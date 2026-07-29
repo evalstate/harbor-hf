@@ -52,6 +52,22 @@ class FakeRunner:
         return self.output
 
 
+class SecretFileRunner(FakeRunner):
+    def __init__(self, output: str) -> None:
+        super().__init__(output)
+        self.secret_path: Path | None = None
+        self.secret_content: str | None = None
+        self.secret_mode: int | None = None
+
+    def run_text(self, command: list[str]) -> str:
+        self.command = command
+        index = command.index("--secrets-file")
+        self.secret_path = Path(command[index + 1])
+        self.secret_content = self.secret_path.read_text(encoding="utf-8")
+        self.secret_mode = self.secret_path.stat().st_mode & 0o777
+        return self.output
+
+
 class FakeBucketApi:
     def __init__(
         self,
@@ -346,6 +362,65 @@ def test_private_source_submission_requires_local_secret_before_staging(
     assert api.created_repositories == []
 
 
+def test_private_source_secret_uses_ephemeral_secret_file(
+    remote_spec: ExperimentSpec,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = GitBenchmarkSource(
+        repository="ShellBench/public-tasks",
+        revision="8" * 40,
+        path="tasks/115-tasks",
+        credentials=GitHubTokenCredentials(secret_name="GITHUB_TOKEN"),
+    )
+    raw = remote_spec.model_dump(mode="python")
+    raw["benchmark"].update(
+        {
+            "dataset": "shellbench/public-115",
+            "source": source.model_dump(),
+            "judge": BenchmarkJudgeSpec(
+                api_url="https://api.openai.com/v1/chat/completions",
+                model="gpt-5.6-luna",
+                api_key_secret_name="OPENAI_API_KEY",
+                reasoning_effort="xhigh",
+                strip_temperature=True,
+            ).model_dump(),
+        }
+    )
+    raw["benchmark"].pop("dataset_digest", None)
+    spec = ExperimentSpec.model_validate(raw)
+    lock = _wave_lock(spec)
+    monkeypatch.setenv("HF_TOKEN", "hf-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    runner = SecretFileRunner("Job started: " + "a" * 24)
+    (tmp_path / "manifest.yaml").write_text("kind: Experiment\n")
+
+    result = submit_wave(
+        lock,
+        input_dir=tmp_path,
+        bucket=lock.artifact_bucket,
+        runner=runner,
+        bucket_api=FakeBucketApi(),
+    )
+
+    assert runner.command is not None
+    rendered_command = " ".join(runner.command)
+    assert "hf-secret" not in rendered_command
+    assert "github-secret" not in rendered_command
+    assert "openai-secret" not in rendered_command
+    assert "--secrets-file" in runner.command
+    assert runner.secret_content == (
+        "HF_TOKEN=hf-secret\nGITHUB_TOKEN=github-secret\nOPENAI_API_KEY=openai-secret\n"
+    )
+    assert runner.secret_mode == 0o600
+    assert runner.secret_path is not None and not runner.secret_path.exists()
+    assert "--secrets-file" not in result.command
+    assert result.command[result.command.index("--secrets") + 1] == "HF_TOKEN"
+    github_secret = result.command.index("GITHUB_TOKEN")
+    assert result.command[github_secret - 1] == "--secrets"
+
+
 def test_provider_wave_submission_has_no_endpoint_lease_label(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
@@ -353,7 +428,21 @@ def test_provider_wave_submission_has_no_endpoint_lease_label(
     target = ProviderTarget(id="hf-provider", model=model.repo)
     spec = remote_spec.model_copy(
         update={
-            "matrix": remote_spec.matrix.model_copy(update={"deployments": [target]})
+            "matrix": remote_spec.matrix.model_copy(
+                update={
+                    "deployments": [target],
+                    "agents": [
+                        remote_spec.matrix.agents[0].model_copy(
+                            update={
+                                "import_path": (
+                                    "harbor_hf_agents.openclaw.agent:OpenClawAgent"
+                                ),
+                                "parameters": {"openclaw_config": {}},
+                            }
+                        )
+                    ],
+                }
+            )
         }
     )
     lock = _wave_lock(spec)

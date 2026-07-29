@@ -43,6 +43,7 @@ def test_provider_target_keeps_admission_and_routing_policy() -> None:
 
     assert target.kind == "inference-provider"
     assert target.service == "hf-inference-providers"
+    assert target.api == "chat-completions"
     assert isinstance(target.routing, ExplicitProviderRoute)
     assert target.routing.provider == "groq"
     assert target.limits.max_concurrent_requests == 8
@@ -86,7 +87,19 @@ def test_manifest_and_campaign_lock_provider_admission_separately_from_endpoints
         remote_spec.model_copy(
             update={
                 "matrix": remote_spec.matrix.model_copy(
-                    update={"deployments": [target]}
+                    update={
+                        "deployments": [target],
+                        "agents": [
+                            remote_spec.matrix.agents[0].model_copy(
+                                update={
+                                    "import_path": (
+                                        "harbor_hf_agents.openclaw.agent:OpenClawAgent"
+                                    ),
+                                    "parameters": {"openclaw_config": {}},
+                                }
+                            )
+                        ],
+                    }
                 )
             }
         ).model_dump(mode="python")
@@ -117,6 +130,7 @@ def test_manifest_and_campaign_lock_provider_admission_separately_from_endpoints
     wave = build_wave_lock(campaign, spec, admitted.actions[0])
     assert isinstance(wave.target, ProviderWaveTarget)
     assert wave.target.provider == target
+    assert wave.target.provider.api == "chat-completions"
     assert wave.endpoint is None
     assert wave.max_concurrent_shards == 1
     assert wave.spend_cap_microusd == 1_250_000
@@ -130,6 +144,18 @@ def test_provider_parameters_reject_secret_like_keys(key: str) -> None:
             id="unsafe-provider",
             model="owner/model",
             parameters={"nested": {key: "must-not-be-recorded"}},
+        )
+
+
+@pytest.mark.parametrize(
+    "key", ["input", "messages", "model", "stream", "stream_options", "tools"]
+)
+def test_provider_target_rejects_transport_owned_parameters(key: str) -> None:
+    with pytest.raises(ValidationError, match=f"reserved keys: {key}"):
+        ProviderTarget(
+            id="provider",
+            model="owner/model",
+            parameters={key: 1},
         )
 
 

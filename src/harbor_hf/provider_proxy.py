@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
+import tempfile
 import threading
 import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter, sleep
 from typing import cast
 
 import httpx
@@ -19,6 +21,7 @@ from pydantic import JsonValue, ValidationError
 from harbor_hf.provider_models import (
     ProviderChatRequest,
     ProviderMessage,
+    ProviderRequestMetadata,
     ProviderTarget,
     ProviderTool,
     ProviderToolCall,
@@ -26,6 +29,7 @@ from harbor_hf.provider_models import (
 from harbor_hf.providers import (
     HF_INFERENCE_PROVIDER_BASE_URL,
     observe_provider_response,
+    observe_responses_api_response,
     routed_provider_model,
 )
 
@@ -34,8 +38,9 @@ _MAX_EVIDENCE_RESPONSE_BYTES = 32 * 1024 * 1024
 PROVIDER_RECORDER_PORT = 8000
 _REQUEST_SCOPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ROUTE_CAPABILITY = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
-_SCOPED_COMPLETIONS = re.compile(
-    r"^/scopes/(?P<capability>[A-Za-z0-9_-]{22,128})/v1/chat/completions/?$"
+_SCOPED_PROVIDER_ROUTE = re.compile(
+    r"^/scopes/(?P<capability>[A-Za-z0-9_-]{22,128})/v1/"
+    r"(?P<endpoint>chat/completions|responses)/?$"
 )
 _FORWARDED_RESPONSE_HEADERS = {
     "content-type",
@@ -53,8 +58,29 @@ _FORWARDED_RESPONSE_HEADERS = {
 }
 
 
+def _atomic_write(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 class ProviderProxyError(RuntimeError):
     """Raised when the hosted provider evidence proxy cannot run safely."""
+
+
+@dataclass(frozen=True)
+class _ProviderRoute:
+    capability: str
+    api: str
 
 
 @dataclass(frozen=True)
@@ -68,7 +94,7 @@ class _ObservedResponse:
 
 
 class ProviderEvidenceProxy:
-    """Forward OpenAI chat requests while recording content-free evidence."""
+    """Forward one locked OpenAI wire API while recording content-free evidence."""
 
     def __init__(
         self,
@@ -78,6 +104,8 @@ class ProviderEvidenceProxy:
         evidence_path: Path,
         client: httpx.Client | None = None,
         capability_factory: Callable[[], str] | None = None,
+        rate_clock: Callable[[], float] = monotonic,
+        rate_sleeper: Callable[[float], None] = sleep,
     ) -> None:
         if not token:
             raise ValueError("provider proxy token must not be empty")
@@ -88,8 +116,13 @@ class ProviderEvidenceProxy:
         self.capability_factory = capability_factory or (
             lambda: secrets.token_urlsafe(32)
         )
+        self._rate_clock = rate_clock
+        self._rate_sleeper = rate_sleeper
         self._owns_client = client is None
         self._lock = threading.Lock()
+        self._checkpoint_lock = threading.Lock()
+        self._rate_lock = threading.Lock()
+        self._next_request_at = 0.0
         self._attempts: dict[tuple[str, str], int] = {}
         self._scopes: dict[str, str] = {}
         self._request_counter = 0
@@ -188,38 +221,41 @@ class ProviderEvidenceProxy:
         self._send_json(handler, 200, {"status": "ok"})
 
     def _handle(self, handler: BaseHTTPRequestHandler) -> None:
-        capability = _route_capability(handler.path)
-        if capability is None:
+        route = _provider_route(handler.path)
+        if route is None or route.api != self.target.api:
             self._send_json(handler, 404, {"error": "unsupported provider route"})
             return
         with self._lock:
-            scope = self._scopes.get(capability)
+            scope = self._scopes.get(route.capability)
         if scope is None:
             self._send_json(handler, 404, {"error": "unsupported provider route"})
             return
         try:
             payload = self._read_request(handler)
-            request, attempt = self._request(payload, scope=scope)
             forwarded = _forwarded_payload(self.target, payload)
+            request, attempt = self._request(forwarded, scope=scope)
         except (ProviderProxyError, ValidationError, ValueError) as error:
             self._send_json(handler, 400, {"error": str(error)})
             return
+        self._wait_for_rate_slot()
         observed = self._forward(handler, forwarded)
         evidence_headers, evidence_content, invalid_content_encoding = (
             _decode_evidence_response(observed.headers, observed.content)
         )
-        result = observe_provider_response(
-            self.target,
-            request,
-            attempt=attempt,
-            status_code=observed.status_code,
-            headers=evidence_headers,
-            content=evidence_content,
-            total_ms=observed.total_ms,
-            time_to_first_token_ms=observed.semantic_output_ms,
-            transport_interrupted=observed.transport_interrupted,
-            invalid_content_encoding=invalid_content_encoding,
-        )
+        common = {
+            "attempt": attempt,
+            "status_code": observed.status_code,
+            "headers": evidence_headers,
+            "content": evidence_content,
+            "total_ms": observed.total_ms,
+            "time_to_first_token_ms": observed.semantic_output_ms,
+            "transport_interrupted": observed.transport_interrupted,
+            "invalid_content_encoding": invalid_content_encoding,
+        }
+        if isinstance(request, ProviderRequestMetadata):
+            result = observe_responses_api_response(self.target, request, **common)
+        else:
+            result = observe_provider_response(self.target, request, **common)
         self._record(result.model_dump(mode="json", exclude={"message"}))
 
     @staticmethod
@@ -231,6 +267,17 @@ class ProviderEvidenceProxy:
         if content_length < 0 or content_length > _MAX_REQUEST_BYTES:
             raise ProviderProxyError("invalid request size")
         return _json_object(handler.rfile.read(content_length))
+
+    def _wait_for_rate_slot(self) -> None:
+        interval = self.target.limits.min_request_interval_seconds
+        if interval <= 0:
+            return
+        with self._rate_lock:
+            now = self._rate_clock()
+            delay = max(0.0, self._next_request_at - now)
+            self._next_request_at = max(now, self._next_request_at) + interval
+        if delay > 0:
+            self._rate_sleeper(delay)
 
     def _forward(
         self,
@@ -247,7 +294,7 @@ class ProviderEvidenceProxy:
         try:
             with self.client.stream(
                 "POST",
-                f"{HF_INFERENCE_PROVIDER_BASE_URL}/v1/chat/completions",
+                _provider_url(self.target),
                 headers={"Authorization": f"Bearer {self.token}"},
                 json=forwarded,
                 timeout=self.target.timeout_seconds,
@@ -282,13 +329,18 @@ class ProviderEvidenceProxy:
 
     def _request(
         self, payload: dict[str, JsonValue], *, scope: str
-    ) -> tuple[ProviderChatRequest, int]:
+    ) -> tuple[ProviderChatRequest | ProviderRequestMetadata, int]:
         request_digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         with self._lock:
             self._request_counter += 1
-            request = _provider_request(payload, f"provider-{self._request_counter}")
+            request_id = f"provider-{self._request_counter}"
+            request = (
+                _provider_responses_request(payload, request_id)
+                if self.target.api == "responses"
+                else _provider_request(payload, request_id)
+            )
             attempt_key = (scope, request_digest)
             previous_attempts = self._attempts.get(attempt_key, 0)
             if previous_attempts >= self.target.limits.max_attempts:
@@ -303,6 +355,34 @@ class ProviderEvidenceProxy:
         )
         with self._lock, self.evidence_path.open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
+
+    def checkpoint(
+        self,
+        evidence_destination: Path,
+        progress_path: Path,
+        progress_destination: Path,
+        *,
+        metadata: dict[str, object],
+    ) -> dict[str, object]:
+        """Durably checkpoint complete provider records without blocking requests."""
+        with self._checkpoint_lock:
+            with self._lock:
+                payload = self.evidence_path.read_bytes()
+                request_count = self._request_counter
+            progress = {
+                "schema_version": "harbor-hf/provider-evidence-progress/v1",
+                "request_count": request_count,
+                "size_bytes": len(payload),
+                "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                **metadata,
+            }
+            _atomic_write(evidence_destination, payload)
+            encoded_progress = (
+                json.dumps(progress, indent=2, sort_keys=True).encode() + b"\n"
+            )
+            _atomic_write(progress_path, encoded_progress)
+            _atomic_write(progress_destination, encoded_progress)
+            return progress
 
     @staticmethod
     def _send_json(
@@ -465,9 +545,18 @@ def _json_object(content: bytes) -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], value)
 
 
-def _route_capability(path: str) -> str | None:
-    matched = _SCOPED_COMPLETIONS.fullmatch(path)
-    return matched.group("capability") if matched is not None else None
+def _provider_route(path: str) -> _ProviderRoute | None:
+    matched = _SCOPED_PROVIDER_ROUTE.fullmatch(path)
+    if matched is None:
+        return None
+    endpoint = matched.group("endpoint")
+    api = "responses" if endpoint == "responses" else "chat-completions"
+    return _ProviderRoute(capability=matched.group("capability"), api=api)
+
+
+def _provider_url(target: ProviderTarget) -> str:
+    endpoint = "responses" if target.api == "responses" else "chat/completions"
+    return f"{HF_INFERENCE_PROVIDER_BASE_URL}/v1/{endpoint}"
 
 
 def _relay_response(
@@ -598,9 +687,20 @@ def _sse_line_has_semantic_output(line: bytes) -> bool:
     except (UnicodeDecodeError, json.JSONDecodeError, ProviderProxyError):
         return False
     choices = payload.get("choices")
-    if not isinstance(choices, list):
-        return False
-    return any(_choice_has_semantic_output(choice) for choice in choices)
+    if isinstance(choices, list):
+        return any(_choice_has_semantic_output(choice) for choice in choices)
+    event_type = payload.get("type")
+    if event_type in {
+        "response.output_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.function_call_arguments.delta",
+    }:
+        delta = payload.get("delta")
+        return isinstance(delta, str) and bool(delta)
+    if event_type == "response.output_item.added":
+        item = payload.get("item")
+        return isinstance(item, dict) and item.get("type") == "function_call"
+    return False
 
 
 def _choice_has_semantic_output(choice: JsonValue) -> bool:
@@ -645,6 +745,32 @@ def _provider_request(
     )
 
 
+def _provider_responses_request(
+    payload: dict[str, JsonValue], request_id: str
+) -> ProviderRequestMetadata:
+    raw_input = payload.get("input")
+    if isinstance(raw_input, str):
+        message_count = 1
+    elif isinstance(raw_input, list) and raw_input:
+        message_count = len(raw_input)
+    else:
+        raise ProviderProxyError(
+            "Responses API request input must be a string or non-empty list"
+        )
+    raw_tools = payload.get("tools", [])
+    if not isinstance(raw_tools, list):
+        raise ProviderProxyError("Responses API request tools must be a list")
+    raw_stream = payload.get("stream", False)
+    if not isinstance(raw_stream, bool):
+        raise ProviderProxyError("Responses API request stream must be a boolean")
+    return ProviderRequestMetadata(
+        request_id=request_id,
+        streaming=raw_stream,
+        message_count=message_count,
+        tool_count=len(raw_tools),
+    )
+
+
 def _provider_message(value: JsonValue) -> ProviderMessage:
     if not isinstance(value, Mapping):
         raise ProviderProxyError("provider message must be an object")
@@ -673,9 +799,9 @@ def _provider_message(value: JsonValue) -> ProviderMessage:
 def _forwarded_payload(
     target: ProviderTarget, payload: dict[str, JsonValue]
 ) -> dict[str, JsonValue]:
-    forwarded = dict(target.parameters)
-    forwarded.update(payload)
+    forwarded = dict(payload)
+    forwarded.update(target.parameters)
     forwarded["model"] = routed_provider_model(target)
-    if forwarded.get("stream") is True:
+    if target.api == "chat-completions" and forwarded.get("stream") is True:
         forwarded["stream_options"] = {"include_usage": True}
     return forwarded

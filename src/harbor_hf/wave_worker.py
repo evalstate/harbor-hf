@@ -75,6 +75,10 @@ from harbor_hf.private_artifacts import (
     write_private_artifact_manifest,
 )
 from harbor_hf.process import CommandRunner, SubprocessRunner, run_streaming
+from harbor_hf.provider_agents import (
+    provider_agent_definition,
+    validate_provider_agent_evidence,
+)
 from harbor_hf.provider_models import (
     ProviderEndpointEvidence,
     ProviderTarget,
@@ -140,6 +144,8 @@ class WatchdogLauncher(Protocol):
 class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+
+_SCOPED_PROVIDER_API_KEY = "harbor-hf-scoped-provider-proxy"
 
 _TRIAL_FAILURE_MARKERS: tuple[tuple[RetryCategory, tuple[str, ...]], ...] = (
     (
@@ -814,12 +820,16 @@ def _prepare_provider_target(
             "controller": controller_environment(lock.runs[0].configuration),
             "provider": {
                 "service": target.service,
+                "api": target.api,
                 "requested_model": target.model,
                 "routed_model": routed_provider_model(target),
                 "routing": target.routing.model_dump(mode="json"),
                 "request_controls": {
                     "max_attempts": target.limits.max_attempts,
                     "max_concurrent_requests": target.limits.max_concurrent_requests,
+                    "min_request_interval_seconds": (
+                        target.limits.min_request_interval_seconds
+                    ),
                     "parameters": target.parameters,
                     "timeout_seconds": target.timeout_seconds,
                 },
@@ -1002,6 +1012,27 @@ def _execute_shard_with_executor(
             failures,
             trial_checksums,
         )
+        if provider_proxy is not None:
+            wave_root = campaign_root / "waves" / wave.wave_id
+            progress_destination = (
+                output_root
+                / campaign.artifact_prefix
+                / "waves"
+                / wave.wave_id
+                / "provider-progress.json"
+            )
+            provider_proxy.checkpoint(
+                progress_destination.with_name("provider-requests.jsonl"),
+                wave_root / "provider-progress.json",
+                progress_destination,
+                metadata={
+                    "campaign_id": campaign.campaign_id,
+                    "wave_id": wave.wave_id,
+                    "shard_id": shard.shard_id,
+                    "last_terminal_trial_id": trial.trial_id,
+                    "checkpointed_at": clock().isoformat(),
+                },
+            )
     if failures:
         append_event(events, "shard_failed", failed_trials=len(failures))
         raise min(failures, key=lambda item: item[0])[1]
@@ -1167,6 +1198,10 @@ def _execute_trial(
             run,
             token=token,
             inference_base_url=trial_base_url,
+            agent_api_key=(
+                _SCOPED_PROVIDER_API_KEY if provider_proxy is not None else None
+            ),
+            judge_api_key=(token if judge_recorder is not None else None),
             judge_api_url=judge_api_url,
             blocked_secret_names=blocked_secret_names,
             redaction_secrets=tuple(
@@ -1213,7 +1248,11 @@ def _execute_trial(
                 else tuple(evidence_secrets)
             ),
         )
-        build_private_artifact_manifest(execution_root, strict_session=True)
+        build_private_artifact_manifest(
+            execution_root,
+            strict_session=True,
+            session_required=_execution_session_required(execution_root, run),
+        )
         append_event(events, "execution_succeeded")
     except Exception as caught:
         error = caught
@@ -1240,7 +1279,12 @@ def _execute_trial(
             "message": _redact_secret_values(str(error), secrets),
         }
         write_json(execution_root / "failure.json", failure_record)
-    _finalize_execution(execution_root, secrets, strict_compatibility=error is None)
+    _finalize_execution(
+        execution_root,
+        secrets,
+        strict_compatibility=error is None,
+        session_required=_execution_session_required(execution_root, run),
+    )
     if error is None:
         (execution_root / "_SUCCESS").write_text("\n", encoding="utf-8")
     else:
@@ -1396,6 +1440,19 @@ def _assemble_execution_trial_evidence(
             files=redacted,
         )
     assert_secret_absent(native_root, known_secrets, allow_symlinks=True)
+    if isinstance(run.deployment, ProviderTarget):
+        definition = provider_agent_definition(run.agent.name)
+        validate_provider_agent_evidence(
+            native_root,
+            definition=definition,
+            expected_agent_name=run.agent.name,
+            expected_agent_version=(
+                run.agent.revision
+                if run.agent.revision_kind in {"package", "git"}
+                else str(run.agent.reported_version)
+            ),
+            expected_model_name=routed_provider_model(run.deployment),
+        )
     assemble_trial_evidence(
         native_root,
         campaign_id=campaign.campaign_id,
@@ -1879,10 +1936,20 @@ def _trial_destination(
     )
 
 
-def _finalize_execution(
-    root: Path, secrets: SecretValues, *, strict_compatibility: bool = True
-) -> None:
+def _execution_session_required(root: Path, run: RunLock) -> bool:
+    if isinstance(run.deployment, ProviderTarget):
+        return provider_agent_definition(run.agent.name).session_required
     attempted = openclaw_execution_was_attempted(root)
+    return openclaw_execution_started(root, fallback_attempted=attempted)
+
+
+def _finalize_execution(
+    root: Path,
+    secrets: SecretValues,
+    *,
+    strict_compatibility: bool = True,
+    session_required: bool,
+) -> None:
     rejection_count = 0
     if not strict_compatibility:
         rejection_count = len(
@@ -1892,7 +1959,6 @@ def _finalize_execution(
             )
         )
         (root / "harbor-jobs").mkdir(exist_ok=True)
-    session_required = openclaw_execution_started(root, fallback_attempted=attempted)
     _redact_unit(root, secrets)
     refresh_error = refresh_retained_bundle(root, strict=strict_compatibility)
     if refresh_error is not None:

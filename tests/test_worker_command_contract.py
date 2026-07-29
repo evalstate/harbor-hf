@@ -344,9 +344,17 @@ def test_provider_command_applies_locked_openclaw_request_controls(
         limits=ProviderLimits(max_concurrent_requests=4, max_attempts=3),
         parameters={"temperature": 0, "max_tokens": 4096},
     )
+    agent = remote_spec.matrix.agents[0].model_copy(
+        update={
+            "import_path": "harbor_hf_agents.openclaw.agent:OpenClawAgent",
+            "parameters": {"openclaw_config": {}},
+        }
+    )
     spec = remote_spec.model_copy(
         update={
-            "matrix": remote_spec.matrix.model_copy(update={"deployments": [target]})
+            "matrix": remote_spec.matrix.model_copy(
+                update={"deployments": [target], "agents": [agent]}
+            )
         }
     )
     lock = build_run_lock(spec, run_id="provider-command-contract", allow_provider=True)
@@ -363,23 +371,13 @@ def test_provider_command_applies_locked_openclaw_request_controls(
     )
     agents = request.harbor_config["agents"]
     assert isinstance(agents, list)
-    config = agents[0]["kwargs"]["openclaw_config"]
-    provider = config["models"]["providers"]["openai"]
-    assert provider == {
-        "api": "openai-completions",
-        "timeoutSeconds": 18,
-        "models": [
-            {
-                "id": f"{remote_spec.matrix.models[0].repo}:groq",
-                "name": f"{remote_spec.matrix.models[0].repo}:groq",
-                "params": {
-                    "temperature": 0,
-                    "max_tokens": 4096,
-                    "maxRetries": 2,
-                    "timeoutMs": 17250,
-                },
-            }
-        ],
+    assert agents[0]["import_path"] == agent.import_path
+    kwargs = agents[0]["kwargs"]
+    assert kwargs["openclaw_config"] == {}
+    assert kwargs["provider_runtime"] == {
+        "api": "chat-completions",
+        "timeout_seconds": 17.25,
+        "max_attempts": 3,
     }
 
 
@@ -485,6 +483,7 @@ def test_provider_command_preserves_locked_openclaw_model_capabilities(
     )
     agent = remote_spec.matrix.agents[0].model_copy(
         update={
+            "import_path": "harbor_hf_agents.openclaw.agent:OpenClawAgent",
             "parameters": {
                 "openclaw_config": {
                     "models": {
@@ -505,7 +504,7 @@ def test_provider_command_preserves_locked_openclaw_model_capabilities(
                         }
                     }
                 }
-            }
+            },
         }
     )
     spec = remote_spec.model_copy(
@@ -546,19 +545,148 @@ def test_provider_command_preserves_locked_openclaw_model_capabilities(
     assert isinstance(provider_models, list)
     provider_model = provider_models[0]
     assert provider_model == {
-        "id": f"{model.repo}:fireworks-ai",
-        "name": f"{model.repo}:fireworks-ai",
+        "id": model.repo,
+        "name": "GLM",
         "contextWindow": 65536,
         "contextTokens": 65536,
         "maxTokens": 8192,
         "reasoning": True,
-        "params": {
-            "reasoning_effort": "high",
-            "max_tokens": 8192,
-            "maxRetries": 0,
-            "timeoutMs": 60000,
-        },
+        "params": {"unlocked": "ignored"},
     }
+    assert kwargs["provider_runtime"] == {
+        "api": "chat-completions",
+        "timeout_seconds": 60.0,
+        "max_attempts": 1,
+    }
+
+
+def test_responses_provider_configures_registered_openclaw_codex_runtime(
+    remote_spec: ExperimentSpec, tmp_path: Path
+) -> None:
+    model = remote_spec.matrix.models[0]
+    target = ProviderTarget(
+        id="responses-provider",
+        api="responses",
+        model=model.repo,
+        routing=ExplicitProviderRoute(provider="together"),
+        parameters={"top_p": 0.95},
+    )
+    agent = remote_spec.matrix.agents[0].model_copy(
+        update={
+            "name": "openclaw-codex",
+            "import_path": ("harbor_hf_agents.openclaw_codex.agent:OpenClawCodexAgent"),
+            "parameters": {
+                "codex_plugin_version": "2026.7.1-1",
+                "codex_request_timeout_ms": 60000,
+                "model_context_window": 65536,
+                "model_max_tokens": 8192,
+                "openclaw_node_version": "24.15.0",
+            },
+        }
+    )
+    spec = remote_spec.model_copy(
+        update={
+            "matrix": remote_spec.matrix.model_copy(
+                update={"deployments": [target], "agents": [agent]}
+            )
+        }
+    )
+    lock = build_run_lock(spec, run_id="codex-provider", allow_provider=True)
+    task_name = next(iter(lock.benchmark_task_digests))
+
+    request = build_execution_request(
+        lock,
+        tmp_path / "jobs",
+        "https://provider.example",
+        task_names=[task_name],
+        attempts=1,
+        concurrency=1,
+        expected_task_digests={task_name: lock.benchmark_task_digests[task_name]},
+    )
+
+    configured_agents = request.harbor_config["agents"]
+    assert isinstance(configured_agents, list)
+    configured = configured_agents[0]
+    assert isinstance(configured, dict)
+    assert configured["import_path"] == agent.import_path
+    assert configured["model_name"] == f"openai/{model.repo}:together"
+    assert configured["kwargs"] == {
+        "codex_plugin_version": "2026.7.1-1",
+        "codex_request_timeout_ms": 60000,
+        "model_context_window": 65536,
+        "model_max_tokens": 8192,
+        "openclaw_node_version": "24.15.0",
+        "provider_runtime": {
+            "api": "responses",
+            "timeout_seconds": 60.0,
+            "max_attempts": 1,
+        },
+        "version": agent.revision,
+    }
+    assert request.verification.expected_model_provider == "openai"
+    assert request.verification.expected_model_name == f"{model.repo}:together"
+
+
+def test_chat_provider_configures_pi_with_locked_models_json(
+    remote_spec: ExperimentSpec, tmp_path: Path
+) -> None:
+    model = remote_spec.matrix.models[0]
+    target = ProviderTarget(
+        id="chat-provider",
+        model=model.repo,
+        routing=ExplicitProviderRoute(provider="together"),
+    )
+    models_json = {
+        "providers": {
+            "openai": {
+                "baseUrl": "$OPENAI_BASE_URL",
+                "api": "openai-completions",
+                "models": [{"id": f"{model.repo}:together"}],
+            }
+        }
+    }
+    agent = remote_spec.matrix.agents[0].model_copy(
+        update={
+            "name": "pi",
+            "import_path": "harbor_hf_agents.pi.agent:PiAgent",
+            "parameters": {"models_json": models_json},
+        }
+    )
+    spec = remote_spec.model_copy(
+        update={
+            "matrix": remote_spec.matrix.model_copy(
+                update={"deployments": [target], "agents": [agent]}
+            )
+        }
+    )
+    lock = build_run_lock(spec, run_id="pi-provider", allow_provider=True)
+    task_name = next(iter(lock.benchmark_task_digests))
+
+    request = build_execution_request(
+        lock,
+        tmp_path / "jobs",
+        "https://provider.example",
+        task_names=[task_name],
+        attempts=1,
+        concurrency=1,
+        expected_task_digests={task_name: lock.benchmark_task_digests[task_name]},
+    )
+
+    configured_agents = request.harbor_config["agents"]
+    assert isinstance(configured_agents, list)
+    configured = configured_agents[0]
+    assert isinstance(configured, dict)
+    assert configured["import_path"] == agent.import_path
+    assert configured["model_name"] == f"openai/{model.repo}:together"
+    configured_kwargs = configured["kwargs"]
+    assert isinstance(configured_kwargs, dict)
+    assert configured_kwargs["models_json"] == models_json
+    assert configured_kwargs["provider_runtime"] == {
+        "api": "chat-completions",
+        "timeout_seconds": 60.0,
+        "max_attempts": 1,
+    }
+    assert request.verification.expected_model_provider == "openai"
 
 
 def test_provider_command_rejects_an_agent_without_request_control_support(
@@ -567,9 +695,17 @@ def test_provider_command_rejects_an_agent_without_request_control_support(
     target = ProviderTarget(
         id="provider-contract", model=remote_spec.matrix.models[0].repo
     )
+    agent = remote_spec.matrix.agents[0].model_copy(
+        update={
+            "import_path": "harbor_hf_agents.openclaw.agent:OpenClawAgent",
+            "parameters": {"openclaw_config": {}},
+        }
+    )
     spec = remote_spec.model_copy(
         update={
-            "matrix": remote_spec.matrix.model_copy(update={"deployments": [target]}),
+            "matrix": remote_spec.matrix.model_copy(
+                update={"deployments": [target], "agents": [agent]}
+            ),
             "execution": remote_spec.execution.model_copy(update={"attempts": 1}),
         }
     )
@@ -580,7 +716,7 @@ def test_provider_command_rejects_an_agent_without_request_control_support(
 
     with pytest.raises(
         WorkerError,
-        match="request controls require the OpenClaw Harbor agent",
+        match="require one of: hermes, openclaw, openclaw-codex, pi",
     ):
         build_harbor_trial_command(
             lock,

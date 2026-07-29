@@ -118,6 +118,21 @@ zero-score outcomes. The
 [Harbor Cookbook](docs/harbor-cookbook.md) walks through full campaign
 operation end to end.
 
+### Ask your coding agent
+
+Copy this block when you want an agent to plan or operate a campaign.
+
+```text
+Use Harbor HF to plan or operate this benchmark campaign.
+
+Start with this skill before changing files or creating remote work:
+https://raw.githubusercontent.com/osolmaz/harbor-hf/main/skills/harbor-hf/SKILL.md
+
+Follow the skill and its linked source documents. Run the duration and spend
+gates before paid work. Ask me for missing protocol choices and explicit
+authorization for remote writes.
+```
+
 ## Publish Results
 
 ```bash
@@ -160,8 +175,10 @@ coordination Dataset — there is no server to keep alive. The
 deterministic endpoint ownership. The
 [deployment profiling contract](docs/deployment-profiling.md) defines the
 powers-of-two concurrency method, immutable profile evidence, stopping rules,
-and selection criteria used before a full campaign. The proposed [trial
-evidence bundle](docs/trial-evidence-bundle.md) and its [implementation
+and selection criteria used before a full campaign. The [provider-agent
+architecture](docs/provider-agent-architecture.md) defines the unmodified-Harbor
+custom-agent package used for Hermes, OpenClaw, OpenClaw Codex, and Pi. The
+proposed [trial evidence bundle](docs/trial-evidence-bundle.md) and its [implementation
 plan](docs/trial-evidence-implementation-plan.md) define complete post-agent
 workspace capture and exact verifier-judge records.
 

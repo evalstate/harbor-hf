@@ -29,6 +29,7 @@ from harbor_hf.models import (
     resolved_judge_required_tasks,
 )
 from harbor_hf.planner import experiment_digest, resolved_cells
+from harbor_hf.provider_agents import validate_provider_agent
 from harbor_hf.provider_models import ProviderTarget
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
@@ -251,16 +252,21 @@ def harbor_process_environment(
     *,
     token: str,
     inference_base_url: str,
+    agent_api_key: str | None = None,
+    judge_api_key: str | None = None,
     judge_api_url: str | None = None,
     blocked_secret_names: Iterable[str] = (),
     redaction_secrets: Iterable[str] = (),
 ) -> Iterator[dict[str, str]]:
+    scoped_api_key = agent_api_key or token
     environment = {
         "HF_TOKEN": token,
-        "OPENAI_API_KEY": token,
+        "OPENAI_API_KEY": scoped_api_key,
         "OPENAI_BASE_URL": f"{inference_base_url.rstrip('/')}/v1",
     }
-    environment.update(_judge_process_environment(lock, judge_api_url, token))
+    environment.update(
+        _judge_process_environment(lock, judge_api_url, judge_api_key or scoped_api_key)
+    )
     blocked = set(blocked_secret_names)
     redaction_values = [value for value in redaction_secrets if value]
     source = lock.benchmark_source
@@ -410,5 +416,4 @@ def validate_provider_cell(
         raise ValueError(
             "Inference Provider target model must match the selected model profile"
         )
-    if agent.name != "openclaw":
-        raise ValueError("Inference Provider targets require the OpenClaw Harbor agent")
+    validate_provider_agent(agent, deployment)

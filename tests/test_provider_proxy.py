@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import zlib
 from collections.abc import Callable, Iterator
@@ -131,6 +132,163 @@ def test_proxy_forwards_stream_and_records_content_free_provider_evidence(
     ttft = evidence["evidence"]["latency"]["time_to_first_token_ms"]
     assert ttft["status"] == "observed"
     assert ttft["value"] >= 0
+
+    checkpoint_evidence = tmp_path / "durable" / "provider-requests.jsonl"
+    local_progress = tmp_path / "provider-progress.json"
+    checkpoint_progress = tmp_path / "durable" / "provider-progress.json"
+    progress = proxy.checkpoint(
+        checkpoint_evidence,
+        local_progress,
+        checkpoint_progress,
+        metadata={"wave_id": "wave-one", "last_terminal_trial_id": "trial-one"},
+    )
+    assert checkpoint_evidence.read_bytes() == evidence_path.read_bytes()
+    assert json.loads(local_progress.read_text()) == progress
+    assert checkpoint_progress.read_bytes() == local_progress.read_bytes()
+    assert progress == {
+        "schema_version": "harbor-hf/provider-evidence-progress/v1",
+        "request_count": 1,
+        "size_bytes": len(evidence_path.read_bytes()),
+        "sha256": "sha256:" + hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+        "wave_id": "wave-one",
+        "last_terminal_trial_id": "trial-one",
+    }
+
+
+def test_proxy_forwards_responses_stream_and_records_content_free_evidence(
+    tmp_path: Path,
+) -> None:
+    observed: list[dict[str, object]] = []
+    stream = (
+        b"event: response.created\n"
+        b'data: {"type":"response.created","response":{"id":"resp-one",'
+        b'"model":"org/model:together","status":"in_progress"}}\n\n'
+        b"event: response.output_item.added\n"
+        b'data: {"type":"response.output_item.added","item":'
+        b'{"type":"function_call","name":"shell","arguments":"PRIVATE_RESULT"}}\n\n'
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp-one",'
+        b'"model":"org/model:together","status":"completed","output":[],'
+        b'"usage":{"input_tokens":11,"output_tokens":4,"total_tokens":15}}}\n\n'
+    )
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        observed.append(
+            {
+                "authorization": request.headers.get("authorization"),
+                "url": str(request.url),
+                "payload": json.loads(request.content),
+            }
+        )
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream",
+                "x-request-id": "provider-response-one",
+            },
+            stream=httpx.ByteStream(stream),
+        )
+
+    target = ProviderTarget(
+        id="responses-provider",
+        api="responses",
+        model="org/model",
+        routing=ExplicitProviderRoute(provider="together"),
+        parameters={"top_p": 0.95},
+    )
+    evidence_path = tmp_path / "provider-requests.jsonl"
+    client = httpx.Client(transport=httpx.MockTransport(upstream))
+    proxy = ProviderEvidenceProxy(
+        target,
+        token="secret-token",
+        evidence_path=evidence_path,
+        client=client,
+    )
+    base_url = proxy.start(host="127.0.0.1", port=0)
+    scoped_url = proxy.scoped_base_url(
+        base_url, proxy.register_scope("responses-trial")
+    )
+    try:
+        wrong_api = httpx.post(
+            f"{scoped_url}/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "private"}]},
+            timeout=5,
+        )
+        response = httpx.post(
+            f"{scoped_url}/v1/responses",
+            json={
+                "model": "ignored/model",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": "PRIVATE_BENCHMARK_PROMPT",
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "PRIVATE_TOOL_NAME",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+                "stream": True,
+                "top_p": 1,
+            },
+            timeout=5,
+        )
+    finally:
+        proxy.close()
+        client.close()
+
+    assert wrong_api.status_code == 404
+    assert response.status_code == 200
+    assert response.content == stream
+    assert observed == [
+        {
+            "authorization": "Bearer secret-token",
+            "url": "https://router.huggingface.co/v1/responses",
+            "payload": {
+                "input": [
+                    {
+                        "content": "PRIVATE_BENCHMARK_PROMPT",
+                        "role": "user",
+                    }
+                ],
+                "model": "org/model:together",
+                "stream": True,
+                "tools": [
+                    {
+                        "name": "PRIVATE_TOOL_NAME",
+                        "parameters": {"type": "object"},
+                        "type": "function",
+                    }
+                ],
+                "top_p": 0.95,
+            },
+        }
+    ]
+    raw_evidence = evidence_path.read_text(encoding="utf-8")
+    for private in (
+        "PRIVATE_BENCHMARK_PROMPT",
+        "PRIVATE_TOOL_NAME",
+        "PRIVATE_RESULT",
+        "secret-token",
+    ):
+        assert private not in raw_evidence
+    evidence = json.loads(raw_evidence)
+    assert evidence["status"] == "succeeded"
+    assert evidence["evidence"]["request"]["streaming"] is True
+    assert evidence["evidence"]["request"]["message_count"] == 1
+    assert evidence["evidence"]["request"]["tool_count"] == 1
+    assert evidence["evidence"]["usage"] == {
+        "input_tokens": {"detail": None, "status": "observed", "value": 11},
+        "output_tokens": {"detail": None, "status": "observed", "value": 4},
+        "total_tokens": {"detail": None, "status": "observed", "value": 15},
+    }
+    assert (
+        evidence["evidence"]["latency"]["time_to_first_token_ms"]["status"]
+        == "observed"
+    )
 
 
 def test_proxy_health_and_capability_lifecycle_isolate_trials(
@@ -269,6 +427,35 @@ def test_proxy_rejects_malformed_multipart_message_content(
         _provider_message(cast(JsonValue, {"role": "user", "content": content}))
 
 
+def test_proxy_enforces_locked_minimum_request_interval(tmp_path: Path) -> None:
+    times = iter((0.0, 1.0, 20.0))
+    sleeps: list[float] = []
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200))
+    )
+    proxy = ProviderEvidenceProxy(
+        ProviderTarget(
+            id="paced-provider",
+            model="org/model",
+            limits=ProviderLimits(min_request_interval_seconds=7),
+        ),
+        token="token",
+        evidence_path=tmp_path / "evidence.jsonl",
+        client=client,
+        rate_clock=lambda: next(times),
+        rate_sleeper=sleeps.append,
+    )
+    try:
+        proxy._wait_for_rate_slot()
+        proxy._wait_for_rate_slot()
+        proxy._wait_for_rate_slot()
+    finally:
+        proxy.close()
+        client.close()
+
+    assert sleeps == [6.0]
+
+
 def test_proxy_rejects_invalid_scope_and_capability(tmp_path: Path) -> None:
     def reject_upstream(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("invalid routes must not reach the provider")
@@ -318,7 +505,12 @@ def test_proxy_request_translation_preserves_openai_tool_contract() -> None:
                         }
                     ],
                 },
-                {"role": "tool", "content": "result", "tool_call_id": "call-one"},
+                {
+                    "role": "tool",
+                    "content": "result",
+                    "name": "shell",
+                    "tool_call_id": "call-one",
+                },
             ],
             "tools": [
                 {
@@ -363,6 +555,7 @@ def test_proxy_request_translation_preserves_openai_tool_contract() -> None:
             {
                 "role": "tool",
                 "content": "result",
+                "name": "shell",
                 "tool_call_id": "call-one",
                 "tool_calls": [],
             },
@@ -455,6 +648,7 @@ def test_proxy_lifecycle_and_http_failure_matrix(tmp_path: Path) -> None:
     target = ProviderTarget(
         id="provider-one",
         model="org/model",
+        parameters={"top_p": 0.95},
         limits=ProviderLimits(max_attempts=2),
     )
     evidence_path = tmp_path / "provider-requests.jsonl"
@@ -488,15 +682,16 @@ def test_proxy_lifecycle_and_http_failure_matrix(tmp_path: Path) -> None:
                 json={
                     "model": "ignored",
                     "messages": [{"role": "user", "content": content}],
+                    "top_p": top_p,
                 },
                 timeout=5,
             )
-            for url, content in (
-                (throttled_url, "PRIVATE_THROTTLE"),
-                (throttled_url, "PRIVATE_THROTTLE"),
-                (throttled_url, "PRIVATE_THROTTLE"),
-                (complete_url, "PRIVATE_COMPLETE"),
-                (timeout_url, "PRIVATE_TIMEOUT"),
+            for url, content, top_p in (
+                (throttled_url, "PRIVATE_THROTTLE", 0.1),
+                (throttled_url, "PRIVATE_THROTTLE", 0.2),
+                (throttled_url, "PRIVATE_THROTTLE", 0.3),
+                (complete_url, "PRIVATE_COMPLETE", 0.4),
+                (timeout_url, "PRIVATE_TIMEOUT", 0.5),
             )
         ]
     finally:
