@@ -72,7 +72,7 @@ function App() {
         <div className="topbar-actions">
           <a
             className="icon-button"
-            href="https://github.com/osolmaz/harbor-hf"
+            href="https://github.com/huggingface/harbor-hf"
             target="_blank"
             rel="noreferrer"
             title="Source repository"

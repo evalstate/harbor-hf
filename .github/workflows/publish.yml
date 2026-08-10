@@ -1,0 +1,65 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish Python distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Verify release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())
+          print(project["project"]["version"])
+          PY
+          )"
+          test "$RELEASE_TAG" = "v$version"
+
+          git fetch origin "$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          release_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          test "$release_commit" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$release_commit" "origin/$DEFAULT_BRANCH"
+
+          python3 - "$version" <<'PY'
+          import sys
+          import urllib.error
+          import urllib.request
+          from urllib.parse import quote
+
+          version = quote(sys.argv[1], safe="")
+          url = f"https://pypi.org/pypi/harbor-hf/{version}/json"
+          request = urllib.request.Request(url, headers={"User-Agent": "harbor-hf-release"})
+          try:
+              urllib.request.urlopen(request, timeout=30)
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  raise SystemExit(0)
+              raise
+          raise SystemExit(f"harbor-hf {sys.argv[1]} is already published")
+          PY
+      - name: Build distribution
+        run: uv build
+      - name: Publish distribution
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

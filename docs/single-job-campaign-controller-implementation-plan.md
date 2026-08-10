@@ -2,7 +2,7 @@
 
 Status: proposed
 
-This plan implements the provider-campaign contract in [the single-job campaign controller specification](single-job-campaign-controller.md) inside `osolmaz/harbor-hf`, then adopts it in `shellbench-local`. It does not launch remote work or change the current campaigns.
+This plan implements the provider-campaign contract in [the single-job campaign controller specification](single-job-campaign-controller.md) inside `huggingface/harbor-hf`, then adopts it in `shellbench-local`. It does not launch remote work or change the current campaigns.
 
 ## Outcome
 

@@ -20,8 +20,8 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/osolmaz/harbor-hf"
-Issues = "https://github.com/osolmaz/harbor-hf/issues"
+Repository = "https://github.com/huggingface/harbor-hf"
+Issues = "https://github.com/huggingface/harbor-hf/issues"
 
 [project.scripts]
 harbor-hf = "harbor_hf.cli:app"

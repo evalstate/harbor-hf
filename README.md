@@ -31,10 +31,17 @@ Bucket.
 
 ## Setup
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/):
+Requires Python 3.12+. Install the CLI from PyPI with
+[uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone https://github.com/osolmaz/harbor-hf.git
+uv tool install harbor-hf
+```
+
+For development, clone the repository and install the locked environment:
+
+```bash
+git clone https://github.com/huggingface/harbor-hf.git
 cd harbor-hf
 uv sync
 ```
@@ -149,7 +156,7 @@ Copy this block when you want an agent to plan or operate a campaign.
 Use Harbor HF to plan or operate this benchmark campaign.
 
 Start with this skill before changing files or creating remote work:
-https://raw.githubusercontent.com/osolmaz/harbor-hf/main/skills/harbor-hf/SKILL.md
+https://raw.githubusercontent.com/huggingface/harbor-hf/main/skills/harbor-hf/SKILL.md
 
 Follow the skill and its linked source documents. Run the duration and spend
 gates before paid work. Ask me for missing protocol choices and explicit
