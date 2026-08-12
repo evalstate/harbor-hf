@@ -71,6 +71,9 @@ def classify_private_artifact(path: str) -> ArtifactKind:
             return kind
     exact_kinds: dict[str, ArtifactKind] = {
         "reward.txt": "verifier",
+        "reward.json": "verifier",
+        "report.json": "verifier",
+        "scorecard.json": "verifier",
         "ctrf.json": "verifier",
         "result.json": "result",
         "verification.json": "result",

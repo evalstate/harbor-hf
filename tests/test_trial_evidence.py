@@ -251,6 +251,53 @@ def test_assemble_and_deep_verify_trial(tmp_path: Path) -> None:
     assert verify_trial_evidence(root, deep=True) == manifest
 
 
+def test_assemble_accepts_current_harbor_verifier_artifacts(tmp_path: Path) -> None:
+    root = _trial(tmp_path)
+    verifier = root / "verifier"
+    (verifier / "scorecard.json").rename(verifier / "report.json")
+    (verifier / "reward.txt").rename(verifier / "reward.json")
+
+    manifest = assemble_trial_evidence(
+        root,
+        campaign_id="campaign",
+        run_id="run",
+        execution_id="execution",
+        trial_id="trial",
+        task_name="task",
+        task_digest="sha256:" + "a" * 64,
+        logical_attempt=1,
+        physical_attempt=1,
+        judge_expected=False,
+        judge_model=None,
+        policy=_policy(),
+    )
+
+    assert manifest.verifier.scorecard.path == "verifier/report.json"
+    assert manifest.verifier.reward.path == "verifier/reward.json"
+    assert verify_trial_evidence(root, deep=True) == manifest
+
+
+def test_assemble_rejects_ambiguous_verifier_reward(tmp_path: Path) -> None:
+    root = _trial(tmp_path)
+    (root / "verifier" / "reward.json").write_text('{"reward":1}\n')
+
+    with pytest.raises(TrialEvidenceError, match="verifier reward is ambiguous"):
+        assemble_trial_evidence(
+            root,
+            campaign_id="campaign",
+            run_id="run",
+            execution_id="execution",
+            trial_id="trial",
+            task_name="task",
+            task_digest="sha256:" + "a" * 64,
+            logical_attempt=1,
+            physical_attempt=1,
+            judge_expected=False,
+            judge_model=None,
+            policy=_policy(),
+        )
+
+
 def test_assemble_requires_judge_recorder_summary(tmp_path: Path) -> None:
     root = _trial(tmp_path)
     with pytest.raises(TrialEvidenceError, match="summary is invalid"):

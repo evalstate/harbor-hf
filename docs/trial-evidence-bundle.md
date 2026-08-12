@@ -36,8 +36,8 @@ harbor-jobs/<job>/<trial>/
 │           ├── response-delivered.bin
 │           └── exchange.json
 └── verifier/
-    ├── scorecard.json
-    ├── reward.txt
+    ├── report.json                    # Current Harbor; scorecard.json is also accepted
+    ├── reward.json                    # Current Harbor; reward.txt is also accepted
     ├── test-stdout.txt
     ├── test-stderr.txt
     └── judge-selection.json
