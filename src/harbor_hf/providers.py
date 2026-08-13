@@ -97,7 +97,7 @@ class _RawDelta(BoundaryModel):
     content: str | None = None
     reasoning_content: str | None = None
     reasoning: str | None = None
-    tool_calls: list[_RawStreamToolCall] = Field(default_factory=list)
+    tool_calls: list[_RawStreamToolCall] | None = None
 
 
 class _RawStreamChoice(BoundaryModel):
@@ -163,7 +163,7 @@ class _StreamState:
             if delta.reasoning_content or delta.reasoning:
                 self.saw_reasoning = True
                 self._record_first_token(elapsed_ms)
-            for tool in delta.tool_calls:
+            for tool in delta.tool_calls or []:
                 state = self.tools.setdefault(tool.index, _StreamToolState())
                 state.add(tool)
                 self._record_first_token(elapsed_ms)

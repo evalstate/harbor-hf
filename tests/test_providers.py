@@ -261,6 +261,32 @@ def test_streaming_contract_records_ttft_and_terminal_usage() -> None:
     assert result.evidence.usage.total_tokens.value == 6
 
 
+def test_streaming_contract_accepts_null_tool_calls() -> None:
+    stream = "\n".join(
+        [
+            'data: {"id":"stream-1","model":"owner/model","choices":'
+            '[{"delta":{"content":"Hi","tool_calls":null},"finish_reason":"stop"}]}',
+            'data: {"choices":[],"usage":{"prompt_tokens":4,'
+            '"completion_tokens":1,"total_tokens":5}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=stream)
+
+    result = _adapter(handler).chat_completion(
+        _target(), _request(stream=True), token="mock-token"
+    )
+
+    assert result.status == "succeeded"
+    assert result.message is not None
+    assert result.message.content == "Hi"
+    assert result.message.tool_calls == []
+    assert result.evidence.usage.total_tokens.value == 5
+
+
 def test_responses_api_non_streaming_usage_is_normalized() -> None:
     target = _target().model_copy(update={"api": "responses"})
     request = ProviderRequestMetadata(

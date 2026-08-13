@@ -628,10 +628,12 @@ def _collect_verifier_evidence(
     verifier_dir = trial_root / "verifier"
     stdout = _normalize_verifier_stream(verifier_dir, "test-stdout.txt")
     stderr = _normalize_verifier_stream(verifier_dir, "test-stderr.txt")
-    scorecard = verifier_dir / "scorecard.json"
-    reward = verifier_dir / "reward.txt"
-    if not scorecard.is_file() or not reward.is_file():
-        raise TrialEvidenceError("verifier scorecard or reward is missing")
+    scorecard = _required_verifier_artifact(
+        verifier_dir, "scorecard", ("scorecard.json", "report.json")
+    )
+    reward = _required_verifier_artifact(
+        verifier_dir, "reward", ("reward.txt", "reward.json")
+    )
     selection, selected_exchange_id = _judge_selection_reference(
         trial_root, verifier_dir, exchanges, judge_expected=judge_expected
     )
@@ -656,6 +658,19 @@ def _collect_verifier_evidence(
         selected_judge_exchange_id=selected_exchange_id,
         logs=logs,
     )
+
+
+def _required_verifier_artifact(
+    verifier_dir: Path, kind: str, candidates: tuple[str, ...]
+) -> Path:
+    matches = [
+        verifier_dir / name for name in candidates if (verifier_dir / name).is_file()
+    ]
+    if not matches:
+        raise TrialEvidenceError(f"verifier {kind} is missing")
+    if len(matches) != 1:
+        raise TrialEvidenceError(f"verifier {kind} is ambiguous")
+    return matches[0]
 
 
 def _judge_selection_reference(
