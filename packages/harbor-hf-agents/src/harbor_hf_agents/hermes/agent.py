@@ -21,6 +21,7 @@ from harbor.models.trajectories import (
     Trajectory,
 )
 from harbor.utils.trajectory_utils import format_trajectory_json
+from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field
 
 from harbor_hf_agents.support.hf_jobs_ingress import (
@@ -148,33 +149,65 @@ class HermesAgent(IsolatedProviderAgent):
         return 'export PATH="$HOME/.local/bin:$PATH"; hermes version'
 
     @staticmethod
-    def _installation_spec(version: str | None) -> tuple[str, str]:
-        if not version or _HERMES_COMMIT.fullmatch(version) is None:
-            raise ValueError("Hermes requires a full Git commit revision")
-        revision = version.lower()
-        return (
-            "https://raw.githubusercontent.com/NousResearch/hermes-agent/"
-            f"{revision}/scripts/install.sh",
-            f" --commit {shlex.quote(revision)}",
-        )
+    def _installation_spec(
+        version: str | None,
+    ) -> tuple[Literal["git", "package"], str]:
+        if not version:
+            raise ValueError(
+                "Hermes requires a full Git commit or exact package version"
+            )
+        if _HERMES_COMMIT.fullmatch(version) is not None:
+            return "git", version.lower()
+        try:
+            normalized = str(Version(version))
+        except InvalidVersion as error:
+            raise ValueError(
+                "Hermes requires a full Git commit or exact package version"
+            ) from error
+        if normalized != version:
+            raise ValueError("Hermes package version must be normalized and exact")
+        return "package", version
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        installer_url, revision_flag = self._installation_spec(self._version)
+        method, revision = self._installation_spec(self._version)
+        packages = (
+            "curl git passwd ripgrep util-linux xz-utils"
+            if method == "git"
+            else "ca-certificates passwd python3 python3-venv ripgrep util-linux"
+        )
         await self.exec_as_root(
             environment,
             command=(
                 "apt-get update && apt-get install -y --no-install-recommends "
-                "curl git passwd ripgrep util-linux xz-utils"
+                + packages
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
+        if method == "git":
+            installer_url = (
+                "https://raw.githubusercontent.com/NousResearch/hermes-agent/"
+                f"{revision}/scripts/install.sh"
+            )
+            install_command = (
+                f"curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "
+                f"{shlex.quote(installer_url)} | "
+                f"bash -s -- --skip-setup --commit {shlex.quote(revision)}"
+            )
+        else:
+            venv = "$HOME/.local/share/hermes-agent"
+            install_command = (
+                f'python3 -m venv "{venv}" && '
+                f'"{venv}/bin/pip" install --disable-pip-version-check '
+                f'--no-cache-dir {shlex.quote(f"hermes-agent=={revision}")} && '
+                'mkdir -p "$HOME/.local/bin" && '
+                f'ln -sfn "{venv}/bin/hermes" "$HOME/.local/bin/hermes"'
+            )
         await self.exec_as_agent(
             environment,
             command=(
                 "set -euo pipefail; "
-                f"curl -fsSL {shlex.quote(installer_url)} | "
-                f"bash -s -- --skip-setup{revision_flag} && "
+                f"{install_command} && "
                 'export PATH="$HOME/.local/bin:$PATH" && '
                 'export HERMES_HOME="${HERMES_HOME:-/tmp/hermes}" && '
                 'mkdir -p "$HERMES_HOME" "$HERMES_HOME/sessions" '

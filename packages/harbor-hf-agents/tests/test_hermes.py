@@ -267,6 +267,25 @@ class TestHermesInstall:
         assert "--branch" not in command
 
     @pytest.mark.asyncio
+    async def test_exact_package_version_uses_pypi_release(self, temp_dir):
+        agent = HermesAgent(
+            logs_dir=temp_dir, model_name="openai/model", version="0.19.0"
+        )
+        agent.exec_as_root = AsyncMock()
+        agent.exec_as_agent = AsyncMock()
+
+        await agent.install(AsyncMock())
+
+        root_command = agent.exec_as_root.await_args.kwargs["command"]
+        assert "python3-venv" in root_command
+        assert " git " not in f" {root_command} "
+        command = agent.exec_as_agent.await_args.kwargs["command"]
+        assert "hermes-agent==0.19.0" in command
+        assert "python3 -m venv" in command
+        assert ".local/bin/hermes" in command
+        assert "raw.githubusercontent.com" not in command
+
+    @pytest.mark.asyncio
     async def test_named_revision_is_rejected(self, temp_dir):
         agent = HermesAgent(
             logs_dir=temp_dir, model_name="openai/model", version="main"
