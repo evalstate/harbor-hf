@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
 
 _HF_JOBS_HOST = re.compile(r"^[a-z0-9-]+\.hf\.jobs$")
+_HF_ENDPOINT_HOST = re.compile(
+    r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.endpoints\.huggingface\.cloud$"
+)
 _LOCAL_API_KEY = "harbor-local-ingress-bridge"
 _ALLOWED_REQUEST_OVERRIDES = {
     "frequency_penalty",
@@ -188,12 +191,16 @@ def _bridge_command() -> str:
 
 
 def is_hf_jobs_ingress_url(value: str) -> bool:
-    """Return whether *value* is a safe authenticated HF Jobs ingress URL."""
+    """Return whether *value* is safe authenticated Hugging Face ingress."""
     parsed = urlsplit(value)
+    hostname = parsed.hostname
+    trusted_host = hostname is not None and (
+        _HF_JOBS_HOST.fullmatch(hostname) is not None
+        or _HF_ENDPOINT_HOST.fullmatch(hostname) is not None
+    )
     return (
         parsed.scheme == "https"
-        and parsed.hostname is not None
-        and _HF_JOBS_HOST.fullmatch(parsed.hostname) is not None
+        and trusted_host
         and parsed.username is None
         and parsed.password is None
         and not parsed.query

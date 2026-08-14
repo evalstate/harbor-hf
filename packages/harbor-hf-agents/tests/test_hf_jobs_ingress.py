@@ -39,9 +39,17 @@ class FailingIsolationAgent(RecordingAgent):
     ("value", "expected"),
     [
         ("https://abc123--8000.hf.jobs/scopes/opaque/v1", True),
+        (
+            "https://abc123.us-east-2.aws.endpoints.huggingface.cloud/v1",
+            True,
+        ),
         ("https://abc123--8000.hf.jobs/scopes/opaque/v1?token=secret", False),
         ("https://user:secret@abc123--8000.hf.jobs/scopes/opaque/v1", False),
         ("https://router.huggingface.co/v1", False),
+        (
+            "https://abc123.us-east-2.aws.endpoints.huggingface.cloud.evil.test/v1",
+            False,
+        ),
         ("http://abc123--8000.hf.jobs/v1", False),
         ("http://127.0.0.1:8000/v1", False),
     ],
