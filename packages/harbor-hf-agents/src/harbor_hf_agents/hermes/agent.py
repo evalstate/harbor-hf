@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from harbor_hf_agents.support.hf_jobs_ingress import (
     prepare_hf_jobs_ingress_bridge,
     stop_hf_jobs_ingress_bridge,
+    validate_request_overrides,
 )
 from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
 
@@ -105,10 +106,12 @@ class HermesAgent(IsolatedProviderAgent):
         self,
         *args: Any,  # noqa: ANN401 -- Harbor API
         provider_runtime: dict[str, Any] | None = None,
+        request_overrides: dict[str, int | float] | None = None,
         **kwargs: Any,  # noqa: ANN401 -- Harbor API
     ) -> None:
         self._runtime_config = HermesRuntimeConfig()
         self._provider_runtime = self._validate_provider_runtime(provider_runtime)
+        self._request_overrides = validate_request_overrides(request_overrides)
         super().__init__(*args, **kwargs)
 
     @staticmethod
@@ -626,6 +629,7 @@ class HermesAgent(IsolatedProviderAgent):
                 api_key_key="OPENAI_API_KEY",
                 ingress_token=self._get_env("HF_TOKEN"),
                 api="chat-completions",
+                request_overrides=self._request_overrides,
             )
 
         if bridged:

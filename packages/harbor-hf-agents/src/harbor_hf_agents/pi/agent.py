@@ -27,6 +27,7 @@ from packaging.version import InvalidVersion, Version
 from harbor_hf_agents.support.hf_jobs_ingress import (
     prepare_hf_jobs_ingress_bridge,
     stop_hf_jobs_ingress_bridge,
+    validate_request_overrides,
 )
 from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
 
@@ -234,6 +235,7 @@ class PiAgent(IsolatedProviderAgent):
         *args: Any,  # noqa: ANN401 -- Harbor API
         models_json: dict[str, Any] | None = None,
         provider_runtime: dict[str, Any] | None = None,
+        request_overrides: dict[str, int | float] | None = None,
         **kwargs: Any,  # noqa: ANN401 -- Harbor API
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -241,6 +243,7 @@ class PiAgent(IsolatedProviderAgent):
         if models_json is not None:
             self._validate_models_json(models_json)
         self._validate_provider_runtime(provider_runtime)
+        self._request_overrides = validate_request_overrides(request_overrides)
 
     @staticmethod
     def _validate_provider_runtime(value: dict[str, Any] | None) -> None:
@@ -444,6 +447,7 @@ class PiAgent(IsolatedProviderAgent):
             api_key_key="OPENAI_API_KEY",
             ingress_token=self._get_env("HF_TOKEN"),
             api="chat-completions",
+            request_overrides=self._request_overrides,
         )
 
         model_args = (

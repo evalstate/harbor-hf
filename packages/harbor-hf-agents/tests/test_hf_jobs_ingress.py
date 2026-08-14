@@ -7,6 +7,7 @@ import pytest
 from harbor_hf_agents.support.hf_jobs_ingress import (
     is_hf_jobs_ingress_url,
     prepare_hf_jobs_ingress_bridge,
+    validate_request_overrides,
 )
 
 
@@ -92,9 +93,47 @@ async def test_bridge_isolates_ingress_token_from_agent_environment(
         "HARBOR_HF_INGRESS_TOKEN": "private-hf-token",
         "HARBOR_HF_INGRESS_LOCAL_PORT": "18080",
         "HARBOR_HF_INGRESS_ALLOWED_PATH": "/v1/chat/completions",
+        "HARBOR_HF_REQUEST_OVERRIDES": "{}",
     }
     assert len(agent.agent_calls) == 1
     assert "bridge_environment_readable" in agent.agent_calls[0][1]
+
+
+def test_request_overrides_are_strict_and_numeric() -> None:
+    assert validate_request_overrides({"temperature": 1.0, "seed": 0}) == {
+        "temperature": 1.0,
+        "seed": 0,
+    }
+    with pytest.raises(ValueError, match="unsupported fields"):
+        validate_request_overrides({"api_key": 1})
+    with pytest.raises(ValueError, match="must be numeric"):
+        validate_request_overrides({"temperature": True})
+
+
+@pytest.mark.asyncio
+async def test_bridge_serializes_request_overrides() -> None:
+    agent = RecordingAgent()
+    env = {
+        "OPENAI_API_KEY": "initial-key",
+        "OPENAI_BASE_URL": (
+            "https://abc123.us-east-2.aws.endpoints.huggingface.cloud/v1"
+        ),
+    }
+
+    await prepare_hf_jobs_ingress_bridge(
+        agent,  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        env,
+        base_url_key="OPENAI_BASE_URL",
+        api_key_key="OPENAI_API_KEY",
+        ingress_token="private-hf-token",
+        api="chat-completions",
+        request_overrides={"temperature": 1.0, "top_p": 0.95, "seed": 0},
+    )
+
+    assert agent.calls[0][2]["HARBOR_HF_REQUEST_OVERRIDES"] == (
+        '{"seed":0,"temperature":1.0,"top_p":0.95}'
+    )
 
 
 @pytest.mark.asyncio

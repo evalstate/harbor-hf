@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import inspect
+import json
+import math
 import re
 import shlex
+from collections.abc import Mapping
 from contextlib import suppress
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -18,6 +21,38 @@ _HF_ENDPOINT_HOST = re.compile(
     r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.endpoints\.huggingface\.cloud$"
 )
 _LOCAL_API_KEY = "harbor-local-ingress-bridge"
+_ALLOWED_REQUEST_OVERRIDES = {
+    "frequency_penalty",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "temperature",
+    "top_k",
+    "top_p",
+}
+
+
+def validate_request_overrides(
+    value: Mapping[str, int | float] | None,
+) -> dict[str, int | float]:
+    """Validate deterministic, non-secret chat-completion sampling overrides."""
+    if value is None:
+        return {}
+    unknown = set(value) - _ALLOWED_REQUEST_OVERRIDES
+    if unknown:
+        raise ValueError(
+            "request overrides contain unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    result: dict[str, int | float] = {}
+    for key, item in value.items():
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise ValueError(f"request override {key} must be numeric")
+        if not math.isfinite(float(item)):
+            raise ValueError(f"request override {key} must be finite")
+        result[key] = item
+    return result
 
 
 def _run_hf_jobs_ingress_bridge() -> None:  # noqa: C901 -- parser branches
@@ -37,6 +72,16 @@ def _run_hf_jobs_ingress_bridge() -> None:  # noqa: C901 -- parser branches
     port = int(os.environ["HARBOR_HF_INGRESS_LOCAL_PORT"])
     allowed_paths = {os.environ["HARBOR_HF_INGRESS_ALLOWED_PATH"]}
     base_path = upstream.path.rstrip("/")
+    request_overrides = json.loads(
+        os.environ.get("HARBOR_HF_REQUEST_OVERRIDES", "{}")
+    )
+    if not isinstance(request_overrides, dict):
+        raise RuntimeError("HF ingress request overrides must be an object")
+    overrides_evidence = "/logs/agent/hf-ingress-request-overrides.json"
+    with open(overrides_evidence, "w", encoding="utf-8") as stream:
+        json.dump(request_overrides, stream, sort_keys=True, separators=(",", ":"))
+        stream.write("\n")
+    os.chmod(overrides_evidence, 0o444)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -54,6 +99,19 @@ def _run_hf_jobs_ingress_bridge() -> None:  # noqa: C901 -- parser branches
                 self.send_error(413)
                 return
             body = self.rfile.read(length)
+            if request_overrides:
+                try:
+                    payload = json.loads(body)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    self.send_error(400)
+                    return
+                if not isinstance(payload, dict):
+                    self.send_error(400)
+                    return
+                payload.update(request_overrides)
+                body = json.dumps(
+                    payload, sort_keys=True, separators=(",", ":")
+                ).encode()
             connection = http.client.HTTPSConnection(upstream_host, 443, timeout=1800)
             headers = {
                 "Authorization": f"Bearer {token}",
@@ -160,6 +218,7 @@ async def prepare_hf_jobs_ingress_bridge(
     ingress_token: str | None,
     api: Literal["chat-completions", "responses"],
     local_port: int = 18080,
+    request_overrides: Mapping[str, int | float] | None = None,
 ) -> bool:
     """Replace an authenticated HF Job URL with a root-owned loopback bridge.
 
@@ -167,6 +226,9 @@ async def prepare_hf_jobs_ingress_bridge(
     delivered only to the root-owned process; the agent receives a loopback URL
     and an inert placeholder key.
     """
+    overrides = validate_request_overrides(request_overrides)
+    if api != "chat-completions" and overrides:
+        raise ValueError("request overrides require the chat-completions API")
     base_url = env.get(base_url_key, "")
     if not is_hf_jobs_ingress_url(base_url):
         return False
@@ -188,6 +250,9 @@ async def prepare_hf_jobs_ingress_bridge(
             "HARBOR_HF_INGRESS_TOKEN": ingress_token,
             "HARBOR_HF_INGRESS_LOCAL_PORT": str(local_port),
             "HARBOR_HF_INGRESS_ALLOWED_PATH": allowed_path,
+            "HARBOR_HF_REQUEST_OVERRIDES": json.dumps(
+                overrides, sort_keys=True, separators=(",", ":")
+            ),
         },
     )
     env[base_url_key] = f"http://127.0.0.1:{local_port}/v1"
