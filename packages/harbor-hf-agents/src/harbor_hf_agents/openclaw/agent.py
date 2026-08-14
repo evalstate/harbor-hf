@@ -28,6 +28,7 @@ from harbor.utils.trajectory_utils import format_trajectory_json
 from harbor_hf_agents.support.hf_jobs_ingress import (
     prepare_hf_jobs_ingress_bridge,
     stop_hf_jobs_ingress_bridge,
+    validate_request_overrides,
 )
 from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
 
@@ -484,6 +485,7 @@ class OpenClawAgent(IsolatedProviderAgent):
         openclaw_config: dict[str, Any] | None = None,
         openclaw_node_version: str = "24",
         provider_runtime: dict[str, Any] | None = None,
+        request_overrides: dict[str, int | float] | None = None,
         **kwargs: Any,  # noqa: ANN401 -- Harbor API
     ) -> None:
         override_setup_timeout_sec = kwargs.pop("override_setup_timeout_sec", None)
@@ -507,6 +509,7 @@ class OpenClawAgent(IsolatedProviderAgent):
         super().__init__(*args, **kwargs)
         self._openclaw_config: dict[str, Any] = openclaw_config or {}
         self._provider_runtime = self._validate_provider_runtime(provider_runtime)
+        self._request_overrides = validate_request_overrides(request_overrides)
 
     @classmethod
     def _validate_provider_runtime(cls, value: dict[str, Any] | None) -> dict[str, Any]:
@@ -1138,6 +1141,7 @@ class OpenClawAgent(IsolatedProviderAgent):
             api_key_key=f"{prefix}_API_KEY",
             ingress_token=self._get_env("HF_TOKEN"),
             api=self._PROVIDER_API,
+            request_overrides=self._request_overrides,
         )
         try:
             await self._run_prepared(instruction, environment, context, env)
