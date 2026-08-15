@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import sleep
 from typing import Literal, Protocol, cast
 
 from huggingface_hub import CommitOperationAdd, HfApi
@@ -22,6 +23,14 @@ _MAX_COMMIT_ATTEMPTS = 8
 _MAX_EVENT_BATCH_OPERATIONS = 50
 _MAX_CONTROL_READ_WORKERS = 20
 _CAMPAIGN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+def _wait_for_control_retry(attempt: int) -> None:
+    """Let the Hub expose a competing commit before reading the head again."""
+    if attempt + 1 < _MAX_COMMIT_ATTEMPTS:
+        sleep(min(float(2**attempt), 8.0))
+
+
 _RECONCILER_DURABLE_EVENT_KINDS = {
     "campaign.draining",
     "campaign.manual-intervention-required",
@@ -808,6 +817,7 @@ class HubCampaignStore:
             except HfHubHTTPError as error:
                 if not _is_parent_conflict(error):
                     raise
+                _wait_for_control_retry(_attempt)
         raise ControlError("control repository remained contended")
 
     def ensure_events(self, campaign_id: str, events: list[CampaignEvent]) -> bool:
@@ -848,6 +858,7 @@ class HubCampaignStore:
             except HfHubHTTPError as error:
                 if not _is_parent_conflict(error):
                     raise
+                _wait_for_control_retry(_attempt)
         raise ControlError("control repository remained contended")
 
     def _ensure_manual_resolution_event(
@@ -883,6 +894,7 @@ class HubCampaignStore:
             except HfHubHTTPError as error:
                 if not _is_parent_conflict(error):
                     raise
+                _wait_for_control_retry(_attempt)
         raise ControlError("control repository remained contended")
 
     def _ensure_cancellation_event(
@@ -928,6 +940,7 @@ class HubCampaignStore:
             except HfHubHTTPError as error:
                 if not _is_parent_conflict(error):
                     raise
+                _wait_for_control_retry(_attempt)
         raise ControlError("control repository remained contended")
 
     def ensure_events_unless_cancelled(
@@ -964,6 +977,7 @@ class HubCampaignStore:
             except HfHubHTTPError as error:
                 if not _is_parent_conflict(error):
                     raise
+                _wait_for_control_retry(_attempt)
         raise ControlError("control repository remained contended")
 
     def _missing_events_from_listing(
@@ -1041,6 +1055,7 @@ class HubCampaignStore:
             except HfHubHTTPError as error:
                 if not _is_parent_conflict(error):
                     raise
+                _wait_for_control_retry(_attempt)
         raise ControlError("control repository remained contended")
 
     def _create_absent(
@@ -1068,6 +1083,7 @@ class HubCampaignStore:
             except HfHubHTTPError as error:
                 if not _is_parent_conflict(error):
                     raise
+                _wait_for_control_retry(_attempt)
         raise ControlError("control repository remained contended")
 
     def _head(self) -> str:

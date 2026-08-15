@@ -32,12 +32,26 @@ from harbor_hf.control import (
     Producer,
     TerminalPayload,
     WaveLifecyclePayload,
+    _wait_for_control_retry,
     new_event,
     project_campaign,
 )
 from harbor_hf.models import ExperimentSpec
 
 NOW = datetime(2026, 7, 14, 1, 2, 3, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def disable_control_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("harbor_hf.control.sleep", lambda _seconds: None)
+
+
+def test_control_retry_waits_exponentially(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list[float] = []
+    monkeypatch.setattr("harbor_hf.control.sleep", waits.append)
+    for attempt in range(8):
+        _wait_for_control_retry(attempt)
+    assert waits == [1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0]
 
 
 class FakeCampaignApi:
