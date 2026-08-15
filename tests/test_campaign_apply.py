@@ -82,7 +82,7 @@ from harbor_hf.endpoints import (
     ProvisioningResult,
 )
 from harbor_hf.hf_endpoints import HuggingFaceEndpointAdapter
-from harbor_hf.models import DeploymentProfile, ExperimentSpec
+from harbor_hf.models import DeploymentProfile, EndpointRef, ExperimentSpec
 from harbor_hf.operations import AutomaticCampaignPublisher
 from harbor_hf.provider_models import (
     ExplicitProviderRoute,
@@ -2650,6 +2650,37 @@ def test_hugging_face_reconciler_factory_requires_hf_token(
 
     with pytest.raises(CampaignApplyError, match="HF token is required"):
         campaign_apply_module.hugging_face_campaign_reconciler("osolmaz")
+
+
+def test_managed_wave_uses_explicitly_adopted_endpoint(
+    remote_spec: ExperimentSpec,
+) -> None:
+    deployment = remote_spec.matrix.deployments[0]
+    assert isinstance(deployment, DeploymentProfile)
+    deployment = deployment.model_copy(
+        update={
+            "endpoint": EndpointRef(
+                namespace="osolmaz",
+                name="existing-managed-endpoint",
+                served_model_name="served-model",
+                adopt_existing=True,
+            )
+        }
+    )
+    spec = remote_spec.model_copy(
+        update={
+            "matrix": remote_spec.matrix.model_copy(
+                update={"deployments": [deployment]}
+            )
+        }
+    )
+    lock, _request, submitted = _campaign(spec)
+    action = plan_reconciliation(lock, [submitted], now=NOW)[1].actions[0]
+
+    endpoint = managed_wave_endpoint(lock, spec, action.deployment_digest)
+
+    assert endpoint.name == "existing-managed-endpoint"
+    assert endpoint.adopt_existing is True
 
 
 def test_hf_wave_adapter_submits_staged_locks_through_submission_module(

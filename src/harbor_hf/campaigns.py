@@ -18,8 +18,8 @@ from harbor_hf.benchmark_source import (
 )
 from harbor_hf.endpoints import (
     bind_endpoint,
+    build_desired_endpoint,
     deployment_digest,
-    managed_endpoint_identity,
     served_model_name,
 )
 from harbor_hf.models import (
@@ -1094,15 +1094,17 @@ def managed_wave_endpoint(
         raise ValueError("inference provider deployments have no managed endpoint")
     if deployment_digest(model, profile) != deployment:
         raise ValueError("manifest deployment does not match the campaign lock")
-    identity = managed_endpoint_identity(
+    identity = build_desired_endpoint(
         namespace=spec.remote.job.namespace,
         campaign_id=campaign.campaign_id,
-        deployment_digest=deployment,
-    )
+        model=model,
+        deployment=profile,
+    ).identity
     return EndpointRef(
         namespace=identity.namespace,
         name=identity.name,
         served_model_name=served_model_name(profile, model),
+        adopt_existing=identity.prebound,
     )
 
 
