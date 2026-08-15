@@ -297,6 +297,7 @@ class EndpointRef(StrictModel):
     namespace: str = Field(min_length=1)
     name: ProfileId
     served_model_name: str = Field(min_length=1)
+    adopt_existing: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class DeploymentProfile(StrictModel):

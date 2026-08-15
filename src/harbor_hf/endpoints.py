@@ -147,6 +147,7 @@ class ManagedEndpointIdentity(FrozenModel):
     campaign_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
     deployment_digest: DeploymentDigest
     tags: list[str]
+    prebound: bool = False
 
     @field_validator("tags")
     @classmethod
@@ -155,6 +156,11 @@ class ManagedEndpointIdentity(FrozenModel):
 
     @model_validator(mode="after")
     def identity_is_deterministic(self) -> ManagedEndpointIdentity:
+        if self.prebound:
+            expected_tags = _managed_adoption_tags(self.deployment_digest)
+            if self.tags != expected_tags:
+                raise ValueError("prebound endpoint identity has invalid managed tags")
+            return self
         expected_name, expected_tags = _managed_identity_values(
             self.namespace, self.campaign_id, self.deployment_digest
         )
@@ -284,6 +290,16 @@ def managed_endpoint_identity(
     )
 
 
+def _managed_adoption_tags(deployment_digest: DeploymentDigest) -> list[str]:
+    digest_hash = deployment_digest.removeprefix("sha256:")
+    return sorted(
+        [
+            _MANAGED_TAG,
+            f"harbor-hf-deployment-{digest_hash[:24]}",
+        ]
+    )
+
+
 def _managed_identity_values(
     namespace: str, campaign_id: str, deployment_digest: DeploymentDigest
 ) -> tuple[str, list[str]]:
@@ -316,11 +332,24 @@ def build_desired_endpoint(
     deployment: DeploymentProfile,
 ) -> DesiredEndpoint:
     digest = deployment_digest(model, deployment)
-    identity = managed_endpoint_identity(
-        namespace=namespace,
-        campaign_id=campaign_id,
-        deployment_digest=digest,
-    )
+    endpoint = deployment.endpoint
+    if endpoint is None or not endpoint.adopt_existing:
+        identity = managed_endpoint_identity(
+            namespace=namespace,
+            campaign_id=campaign_id,
+            deployment_digest=digest,
+        )
+    else:
+        if endpoint.namespace != namespace:
+            raise ValueError("prebound endpoint namespace must match the campaign")
+        identity = ManagedEndpointIdentity(
+            namespace=namespace,
+            name=endpoint.name,
+            campaign_id=campaign_id,
+            deployment_digest=digest,
+            tags=_managed_adoption_tags(digest),
+            prebound=True,
+        )
     settings = EndpointSettings.model_validate(deployment.parameters)
     vendor, separator, region = deployment.region.partition("-")
     if not separator or not region:
@@ -416,8 +445,8 @@ def effective_configuration_mismatches(
 ) -> tuple[ConfigurationMismatch, ...]:
     mismatches: list[ConfigurationMismatch] = []
     _compare_values(
-        expected.model_dump(mode="json"),
-        observed.model_dump(mode="json"),
+        expected.model_dump(mode="json", exclude={"tags"}),
+        observed.model_dump(mode="json", exclude={"tags"}),
         path="configuration",
         mismatches=mismatches,
     )
@@ -428,7 +457,7 @@ def verify_exact_endpoint(desired: DesiredEndpoint, snapshot: EndpointSnapshot) 
     if (
         snapshot.namespace != desired.identity.namespace
         or snapshot.name != desired.identity.name
-        or not set(desired.identity.tags).issubset(snapshot.configuration.tags)
+        or not set(desired.configuration.tags).issubset(snapshot.configuration.tags)
     ):
         raise EndpointIdentityMismatch(
             "endpoint does not have the expected deterministic managed identity"

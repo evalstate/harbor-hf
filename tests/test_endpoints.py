@@ -171,6 +171,76 @@ def test_builds_complete_deterministic_desired_endpoint(
     }
 
 
+def test_builds_prebound_managed_endpoint_for_safe_cross_campaign_reuse(
+    remote_spec: ExperimentSpec,
+) -> None:
+    deployment = remote_spec.matrix.deployments[0]
+    assert isinstance(deployment, DeploymentProfile)
+    deployment = deployment.model_copy(
+        update={
+            "endpoint": EndpointRef(
+                namespace="osolmaz",
+                name="existing-managed-endpoint",
+                served_model_name="served-model",
+                adopt_existing=True,
+            ),
+            "parameters": {"tags": ["benchmark"]},
+        }
+    )
+
+    desired = build_desired_endpoint(
+        namespace="osolmaz",
+        campaign_id="replacement-campaign",
+        model=remote_spec.matrix.models[0],
+        deployment=deployment,
+    )
+
+    digest = deployment_digest(remote_spec.matrix.models[0], deployment)
+    deployment_tag = f"harbor-hf-deployment-{digest.removeprefix('sha256:')[:24]}"
+    assert desired.identity.name == "existing-managed-endpoint"
+    assert desired.identity.prebound is True
+    assert desired.identity.tags == [deployment_tag, "harbor-hf-managed"]
+    assert desired.configuration.tags == [
+        "benchmark",
+        deployment_tag,
+        "harbor-hf-managed",
+    ]
+    observed = desired.configuration.model_copy(
+        update={
+            "tags": [
+                *desired.configuration.tags,
+                "harbor-hf-campaign-prior",
+            ]
+        }
+    )
+    verify_exact_endpoint(desired, _snapshot(desired, configuration=observed))
+
+
+def test_rejects_prebound_endpoint_from_another_namespace(
+    remote_spec: ExperimentSpec,
+) -> None:
+    deployment = remote_spec.matrix.deployments[0]
+    assert isinstance(deployment, DeploymentProfile)
+    deployment = deployment.model_copy(
+        update={
+            "endpoint": EndpointRef(
+                namespace="another",
+                name="existing-managed-endpoint",
+                served_model_name="served-model",
+                adopt_existing=True,
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="namespace must match"):
+        build_desired_endpoint(
+            namespace="osolmaz",
+            campaign_id="replacement-campaign",
+            model=remote_spec.matrix.models[0],
+            deployment=deployment,
+        )
+
+
 @pytest.mark.parametrize("alias_flag", ["--alias", "-a"])
 def test_llama_cpp_alias_defines_served_model_name(
     remote_spec: ExperimentSpec, alias_flag: str
@@ -327,7 +397,6 @@ MISMATCH_CASES: Sequence[tuple[str, object]] = (
     ("route.domain", "other.example.test"),
     ("route.path", "/other"),
     ("cache_http_responses", False),
-    ("tags", ["different"]),
 )
 
 
