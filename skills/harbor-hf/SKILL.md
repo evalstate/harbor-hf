@@ -11,7 +11,29 @@ Hugging Face Jobs, recovery, private evidence, and result publication.
 
 A Harbor HF campaign is a durable control-plane object. Treat HF Jobs as
 replaceable workers. Read campaign state from the coordination Dataset and
-canonical evidence from the private Bucket.
+canonical evidence from the private Bucket until the control-service plan is
+implemented.
+
+Treat Hub resources as shared infrastructure. Reuse the namespace's configured
+control store, evidence Bucket, results Dataset, results Space, and backup
+Bucket. Never create a repository, Bucket, Space, or schedule for one campaign,
+repair, profile, lease, status file, result subset, or temporary workflow. A new
+persistent resource requires a namespace inventory, a privacy or failure-domain
+reason that existing resources cannot satisfy, a lifecycle and cost record, and
+explicit operator approval. Namespace bootstrap is a separate operator action
+and may create only missing resources from the approved canonical inventory.
+The target resource layout and new-write switch are
+specified in `docs/2026-08-16-harbor-hf-control-service-plan.md`.
+
+Use one active long-lived Hugging Face service credential for normal Harbor-HF
+control. Reuse the approved existing credential under one stable secret name;
+do not mint per-campaign, per-repair, or per-worker credentials. The control
+Space may inject that credential only into the trusted outer worker of a Job.
+Never forward it into a Harbor Sandbox, benchmark agent, model server, or
+evidence. External provider keys stay separate. A backup-only credential stays
+separate when required by the backup failure boundary. Audit consumers and run
+a retained-credential canary before revoking any redundant Harbor-HF service
+credential.
 
 ## Source documents
 
@@ -26,6 +48,8 @@ Read the complete source document before acting in that area:
 - Evidence, audit, restoration, or repair: `docs/trial-evidence-bundle.md`.
 - Publication or catalog change: `docs/result-publication.md` and the current
   `results publish` and `results catalog` CLI help.
+- Campaign control, profile reuse, Hub resource layout, or storage changes:
+  `docs/2026-08-16-harbor-hf-control-service-plan.md`.
 
 The checked-out CLI is authoritative for command syntax. Run
 `uv run harbor-hf <group> <command> --help` before using a mutating command.
@@ -55,6 +79,9 @@ Keep these rules in force throughout the session:
   as agents and workers.
 - Keep the control Dataset, input Bucket, evidence Bucket, and unpublished
   results private.
+- Inventory existing Hub resources before any remote mutation. Reuse canonical
+  stores and prefixes. A campaign must not create its own repository, Bucket,
+  Space, schedule, status store, lease store, or result Dataset.
 - Serialize campaign control mutations. A provider controller runs one internal
   wave at a time; trial requests may overlap only within locked provider limits.
 - Treat `execution.concurrent_trials` and provider request concurrency as

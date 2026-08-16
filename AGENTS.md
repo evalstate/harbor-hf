@@ -14,6 +14,34 @@
 - Do not load models or run inference locally. Remote integration tests must be
   explicit and leave every Inference Endpoint paused.
 - Never write secret values to manifests, logs, tests, locks, or artifacts.
+- Treat Hugging Face repositories and Buckets as shared namespace
+  infrastructure. Spaces and schedules are shared too. Endpoints follow the
+  same rule. Reuse the canonical configured resources.
+- Never create a repository, Bucket, Space, or schedule for one campaign,
+  repair, profile, lease, status record, result subset, or temporary workflow.
+- Before adding a persistent Hub resource, inventory the namespace and prove
+  that the existing private evidence Bucket, normalized results Dataset,
+  control Space, results Space, source repository, or backup Bucket cannot meet
+  the privacy, access, retention, or failure-domain requirement. Record the
+  owner and lifecycle. Record the cost and removal condition, then obtain
+  explicit approval.
+- Keep control objects and profiles under clear prefixes in the existing
+  private evidence Bucket. Keep evidence and receipts there as well, including
+  reassessments. Do not create a new Bucket to avoid designing a clear schema
+  or prefix.
+- Keep the backup Bucket separate from the primary evidence Bucket. Reusing
+  resources does not permit weakening the backup failure boundary.
+- Configure one active long-lived Hugging Face service credential for normal
+  Harbor-HF control. Reuse the approved existing credential instead of minting
+  another credential for a migration, campaign, repair, or worker.
+- Keep external provider keys separate. Keep a backup-only credential separate
+  when the backup failure boundary requires it.
+- Treat any other Harbor-HF service credential as a deprecation candidate. Do
+  not revoke it until a private consumer audit and a retained-credential canary
+  prove that control writes, evidence upload, endpoint cleanup, and publication
+  still work.
+- Follow `docs/2026-08-16-harbor-hf-control-service-plan.md` when changing
+  campaign control, profiles, storage, recovery, or publication architecture.
 - Never pass a locally configured personal or broad account credential, including
   the output of `gh auth token`, to a Hugging Face Job, Sandbox, Endpoint, or
   other remote runtime. Never copy any credential between stores without the
