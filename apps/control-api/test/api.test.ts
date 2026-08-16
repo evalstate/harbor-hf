@@ -1,0 +1,659 @@
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import type { ProfileObject, ProfilePromotion } from "@harbor-hf/contracts";
+import {
+  canonicalJson,
+  controlRecordPath,
+  deterministicId,
+  sha256,
+  workerEvidenceObjectPath,
+} from "@harbor-hf/contracts";
+import { mintWorkerCapability } from "@harbor-hf/control-core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildApp } from "../src/app.js";
+import { AuthStore, AuthenticationService, safeReturnPath } from "../src/auth.js";
+import type { AppConfig } from "../src/config.js";
+import { createRuntime, type Runtime } from "../src/runtime.js";
+
+const roots: string[] = [];
+const runtimes: Runtime[] = [];
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
+
+async function setup(
+  writeMode: AppConfig["write_mode"] = "canary",
+  seed?: (runtime: Runtime) => Promise<void>,
+): Promise<{
+  runtime: Runtime;
+  app: Awaited<ReturnType<typeof buildApp>>;
+}> {
+  const root = await mkdtemp(join(tmpdir(), "hhf-api-"));
+  roots.push(root);
+  const bucket = join(root, "bucket");
+  await mkdir(bucket);
+  const config: AppConfig = {
+    node_env: "test",
+    port: 7860,
+    namespace: "test",
+    bucket_id: "test/artifacts",
+    bucket_root: bucket,
+    store_mode: "filesystem",
+    projection_path: join(root, "projection.sqlite"),
+    auth_path: join(root, "auth.sqlite"),
+    profiles_root: resolve("profiles"),
+    web_root: join(root, "web"),
+    auth_mode: "development",
+    write_mode: writeMode,
+    public_origin: "http://127.0.0.1:7860",
+    oauth: null,
+    hf_token: "test-token-not-a-real-credential",
+    reconcile_interval_ms: 60_000,
+    observe_interval_ms: 0,
+    worker_receipt_grace_ms: 0,
+    source_revision: "test-revision",
+    bootstrap_operator_subjects: [],
+  };
+  const runtime = await createRuntime(config);
+  if (seed) await seed(runtime);
+  runtimes.push(runtime);
+  const app = await buildApp(runtime);
+  await runtime.initialize();
+  await runtime.reconciler.stop();
+  return { runtime, app };
+}
+
+const input = {
+  benchmark: "control-smoke",
+  model: "control-smoke",
+  harness: "control-smoke",
+  deployment: "hf-cpu-smoke",
+  launch_policy: "control-smoke",
+  ceiling_microusd: 0,
+  confirmed: true,
+};
+
+describe("control API", () => {
+  it("reports liveness and projection readiness separately", async () => {
+    const { app } = await setup();
+    expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(
+      200,
+    );
+    const ready = await app.inject({ method: "GET", url: "/health/ready" });
+    expect(ready.statusCode).toBe(200);
+    expect(ready.json()).toMatchObject({ status: "ready" });
+    await app.close();
+  });
+
+  it("loads approved durable profile aliases and ignores recommendations", async () => {
+    const spec = {
+      model_id: "example/durable-model",
+      revision: sha256("durable-model-revision"),
+    };
+    const profile: ProfileObject = {
+      schema_version: "v1",
+      kind: "profile.object",
+      record_id: deterministicId(
+        "profile",
+        "model",
+        "durable-model",
+        sha256(canonicalJson(spec)),
+      ),
+      created_at: "2026-08-16T00:00:00.000Z",
+      actor: { subject: "profile-import", role: "migration" },
+      profile_kind: "model",
+      name: "durable-model",
+      spec,
+    };
+    const profileId = sha256(canonicalJson(profile));
+    const promotion = (
+      alias: string,
+      state: ProfilePromotion["promotion_state"],
+      createdAt: string,
+      targetProfileId = profileId,
+    ): ProfilePromotion => ({
+      schema_version: "v1",
+      kind: "profile.promotion",
+      record_id: deterministicId("promotion", "model", alias, targetProfileId, state),
+      created_at: createdAt,
+      actor: { subject: "profile-operator", role: "operator" },
+      profile_kind: "model",
+      alias,
+      profile_id: targetProfileId,
+      promotion_state: state,
+      reason: `${state} after profile review`,
+      evidence: [sha256(`${alias}-canary-evidence`)],
+    });
+    const approved = promotion("control-smoke", "approved", "2026-08-16T00:00:01.000Z");
+    const recommended = promotion(
+      "recommended-only",
+      "recommended",
+      "2026-08-16T00:00:02.000Z",
+    );
+    const { runtime, app } = await setup("canary", async (seedRuntime) => {
+      for (const record of [profile, approved, recommended])
+        await seedRuntime.store.create(
+          controlRecordPath(record),
+          new TextEncoder().encode(canonicalJson(record)),
+        );
+    });
+
+    expect(runtime.service.resolver.get("model", "control-smoke").profile_id).toBe(
+      profileId,
+    );
+    expect(() => runtime.service.resolver.get("model", "recommended-only")).toThrow(
+      "unknown model profile",
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "durable-profile-campaign-key" },
+      payload: input,
+    });
+    expect(response.statusCode).toBe(202);
+    const lock = await runtime.projection.campaignLock(
+      response.json().campaign_id as string,
+    );
+    const lockedModel = lock?.profiles.find((item) => item.kind === "model");
+    expect(lockedModel).toMatchObject({
+      name: "control-smoke",
+      profile_id: profileId,
+    });
+    const replacementSpec = {
+      model_id: "example/replacement-model",
+      revision: sha256("replacement-model-revision"),
+    };
+    const replacementProfile: ProfileObject = {
+      ...profile,
+      record_id: deterministicId(
+        "profile",
+        "model",
+        "replacement-model",
+        sha256(canonicalJson(replacementSpec)),
+      ),
+      created_at: "2026-08-16T00:00:03.000Z",
+      name: "replacement-model",
+      spec: replacementSpec,
+    };
+    const replacementProfileId = sha256(canonicalJson(replacementProfile));
+    const movedAlias = promotion(
+      "control-smoke",
+      "approved",
+      "2026-08-16T00:00:04.000Z",
+      replacementProfileId,
+    );
+    await runtime.service.append(replacementProfile);
+    await runtime.service.append(movedAlias);
+    expect(runtime.service.resolver.get("model", "control-smoke").profile_id).toBe(
+      replacementProfileId,
+    );
+    const repeated = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "durable-profile-campaign-key" },
+      payload: input,
+    });
+    expect(repeated.statusCode).toBe(202);
+    expect(repeated.json()).toMatchObject({ adopted: true });
+    expect(
+      (
+        await runtime.projection.campaignLock(repeated.json().campaign_id as string)
+      )?.profiles.find((item) => item.kind === "model")?.profile_id,
+    ).toBe(profileId);
+    await app.close();
+  });
+
+  it("paginates every collection response", async () => {
+    const { runtime, app } = await setup();
+    const campaign = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "pagination-campaign-key" },
+      payload: input,
+    });
+    const campaignId = campaign.json().campaign_id as string;
+    await runtime.reconciler.tick();
+    const urls = [
+      "/api/v1/campaigns?limit=1",
+      `/api/v1/campaigns/${campaignId}/tasks?limit=1`,
+      "/api/v1/jobs?limit=1",
+      "/api/v1/endpoints?limit=1",
+      "/api/v1/profiles?limit=1",
+      "/api/v1/results?limit=1",
+      "/api/v1/audit?limit=1",
+    ];
+    for (const url of urls) {
+      const response = await app.inject({ method: "GET", url });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toHaveProperty("items");
+      expect(response.json()).toHaveProperty("next_cursor");
+    }
+    const firstProfiles = await app.inject({
+      method: "GET",
+      url: "/api/v1/profiles?limit=1",
+    });
+    const firstProfile = firstProfiles.json().items[0].profile_id as string;
+    const cursor = firstProfiles.json().next_cursor as string;
+    const secondProfiles = await app.inject({
+      method: "GET",
+      url: `/api/v1/profiles?limit=1&cursor=${encodeURIComponent(cursor)}`,
+    });
+    expect(secondProfiles.json().items[0].profile_id).not.toBe(firstProfile);
+    await app.close();
+  });
+
+  it("limits worker capabilities to their campaign action routes", async () => {
+    const { runtime, app } = await setup();
+    const submission = await runtime.service.submit(
+      input,
+      "worker-capability-submission",
+      { subject: "operator", role: "operator" },
+    );
+    const lock = await runtime.projection.campaignLock(submission.campaign_id);
+    expect(lock).not.toBeNull();
+    const taskId = lock?.tasks[0]?.task_id;
+    expect(taskId).toBeDefined();
+    const token = mintWorkerCapability(runtime.config.hf_token ?? "", {
+      namespace: runtime.config.namespace,
+      campaign_id: submission.campaign_id,
+      action_id: "action-worker-capability",
+      task_ids: [taskId ?? "missing"],
+      expires_at: Math.floor(Date.now() / 1000) + 60,
+    });
+    const headers = { "x-harbor-hf-worker-capability": token };
+
+    const lockResponse = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${submission.campaign_id}/lock`,
+      headers,
+    });
+    expect(lockResponse.statusCode).toBe(200);
+    expect(lockResponse.json().tasks).toMatchObject([{ task_id: taskId }]);
+    expect(
+      (await app.inject({ method: "GET", url: "/api/v1/profiles", headers }))
+        .statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/campaigns/campaign-other/lock",
+          headers,
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: `/api/v1/campaigns/${submission.campaign_id}/tasks/${taskId}/attempts`,
+          headers: { ...headers, "idempotency-key": "worker-scope-attempt" },
+          payload: {
+            action_id: "action-not-authorized",
+            outcome: "complete",
+            replacement_eligible: false,
+            evidence_digest: `sha256:${"a".repeat(64)}`,
+            evidence_path: "worker/evidence",
+            cost_microusd: 0,
+            metrics: { reward: 1 },
+            completed_at: "2026-08-16T00:00:00Z",
+            confirmed: true,
+          },
+        })
+      ).statusCode,
+    ).toBe(403);
+    await app.close();
+  });
+
+  it("returns 401 for an invalid bearer credential", async () => {
+    const { runtime, app } = await setup();
+    runtime.config.auth_mode = "oauth";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("unauthorized", { status: 401 })),
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/system",
+      headers: { authorization: "Bearer invalid-test-credential" },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({
+      error: { code: "invalid_bearer_credential" },
+    });
+    await app.close();
+  });
+
+  it("serves validated imported result catalogs", async () => {
+    const { runtime, app } = await setup();
+    const catalog = {
+      schema_version: "v1",
+      kind: "result.catalog",
+      record_id: "catalog-import-one",
+      created_at: "2026-08-16T00:00:00Z",
+      source_digest: `sha256:${"a".repeat(64)}`,
+      entries: [
+        {
+          publication_id: "publication-one",
+          campaign_id: "campaign-one",
+          run_id: "run-one",
+          published_at: "2026-08-15T00:00:00Z",
+          benchmark: "benchmark-one",
+          model: "model-one",
+          harness: "harness-one",
+          inference_provider: "provider-one",
+          run_outcome: "complete",
+          quality: "clean",
+          publication_role: "final",
+          task_count: 89,
+          scored_task_count: 89,
+          strict_pass_count: 1,
+          primary_metric: { name: "mean_reward", value: 0.75, unit: "score" },
+          result_path: "imports/result-one.json",
+        },
+      ],
+    };
+    await runtime.store.create(
+      "results/schema=v1/catalog/imports/catalog-import-one.json",
+      new TextEncoder().encode(canonicalJson(catalog)),
+    );
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/results" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().items[0]).toMatchObject({
+      publication_id: "publication-one",
+      model: "model-one",
+      primary_metric: { value: 0.75 },
+      status: "published",
+    });
+    await app.close();
+  });
+
+  it("accepts idempotent trusted-worker attempt receipts", async () => {
+    const { runtime, app } = await setup();
+    const campaign = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "campaign-request-key" },
+      payload: input,
+    });
+    const campaignId = campaign.json().campaign_id as string;
+    await runtime.reconciler.tick();
+    const launch = (await runtime.projection.actions()).find(
+      (action) => action.action_kind === "job.launch",
+    );
+    if (!launch) throw new Error("campaign admission did not create a Job launch");
+    const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
+      namespace: runtime.config.namespace,
+      campaign_id: campaignId,
+      action_id: launch.action_id,
+      task_ids: ["control-smoke-task"],
+      expires_at: Math.floor(Date.now() / 1000) + 60,
+    });
+    const capabilityHeaders = {
+      "x-harbor-hf-worker-capability": capability,
+    };
+    const workerHeaders = {
+      ...capabilityHeaders,
+      "idempotency-key": "worker-attempt-key",
+    };
+    const chunk = Buffer.from("worker evidence chunk", "utf8");
+    const chunkDigest = sha256(chunk);
+    const chunkPath = workerEvidenceObjectPath(
+      campaignId,
+      launch.action_id,
+      "control-smoke-task",
+      chunkDigest,
+    );
+    const evidenceUrl = `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`;
+    const evidencePayload = {
+      operation: "upload_evidence",
+      action_id: launch.action_id,
+      digest: chunkDigest,
+      content_base64: chunk.toString("base64"),
+    };
+    const missingEvidenceCapability = await app.inject({
+      method: "POST",
+      url: evidenceUrl,
+      headers: { "idempotency-key": "evidence-missing-capability-key" },
+      payload: evidencePayload,
+    });
+    expect(missingEvidenceCapability.statusCode).toBe(403);
+    const wrongEvidenceAction = await app.inject({
+      method: "POST",
+      url: evidenceUrl,
+      headers: {
+        ...capabilityHeaders,
+        "idempotency-key": "evidence-wrong-action-key",
+      },
+      payload: { ...evidencePayload, action_id: "wrong-action" },
+    });
+    expect(wrongEvidenceAction.statusCode).toBe(403);
+    const wrongEvidenceDigest = await app.inject({
+      method: "POST",
+      url: evidenceUrl,
+      headers: {
+        ...capabilityHeaders,
+        "idempotency-key": "evidence-wrong-digest-key",
+      },
+      payload: { ...evidencePayload, digest: `sha256:${"0".repeat(64)}` },
+    });
+    expect(wrongEvidenceDigest.statusCode).toBe(422);
+    const chunkUpload = await app.inject({
+      method: "POST",
+      url: evidenceUrl,
+      headers: { ...capabilityHeaders, "idempotency-key": "evidence-chunk-key" },
+      payload: evidencePayload,
+    });
+    expect(chunkUpload.statusCode).toBe(201);
+    const manifest = {
+      schema_version: "v1",
+      kind: "worker.evidence.manifest",
+      campaign_id: campaignId,
+      action_id: launch.action_id,
+      task_id: "control-smoke-task",
+      objects: [{ path: chunkPath, digest: chunkDigest, size: chunk.byteLength }],
+    };
+    const manifestBytes = Buffer.from(canonicalJson(manifest), "utf8");
+    const manifestDigest = sha256(manifestBytes);
+    const manifestPath = workerEvidenceObjectPath(
+      campaignId,
+      launch.action_id,
+      "control-smoke-task",
+      manifestDigest,
+    );
+    const manifestUpload = await app.inject({
+      method: "POST",
+      url: evidenceUrl,
+      headers: { ...capabilityHeaders, "idempotency-key": "evidence-manifest-key" },
+      payload: {
+        operation: "upload_evidence",
+        action_id: launch.action_id,
+        digest: manifestDigest,
+        content_base64: manifestBytes.toString("base64"),
+      },
+    });
+    expect(manifestUpload.statusCode).toBe(201);
+    const payload = {
+      action_id: launch.action_id,
+      outcome: "complete",
+      replacement_eligible: false,
+      evidence_digest: manifestDigest,
+      evidence_path: manifestPath,
+      cost_microusd: 0,
+      metrics: { reward: 1 },
+      completed_at: "2026-08-16T00:00:00Z",
+      confirmed: true,
+    };
+    const missingCapability = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`,
+      headers: { "idempotency-key": "worker-attempt-key" },
+      payload,
+    });
+    expect(missingCapability.statusCode).toBe(403);
+    const first = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`,
+      headers: workerHeaders,
+      payload,
+    });
+    expect(first.statusCode).toBe(202);
+    expect(first.json()).toMatchObject({ adopted: false });
+    const duplicate = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`,
+      headers: workerHeaders,
+      payload,
+    });
+    expect(duplicate.statusCode).toBe(202);
+    expect(duplicate.json()).toMatchObject({ adopted: true });
+    const taskDetail = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task`,
+    });
+    expect(taskDetail.statusCode).toBe(200);
+    expect(taskDetail.json().attempts[0]).not.toHaveProperty("evidence_path");
+    expect(taskDetail.json().attempts[0]).not.toHaveProperty("evidence_digest");
+    expect(JSON.stringify(taskDetail.json())).not.toContain(manifestPath);
+    const conflict = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`,
+      headers: workerHeaders,
+      payload: { ...payload, outcome: "semantic" },
+    });
+    expect(conflict.statusCode).toBe(409);
+    const audit = await app.inject({ method: "GET", url: "/api/v1/audit" });
+    const attemptEvent = audit
+      .json()
+      .items.find((event: { type: string }) => event.type === "attempt.receipt");
+    expect(attemptEvent.data.record_id).toMatch(/^attempt-receipt-/);
+    expect(attemptEvent.data).not.toHaveProperty("record");
+    expect(JSON.stringify(attemptEvent)).not.toContain(payload.evidence_path);
+    await app.close();
+  });
+
+  it("returns a client error for an unknown profile alias", async () => {
+    const { app } = await setup("enabled");
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "unknown-profile-key" },
+      payload: { ...input, model: "unknown-model" },
+    });
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toMatchObject({
+      error: { code: "profile_resolution_failed" },
+    });
+    await app.close();
+  });
+
+  it("enforces canary profiles, confirmation, and idempotency", async () => {
+    const { runtime, app } = await setup();
+    const missingKey = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      payload: input,
+    });
+    expect(missingKey.statusCode).toBe(409);
+    const unconfirmed = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "request-key-0001" },
+      payload: { ...input, confirmed: false },
+    });
+    expect(unconfirmed.statusCode).toBe(400);
+    const wrongProfile = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "request-key-0002" },
+      payload: { ...input, model: "other-model" },
+    });
+    expect(wrongProfile.statusCode).toBe(422);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "request-key-0003" },
+      payload: input,
+    });
+    expect(response.statusCode).toBe(202);
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "request-key-0003" },
+      payload: input,
+    });
+    expect(duplicate.json()).toMatchObject({
+      adopted: true,
+      campaign_id: response.json().campaign_id,
+    });
+    const lock = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${response.json().campaign_id}/lock`,
+    });
+    expect(lock.statusCode).toBe(200);
+    expect(lock.json()).toMatchObject({
+      kind: "campaign.lock",
+      campaign_id: response.json().campaign_id,
+      tasks: [{ task_id: "control-smoke-task" }],
+    });
+    const audit = await app.inject({ method: "GET", url: "/api/v1/audit" });
+    expect(audit.statusCode).toBe(200);
+    expect(audit.json().items.length).toBeGreaterThanOrEqual(4);
+    expect(runtime.projection.system().ready).toBe(true);
+    await app.close();
+  });
+});
+
+describe("authentication state", () => {
+  it("keeps post-login redirects on the callback origin", () => {
+    const callback = "https://control.example/auth/callback";
+    expect(safeReturnPath("/campaigns?state=active#latest", callback)).toBe(
+      "/campaigns?state=active#latest",
+    );
+    expect(safeReturnPath("/\\evil.example", callback)).toBe("/");
+    expect(safeReturnPath("//evil.example", callback)).toBe("/");
+    expect(safeReturnPath("https://evil.example", callback)).toBe("/");
+  });
+
+  it("stores opaque sessions and rejects the wrong CSRF token", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hhf-auth-"));
+    roots.push(root);
+    const store = await AuthStore.open(join(root, "auth.sqlite"));
+    const session = store.createSession("subject-1", 60);
+    const row = store.session(session.id);
+    expect(row).not.toBeNull();
+    if (!row) throw new Error("session was not stored");
+    expect(store.verifyCsrf(row, session.csrf)).toBe(true);
+    expect(store.verifyCsrf(row, "wrong-token-that-is-long-enough-to-check")).toBe(
+      false,
+    );
+    store.close();
+  });
+
+  it("keeps authenticated readers read-only unless listed as operators", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hhf-auth-"));
+    roots.push(root);
+    const store = await AuthStore.open(join(root, "auth.sqlite"));
+    const auth = new AuthenticationService("development", store, null, async () => ({
+      schema_version: "v1",
+      kind: "operator.acl",
+      record_id: "operator-acl-test",
+      created_at: "2026-08-16T00:00:00Z",
+      actor: { subject: "test", role: "service" },
+      operators: ["operator"],
+      readers: ["reader"],
+    }));
+    expect(await auth.role("operator")).toBe("operator");
+    expect(await auth.role("reader")).toBe("reader");
+    store.close();
+  });
+});
