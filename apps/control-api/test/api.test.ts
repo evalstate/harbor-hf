@@ -397,14 +397,17 @@ describe("control API", () => {
     await app.close();
   });
 
-  it("does not trust caller-supplied forwarded-for hops for rate limits", async () => {
-    const { app } = await setup();
+  it("does not trust unverified identity or forwarded headers for limits", async () => {
+    const { runtime, app } = await setup();
     for (let index = 0; index < 120; index += 1) {
       const response = await app.inject({
         method: "GET",
         url: "/health/live",
         headers: {
-          "x-forwarded-for": `203.0.113.${(index % 250) + 1}, 198.51.100.10`,
+          authorization: `Bearer unverified-${index}`,
+          cookie: `hhf_session=unverified-${index}`,
+          "x-forwarded-for": `203.0.113.${(index % 250) + 1}`,
+          "x-harbor-hf-worker-capability": `unverified-${index}`,
         },
       });
       expect(response.statusCode).toBe(200);
@@ -412,9 +415,142 @@ describe("control API", () => {
     const limited = await app.inject({
       method: "GET",
       url: "/health/live",
-      headers: { "x-forwarded-for": "192.0.2.99, 198.51.100.10" },
+      headers: {
+        authorization: "Bearer unverified-limited",
+        cookie: "hhf_session=unverified-limited",
+        "x-forwarded-for": "192.0.2.99",
+        "x-harbor-hf-worker-capability": "unverified-limited",
+      },
     });
     expect(limited.statusCode).toBe(429);
+    expect(
+      (await app.inject({ method: "GET", url: "/api/v1/system" })).statusCode,
+    ).toBe(200);
+    const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
+      namespace: runtime.config.namespace,
+      campaign_id: "campaign-rate-limit",
+      action_id: "action-rate-limit",
+      task_ids: ["task-rate-limit"],
+      expires_at: Math.floor(Date.now() / 1000) + 60,
+    });
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/campaigns/campaign-rate-limit/lock",
+          headers: { "x-harbor-hf-worker-capability": capability },
+        })
+      ).statusCode,
+    ).toBe(404);
+    await app.close();
+  });
+
+  it("limits rejected cross-origin requests before returning the error", async () => {
+    const { app } = await setup();
+    for (let index = 0; index < 240; index += 1) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/system",
+        headers: { origin: `https://outside-${index}.example` },
+      });
+      expect(response.statusCode).toBe(403);
+    }
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/system",
+          headers: { origin: "https://outside-limited.example" },
+        })
+      ).statusCode,
+    ).toBe(429);
+    expect(
+      (await app.inject({ method: "GET", url: "/api/v1/system" })).statusCode,
+    ).toBe(200);
+    await app.close();
+  });
+
+  it("keeps unverified capabilities in the shared anonymous API limit", async () => {
+    const { runtime, app } = await setup();
+    for (let index = 0; index < 240; index += 1) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/system",
+        headers: {
+          "x-harbor-hf-worker-capability": `unverified-${index}`,
+        },
+      });
+      expect(response.statusCode).toBe(403);
+    }
+    const limited = await app.inject({
+      method: "GET",
+      url: "/api/v1/system",
+      headers: {
+        "x-harbor-hf-worker-capability": "unverified-limited",
+      },
+    });
+    expect(limited.statusCode).toBe(429);
+
+    const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
+      namespace: runtime.config.namespace,
+      campaign_id: "campaign-verified-limit",
+      action_id: "action-verified-limit",
+      task_ids: ["task-verified-limit"],
+      expires_at: Math.floor(Date.now() / 1000) + 60,
+    });
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/campaigns/campaign-verified-limit/lock",
+          headers: { "x-harbor-hf-worker-capability": capability },
+        })
+      ).statusCode,
+    ).toBe(404);
+    await app.close();
+  });
+
+  it("isolates a verified session from anonymous session-check limits", async () => {
+    const acl: OperatorAcl = {
+      schema_version: "v1",
+      kind: "operator.acl",
+      record_id: "operator-acl-session-limit",
+      created_at: "2026-08-16T00:00:00Z",
+      actor: { subject: "test", role: "service" },
+      operators: ["operator"],
+      readers: [],
+    };
+    const { runtime, app } = await setup("canary", async (seededRuntime) => {
+      await seededRuntime.service.append(acl);
+    });
+    runtime.config.auth_mode = "oauth";
+    for (let index = 0; index < 120; index += 1) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/auth/session",
+      });
+      expect(response.statusCode).toBe(401);
+    }
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/auth/session",
+        })
+      ).statusCode,
+    ).toBe(429);
+
+    const session = runtime.auth.store.createSession("operator", 60);
+    const authenticated = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/session",
+      headers: { cookie: `hhf_session=${session.id}` },
+    });
+    expect(authenticated.statusCode).toBe(200);
+    expect(authenticated.json()).toMatchObject({
+      authenticated: true,
+      actor: { subject: "operator", role: "operator" },
+    });
     await app.close();
   });
 
@@ -457,7 +593,7 @@ describe("control API", () => {
     );
     vi.stubGlobal("fetch", fetchIdentity);
 
-    for (let index = 0; index < 20; index += 1) {
+    for (let index = 0; index < 120; index += 1) {
       const response = await app.inject({
         method: "GET",
         url: "/api/v1/system",
@@ -475,7 +611,7 @@ describe("control API", () => {
     expect(limited.json()).toMatchObject({
       error: { code: "rate_limit_exceeded" },
     });
-    expect(fetchIdentity).toHaveBeenCalledTimes(20);
+    expect(fetchIdentity).toHaveBeenCalledTimes(120);
     await app.close();
   });
 
