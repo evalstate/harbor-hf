@@ -1,6 +1,7 @@
 import type {
   ActionAdvanced,
   ActionDispatch,
+  BenchmarkProfileSpec,
   ActionIntent,
   ActionReceipt,
   Actor,
@@ -12,7 +13,12 @@ import type {
   CampaignSubmissionV1,
   DeploymentProfileSpec,
   HarborHFControlRecordV1,
+  HarnessProfileSpec,
   LaunchPolicySpec,
+  ModelProfileSpec,
+  PreparedJob,
+  PreparedJobSubmissionV1,
+  PreparedTrial,
   PublicationReceipt,
   ResolvedProfile,
   TerminalSelection,
@@ -25,6 +31,7 @@ import {
   validateCampaignAction,
   validateCampaignSubmission,
   validateControlRecord,
+  validatePreparedJobSubmission,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
 import {
@@ -33,7 +40,13 @@ import {
   verifyWorkerEvidence,
 } from "./evidence.js";
 import { EventBus, eventCursor } from "./events.js";
-import { type LoadedProfile, ProfileResolver, profileSpec } from "./profiles.js";
+import {
+  type LoadedProfile,
+  preparationRequired,
+  ProfileResolver,
+  profileSpec,
+  validatePreparedCampaignProfiles,
+} from "./profiles.js";
 import type { Projection } from "./projection.js";
 import { createJson, type ImmutableObjectStore } from "./store.js";
 
@@ -71,6 +84,13 @@ export interface SubmissionResult {
   adopted: boolean;
 }
 
+export interface PreparedJobSubmissionResult {
+  phase: PreparedJobSubmissionV1["phase"];
+  record_id: string;
+  digest: string;
+  adopted: boolean;
+}
+
 export class ControlNotReadyError extends Error {}
 export class ConfirmationRequiredError extends Error {}
 export class IdempotencyConflictError extends Error {}
@@ -80,12 +100,135 @@ function serviceActor(): Actor {
   return { subject: "harbor-hf-control", role: "service" };
 }
 
+function objectValue(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new PolicyError(`${label} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+function subsetMatches(expected: unknown, actual: unknown): boolean {
+  if (Array.isArray(expected))
+    return (
+      Array.isArray(actual) &&
+      expected.length === actual.length &&
+      expected.every((value, index) => subsetMatches(value, actual[index]))
+    );
+  if (expected && typeof expected === "object") {
+    if (!actual || typeof actual !== "object" || Array.isArray(actual)) return false;
+    return Object.entries(expected).every(([key, value]) =>
+      subsetMatches(value, (actual as Record<string, unknown>)[key]),
+    );
+  }
+  return Object.is(expected, actual);
+}
+
+function normalizeGitUrl(value: string): string {
+  return value.replace(/\.git$/, "");
+}
+
+function imageRepository(value: string): string {
+  const withoutDigest = value.split("@", 1)[0] as string;
+  const tail = withoutDigest.slice(withoutDigest.lastIndexOf("/") + 1);
+  return tail.includes(":")
+    ? withoutDigest.slice(0, withoutDigest.lastIndexOf(":"))
+    : withoutDigest;
+}
+
+function gitDatasetMatches(
+  task: Record<string, unknown>,
+  dataset: Record<string, unknown>,
+): boolean {
+  if (typeof dataset.repo !== "string" || typeof task.git_url !== "string")
+    return false;
+  const match = dataset.repo.match(/^(.*)@([0-9a-f]{40})$/);
+  if (!match) return false;
+  const [, repository, revision] = match;
+  if (
+    !repository ||
+    !revision ||
+    normalizeGitUrl(repository) !== normalizeGitUrl(task.git_url) ||
+    task.git_commit_id !== revision ||
+    typeof task.path !== "string"
+  )
+    return false;
+  if (typeof dataset.path !== "string") return true;
+  return task.path === dataset.path || task.path.startsWith(`${dataset.path}/`);
+}
+
+function preparedTaskSourceMatches(
+  task: Record<string, unknown>,
+  harborJob: unknown,
+): boolean {
+  if (task.type === "local") return false;
+  const job = objectValue(harborJob, "benchmark Harbor job");
+  const datasets = Array.isArray(job.datasets) ? job.datasets : [];
+  const tasks = Array.isArray(job.tasks) ? job.tasks : [];
+  if (
+    task.type === "git" &&
+    datasets.some(
+      (value) =>
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        gitDatasetMatches(task, value as Record<string, unknown>),
+    )
+  )
+    return true;
+  if (
+    task.type === "package" &&
+    datasets.some(
+      (value) =>
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        (value as Record<string, unknown>).name === task.source &&
+        typeof (value as Record<string, unknown>).ref === "string" &&
+        /^sha256:[a-f0-9]{64}$/.test((value as Record<string, unknown>).ref as string),
+    )
+  )
+    return true;
+  return tasks.some((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const expected = value as Record<string, unknown>;
+    if (task.type === "git")
+      return (
+        expected.git_url === task.git_url &&
+        expected.git_commit_id === task.git_commit_id &&
+        expected.path === task.path
+      );
+    return (
+      task.type === "package" &&
+      expected.name === task.name &&
+      expected.ref === task.digest
+    );
+  });
+}
+
+function validatePreparedEnvironment(value: unknown, taskId: string): void {
+  const environment = objectValue(value, "prepared Harbor environment lock");
+  const kwargs = objectValue(environment.kwargs, "prepared Harbor environment kwargs");
+  if (
+    environment.import_path !==
+      "harbor_hf_agents.support.control_sandbox_environment:ControlSandboxEnvironment" ||
+    environment.delete !== true ||
+    kwargs.control_task_id !== taskId ||
+    Object.keys(kwargs).length !== 1 ||
+    (Array.isArray(environment.mounts) && environment.mounts.length > 0) ||
+    (environment.env &&
+      objectValue(environment.env, "prepared Harbor environment variables") &&
+      Object.keys(environment.env as Record<string, unknown>).length > 0)
+  )
+    throw new PolicyError("prepared Harbor environment does not match control policy");
+}
+
 export class ControlService {
   readonly resolver: ProfileResolver;
   private appendQueue: Promise<void> = Promise.resolve();
   private budgetQueue: Promise<void> = Promise.resolve();
   private retryAdmissionQueue: Promise<void> = Promise.resolve();
   private submitQueue: Promise<void> = Promise.resolve();
+  private preparationQueue: Promise<void> = Promise.resolve();
+  private sandboxAdmissionQueue: Promise<void> = Promise.resolve();
 
   constructor(
     readonly namespace: string,
@@ -193,6 +336,347 @@ export class ControlService {
     return operation;
   }
 
+  private async readRecord<T extends HarborHFControlRecordV1>(
+    identity: Parameters<typeof controlRecordPath>[0],
+  ): Promise<T | null> {
+    const path = controlRecordPath(identity);
+    try {
+      return validateControlRecord<T>(
+        JSON.parse(new TextDecoder().decode(await this.store.read(path))),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  async preparedTrial(
+    campaignId: string,
+    taskId: string,
+  ): Promise<PreparedTrial | null> {
+    return this.readRecord<PreparedTrial>({
+      kind: "prepared.trial",
+      record_id: deterministicId("prepared-trial", campaignId, taskId),
+      campaign_id: campaignId,
+      task_id: taskId,
+    });
+  }
+
+  async preparedJob(campaignId: string): Promise<PreparedJob | null> {
+    return this.readRecord<PreparedJob>({
+      kind: "prepared.job",
+      record_id: deterministicId("prepared-job", campaignId),
+      campaign_id: campaignId,
+    });
+  }
+
+  async submitPreparedJob(
+    campaignId: string,
+    launchActionId: string,
+    raw: unknown,
+  ): Promise<PreparedJobSubmissionResult> {
+    const operation = this.preparationQueue.then(() =>
+      this.submitPreparedJobSerialized(campaignId, launchActionId, raw),
+    );
+    this.preparationQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async assertPreparationAction(
+    campaignId: string,
+    launchActionId: string,
+  ): Promise<void> {
+    const action = await this.projection.action(launchActionId);
+    if (
+      !action ||
+      action.campaign_id !== campaignId ||
+      action.action_kind !== "job.launch"
+    )
+      throw new PolicyError("prepared job submission has no matching launch action");
+    const intent = JSON.parse(action.intent_body) as ActionIntent;
+    if (intent.payload.worker_role !== "preparation")
+      throw new PolicyError("prepared job submission requires a preparation worker");
+  }
+
+  private async submitPreparedJobSerialized(
+    campaignId: string,
+    launchActionId: string,
+    raw: unknown,
+  ): Promise<PreparedJobSubmissionResult> {
+    this.assertReady();
+    await this.assertPreparationAction(campaignId, launchActionId);
+    const input = validatePreparedJobSubmission<PreparedJobSubmissionV1>(raw);
+    const lock = await this.projection.campaignLock(campaignId);
+    if (!lock) throw new PolicyError("prepared job campaign lock does not exist");
+    const lockDigest = sha256(canonicalJson(lock));
+    const preparationId = deterministicId("preparation", campaignId);
+    if (input.phase === "trial") {
+      const expected = lock.tasks.find((task) => task.task_id === input.task_id);
+      if (!expected) throw new PolicyError("prepared trial is outside the campaign");
+      if (
+        expected.input_digest !== input.input_digest ||
+        expected.source_task_id !== input.source_task_id ||
+        expected.trial_index !== input.trial_index
+      )
+        throw new PolicyError("prepared trial does not match the campaign task lock");
+      const trialLockDigest = sha256(canonicalJson(input.trial_lock));
+      const trialLock = objectValue(input.trial_lock, "prepared Harbor trial lock");
+      const harborTask = objectValue(trialLock.task, "prepared Harbor task lock");
+      if (harborTask.digest !== input.input_digest)
+        throw new PolicyError(
+          "prepared Harbor task digest does not match the campaign",
+        );
+      const benchmark = this.resolvedProfile<BenchmarkProfileSpec>(lock, "benchmark");
+      if (
+        !preparedTaskSourceMatches(harborTask, benchmark.harbor_job) ||
+        (typeof harborTask.name === "string" &&
+          harborTask.name.split("/").at(-1) !== input.source_task_id)
+      )
+        throw new PolicyError(
+          "prepared Harbor task source does not match the benchmark profile",
+        );
+      if (imageRepository(input.declared_image) !== imageRepository(input.image))
+        throw new PolicyError("prepared task image repository does not match");
+      const model = this.resolvedProfile<ModelProfileSpec>(lock, "model");
+      const harness = this.resolvedProfile<HarnessProfileSpec>(lock, "harness");
+      const agent = objectValue(trialLock.agent, "prepared Harbor agent lock");
+      if (
+        agent.model_name !== model.harbor_model_name ||
+        !subsetMatches(harness.harbor_agent, agent)
+      )
+        throw new PolicyError("prepared Harbor agent does not match selected profiles");
+      validatePreparedEnvironment(trialLock.environment, input.task_id);
+      const existing = await this.preparedTrial(campaignId, input.task_id);
+      const createdAt = existing?.created_at ?? this.clock.now().toISOString();
+      const record: PreparedTrial = {
+        schema_version: "v1",
+        kind: "prepared.trial",
+        record_id: deterministicId("prepared-trial", campaignId, input.task_id),
+        created_at: createdAt,
+        actor: serviceActor(),
+        campaign_id: campaignId,
+        preparation_id: preparationId,
+        campaign_lock_digest: lockDigest,
+        task_id: input.task_id,
+        source_task_id: input.source_task_id,
+        trial_index: input.trial_index,
+        input_digest: input.input_digest,
+        trial_lock: input.trial_lock,
+        trial_lock_digest: trialLockDigest,
+        declared_image: input.declared_image,
+        image: input.image,
+        cpus: input.cpus,
+        memory_mb: input.memory_mb,
+        storage_mb: input.storage_mb,
+        gpus: input.gpus,
+        agent_timeout_seconds: input.agent_timeout_seconds,
+        verifier_timeout_seconds: input.verifier_timeout_seconds,
+        environment_build_timeout_seconds: input.environment_build_timeout_seconds,
+        agent_setup_timeout_seconds: input.agent_setup_timeout_seconds,
+      };
+      if (existing && canonicalJson(existing) !== canonicalJson(record))
+        throw new IdempotencyConflictError(
+          `prepared trial conflicts with durable state: ${input.task_id}`,
+        );
+      const result = await this.append(record);
+      return {
+        phase: "trial",
+        record_id: record.record_id,
+        digest: result.digest,
+        adopted: !result.created,
+      };
+    }
+
+    const existing = await this.preparedJob(campaignId);
+    const preparedTrials: PreparedTrial[] = [];
+    for (const task of lock.tasks) {
+      const trial = await this.preparedTrial(campaignId, task.task_id);
+      if (!trial) throw new PolicyError(`prepared trial is missing: ${task.task_id}`);
+      if (
+        trial.preparation_id !== preparationId ||
+        trial.campaign_lock_digest !== lockDigest
+      )
+        throw new PolicyError(`prepared trial binding is invalid: ${task.task_id}`);
+      preparedTrials.push(trial);
+    }
+    const header = objectValue(input.job_lock_header, "prepared Harbor job header");
+    if ("trials" in header)
+      throw new PolicyError("prepared Harbor job header must not contain trials");
+    const harborLock = {
+      ...header,
+      trials: preparedTrials.map((trial) => trial.trial_lock),
+    };
+    const harborLockDigest = sha256(canonicalJson(harborLock));
+    const deployment = this.resolvedProfile<DeploymentProfileSpec>(lock, "deployment");
+    if (
+      deployment.route !== "hf_job" ||
+      deployment.harbor_version !== input.harbor_version
+    )
+      throw new PolicyError("prepared Harbor version does not match the deployment");
+    const harborInfo = objectValue(header.harbor, "prepared Harbor version lock");
+    if (harborInfo.version !== input.harbor_version)
+      throw new PolicyError("prepared Harbor lock reports a different version");
+    const benchmark = this.resolvedProfile<BenchmarkProfileSpec>(lock, "benchmark");
+    if (!subsetMatches(benchmark.harbor_job, input.job_config))
+      throw new PolicyError("prepared Harbor job does not match the benchmark profile");
+    const harness = this.resolvedProfile<HarnessProfileSpec>(lock, "harness");
+    const jobConfig = objectValue(input.job_config, "prepared Harbor job config");
+    const agents = jobConfig.agents;
+    if (
+      !Array.isArray(agents) ||
+      agents.length !== 1 ||
+      !subsetMatches(harness.harbor_agent, agents[0])
+    )
+      throw new PolicyError("prepared Harbor agent does not match the harness profile");
+    const retry = objectValue(jobConfig.retry, "prepared Harbor retry policy");
+    if (retry.max_retries !== 0)
+      throw new PolicyError("prepared Harbor job must disable internal retries");
+    const createdAt = existing?.created_at ?? this.clock.now().toISOString();
+    const refs = preparedTrials.map((trial) => ({
+      task_id: trial.task_id,
+      record_id: trial.record_id,
+      record_digest: sha256(canonicalJson(trial)),
+    }));
+    const record: PreparedJob = {
+      schema_version: "v1",
+      kind: "prepared.job",
+      record_id: deterministicId("prepared-job", campaignId),
+      created_at: createdAt,
+      actor: serviceActor(),
+      campaign_id: campaignId,
+      preparation_id: preparationId,
+      campaign_lock_digest: lockDigest,
+      harbor_version: input.harbor_version,
+      job_config: input.job_config,
+      job_lock_header: input.job_lock_header,
+      trials: [refs[0] as (typeof refs)[number], ...refs.slice(1)],
+      harbor_lock_digest: harborLockDigest,
+    };
+    if (existing && canonicalJson(existing) !== canonicalJson(record))
+      throw new IdempotencyConflictError(
+        "prepared job conflicts with durable campaign state",
+      );
+    const result = await this.append(record);
+    return {
+      phase: "finalize",
+      record_id: record.record_id,
+      digest: result.digest,
+      adopted: !result.created,
+    };
+  }
+
+  async admitSandboxCreate(
+    intent: ActionIntent,
+    maximumSandboxes: number,
+  ): Promise<{ dispatch_created: boolean }> {
+    const operation = this.sandboxAdmissionQueue.then(() =>
+      this.admitSandboxCreateSerialized(intent, maximumSandboxes),
+    );
+    this.sandboxAdmissionQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async admitSandboxCreateSerialized(
+    intent: ActionIntent,
+    maximumSandboxes: number,
+  ): Promise<{ dispatch_created: boolean }> {
+    if (intent.action_kind !== "sandbox.create" || maximumSandboxes < 1)
+      throw new PolicyError("Sandbox create admission is invalid");
+    const existing = await this.projection.action(intent.action_id);
+    if (existing?.observed_state === "budget-rejected")
+      throw new PolicyError("Sandbox reservation exceeds the campaign ceiling");
+    const taskId = intent.payload.task_id;
+    if (typeof taskId !== "string")
+      throw new PolicyError("Sandbox create admission has no task ID");
+    const creates = (await this.projection.campaignActions(intent.campaign_id)).filter(
+      (row) => {
+        if (
+          row.action_kind !== "sandbox.create" ||
+          row.outcome === "failed" ||
+          row.action_id === intent.action_id
+        )
+          return false;
+        const recorded = JSON.parse(row.intent_body) as ActionIntent;
+        return recorded.payload.task_id === taskId;
+      },
+    );
+    if (!existing && creates.length >= maximumSandboxes)
+      throw new PolicyError("Sandbox count exceeds immutable policy");
+    await this.writeAction(intent);
+    const policy = intent.payload.sandbox;
+    if (!policy) throw new PolicyError("Sandbox create has no immutable policy");
+    if (
+      !(await this.reserveSandbox(
+        intent.campaign_id,
+        intent.action_id,
+        intent.created_at,
+        policy.reservation_microusd,
+      ))
+    ) {
+      const receipt = await this.receipt(intent, {
+        outcome: "failed",
+        observed_state: "budget-rejected",
+        error_code: "campaign_ceiling_exceeded",
+      });
+      await this.markAdvanced(intent, receipt);
+      throw new PolicyError("Sandbox reservation exceeds the campaign ceiling");
+    }
+    const dispatch = await this.dispatchAction(
+      intent,
+      new Date(this.clock.now().getTime() + 30_000).toISOString(),
+    );
+    return { dispatch_created: dispatch.created };
+  }
+
+  async admitSandboxCommand(
+    intent: ActionIntent,
+    maximumCommands: number,
+  ): Promise<void> {
+    const operation = this.sandboxAdmissionQueue.then(() =>
+      this.admitSandboxCommandSerialized(intent, maximumCommands),
+    );
+    this.sandboxAdmissionQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async admitSandboxCommandSerialized(
+    intent: ActionIntent,
+    maximumCommands: number,
+  ): Promise<void> {
+    const sandboxId = intent.payload.sandbox_create_action_id;
+    if (
+      intent.action_kind !== "sandbox.exec" ||
+      maximumCommands < 1 ||
+      typeof sandboxId !== "string"
+    )
+      throw new PolicyError("Sandbox command admission is invalid");
+    const existing = await this.projection.action(intent.action_id);
+    const commands = (await this.projection.campaignActions(intent.campaign_id)).filter(
+      (row) => {
+        if (
+          row.action_kind !== "sandbox.exec" ||
+          row.outcome === "failed" ||
+          row.action_id === intent.action_id
+        )
+          return false;
+        const recorded = JSON.parse(row.intent_body) as ActionIntent;
+        return recorded.payload.sandbox_create_action_id === sandboxId;
+      },
+    );
+    if (!existing && commands.length >= maximumCommands)
+      throw new PolicyError("Sandbox command count exceeds immutable policy");
+    await this.writeAction(intent);
+  }
+
   async submit(
     raw: unknown,
     idempotencyKey: string,
@@ -245,8 +729,28 @@ export class ControlService {
     if (deployment.route !== "hf_job")
       throw new PolicyError("imported deployment profiles cannot launch campaigns");
     const launchPolicy = profileSpec<LaunchPolicySpec>(profiles, "launch_policy");
-    if (launchPolicy.reservation_microusd > input.ceiling_microusd)
+    const tasks = existingLock?.tasks ?? this.resolver.tasks(input.benchmark);
+    const executionJobs = deployment.worker_max_tasks_per_job
+      ? Math.ceil(tasks.length / deployment.worker_max_tasks_per_job)
+      : 1;
+    const initialReservation =
+      launchPolicy.reservation_microusd * executionJobs +
+      (preparationRequired(deployment)
+        ? (launchPolicy.preparation_reservation_microusd ?? 0) *
+          (launchPolicy.max_preparation_attempts ?? 1)
+        : 0);
+    if (initialReservation > input.ceiling_microusd)
       throw new PolicyError("launch reservation exceeds the campaign ceiling");
+    const benchmark = profileSpec<BenchmarkProfileSpec>(profiles, "benchmark");
+    const model = profileSpec<ModelProfileSpec>(profiles, "model");
+    const harness = profileSpec<HarnessProfileSpec>(profiles, "harness");
+    try {
+      validatePreparedCampaignProfiles(deployment, benchmark, model, harness, tasks);
+    } catch (error) {
+      throw new PolicyError(
+        error instanceof Error ? error.message : "prepared campaign profile is invalid",
+      );
+    }
     const timestamp =
       existingLock?.created_at ??
       existingRequest?.created_at ??
@@ -279,7 +783,7 @@ export class ControlService {
         actor: recordActor,
         campaign_id: campaignId,
         profiles: profiles as CampaignLock["profiles"],
-        tasks: this.resolver.tasks(input.benchmark) as CampaignLock["tasks"],
+        tasks: tasks as CampaignLock["tasks"],
         ceiling_microusd: input.ceiling_microusd,
         source_revision: this.resolver.sourceRevision(),
       } satisfies CampaignLock);
@@ -500,7 +1004,18 @@ export class ControlService {
       receipt.campaign_id !== intent.campaign_id
     )
       throw new PolicyError("advanced action receipt does not match its intent");
-    if (intent.action_kind === "sandbox.close") {
+    if (intent.action_kind === "sandbox.create" && !receipt.resource_id) {
+      const policy = intent.payload.sandbox;
+      if (!policy)
+        throw new PolicyError("failed Sandbox create is missing budget identity");
+      await this.finalizeSandboxBudget(
+        intent.campaign_id,
+        intent.action_id,
+        receipt.created_at,
+        policy.reservation_microusd,
+        receipt.cost_microusd ?? 0,
+      );
+    } else if (intent.action_kind === "sandbox.close") {
       const policy = intent.payload.sandbox;
       const createActionId = intent.payload.sandbox_create_action_id;
       if (!policy || typeof createActionId !== "string")
@@ -1048,8 +1563,20 @@ export class ControlService {
         completedAt: priorAttempt.created_at,
         amountMicrousd: policy.reservation_microusd,
       };
+      const prepared = preparationRequired(deployment)
+        ? await this.preparedJob(campaignId)
+        : null;
+      if (preparationRequired(deployment) && !prepared)
+        throw new PolicyError("campaign preparation is incomplete");
+      const sandboxAuthorized = Boolean(
+        deployment.sandbox || deployment.sandbox_template,
+      );
+      const sandboxTimeout =
+        deployment.sandbox_template?.max_timeout_seconds ??
+        deployment.sandbox?.timeout_seconds;
       kind = "job.launch";
       payload = {
+        worker_role: "execution",
         task_ids: [input.task_id],
         job_image: deployment.job_image,
         job_command: deployment.job_command,
@@ -1059,6 +1586,9 @@ export class ControlService {
         max_infrastructure_attempts: policy.max_infrastructure_attempts,
         reservation_microusd: policy.reservation_microusd,
         trusted_worker: deployment.trusted_worker,
+        ...(deployment.worker_revision
+          ? { worker_revision: deployment.worker_revision }
+          : {}),
         inference_token: deployment.inference_token ?? "forbidden",
         ...(deployment.inference_token === "required"
           ? {
@@ -1068,6 +1598,11 @@ export class ControlService {
               inference_max_output_tokens: deployment.inference_max_output_tokens,
             }
           : {}),
+        campaign_lock_digest: sha256(canonicalJson(lock)),
+        ...(prepared ? { prepared_job_digest: sha256(canonicalJson(prepared)) } : {}),
+        ...(deployment.sandbox ? { sandbox: deployment.sandbox } : {}),
+        ...(sandboxAuthorized ? { sandbox_authorized: true } : {}),
+        ...(sandboxTimeout ? { sandbox_timeout_seconds: sandboxTimeout } : {}),
         reason: input.reason ?? null,
         prior_attempt_id: priorAttempt.attempt_id,
       };
