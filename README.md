@@ -14,15 +14,28 @@ The CLI requires Python 3.12 or newer. Install it with [uv](https://docs.astral.
 uv tool install harbor-hf
 ```
 
-Log in to Hugging Face, then point the CLI at your control Space:
+Create a dedicated [fine-grained Hugging Face User Access Token](https://huggingface.co/docs/hub/security-tokens)
+for the CLI, have its identity approved as an operator or reader by the control
+service, and point the CLI at your control Space. Harbor-HF uses the token only
+to verify its Hugging Face identity through `whoami-v2`; it does not require
+repository, inference, Endpoint, Job, billing, or write permissions. Leave
+those optional permissions disabled unless the token has a separately approved
+purpose.
 
 ```bash
-hf auth login
 export HARBOR_HF_CONTROL_URL=https://<control-space>.hf.space
+read -rsp 'Control bearer token: ' HARBOR_HF_CONTROL_BEARER_TOKEN
+export HARBOR_HF_CONTROL_BEARER_TOKEN
+printf '\n'
 harbor-hf status
 ```
 
-The CLI uses the active Hugging Face login only to authenticate HTTPS requests to the control API. It does not access the Bucket directly.
+The CLI deliberately does not read the active `hf auth login` credential or
+`HF_TOKEN`. Do not substitute a broad `read` or `write` token, print the token,
+or store it in the repository. The CLI sends the explicit bearer token only to
+the configured HTTPS control API and does not access the Bucket directly. A
+valid token does not grant control access unless its Hugging Face identity is
+also present in the service access list.
 
 ## Launch a campaign
 
