@@ -6,6 +6,9 @@
 
 A hosted installation uses two persistent resources: one publicly reachable, application-protected control Space and one private Bucket. The Space serves the API and web console while its single control process reconciles immutable records stored in the Bucket.
 
+Installer usage: `npm run install:plan -- --help`,
+`npm run install:apply -- --help`, and `npm run install:verify -- --help`.
+
 ## Install the CLI
 
 The CLI requires Python 3.12 or newer. Install it with [uv](https://docs.astral.sh/uv/):

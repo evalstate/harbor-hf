@@ -4,6 +4,7 @@
     "includes": [
       "**",
       "!!.git",
+      "!!.fast-agent",
       "!!.venv",
       "!!assets",
       "!!mutants",

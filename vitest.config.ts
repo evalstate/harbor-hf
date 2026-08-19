@@ -13,7 +13,7 @@ export default defineConfig({
       },
     },
     exclude: ["**/node_modules/**", "**/dist/**", "**/e2e/**"],
-    include: ["{apps,packages}/**/*.{test,spec}.ts", "apps/**/*.test.tsx"],
+    include: ["{apps,packages,scripts}/**/*.{test,spec}.ts", "apps/**/*.test.tsx"],
     testTimeout: 15_000,
   },
 });
