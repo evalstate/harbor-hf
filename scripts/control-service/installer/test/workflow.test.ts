@@ -144,9 +144,10 @@ class FakeHf implements HfAdapter {
   failSetVariablesAfterUpload = false;
   failUpload = false;
   failObserve = false;
+  versionValue = "1.23.0";
 
   async version(): Promise<string> {
-    return "1.23.0";
+    return this.versionValue;
   }
 
   async whoamiUsername(): Promise<string> {
@@ -709,5 +710,18 @@ describe("installer workflows", () => {
         setupResult.dependencies,
       ),
     ).rejects.toThrow("bundle");
+  });
+
+  it("requires apply to use the exact compatible CLI version from planning", async () => {
+    const setupResult = await setup();
+    setupResult.hf.versionValue = "1.25.1";
+    await expect(
+      applyInstall(
+        {
+          planPath: setupResult.planPath,
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("hf CLI version changed");
   });
 });

@@ -73,6 +73,12 @@ export interface InstallPlan {
 const ID_PART = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const HF_CLI_VERSION = /^1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+
+export function isSupportedHfCliVersion(value: string): boolean {
+  const match = value.match(HF_CLI_VERSION);
+  return match !== null && BigInt(match[1] as string) >= 23n;
+}
 
 export function parseTargetIds(
   spaceInput: string,
@@ -466,7 +472,7 @@ export function validatePlan(value: unknown): InstallPlan {
     throw new Error("plan paths must be absolute and normalized");
   }
   const hfCliVersion = stringField(value, "hf_cli_version");
-  if (!/^1\.23\.\d+$/.test(hfCliVersion)) {
+  if (!isSupportedHfCliVersion(hfCliVersion)) {
     throw new Error("plan hf CLI version is invalid");
   }
   const remoteState = parseRemoteState(observed);

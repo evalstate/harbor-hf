@@ -1,5 +1,5 @@
 import type { BucketState, RemoteState, SpaceState } from "./model.js";
-import { validateOrigin } from "./model.js";
+import { isSupportedHfCliVersion, validateOrigin } from "./model.js";
 import type { ProcessAdapter } from "./process.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -257,8 +257,8 @@ export class HfCli implements HfAdapter {
   async version(): Promise<string> {
     const value = unwrapRecord(await this.json(["version"]));
     const version = stringAt(value, [["version"]]);
-    if (!version || !/^1\.23\.\d+$/.test(version)) {
-      throw new Error("hf CLI 1.23.x is required");
+    if (!version || !isSupportedHfCliVersion(version)) {
+      throw new Error("hf CLI >=1.23.0 and <2.0.0 is required");
     }
     return version;
   }

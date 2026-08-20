@@ -26,14 +26,19 @@ class QueueProcess implements ProcessAdapter {
 }
 
 describe("Hugging Face CLI adapter", () => {
-  it("requires the pinned CLI line and structured JSON", async () => {
+  it("accepts the compatible CLI range with structured JSON", async () => {
     const processAdapter = new QueueProcess([{ version: "1.23.7" }]);
     const hf = new HfCli(processAdapter);
     await expect(hf.version()).resolves.toBe("1.23.7");
     expect(processAdapter.requests[0]?.args.slice(-2)).toEqual(["--format", "json"]);
     await expect(
-      new HfCli(new QueueProcess([{ version: "1.24.0" }])).version(),
-    ).rejects.toThrow("1.23.x");
+      new HfCli(new QueueProcess([{ version: "1.25.1" }])).version(),
+    ).resolves.toBe("1.25.1");
+    for (const version of ["1.22.9", "2.0.0", "1.25.1rc1", "invalid"]) {
+      await expect(
+        new HfCli(new QueueProcess([{ version }])).version(),
+      ).rejects.toThrow(">=1.23.0");
+    }
   });
 
   it("uses the CLI raw-token exception without adding the token to argv", async () => {

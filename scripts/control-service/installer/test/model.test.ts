@@ -14,6 +14,7 @@ import {
   buildBundleManifest,
   expectedVariables,
   type InstallPlan,
+  isSupportedHfCliVersion,
   manifestDigest,
   parseTargetIds,
   readPrivatePlan,
@@ -80,6 +81,15 @@ function plan(directory: string): InstallPlan {
 }
 
 describe("installer model", () => {
+  it("accepts stable compatible HF CLI versions only", () => {
+    for (const version of ["1.23.0", "1.25.1", "1.999.0"]) {
+      expect(isSupportedHfCliVersion(version)).toBe(true);
+    }
+    for (const version of ["1.22.9", "2.0.0", "1.25.1rc1", "1.025.1", "invalid"]) {
+      expect(isSupportedHfCliVersion(version)).toBe(false);
+    }
+  });
+
   it("validates explicit IDs and defaults the Bucket", () => {
     expect(parseTargetIds("example/control")).toEqual({
       namespace: "example",
