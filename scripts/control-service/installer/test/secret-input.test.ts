@@ -39,4 +39,18 @@ describe("installer secret input", () => {
     expect(displayed).not.toContain("secret-placeholder");
     expect(input.isRaw).toBe(false);
   });
+
+  it("identifies the inference credential as a token", async () => {
+    const input = new TestTtyInput();
+    const output = new TestTtyOutput();
+    const pending = new TtyInstallerSecretInput(input, output).read(
+      "HF_INFERENCE_TOKEN",
+    );
+    input.end("inference-placeholder\n");
+    await expect(pending).resolves.toBe("inference-placeholder");
+    const displayed = output.read()?.toString("utf8") ?? "";
+    expect(displayed).toContain("Inference-only credential/token:");
+    expect(displayed).not.toContain("inference-placeholder");
+    expect(input.isRaw).toBe(false);
+  });
 });

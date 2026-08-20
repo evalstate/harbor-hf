@@ -42,7 +42,9 @@ export class TtyInstallerSecretInput implements InstallerSecretInput {
       historySize: 0,
     });
     const label =
-      name === "HF_TOKEN" ? "Control service credential" : "Inference-only credential";
+      name === "HF_TOKEN"
+        ? "Control service credential"
+        : "Inference-only credential/token";
     try {
       const pending = readline.question(`${label}: `);
       mutedOutput.muted = true;
