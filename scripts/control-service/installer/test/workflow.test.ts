@@ -750,12 +750,12 @@ describe("installer workflows", () => {
     );
   });
 
-  it("disables and pauses legacy canary mode without control API health", async () => {
+  it("disables and pauses enabled mode without control API health", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     await complete(setupResult, bootstrapResult.receipt);
     if (!setupResult.hf.state.space) throw new Error("test Space is missing");
-    setupResult.hf.state.space.variables.HARBOR_HF_WRITE_MODE = "canary";
+    setupResult.hf.state.space.variables.HARBOR_HF_WRITE_MODE = "enabled";
     setupResult.hf.calls.length = 0;
     setupResult.http.requests.length = 0;
     setupResult.dependencies.environment = {};

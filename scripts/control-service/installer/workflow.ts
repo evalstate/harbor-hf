@@ -742,7 +742,7 @@ function concreteVariables(plan: InstallPlan, origin: string): Record<string, st
   return concreteVariableRecord(plan.expected_variables, origin);
 }
 
-type WriteMode = "disabled" | "canary" | "enabled";
+type WriteMode = "disabled" | "enabled";
 
 function variablesForWriteMode(
   plan: InstallPlan,
@@ -1028,7 +1028,7 @@ export interface ActivationResult {
 
 function writeModeOf(space: SpaceState): WriteMode {
   const writeMode = space.variables.HARBOR_HF_WRITE_MODE;
-  if (writeMode !== "disabled" && writeMode !== "canary" && writeMode !== "enabled") {
+  if (writeMode !== "disabled" && writeMode !== "enabled") {
     throw new Error("managed Space write mode is invalid");
   }
   return writeMode;
@@ -1116,11 +1116,6 @@ export async function activateInstall(
   );
   if (!observed.space) throw new Error("activation Space is missing");
   const currentMode = writeModeOf(observed.space);
-  if (currentMode === "canary") {
-    throw new InstallerInputError(
-      "legacy canary mode must be disabled before activation",
-    );
-  }
   const currentSpace = assertInstalledActivationState(plan, observed, currentMode);
   const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-activation-"));
   try {
