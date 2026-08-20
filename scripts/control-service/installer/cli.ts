@@ -133,6 +133,7 @@ export function formatApplyOutput(
   return [
     "Installation verified.",
     `Space: ${spaceId}`,
+    `URL: ${verification.space_url}`,
     `Anonymous health: ${verification.anonymous_live}`,
     `Authenticated system: ${verification.authenticated_system}`,
     `Source upload: ${verification.source_upload_revision}`,

@@ -811,6 +811,7 @@ async function assertControlCredentialCanReadBucket(
 
 export interface VerificationResult {
   production_ready: false;
+  space_url: string;
   anonymous_live: "passed";
   anonymous_ready: "passed";
   authenticated_system: "passed" | "skipped";
@@ -948,6 +949,7 @@ async function verifyPlan(
   }
   return {
     production_ready: false,
+    space_url: origin,
     anonymous_live: "passed",
     anonymous_ready: "passed",
     authenticated_system: authenticatedSystem,

@@ -512,6 +512,7 @@ describe("installer workflows", () => {
       status: "installed",
       verification: {
         production_ready: false,
+        space_url: ORIGIN,
         anonymous_live: "passed",
         anonymous_ready: "passed",
         authenticated_system: "skipped",

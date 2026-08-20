@@ -121,6 +121,7 @@ describe("installer CLI contract", () => {
       status: "installed",
       verification: {
         production_ready: false,
+        space_url: "https://placeholder-control.hf.space",
         anonymous_live: "passed",
         anonymous_ready: "passed",
         authenticated_system: "skipped",
@@ -128,6 +129,7 @@ describe("installer CLI contract", () => {
       },
     });
     expect(output).toContain("Installation verified.");
+    expect(output).toContain("URL: https://placeholder-control.hf.space");
     expect(output).toContain("Write mode: disabled");
     expect(output).toContain("Production ready: no");
     expect(output).toContain("before activation");
