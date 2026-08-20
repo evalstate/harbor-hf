@@ -479,6 +479,7 @@ function assertPlanVariableTransitionSafe(plan: InstallPlan, state: RemoteState)
 async function pauseManagedTarget(
   plan: InstallPlan,
   dependencies: InstallerDependencies,
+  options: { pauseNoAppFile?: boolean } = {},
 ): Promise<void> {
   const observed = await dependencies.hf.observe(
     plan.targets.namespace,
@@ -517,6 +518,13 @@ async function pauseManagedTarget(
       (!observed.bucket ||
         observed.bucket.id !== plan.targets.bucket_id ||
         !observed.bucket.private))
+  ) {
+    return;
+  }
+  if (
+    !options.pauseNoAppFile &&
+    phase === "credentials_required" &&
+    space.runtimeStage === "NO_APP_FILE"
   ) {
     return;
   }
@@ -1097,8 +1105,16 @@ async function bootstrapFreshInstall(
     remoteMutationStarted = true;
     await dependencies.hf.setVariables(plan.targets.space_id, variablesFile);
     await dependencies.hf.setProtected(plan.targets.space_id);
-    await dependencies.hf.pause(plan.targets.space_id);
     current = await observePlan(plan, dependencies);
+    assertBootstrapPhase(plan, current, "credentials_required", {
+      requireBucket: false,
+      requirePaused: false,
+      requireAllSecrets: false,
+    });
+    if (current.space?.runtimeStage !== "NO_APP_FILE") {
+      await dependencies.hf.pause(plan.targets.space_id);
+      current = await observePlan(plan, dependencies);
+    }
     assertBootstrapPhase(plan, current, "credentials_required", {
       requireBucket: false,
       requirePaused: true,
@@ -1186,6 +1202,7 @@ async function completeInstall(
   const environment = dependencies.environment ?? process.env;
   const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-install-"));
   let remoteMutationStarted = false;
+  let sourceUploadAttempted = false;
   try {
     const stagedBundle = resolve(tempDirectory, "bundle");
     await cp(plan.bundle.directory, stagedBundle, {
@@ -1200,11 +1217,23 @@ async function completeInstall(
       ? assertFreshCompletionEntrySafe(plan, current)
       : assertCompletionState(plan, current, false, variableTransition);
     remoteMutationStarted = true;
-    await dependencies.hf.pause(plan.targets.space_id);
+    if (
+      !(
+        freshContinuation &&
+        phase === "credentials_required" &&
+        current.space?.runtimeStage === "NO_APP_FILE"
+      )
+    ) {
+      await dependencies.hf.pause(plan.targets.space_id);
+    }
     await dependencies.hf.setProtected(plan.targets.space_id);
     current = await observePlan(plan, dependencies);
     phase = assertCompletionState(plan, current, freshContinuation, variableTransition);
-    if (current.space?.runtimeStage !== "PAUSED") {
+    const releaseUploadIsSafelyStopped =
+      freshContinuation && phase === "credentials_required"
+        ? isCredentialBootstrapStopped(current.space?.runtimeStage ?? null)
+        : current.space?.runtimeStage === "PAUSED";
+    if (!releaseUploadIsSafelyStopped) {
       throw new Error("Space is not PAUSED before release upload");
     }
     if (!current.bucket) {
@@ -1213,6 +1242,7 @@ async function completeInstall(
       );
     }
 
+    sourceUploadAttempted = true;
     const uploadSha = await dependencies.hf.uploadMirror(
       plan.targets.space_id,
       stagedBundle,
@@ -1372,7 +1402,9 @@ async function completeInstall(
         }
       }
       try {
-        await pauseManagedTarget(plan, dependencies);
+        await pauseManagedTarget(plan, dependencies, {
+          pauseNoAppFile: sourceUploadAttempted,
+        });
       } catch {
         // Best effort only. Never replace the fixed redacted failure.
       }

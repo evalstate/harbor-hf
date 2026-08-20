@@ -148,6 +148,7 @@ class FakeHf implements HfAdapter {
   failSetVariablesAfterUpload = false;
   failUpload = false;
   mutateBindingOnUploadFailure = false;
+  preserveNoAppFileOnVariables = false;
   failObserve = false;
   versionValue = "1.23.0";
 
@@ -246,7 +247,12 @@ class FakeHf implements HfAdapter {
       throw new Error("partial variable write");
     }
     this.state.space.variables = variables;
-    this.state.space.runtimeStage = "BUILDING";
+    if (
+      !this.preserveNoAppFileOnVariables ||
+      this.state.space.runtimeStage !== "NO_APP_FILE"
+    ) {
+      this.state.space.runtimeStage = "BUILDING";
+    }
   }
 
   async setSecrets(_spaceId: string, secretsFile: string): Promise<void> {
@@ -553,6 +559,7 @@ describe("installer workflows", () => {
       variables,
       secretNames: [],
     };
+    setupResult.hf.preserveNoAppFileOnVariables = true;
 
     await expect(
       applyInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
@@ -562,6 +569,7 @@ describe("installer workflows", () => {
       secrets_configured: false,
     });
     expect(setupResult.hf.calls).toContain("createBucket");
+    expect(setupResult.hf.calls).not.toContain("pause");
     expect(setupResult.hf.calls).not.toContain("uploadMirror");
     expect(setupResult.hf.calls).not.toContain("setSecrets");
   });
@@ -908,6 +916,26 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls.indexOf("uploadMirror")).toBeLessThan(
       setupResult.hf.calls.indexOf("setSecrets"),
     );
+    expect(setupResult.hf.calls.indexOf("uploadMirror")).toBeLessThan(
+      setupResult.hf.calls.indexOf("pause"),
+    );
+  });
+
+  it("pauses after a failed upload attempt from an empty stopped bootstrap", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+    setupResult.hf.state.space.runtimeStage = "NO_APP_FILE";
+    setupResult.hf.failUpload = true;
+    setupResult.hf.calls.length = 0;
+
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "after remote mutation began",
+    );
+    expect(setupResult.hf.calls.indexOf("uploadMirror")).toBeLessThan(
+      setupResult.hf.calls.indexOf("pause"),
+    );
+    expect(setupResult.hf.state.space.runtimeStage).toBe("PAUSED");
   });
 
   it("rejects incomplete installed bootstrap credentials before mutation", async () => {
