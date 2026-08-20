@@ -465,10 +465,11 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         imgSrc: ["'self'", "data:"],
         connectSrc: ["'self'"],
         objectSrc: ["'none'"],
-        frameAncestors: ["'none'"],
+        frameAncestors: ["'self'", "https://huggingface.co"],
       },
     },
     crossOriginEmbedderPolicy: false,
+    xFrameOptions: false,
   });
   await app.register(swagger, {
     openapi: {

@@ -472,6 +472,10 @@ describe("control API", () => {
     expect(live.json()).toEqual({ status: "live" });
     expect(live.headers["x-content-type-options"]).toBe("nosniff");
     expect(live.headers["content-security-policy"]).toContain("default-src 'self'");
+    expect(live.headers["content-security-policy"]).toContain(
+      "frame-ancestors 'self' https://huggingface.co",
+    );
+    expect(live.headers["x-frame-options"]).toBeUndefined();
     expect((await app.inject({ method: "GET", url: "/health/ready" })).json()).toEqual({
       status: "ready",
     });
