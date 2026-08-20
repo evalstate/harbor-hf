@@ -803,7 +803,9 @@ async function assertControlCredentialCanReadBucket(
     maxBytes: 256 * 1024,
   });
   if (response.status !== 200 || !Array.isArray(response.body)) {
-    throw new InstallerInputError("control credential cannot read the artifact Bucket");
+    throw new InstallerInputError(
+      `control credential needs read access to ${plan.targets.bucket_id}`,
+    );
   }
 }
 

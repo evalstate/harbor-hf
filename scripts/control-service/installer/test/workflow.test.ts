@@ -1032,7 +1032,7 @@ describe("installer workflows", () => {
     setupResult.http.controlCredentialStatus = 404;
 
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
-      "control credential cannot read the artifact Bucket",
+      "control credential needs read access to example/control-artifacts",
     );
     expect(setupResult.hf.calls).not.toContain("setSecrets");
     expect(setupResult.hf.state.space?.secretNames).toEqual([]);
