@@ -742,6 +742,19 @@ function concreteVariables(plan: InstallPlan, origin: string): Record<string, st
   return concreteVariableRecord(plan.expected_variables, origin);
 }
 
+type WriteMode = "disabled" | "canary" | "enabled";
+
+function variablesForWriteMode(
+  plan: InstallPlan,
+  origin: string,
+  writeMode: WriteMode,
+): Record<string, string> {
+  return {
+    ...concreteVariables(plan, origin),
+    HARBOR_HF_WRITE_MODE: writeMode,
+  };
+}
+
 function nonNullVariables(
   values: Record<string, string | null>,
 ): Record<string, string> {
@@ -844,13 +857,17 @@ function exactStatus(body: unknown, expected: string): boolean {
   return isRecord(body) && body.status === expected && Object.keys(body).length === 1;
 }
 
-function assertSystem(body: unknown, sourceRevision: string): void {
+function assertSystem(
+  body: unknown,
+  sourceRevision: string,
+  expectedWriteMode: WriteMode,
+): void {
   if (!isRecord(body)) throw new Error("system response is invalid");
   const projection = body.projection;
   const contract = body.resource_contract;
   if (
     body.source_revision !== sourceRevision ||
-    body.write_mode !== "disabled" ||
+    body.write_mode !== expectedWriteMode ||
     !isRecord(projection) ||
     projection.ready !== true ||
     projection.integrity_error !== null ||
@@ -867,7 +884,13 @@ async function verifyPlan(
   plan: InstallPlan,
   dependencies: InstallerDependencies,
   expectedUploadSha?: string,
+  options: {
+    expectedWriteMode?: WriteMode;
+    requireAuthenticated?: boolean;
+    requireEmptyCampaigns?: boolean;
+  } = {},
 ): Promise<VerificationResult> {
+  const expectedWriteMode = options.expectedWriteMode ?? "disabled";
   const observed = await dependencies.hf.observe(
     plan.targets.namespace,
     plan.targets.space_id,
@@ -882,7 +905,7 @@ async function verifyPlan(
     );
   }
   const expectedForRemote = observed.space
-    ? concreteVariables(plan, observed.space.origin)
+    ? variablesForWriteMode(plan, observed.space.origin, expectedWriteMode)
     : plan.expected_variables;
   assertRemoteSafe(
     observed,
@@ -896,7 +919,11 @@ async function verifyPlan(
   if (!observed.space || !observed.bucket) {
     throw new Error("installed resources are missing");
   }
-  const variables = concreteVariables(plan, observed.space.origin);
+  const variables = variablesForWriteMode(
+    plan,
+    observed.space.origin,
+    expectedWriteMode,
+  );
   for (const [key, value] of Object.entries(variables)) {
     if (observed.space.variables[key] !== value) {
       throw new Error("managed Space variable verification failed");
@@ -934,6 +961,11 @@ async function verifyPlan(
 
   const bearer = (dependencies.environment ?? process.env)
     .HARBOR_HF_INSTALL_VERIFY_BEARER;
+  if (options.requireAuthenticated && !bearer) {
+    throw new InstallerInputError(
+      "HARBOR_HF_INSTALL_VERIFY_BEARER is required for activation",
+    );
+  }
   let authenticatedSystem: VerificationResult["authenticated_system"] = "skipped";
   if (bearer) {
     const system = await dependencies.http.getJson(new URL("/api/v1/system", origin), {
@@ -944,8 +976,27 @@ async function verifyPlan(
     if (system.status !== 200) {
       throw new Error("authenticated system verification failed");
     }
-    assertSystem(system.body, plan.source.revision);
+    assertSystem(system.body, plan.source.revision, expectedWriteMode);
     authenticatedSystem = "passed";
+    if (options.requireEmptyCampaigns) {
+      const campaigns = await dependencies.http.getJson(
+        new URL("/api/v1/campaigns?limit=1", origin),
+        {
+          bearer,
+          timeoutMs: 10_000,
+          maxBytes: 256 * 1024,
+        },
+      );
+      if (
+        campaigns.status !== 200 ||
+        !isRecord(campaigns.body) ||
+        !Array.isArray(campaigns.body.items) ||
+        campaigns.body.items.length !== 0 ||
+        campaigns.body.next_cursor !== null
+      ) {
+        throw new Error("canary activation requires an empty campaign projection");
+      }
+    }
   }
   return {
     production_ready: false,
@@ -965,6 +1016,211 @@ export async function verifyInstall(
   const version = await dependencies.hf.version();
   if (version !== plan.hf_cli_version) throw new Error("hf CLI version changed");
   return await verifyPlan(plan, dependencies);
+}
+
+export interface ActivationResult {
+  production_ready: false;
+  space_url: string;
+  write_mode: "disabled" | "canary";
+  runtime: "paused" | "running";
+  authenticated_system: "not_required" | "passed";
+}
+
+function writeModeOf(space: SpaceState): WriteMode {
+  const writeMode = space.variables.HARBOR_HF_WRITE_MODE;
+  if (writeMode !== "disabled" && writeMode !== "canary" && writeMode !== "enabled") {
+    throw new Error("managed Space write mode is invalid");
+  }
+  return writeMode;
+}
+
+function assertInstalledActivationState(
+  plan: InstallPlan,
+  state: RemoteState,
+  writeMode: WriteMode,
+): SpaceState {
+  if (!state.space) throw new Error("activation Space is missing");
+  assertRemoteSafe(
+    state,
+    {
+      spaceId: plan.targets.space_id,
+      bucketId: plan.targets.bucket_id,
+      variables: variablesForWriteMode(plan, state.space.origin, writeMode),
+    },
+    { requireRunning: false, requireAllSecrets: true },
+  );
+  const expected = variablesForWriteMode(plan, state.space.origin, writeMode);
+  for (const [key, value] of Object.entries(expected)) {
+    if (state.space.variables[key] !== value) {
+      throw new Error("activation Space variables do not match the install plan");
+    }
+  }
+  return state.space;
+}
+
+async function forceDisabledAndPaused(
+  plan: InstallPlan,
+  dependencies: InstallerDependencies,
+  variablesFile: string,
+): Promise<SpaceState> {
+  try {
+    await dependencies.hf.pause(plan.targets.space_id);
+  } catch {
+    // Continue to the authoritative disabled variable write.
+  }
+  try {
+    await dependencies.hf.setVariables(plan.targets.space_id, variablesFile);
+  } catch {
+    // The exact final observation below resolves an ambiguous provider response.
+  }
+  try {
+    await dependencies.hf.pause(plan.targets.space_id);
+  } catch {
+    // The final observation below remains authoritative.
+  }
+  const observed = await dependencies.hf.observe(
+    plan.targets.namespace,
+    plan.targets.space_id,
+    plan.targets.bucket_id,
+  );
+  const space = assertInstalledActivationState(plan, observed, "disabled");
+  if (space.runtimeStage !== "PAUSED") {
+    throw new Error("disabled rollback did not leave the Space paused");
+  }
+  return space;
+}
+
+export async function activateInstall(
+  input: {
+    planPath: string;
+    bootstrapReceipt?: BootstrapReceipt;
+    confirmSpace: string;
+    to: "disabled" | "canary";
+  },
+  dependencies: InstallerDependencies,
+): Promise<ActivationResult> {
+  if (input.to !== "disabled" && input.to !== "canary") {
+    throw new InstallerInputError(
+      "enabled promotion is unavailable: durable canary evidence and paid-hardware approval are not proven",
+    );
+  }
+  const loaded = await readPrivatePlan(input.planPath);
+  const { plan } = loaded;
+  if (input.confirmSpace !== plan.targets.space_id) {
+    throw new InstallerInputError("activation confirmation does not match Space");
+  }
+  const version = await dependencies.hf.version();
+  if (version !== plan.hf_cli_version) throw new Error("hf CLI version changed");
+  const principal = await dependencies.identity.resolve();
+  if (canonicalJson(principal) !== canonicalJson(plan.principal)) {
+    throw new Error("authenticated principal changed");
+  }
+  let observed = await dependencies.hf.observe(
+    plan.targets.namespace,
+    plan.targets.space_id,
+    plan.targets.bucket_id,
+  );
+  if (!observed.space) throw new Error("activation Space is missing");
+  const currentMode = writeModeOf(observed.space);
+  const currentSpace = assertInstalledActivationState(plan, observed, currentMode);
+  const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-activation-"));
+  try {
+    const disabledFile = await writePrivateEnvironmentFile(
+      tempDirectory,
+      "variables-disabled.env",
+      variablesForWriteMode(plan, currentSpace.origin, "disabled"),
+    );
+    if (input.to === "disabled") {
+      const space = await forceDisabledAndPaused(plan, dependencies, disabledFile);
+      return {
+        production_ready: false,
+        space_url: validateOrigin(space.origin),
+        write_mode: "disabled",
+        runtime: "paused",
+        authenticated_system: "not_required",
+      };
+    }
+    if (currentMode === "enabled") {
+      throw new InstallerInputError(
+        "enabled Space must be disabled before canary activation",
+      );
+    }
+    if (!(dependencies.environment ?? process.env).HARBOR_HF_INSTALL_VERIFY_BEARER) {
+      throw new InstallerInputError(
+        "HARBOR_HF_INSTALL_VERIFY_BEARER is required for activation",
+      );
+    }
+    if (!input.bootstrapReceipt?.uploaded_sha) {
+      throw new InstallerInputError(
+        "activation requires an exact upload receipt; rerun install:apply",
+      );
+    }
+    assertReceipt(plan, loaded.digest, input.bootstrapReceipt);
+    const expectedUploadSha = input.bootstrapReceipt.uploaded_sha;
+    const canaryFile = await writePrivateEnvironmentFile(
+      tempDirectory,
+      "variables-canary.env",
+      variablesForWriteMode(plan, currentSpace.origin, "canary"),
+    );
+    let mutationStarted = currentMode === "canary";
+    try {
+      if (currentSpace.runtimeStage !== "RUNNING") {
+        mutationStarted = true;
+        await dependencies.hf.restart(plan.targets.space_id);
+        await dependencies.hf.wait(plan.targets.space_id);
+      }
+      const preflight = await verifyPlan(plan, dependencies, expectedUploadSha, {
+        expectedWriteMode: currentMode,
+        requireAuthenticated: true,
+        requireEmptyCampaigns: currentMode === "disabled",
+      });
+      if (currentMode === "canary") {
+        return {
+          production_ready: false,
+          space_url: preflight.space_url,
+          write_mode: "canary",
+          runtime: "running",
+          authenticated_system: "passed",
+        };
+      }
+      mutationStarted = true;
+      await dependencies.hf.pause(plan.targets.space_id);
+      await dependencies.hf.setVariables(plan.targets.space_id, canaryFile);
+      observed = await dependencies.hf.observe(
+        plan.targets.namespace,
+        plan.targets.space_id,
+        plan.targets.bucket_id,
+      );
+      assertInstalledActivationState(plan, observed, "canary");
+      await dependencies.hf.restart(plan.targets.space_id);
+      await dependencies.hf.wait(plan.targets.space_id);
+      const verification = await verifyPlan(plan, dependencies, expectedUploadSha, {
+        expectedWriteMode: "canary",
+        requireAuthenticated: true,
+      });
+      return {
+        production_ready: false,
+        space_url: verification.space_url,
+        write_mode: "canary",
+        runtime: "running",
+        authenticated_system: "passed",
+      };
+    } catch (error) {
+      if (!mutationStarted) throw error;
+      try {
+        await forceDisabledAndPaused(plan, dependencies, disabledFile);
+      } catch {
+        throw new Error(
+          `canary activation failed and disabled rollback could not be verified${providerFailureSuffix(error)}`,
+        );
+      }
+      throw new Error(
+        `canary activation failed; disabled rollback verified${providerFailureSuffix(error)}`,
+      );
+    }
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
 }
 
 async function observePlan(
@@ -1227,6 +1483,8 @@ async function completeInstall(
   variableTransition: boolean,
   replaceCredentials: boolean,
   dependencies: InstallerDependencies,
+  receipt?: BootstrapReceipt,
+  persistReceipt?: (receipt: BootstrapReceipt) => Promise<void>,
 ): Promise<InstalledResult> {
   if (!observed.space) throw new Error("completion Space is missing");
   const environment = dependencies.environment ?? process.env;
@@ -1288,6 +1546,9 @@ async function completeInstall(
     phase = assertCompletionState(plan, current, freshContinuation, variableTransition);
     if (current.space?.runtimeStage !== "PAUSED" || current.space.sha !== uploadSha) {
       throw new Error("Space is not safely paused after release upload");
+    }
+    if (receipt) {
+      await persistReceipt?.({ ...receipt, uploaded_sha: uploadSha });
     }
 
     let variablesFile: string;
@@ -1584,5 +1845,7 @@ export async function applyInstall(
     variableTransition,
     input.replaceCredentials ?? false,
     dependencies,
+    input.bootstrapReceipt,
+    input.persistBootstrapReceipt,
   );
 }

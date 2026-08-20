@@ -7,7 +7,34 @@
 A hosted installation uses two persistent resources: one publicly reachable, application-protected control Space and one private Bucket. The Space serves the API and web console while its single control process reconciles immutable records stored in the Bucket.
 
 Installer usage: `npm run install:plan -- --help`,
-`npm run install:apply -- --help`, and `npm run install:verify -- --help`.
+`npm run install:apply -- --help`, `npm run install:verify -- --help`, and
+`npm run install:activate -- --help`.
+
+After authenticated verification, activate only the built-in control-smoke
+canary with an exact repeated target confirmation. Activation also requires an
+empty durable campaign projection and an owner-only receipt that attests the
+exact provider upload SHA. Installations completed by an older installer must
+rerun `install:apply` once to record that attestation:
+
+```bash
+export HARBOR_HF_INSTALL_VERIFY_BEARER="$HARBOR_HF_CONTROL_BEARER_TOKEN"
+npm run install:activate -- \
+  --space '<namespace>/<control-space>' \
+  --to canary \
+  --confirm-space '<namespace>/<control-space>'
+```
+
+Emergency disablement does not require a healthy control API:
+
+```bash
+npm run install:activate -- \
+  --space '<namespace>/<control-space>' \
+  --to disabled \
+  --confirm-space '<namespace>/<control-space>'
+```
+
+Production `enabled` promotion remains unavailable until durable canary
+evidence and separately approved paid always-on hardware are proven.
 
 ## Install the CLI
 

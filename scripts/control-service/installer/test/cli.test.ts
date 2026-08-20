@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatActivationOutput,
   formatApplyOutput,
   formatPlanOutput,
+  parseActivationOptions,
   parseApplyOptions,
   parseSavedPlanOptions,
 } from "../cli.js";
@@ -101,6 +103,54 @@ describe("installer CLI contract", () => {
     expect(() =>
       parseSavedPlanOptions(["--space", "example/control", "--replace-credentials"]),
     ).toThrow("invalid command arguments");
+  });
+
+  it("parses explicit canary activation and rejects enabled promotion", () => {
+    expect(
+      parseActivationOptions([
+        "--space",
+        "example/control",
+        "--to",
+        "canary",
+        "--confirm-space",
+        "example/control",
+      ]),
+    ).toEqual({
+      space: "example/control",
+      confirmSpace: "example/control",
+      to: "canary",
+    });
+    expect(() =>
+      parseActivationOptions([
+        "--space",
+        "example/control",
+        "--to",
+        "enabled",
+        "--confirm-space",
+        "example/control",
+      ]),
+    ).toThrow("durable canary evidence");
+  });
+
+  it("prints canary and emergency-disable activation results", () => {
+    expect(
+      formatActivationOutput("example/control", {
+        production_ready: false,
+        space_url: "https://placeholder-control.hf.space",
+        write_mode: "canary",
+        runtime: "running",
+        authenticated_system: "passed",
+      }),
+    ).toContain("Run only the built-in control smoke canary");
+    expect(
+      formatActivationOutput("example/control", {
+        production_ready: false,
+        space_url: "https://placeholder-control.hf.space",
+        write_mode: "disabled",
+        runtime: "paused",
+        authenticated_system: "not_required",
+      }),
+    ).toContain("Writes disabled and Space paused.");
   });
 
   it("prints a path-free digest-free plan summary and next command", () => {

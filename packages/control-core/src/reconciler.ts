@@ -14,9 +14,9 @@ import {
   sha256,
 } from "@harbor-hf/contracts";
 import { preparationRequired } from "./profiles.js";
-import type { ResultPublisher } from "./publication.js";
 import type { Projection } from "./projection.js";
-import { PolicyError, type ControlService } from "./service.js";
+import type { ResultPublisher } from "./publication.js";
+import { type ControlService, PolicyError } from "./service.js";
 
 export interface ExternalActionResult {
   outcome: ActionReceipt["outcome"];
@@ -48,6 +48,7 @@ export interface ReconcilerOptions {
   batch_size: number;
   dispatch_adoption_delay_ms?: number;
   worker_receipt_grace_ms?: number;
+  campaign_allowed?: (campaignId: string) => Promise<boolean>;
 }
 
 const terminalJobStates = new Set([
@@ -173,25 +174,72 @@ export class Reconciler {
 
   async tick(): Promise<number> {
     let handled = await this.service.syncProjection();
-    for (const { intent, receipt } of await this.projection.unadvancedActions(
-      this.options.batch_size,
-    )) {
+    for (const { intent, receipt } of await this.allowedUnadvancedActions()) {
       await this.advance(intent, receipt);
       await this.service.markAdvanced(intent, receipt);
       handled += 1;
     }
-    for (const intent of await this.projection.pendingActions(
-      this.options.batch_size,
-    )) {
+    for (const intent of await this.allowedPendingActions()) {
       const notBefore = intent.payload.not_before;
       if (typeof notBefore === "string" && Date.parse(notBefore) > Date.now()) continue;
       await this.handle(intent);
       handled += 1;
     }
     for (const campaign of await this.projection.campaigns(10_000)) {
+      if (
+        this.options.campaign_allowed &&
+        !(await this.options.campaign_allowed(campaign.campaign_id))
+      )
+        continue;
       if (await this.maybePublish(campaign.campaign_id)) handled += 1;
     }
     return handled;
+  }
+
+  private async allowedPendingActions(): Promise<ActionIntent[]> {
+    const selected: ActionIntent[] = [];
+    let offset = 0;
+    while (selected.length < this.options.batch_size) {
+      const page = await this.projection.pendingActions(
+        this.options.batch_size,
+        offset,
+      );
+      if (page.length === 0) break;
+      for (const intent of page) {
+        if (
+          !this.options.campaign_allowed ||
+          (await this.options.campaign_allowed(intent.campaign_id))
+        )
+          selected.push(intent);
+        if (selected.length === this.options.batch_size) break;
+      }
+      offset += page.length;
+    }
+    return selected;
+  }
+
+  private async allowedUnadvancedActions(): Promise<
+    Array<{ intent: ActionIntent; receipt: ActionReceipt }>
+  > {
+    const selected: Array<{ intent: ActionIntent; receipt: ActionReceipt }> = [];
+    let offset = 0;
+    while (selected.length < this.options.batch_size) {
+      const page = await this.projection.unadvancedActions(
+        this.options.batch_size,
+        offset,
+      );
+      if (page.length === 0) break;
+      for (const item of page) {
+        if (
+          !this.options.campaign_allowed ||
+          (await this.options.campaign_allowed(item.intent.campaign_id))
+        )
+          selected.push(item);
+        if (selected.length === this.options.batch_size) break;
+      }
+      offset += page.length;
+    }
+    return selected;
   }
 
   private async handle(intent: ActionIntent): Promise<void> {

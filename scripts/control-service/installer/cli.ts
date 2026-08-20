@@ -5,7 +5,11 @@ import type { InstallPlan } from "./model.js";
 import { BoundedJsonProcess } from "./process.js";
 import { TtyInstallerSecretInput } from "./secret-input.js";
 import { GitSourceAdapter } from "./source.js";
-import type { ApplyInstallResult, InstallerDependencies } from "./workflow.js";
+import type {
+  ActivationResult,
+  ApplyInstallResult,
+  InstallerDependencies,
+} from "./workflow.js";
 
 export function defaultDependencies(): InstallerDependencies {
   const hf = new HfCli(new BoundedJsonProcess());
@@ -75,6 +79,37 @@ export function parseApplyOptions(
   };
 }
 
+export function parseActivationOptions(args: readonly string[]):
+  | {
+      space: string;
+      confirmSpace: string;
+      to: "disabled" | "canary";
+      stateDirectory?: string;
+    }
+  | "help" {
+  const options = parseOptions(args, {
+    space: { required: true },
+    to: { required: true },
+    "confirm-space": { required: true },
+    "state-dir": { required: false },
+  });
+  if (options === "help") return options;
+  if (options.to === "enabled") {
+    throw new Error(
+      "enabled promotion is unavailable: durable canary evidence and paid-hardware approval are not proven",
+    );
+  }
+  if (options.to !== "disabled" && options.to !== "canary") {
+    throw new Error("activation target must be disabled or canary");
+  }
+  return {
+    space: options.space as string,
+    confirmSpace: options["confirm-space"] as string,
+    to: options.to,
+    ...(options["state-dir"] ? { stateDirectory: options["state-dir"] as string } : {}),
+  };
+}
+
 export function formatPlanOutput(
   plan: InstallPlan,
   customStateDirectory = false,
@@ -141,6 +176,28 @@ export function formatApplyOutput(
     "Production ready: no",
     "",
     "Review access and credential scopes before activation.",
+    "",
+  ].join("\n");
+}
+
+export function formatActivationOutput(
+  spaceId: string,
+  result: ActivationResult,
+): string {
+  return [
+    result.write_mode === "canary"
+      ? "Canary activation verified."
+      : "Writes disabled and Space paused.",
+    `Space: ${spaceId}`,
+    `URL: ${result.space_url}`,
+    "Hardware: cpu-basic",
+    `Runtime: ${result.runtime}`,
+    `Write mode: ${result.write_mode}`,
+    `Authenticated system: ${result.authenticated_system}`,
+    "Production ready: no",
+    ...(result.write_mode === "canary"
+      ? ["", "Run only the built-in control smoke canary before promotion."]
+      : []),
     "",
   ].join("\n");
 }

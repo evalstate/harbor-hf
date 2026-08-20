@@ -46,6 +46,7 @@ export interface BootstrapReceipt {
   bucket_id: string;
   source_revision: string;
   manifest_digest: string;
+  uploaded_sha?: string;
 }
 
 export interface PreparedInstallState {
@@ -294,8 +295,10 @@ function parseBootstrapReceipt(value: unknown): BootstrapReceipt {
     typeof value !== "object" ||
     value === null ||
     Array.isArray(value) ||
-    Object.keys(value).sort().join(",") !==
-      "bucket_id,install_id,manifest_digest,plan_digest,schema_version,source_revision,space_id"
+    ![
+      "bucket_id,install_id,manifest_digest,plan_digest,schema_version,source_revision,space_id",
+      "bucket_id,install_id,manifest_digest,plan_digest,schema_version,source_revision,space_id,uploaded_sha",
+    ].includes(Object.keys(value).sort().join(","))
   ) {
     throw new Error("installer bootstrap receipt is invalid");
   }
@@ -311,7 +314,9 @@ function parseBootstrapReceipt(value: unknown): BootstrapReceipt {
     typeof record.source_revision !== "string" ||
     !REVISION.test(record.source_revision) ||
     typeof record.manifest_digest !== "string" ||
-    !DIGEST.test(record.manifest_digest)
+    !DIGEST.test(record.manifest_digest) ||
+    (record.uploaded_sha !== undefined &&
+      (typeof record.uploaded_sha !== "string" || !REVISION.test(record.uploaded_sha)))
   ) {
     throw new Error("installer bootstrap receipt is invalid");
   }
@@ -324,6 +329,9 @@ function parseBootstrapReceipt(value: unknown): BootstrapReceipt {
     bucket_id: ids.bucketId,
     source_revision: record.source_revision,
     manifest_digest: record.manifest_digest,
+    ...(record.uploaded_sha === undefined
+      ? {}
+      : { uploaded_sha: record.uploaded_sha as string }),
   };
 }
 
@@ -391,10 +399,16 @@ export async function writeBootstrapReceipt(
   const validated = parseBootstrapReceipt(receipt);
   const existing = await readBootstrapReceipt(planPath);
   if (existing) {
-    if (canonicalJson(existing) !== canonicalJson(validated)) {
+    if (canonicalJson(existing) === canonicalJson(validated)) return;
+    const { uploaded_sha: existingUpload, ...existingBase } = existing;
+    const { uploaded_sha: validatedUpload, ...validatedBase } = validated;
+    if (
+      existingUpload !== undefined ||
+      validatedUpload === undefined ||
+      canonicalJson(existingBase) !== canonicalJson(validatedBase)
+    ) {
       throw new Error("installer bootstrap receipt already exists");
     }
-    return;
   }
   const path = bootstrapReceiptPath(planPath);
   const temporaryPath = resolve(
@@ -410,7 +424,8 @@ export async function writeBootstrapReceipt(
       await handle.close();
     }
     try {
-      await link(temporaryPath, path);
+      if (existing) await rename(temporaryPath, path);
+      else await link(temporaryPath, path);
     } catch (error) {
       if (
         !(
@@ -680,7 +695,15 @@ export async function preserveBootstrapReceipt(
     }
     await assertReceiptMatchesPreviousPlan(previousPlanPath, receipt);
     assertInstalledReceiptAttestation(nextPlan);
-    await writeBootstrapReceipt(nextPlanPath, receiptForPlan(nextPlan, nextPlanDigest));
+    const uploadStillMatchesPlan =
+      receipt.source_revision === nextPlan.source.revision &&
+      receipt.manifest_digest === nextPlan.bundle.manifest_digest;
+    await writeBootstrapReceipt(nextPlanPath, {
+      ...receiptForPlan(nextPlan, nextPlanDigest),
+      ...(receipt.uploaded_sha && uploadStillMatchesPlan
+        ? { uploaded_sha: receipt.uploaded_sha }
+        : {}),
+    });
     return;
   }
   if (remote.phase !== "credentials_required" && remote.phase !== "source_staged") {

@@ -16,6 +16,7 @@ import type { IdentityAdapter } from "../identity.js";
 import { expectedVariables, type Principal, type RemoteState } from "../model.js";
 import type { SourceAdapter } from "../source.js";
 import {
+  activateInstall,
   applyInstall,
   type InstallerDependencies,
   planInstall,
@@ -90,6 +91,14 @@ class FakeHttp implements HttpAdapter {
   readyStatus = "ready";
   systemIntegrityError: string | null = null;
   controlCredentialStatus = 200;
+  readyRequestCount = 0;
+  failReadyOnRequest: number | null = null;
+  campaignItems: unknown[] = [];
+
+  constructor(
+    private readonly currentWriteMode: () => "disabled" | "canary" | "enabled" = () =>
+      "disabled",
+  ) {}
 
   async getJson(
     url: URL,
@@ -103,9 +112,13 @@ class FakeHttp implements HttpAdapter {
       return { status: 200, body: { status: "live" } };
     }
     if (url.pathname === "/health/ready") {
+      this.readyRequestCount += 1;
+      const ready =
+        this.readyStatus === "ready" &&
+        this.readyRequestCount !== this.failReadyOnRequest;
       return {
-        status: this.readyStatus === "ready" ? 200 : 503,
-        body: { status: this.readyStatus },
+        status: ready ? 200 : 503,
+        body: { status: ready ? "ready" : "rebuilding" },
       };
     }
     if (url.pathname === "/api/v1/system") {
@@ -113,7 +126,7 @@ class FakeHttp implements HttpAdapter {
         status: 200,
         body: {
           source_revision: REVISION,
-          write_mode: "disabled",
+          write_mode: this.currentWriteMode(),
           projection: {
             ready: this.systemIntegrityError === null,
             integrity_error: this.systemIntegrityError,
@@ -123,6 +136,15 @@ class FakeHttp implements HttpAdapter {
             buckets: 1,
             operator_secrets: 2,
           },
+        },
+      };
+    }
+    if (url.pathname === "/api/v1/campaigns") {
+      return {
+        status: 200,
+        body: {
+          items: this.campaignItems,
+          next_cursor: null,
         },
       };
     }
@@ -342,7 +364,10 @@ async function setup(existingRevision?: string) {
   const hf = new FakeHf();
   const source = new FakeSource(repository);
   const identity = new FakeIdentity();
-  const http = new FakeHttp();
+  const http = new FakeHttp(() => {
+    const writeMode = hf.state.space?.variables.HARBOR_HF_WRITE_MODE;
+    return writeMode === "canary" || writeMode === "enabled" ? writeMode : "disabled";
+  });
   if (existingRevision) {
     hf.state = installedState(existingRevision, identity.principal);
   }
@@ -467,7 +492,13 @@ async function complete(
   receipt: Awaited<ReturnType<typeof bootstrap>>["receipt"],
 ) {
   return await applyInstall(
-    { planPath: setupResult.planPath, bootstrapReceipt: receipt },
+    {
+      planPath: setupResult.planPath,
+      bootstrapReceipt: receipt,
+      persistBootstrapReceipt: async (persisted) => {
+        Object.assign(receipt, persisted);
+      },
+    },
     setupResult.dependencies,
   );
 }
@@ -520,6 +551,7 @@ describe("installer workflows", () => {
       },
     });
     expect(setupResult.hf.calls).toContain("uploadMirror");
+    expect(bootstrapResult.receipt.uploaded_sha).toBe(UPLOAD_SHA);
     expect(setupResult.hf.calls.indexOf("uploadMirror")).toBeLessThan(
       setupResult.hf.calls.indexOf("setSecrets"),
     );
@@ -532,6 +564,235 @@ describe("installer workflows", () => {
     for (const path of setupResult.hf.temporaryPaths) {
       await expect(access(path)).rejects.toThrow();
     }
+  });
+
+  it("activates only a healthy authenticated installed Space into canary mode", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    await complete(setupResult, bootstrapResult.receipt);
+    setupResult.hf.calls.length = 0;
+    setupResult.http.requests.length = 0;
+    setupResult.http.readyRequestCount = 0;
+    setupResult.dependencies.environment = {
+      ...setupResult.dependencies.environment,
+      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+    };
+
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          confirmSpace: "example/control",
+          to: "canary",
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toEqual({
+      production_ready: false,
+      space_url: ORIGIN,
+      write_mode: "canary",
+      runtime: "running",
+      authenticated_system: "passed",
+    });
+    expect(setupResult.hf.state.space?.variables.HARBOR_HF_WRITE_MODE).toBe("canary");
+    expect(setupResult.hf.calls).toContain("restart");
+    expect(setupResult.hf.calls).toContain("wait");
+    expect(setupResult.hf.calls).not.toContain("setSecrets");
+    expect(
+      setupResult.hf.calls.filter((call) =>
+        ["pause", "setVariables", "restart", "wait"].includes(call),
+      ),
+    ).toEqual(["pause", "setVariables", "restart", "wait"]);
+    expect(
+      setupResult.http.requests.filter((request) => request.path === "/api/v1/system"),
+    ).toHaveLength(2);
+  });
+
+  it("does not activate without authenticated system verification", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    await complete(setupResult, bootstrapResult.receipt);
+    setupResult.hf.calls.length = 0;
+    setupResult.http.readyRequestCount = 0;
+
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          confirmSpace: "example/control",
+          to: "canary",
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("HARBOR_HF_INSTALL_VERIFY_BEARER is required");
+    expect(setupResult.hf.calls).not.toContain("setVariables");
+    expect(setupResult.hf.calls).not.toContain("pause");
+  });
+
+  it("rejects mismatched activation confirmation before provider calls", async () => {
+    const setupResult = await setup();
+    setupResult.hf.calls.length = 0;
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          confirmSpace: "example/not-control",
+          to: "canary",
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("activation confirmation does not match Space");
+    expect(setupResult.hf.calls).toEqual([]);
+  });
+
+  it("does not activate canary with an existing campaign projection", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    await complete(setupResult, bootstrapResult.receipt);
+    setupResult.hf.calls.length = 0;
+    setupResult.http.readyRequestCount = 0;
+    setupResult.http.campaignItems = [{ campaign_id: "existing-campaign" }];
+    setupResult.dependencies.environment = {
+      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+    };
+
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          confirmSpace: "example/control",
+          to: "canary",
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("empty campaign projection");
+    expect(setupResult.hf.calls).not.toContain("setVariables");
+    expect(setupResult.hf.calls).not.toContain("pause");
+  });
+
+  it("disables an unhealthy already-running canary", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    await complete(setupResult, bootstrapResult.receipt);
+    if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+    setupResult.hf.state.space.variables.HARBOR_HF_WRITE_MODE = "canary";
+    setupResult.http.systemIntegrityError = "projection mismatch";
+    setupResult.http.readyRequestCount = 0;
+    setupResult.dependencies.environment = {
+      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+    };
+
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          confirmSpace: "example/control",
+          to: "canary",
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("disabled rollback verified");
+    expect(setupResult.hf.state.space.variables.HARBOR_HF_WRITE_MODE).toBe("disabled");
+    expect(setupResult.hf.state.space.runtimeStage).toBe("PAUSED");
+  });
+
+  it("verifies disabled rollback after a failed canary restart", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    await complete(setupResult, bootstrapResult.receipt);
+    setupResult.hf.calls.length = 0;
+    setupResult.http.readyRequestCount = 0;
+    setupResult.http.failReadyOnRequest = 2;
+    setupResult.dependencies.environment = {
+      ...setupResult.dependencies.environment,
+      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+    };
+
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          confirmSpace: "example/control",
+          to: "canary",
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("disabled rollback verified");
+    expect(setupResult.hf.state.space?.variables.HARBOR_HF_WRITE_MODE).toBe("disabled");
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+    expect(setupResult.hf.calls.filter((call) => call === "setVariables")).toHaveLength(
+      2,
+    );
+  });
+
+  it("disables and pauses canary mode without control API health", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    await complete(setupResult, bootstrapResult.receipt);
+    if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+    setupResult.hf.state.space.variables.HARBOR_HF_WRITE_MODE = "canary";
+    setupResult.hf.calls.length = 0;
+    setupResult.http.requests.length = 0;
+    setupResult.dependencies.environment = {};
+
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          confirmSpace: "example/control",
+          to: "disabled",
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toMatchObject({
+      write_mode: "disabled",
+      runtime: "paused",
+      authenticated_system: "not_required",
+    });
+    expect(setupResult.http.requests).toEqual([]);
+    expect(setupResult.hf.state.space.variables.HARBOR_HF_WRITE_MODE).toBe("disabled");
+    expect(setupResult.hf.state.space.runtimeStage).toBe("PAUSED");
+
+    setupResult.http.readyRequestCount = 0;
+    setupResult.dependencies.environment = {
+      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+    };
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          confirmSpace: "example/control",
+          to: "canary",
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toMatchObject({
+      write_mode: "canary",
+      runtime: "running",
+    });
+  });
+
+  it("rejects enabled promotion at the workflow boundary", async () => {
+    const setupResult = await setup();
+    setupResult.hf.calls.length = 0;
+    await expect(
+      activateInstall(
+        {
+          planPath: setupResult.planPath,
+          confirmSpace: "example/control",
+          to: "enabled" as "canary",
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("durable canary evidence");
+    expect(setupResult.hf.calls).toEqual([]);
   });
 
   it("persists Bucket proof before returning the bootstrap result", async () => {

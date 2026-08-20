@@ -262,7 +262,7 @@ describe("control API", () => {
       "recommended",
       "2026-08-16T00:00:02.000Z",
     );
-    const { runtime, app } = await setup("canary", async (seedRuntime) => {
+    const { runtime, app } = await setup("enabled", async (seedRuntime) => {
       for (const record of [profile, approved, recommended])
         await seedRuntime.store.create(
           controlRecordPath(record),
@@ -333,6 +333,22 @@ describe("control API", () => {
       )?.profiles.find((item) => item.kind === "model")?.profile_id,
     ).toBe(profileId);
     await app.close();
+
+    const { app: canaryApp } = await setup("canary", async (seedRuntime) => {
+      for (const record of [profile, approved])
+        await seedRuntime.store.create(
+          controlRecordPath(record),
+          new TextEncoder().encode(canonicalJson(record)),
+        );
+    });
+    const canaryResponse = await canaryApp.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "promoted-canary-profile-key" },
+      payload: input,
+    });
+    expect(canaryResponse.statusCode).toBe(422);
+    await canaryApp.close();
   });
 
   it("paginates every collection response", async () => {

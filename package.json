@@ -18,6 +18,7 @@
     "format:check": "biome format .",
     "generate": "npm run generate -w @harbor-hf/contracts && tsc -b packages/contracts packages/control-core packages/hf-adapters --force && npm run generate:openapi -w @harbor-hf/control-api",
     "install:apply": "tsx scripts/control-service/installer/cli-apply.ts",
+    "install:activate": "tsx scripts/control-service/installer/cli-activate.ts",
     "install:plan": "tsx scripts/control-service/installer/cli-plan.ts",
     "install:verify": "tsx scripts/control-service/installer/cli-verify.ts",
     "lint": "biome lint .",
