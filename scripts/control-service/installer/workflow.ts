@@ -28,6 +28,11 @@ export interface InstallerDependencies {
   http: HttpAdapter;
   source: SourceAdapter;
   environment?: NodeJS.ProcessEnv;
+  secretInput?: InstallerSecretInput;
+}
+
+export interface InstallerSecretInput {
+  read(name: "HF_TOKEN" | "HF_INFERENCE_TOKEN"): Promise<string | undefined>;
 }
 
 function sortedStrings(values: readonly string[]): string[] {
@@ -177,7 +182,7 @@ export async function planInstall(
     planPath: string;
   },
   dependencies: InstallerDependencies,
-): Promise<{ path: string; digest: string }> {
+): Promise<{ path: string; digest: string; plan: InstallPlan }> {
   const ids = parseTargetIds(input.space, input.bucket);
   const sourceBefore = await dependencies.source.inspect();
   assertPrivateOutputPaths(
@@ -236,7 +241,7 @@ export async function planInstall(
     observed_preconditions: observed,
   };
   await mkdir(dirname(resolve(input.planPath)), { recursive: true, mode: 0o700 });
-  return await writePrivatePlan(input.planPath, plan);
+  return { ...(await writePrivatePlan(input.planPath, plan)), plan };
 }
 
 async function writePrivateEnvironmentFile(
@@ -287,10 +292,11 @@ function initialVariables(plan: InstallPlan): Record<string, string> {
   return output;
 }
 
-function secretValues(
+async function secretValues(
   environment: NodeJS.ProcessEnv,
   missingNames: readonly string[],
-): Record<string, string> {
+  input?: InstallerSecretInput,
+): Promise<Record<string, string>> {
   const sourceNames = {
     HF_TOKEN: "HARBOR_HF_INSTALL_CONTROL_SECRET",
     HF_INFERENCE_TOKEN: "HARBOR_HF_INSTALL_INFERENCE_SECRET",
@@ -300,7 +306,7 @@ function secretValues(
     if (name !== "HF_TOKEN" && name !== "HF_INFERENCE_TOKEN") {
       throw new Error("unexpected secret name");
     }
-    const value = environment[sourceNames[name]];
+    const value = environment[sourceNames[name]] ?? (await input?.read(name));
     if (!value || value.length < 8 || value.includes("\n") || value.includes("\r")) {
       throw new Error("required installer secret is missing or invalid");
     }
@@ -489,7 +495,11 @@ export async function applyInstall(
   const missingSecrets = SECRET_NAMES.filter(
     (name) => !observed.space?.secretNames.includes(name),
   );
-  const secrets = secretValues(environment, missingSecrets);
+  const secrets = await secretValues(
+    environment,
+    missingSecrets,
+    dependencies.secretInput,
+  );
   const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-install-"));
   const stagedBundle = resolve(tempDirectory, "bundle");
   await cp(plan.bundle.directory, stagedBundle, {

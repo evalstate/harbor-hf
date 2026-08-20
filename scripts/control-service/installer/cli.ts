@@ -1,9 +1,11 @@
 import { HfCli } from "./hf.js";
 import { BoundedHttpAdapter } from "./http.js";
 import { StableIdentityAdapter } from "./identity.js";
+import type { InstallPlan } from "./model.js";
 import { BoundedJsonProcess } from "./process.js";
+import { TtyInstallerSecretInput } from "./secret-input.js";
 import { GitSourceAdapter } from "./source.js";
-import type { InstallerDependencies } from "./workflow.js";
+import type { InstallerDependencies, VerificationResult } from "./workflow.js";
 
 export function defaultDependencies(): InstallerDependencies {
   const hf = new HfCli(new BoundedJsonProcess());
@@ -12,6 +14,7 @@ export function defaultDependencies(): InstallerDependencies {
     hf,
     http,
     identity: new StableIdentityAdapter(hf, http),
+    secretInput: new TtyInstallerSecretInput(),
     source: new GitSourceAdapter(),
   };
 }
@@ -42,16 +45,59 @@ export function parseOptions(
   return output;
 }
 
-export function parseApplyOptions(args: readonly string[]): { plan: string } | "help" {
+export function parseSavedPlanOptions(
+  args: readonly string[],
+): { space: string; stateDirectory?: string } | "help" {
   const options = parseOptions(args, {
-    plan: { required: true },
+    space: { required: true },
+    "state-dir": { required: false },
   });
   if (options === "help") return options;
-  return { plan: options.plan as string };
+  return {
+    space: options.space as string,
+    ...(options["state-dir"] ? { stateDirectory: options["state-dir"] as string } : {}),
+  };
 }
 
-export function formatPlanOutput(path: string): string {
-  return `plan: ${path}\n`;
+export function formatPlanOutput(
+  plan: InstallPlan,
+  customStateDirectory = false,
+): string {
+  const observed = plan.observed_preconditions;
+  const action = !observed.space
+    ? "create Space and Bucket"
+    : observed.bucket
+      ? "update installer-managed Space"
+      : "update Space and create Bucket";
+  return [
+    `Space:      ${plan.targets.space_id}`,
+    `Bucket:     ${plan.targets.bucket_id}`,
+    "Access:     protected",
+    "Hardware:   cpu-basic",
+    "Write mode: disabled",
+    `Action:     ${action}`,
+    "",
+    "Plan saved privately.",
+    customStateDirectory
+      ? "Next: rerun install:apply with this Space and the same --state-dir."
+      : `Next: npm run install:apply -- --space ${plan.targets.space_id}`,
+    "",
+  ].join("\n");
+}
+
+export function formatApplyOutput(spaceId: string, result: VerificationResult): string {
+  return [
+    "Installation verified.",
+    `Space: ${spaceId}`,
+    `Anonymous health: ${result.anonymous_live}`,
+    `Authenticated system: ${result.authenticated_system}`,
+    `Source upload: ${result.source_upload_revision}`,
+    "Write mode: disabled",
+    "Production ready: no",
+    "",
+    "Review access and credential scopes before activation.",
+    "",
+  ].join("\n");
 }
 
 export async function cliMain(action: () => Promise<void>): Promise<void> {

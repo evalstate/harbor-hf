@@ -634,6 +634,40 @@ describe("installer workflows", () => {
     ).resolves.toMatchObject({ production_ready: false });
   });
 
+  it("prompts only for missing fresh-install credentials", async () => {
+    const setupResult = await setup();
+    setupResult.dependencies.environment = {};
+    const prompts: string[] = [];
+    setupResult.dependencies.secretInput = {
+      async read(name) {
+        prompts.push(name);
+        return name === "HF_TOKEN"
+          ? "prompted-control-placeholder"
+          : "prompted-inference-placeholder";
+      },
+    };
+    await expect(
+      applyInstall(
+        {
+          planPath: setupResult.planPath,
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toMatchObject({ production_ready: false });
+    expect(prompts.sort()).toEqual(["HF_INFERENCE_TOKEN", "HF_TOKEN"]);
+
+    const existing = await setup(REVISION);
+    existing.dependencies.environment = {};
+    existing.dependencies.secretInput = {
+      async read() {
+        throw new Error("existing secrets must not prompt");
+      },
+    };
+    await expect(
+      applyInstall({ planPath: existing.planPath }, existing.dependencies),
+    ).resolves.toMatchObject({ production_ready: false });
+  });
+
   it("verifies authenticated system state only with an explicit bearer", async () => {
     const setupResult = await setup(REVISION);
     setupResult.dependencies.environment = {

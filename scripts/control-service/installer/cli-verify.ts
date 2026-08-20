@@ -1,16 +1,20 @@
-import { cliMain, defaultDependencies, parseOptions } from "./cli.js";
+import { cliMain, defaultDependencies, parseSavedPlanOptions } from "./cli.js";
+import { currentInstallPlanPath, installerStateRoot } from "./state.js";
 import { verifyInstall } from "./workflow.js";
 
-const usage = "Usage: npm run install:verify -- --plan <file>\n";
+const usage =
+  "Usage: npm run install:verify -- --space <namespace>/<space> [--state-dir <dir>]\n";
 
 await cliMain(async () => {
-  const options = parseOptions(process.argv.slice(2), {
-    plan: { required: true },
-  });
+  const options = parseSavedPlanOptions(process.argv.slice(2));
   if (options === "help") {
     process.stdout.write(usage);
     return;
   }
-  const result = await verifyInstall(options.plan as string, defaultDependencies());
+  const planPath = await currentInstallPlanPath(
+    options.space,
+    installerStateRoot(options.stateDirectory),
+  );
+  const result = await verifyInstall(planPath, defaultDependencies());
   process.stdout.write(`${JSON.stringify(result)}\n`);
 });
