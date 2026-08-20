@@ -249,8 +249,9 @@ describe("Hugging Face CLI adapter", () => {
     ]);
     const hf = new HfCli(processAdapter);
     await expect(
-      hf.createBucket("example-org/control-artifacts"),
+      hf.createBucket("example-org/control-artifacts", "example-user"),
     ).resolves.toBeUndefined();
+    expect(processAdapter.requests[0]?.args).toContain("example-org/control-artifacts");
     await expect(hf.restart("example/control")).resolves.toBeUndefined();
     await expect(
       new HfCli(
@@ -260,7 +261,26 @@ describe("Hugging Face CLI adapter", () => {
             url: "https://huggingface.co/buckets/example-org/other",
           },
         ]),
-      ).createBucket("example-org/control-artifacts"),
+      ).createBucket("example-org/control-artifacts", "example-user"),
     ).rejects.toThrow("unexpected target");
+  });
+
+  it("uses a bare Bucket name for the authenticated user's namespace", async () => {
+    const processAdapter = new QueueProcess([
+      {
+        uri: "hf://buckets/example-org/control-artifacts",
+        url: "https://huggingface.co/buckets/example-org/control-artifacts",
+      },
+    ]);
+    await expect(
+      new HfCli(processAdapter).createBucket(
+        "example-org/control-artifacts",
+        "example-org",
+      ),
+    ).resolves.toBeUndefined();
+    expect(processAdapter.requests[0]?.args).toContain("control-artifacts");
+    expect(processAdapter.requests[0]?.args).not.toContain(
+      "example-org/control-artifacts",
+    );
   });
 });

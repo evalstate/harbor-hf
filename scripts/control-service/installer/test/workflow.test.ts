@@ -219,7 +219,7 @@ class FakeHf implements HfAdapter {
     if (this.failCreateSpaceResponse) throw new Error("lost create response");
   }
 
-  async createBucket(bucketId: string): Promise<void> {
+  async createBucket(bucketId: string, _authenticatedUsername: string): Promise<void> {
     this.calls.push("createBucket");
     if (this.createBucketFailureCategory) {
       throw new HfCommandFailure(this.createBucketFailureCategory);

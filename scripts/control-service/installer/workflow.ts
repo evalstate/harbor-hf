@@ -1106,7 +1106,7 @@ async function bootstrapFreshInstall(
     });
 
     remoteMutationStarted = true;
-    await dependencies.hf.createBucket(plan.targets.bucket_id);
+    await dependencies.hf.createBucket(plan.targets.bucket_id, plan.principal.username);
     current = await observePlan(plan, dependencies);
     assertBootstrapPhase(plan, current, "credentials_required", {
       requireBucket: true,

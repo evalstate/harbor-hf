@@ -234,7 +234,7 @@ export interface HfAdapter {
     variablesFile: string,
     secretsFile?: string,
   ): Promise<void>;
-  createBucket(bucketId: string): Promise<void>;
+  createBucket(bucketId: string, authenticatedUsername: string): Promise<void>;
   setVariables(spaceId: string, variablesFile: string): Promise<void>;
   setSecrets(spaceId: string, secretsFile: string): Promise<void>;
   setProtected(spaceId: string): Promise<void>;
@@ -415,9 +415,13 @@ export class HfCli implements HfAdapter {
     assertMutation(value, spaceId);
   }
 
-  async createBucket(bucketId: string): Promise<void> {
+  async createBucket(bucketId: string, authenticatedUsername: string): Promise<void> {
+    const separator = bucketId.indexOf("/");
+    const namespace = bucketId.slice(0, separator);
+    const name = bucketId.slice(separator + 1);
+    const createId = namespace === authenticatedUsername ? name : bucketId;
     assertBucketCreation(
-      await this.json(["buckets", "create", bucketId, "--private"]),
+      await this.json(["buckets", "create", createId, "--private"]),
       bucketId,
     );
   }
