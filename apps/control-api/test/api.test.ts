@@ -1689,6 +1689,52 @@ describe("authentication state", () => {
     expect(safeReturnPath("https://evil.example", callback)).toBe("/");
   });
 
+  it("uses secure partitioned cookies for embedded OAuth sessions", async () => {
+    const { runtime, app } = await setup();
+    vi.spyOn(runtime.auth, "login").mockResolvedValue({
+      flow_id: "flow-id",
+      url: new URL("https://identity.example/authorize"),
+    });
+    vi.spyOn(runtime.auth, "callback").mockResolvedValue({
+      session_id: "session-id",
+      csrf: "csrf-token",
+      return_to: "/results",
+      expires_at: Date.now() + 60_000,
+    });
+
+    const login = await app.inject({ method: "GET", url: "/auth/login" });
+    expect(login.statusCode).toBe(302);
+    expect(login.headers["set-cookie"]).toContain("hhf_oauth_flow=flow-id");
+    expect(login.headers["set-cookie"]).toContain("SameSite=None");
+    expect(login.headers["set-cookie"]).toContain("Partitioned");
+
+    const callback = await app.inject({
+      method: "GET",
+      url: "/auth/callback?code=test-code&state=test-state",
+      headers: { cookie: "hhf_oauth_flow=flow-id" },
+    });
+    expect(callback.statusCode).toBe(302);
+    const callbackCookies = callback.headers["set-cookie"];
+    expect(callbackCookies).toHaveLength(3);
+    for (const setCookie of callbackCookies ?? []) {
+      expect(setCookie).toContain("Secure");
+      expect(setCookie).toContain("SameSite=None");
+      expect(setCookie).toContain("Partitioned");
+    }
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/auth/logout",
+      headers: { cookie: "hhf_session=session-id; hhf_csrf=csrf-token" },
+    });
+    expect(logout.statusCode).toBe(204);
+    for (const setCookie of logout.headers["set-cookie"] ?? []) {
+      expect(setCookie).toContain("SameSite=None");
+      expect(setCookie).toContain("Partitioned");
+    }
+    await app.close();
+  });
+
   it("stores opaque sessions and rejects the wrong CSRF token", async () => {
     const root = await mkdtemp(join(tmpdir(), "hhf-auth-"));
     roots.push(root);

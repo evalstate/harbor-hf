@@ -82,6 +82,14 @@ declare module "fastify" {
   }
 }
 
+// Partitioned cookies remain available inside the cross-site Hub iframe without
+// becoming shared third-party cookies across unrelated top-level sites.
+const embeddedCookiePolicy = {
+  partitioned: true,
+  sameSite: "none",
+  secure: true,
+} as const;
+
 function actor(request: FastifyRequest): AuthenticatedActor {
   if (!request.actor) throw new Error("authenticated actor is missing");
   return request.actor;
@@ -921,9 +929,8 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       const query = request.query as { return_to?: string };
       const login = await runtime.auth.login(query.return_to ?? "/");
       reply.setCookie("hhf_oauth_flow", login.flow_id, {
+        ...embeddedCookiePolicy,
         httpOnly: true,
-        secure: true,
-        sameSite: "lax",
         path: "/auth/callback",
         maxAge: 600,
       });
@@ -950,18 +957,19 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         flowId,
         new URL(request.url, runtime.config.public_origin),
       );
-      reply.clearCookie("hhf_oauth_flow", { path: "/auth/callback" });
+      reply.clearCookie("hhf_oauth_flow", {
+        ...embeddedCookiePolicy,
+        path: "/auth/callback",
+      });
       reply.setCookie("hhf_session", callback.session_id, {
+        ...embeddedCookiePolicy,
         httpOnly: true,
-        secure: true,
-        sameSite: "strict",
         path: "/",
         expires: new Date(callback.expires_at),
       });
       reply.setCookie("hhf_csrf", callback.csrf, {
+        ...embeddedCookiePolicy,
         httpOnly: false,
-        secure: true,
-        sameSite: "strict",
         path: "/",
         expires: new Date(callback.expires_at),
       });
@@ -977,8 +985,8 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     async (request, reply) => {
       const sessionId = request.cookies.hhf_session;
       if (sessionId) runtime.auth.store.deleteSession(sessionId);
-      reply.clearCookie("hhf_session", { path: "/" });
-      reply.clearCookie("hhf_csrf", { path: "/" });
+      reply.clearCookie("hhf_session", { ...embeddedCookiePolicy, path: "/" });
+      reply.clearCookie("hhf_csrf", { ...embeddedCookiePolicy, path: "/" });
       return reply.code(204).send();
     },
   );
