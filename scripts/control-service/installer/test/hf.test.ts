@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { HfCli } from "../hf.js";
-import type { ProcessAdapter, ProcessRequest } from "../process.js";
+import { HfCli, HfCommandFailure } from "../hf.js";
+import {
+  type ProcessAdapter,
+  ProcessFailure,
+  type ProcessRequest,
+} from "../process.js";
 
 class QueueProcess implements ProcessAdapter {
   readonly requests: ProcessRequest[] = [];
@@ -47,6 +51,13 @@ describe("Hugging Face CLI adapter", () => {
       "token-placeholder",
     );
     expect(processAdapter.requests[0]?.args).toEqual(["auth", "token"]);
+  });
+
+  it("propagates only a sanitized provider failure category", async () => {
+    const hf = new HfCli(
+      new QueueProcess([new ProcessFailure("nonzero", "forbidden")]),
+    );
+    await expect(hf.version()).rejects.toEqual(new HfCommandFailure("forbidden"));
   });
 
   it("creates protected rather than private Spaces without exist-ok", async () => {

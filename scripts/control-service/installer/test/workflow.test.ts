@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HfAdapter } from "../hf.js";
+import { type HfAdapter, HfCommandFailure } from "../hf.js";
 import type { HttpAdapter } from "../http.js";
 import type { IdentityAdapter } from "../identity.js";
 import { expectedVariables, type Principal, type RemoteState } from "../model.js";
@@ -139,6 +139,7 @@ class FakeHf implements HfAdapter {
   readonly temporaryPaths: string[] = [];
   readonly uploadedBundleDirectories: string[] = [];
   failCreateBucket = false;
+  createBucketFailureCategory: "forbidden" | null = null;
   failCreateBucketResponse = false;
   failCreateSpaceResponse = false;
   failCreateWithUnmarkedRace = false;
@@ -220,6 +221,9 @@ class FakeHf implements HfAdapter {
 
   async createBucket(bucketId: string): Promise<void> {
     this.calls.push("createBucket");
+    if (this.createBucketFailureCategory) {
+      throw new HfCommandFailure(this.createBucketFailureCategory);
+    }
     if (this.failCreateBucket) throw new Error("provider detail");
     this.state.bucket = { id: bucketId, private: true };
     if (this.failCreateBucketResponse) {
@@ -712,6 +716,16 @@ describe("installer workflows", () => {
     expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
     expect(setupResult.hf.calls).not.toContain("uploadMirror");
     expect(setupResult.hf.calls).not.toContain("setSecrets");
+  });
+
+  it("reports only a sanitized Bucket provider failure category", async () => {
+    const setupResult = await setup();
+    setupResult.hf.createBucketFailureCategory = "forbidden";
+    await expect(
+      applyInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+    ).rejects.toThrow("provider category: forbidden");
+    expect(setupResult.hf.state.bucket).toBeNull();
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
   });
 
   it("requires the exact local Bucket proof receipt before completion", async () => {

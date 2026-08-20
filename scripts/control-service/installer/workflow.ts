@@ -2,7 +2,7 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { canonicalJson } from "./canonical.js";
-import type { HfAdapter } from "./hf.js";
+import { type HfAdapter, HfCommandFailure } from "./hf.js";
 import type { HttpAdapter } from "./http.js";
 import type { IdentityAdapter } from "./identity.js";
 import {
@@ -39,6 +39,12 @@ export interface InstallerSecretInput {
 }
 
 class InstallerInputError extends Error {}
+
+function providerFailureSuffix(error: unknown): string {
+  return error instanceof HfCommandFailure
+    ? `; provider category: ${error.category}`
+    : "";
+}
 
 function sortedStrings(values: readonly string[]): string[] {
   return [...values].sort((left, right) => left.localeCompare(right, "en"));
@@ -1128,7 +1134,7 @@ async function bootstrapFreshInstall(
       }
       if (error instanceof InstallerInputError) throw error;
       throw new Error(
-        "bootstrap failed after remote mutation began; the Space was paused when possible; inspect remote diagnostics",
+        `bootstrap failed after remote mutation began; the Space was paused when possible; inspect remote diagnostics${providerFailureSuffix(error)}`,
       );
     }
     throw new Error("bootstrap failed before remote mutation began");
@@ -1372,7 +1378,7 @@ async function completeInstall(
       }
       if (error instanceof InstallerInputError) throw error;
       throw new Error(
-        "installation failed after remote mutation began; the Space was paused when possible; inspect remote diagnostics",
+        `installation failed after remote mutation began; the Space was paused when possible; inspect remote diagnostics${providerFailureSuffix(error)}`,
       );
     }
     throw new Error("installation failed before remote mutation began");

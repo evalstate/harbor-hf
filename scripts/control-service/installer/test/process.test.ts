@@ -45,6 +45,23 @@ describe("bounded JSON process adapter", () => {
     );
   });
 
+  it("classifies provider status without retaining stderr", async () => {
+    try {
+      await adapter.runJson(
+        request(
+          'process.stderr.write("403 Forbidden: private detail");process.exit(1)',
+        ),
+      );
+      throw new Error("expected process failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ProcessFailure);
+      expect((error as ProcessFailure).providerCategory).toBe("forbidden");
+      expect(error instanceof Error ? error.message : "").not.toContain(
+        "private detail",
+      );
+    }
+  });
+
   it("bounds stdout and stderr", async () => {
     expect(
       await reason(

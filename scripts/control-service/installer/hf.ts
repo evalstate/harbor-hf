@@ -1,9 +1,19 @@
 import type { BucketState, RemoteState, SpaceState } from "./model.js";
 import { isSupportedHfCliVersion, validateOrigin } from "./model.js";
-import type { ProcessAdapter } from "./process.js";
+import {
+  type ProcessAdapter,
+  ProcessFailure,
+  type ProviderFailureCategory,
+} from "./process.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_OUTPUT_BYTES = 4 * 1024 * 1024;
+
+export class HfCommandFailure extends Error {
+  constructor(readonly category: ProviderFailureCategory) {
+    super(`Hugging Face command failed: ${category}`);
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -245,13 +255,20 @@ export class HfCli implements HfAdapter {
     args: readonly string[],
     options: { timeoutMs?: number; maxBytes?: number } = {},
   ): Promise<unknown> {
-    return await this.processAdapter.runJson({
-      command: "hf",
-      args: [...args, "--format", "json"],
-      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      maxStdoutBytes: options.maxBytes ?? DEFAULT_OUTPUT_BYTES,
-      maxStderrBytes: 256 * 1024,
-    });
+    try {
+      return await this.processAdapter.runJson({
+        command: "hf",
+        args: [...args, "--format", "json"],
+        timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        maxStdoutBytes: options.maxBytes ?? DEFAULT_OUTPUT_BYTES,
+        maxStderrBytes: 256 * 1024,
+      });
+    } catch (error) {
+      if (error instanceof ProcessFailure && error.providerCategory) {
+        throw new HfCommandFailure(error.providerCategory);
+      }
+      throw error;
+    }
   }
 
   async version(): Promise<string> {

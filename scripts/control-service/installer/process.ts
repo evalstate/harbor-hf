@@ -37,8 +37,31 @@ export type ProcessFailureReason =
   | "nonzero"
   | "malformed_json";
 
+export type ProviderFailureCategory =
+  | "unauthorized"
+  | "forbidden"
+  | "conflict"
+  | "rate_limited"
+  | "client_error"
+  | "server_error"
+  | "quota_or_limit";
+
+function providerFailureCategory(stderr: string): ProviderFailureCategory | undefined {
+  if (/\b401\b/.test(stderr)) return "unauthorized";
+  if (/\b403\b/.test(stderr)) return "forbidden";
+  if (/\b409\b/.test(stderr)) return "conflict";
+  if (/\b429\b/.test(stderr)) return "rate_limited";
+  if (/\b(?:400|422)\b/.test(stderr)) return "client_error";
+  if (/\b5[0-9]{2}\b/.test(stderr)) return "server_error";
+  if (/\b(?:quota|limit|maximum)\b/i.test(stderr)) return "quota_or_limit";
+  return undefined;
+}
+
 export class ProcessFailure extends Error {
-  constructor(readonly reason: ProcessFailureReason) {
+  constructor(
+    readonly reason: ProcessFailureReason,
+    readonly providerCategory?: ProviderFailureCategory,
+  ) {
     super(`process failed: ${reason}`);
     this.name = "ProcessFailure";
   }
@@ -91,7 +114,12 @@ export class BoundedJsonProcess implements ProcessAdapter {
       child.once("close", (code) => {
         if (settled) return;
         if (code !== 0) {
-          finish(new ProcessFailure("nonzero"));
+          finish(
+            new ProcessFailure(
+              "nonzero",
+              providerFailureCategory(Buffer.concat(stderr).toString("utf8")),
+            ),
+          );
           return;
         }
         try {
