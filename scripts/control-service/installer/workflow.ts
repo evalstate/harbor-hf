@@ -782,6 +782,31 @@ async function secretValues(
   return values;
 }
 
+async function assertControlCredentialCanReadBucket(
+  plan: InstallPlan,
+  secrets: Record<string, string>,
+  dependencies: InstallerDependencies,
+): Promise<void> {
+  const controlCredential = secrets.HF_TOKEN;
+  if (!controlCredential) {
+    throw new InstallerInputError("control credential is missing");
+  }
+  const url = new URL(
+    `/api/buckets/${plan.targets.bucket_id}/tree/control/schema=v1`,
+    "https://huggingface.co",
+  );
+  url.searchParams.set("recursive", "true");
+  url.searchParams.set("expand", "false");
+  const response = await dependencies.http.getJson(url, {
+    bearer: controlCredential,
+    timeoutMs: 30_000,
+    maxBytes: 256 * 1024,
+  });
+  if (response.status !== 200 || !Array.isArray(response.body)) {
+    throw new InstallerInputError("control credential cannot read the artifact Bucket");
+  }
+}
+
 export interface VerificationResult {
   production_ready: false;
   anonymous_live: "passed";
@@ -1196,6 +1221,7 @@ async function completeInstall(
   observed: RemoteState,
   freshContinuation: boolean,
   variableTransition: boolean,
+  replaceCredentials: boolean,
   dependencies: InstallerDependencies,
 ): Promise<InstalledResult> {
   if (!observed.space) throw new Error("completion Space is missing");
@@ -1293,12 +1319,13 @@ async function completeInstall(
       const missingSecrets = SECRET_NAMES.filter(
         (name) => !reattested.space?.secretNames.includes(name),
       );
-      if (missingSecrets.length > 0) {
+      if (missingSecrets.length > 0 || replaceCredentials) {
         const secrets = await secretValues(
           environment,
           SECRET_NAMES,
           dependencies.secretInput,
         );
+        await assertControlCredentialCanReadBucket(plan, secrets, dependencies);
         const secretsFile = await writePrivateEnvironmentFile(
           tempDirectory,
           "secrets.env",
@@ -1334,12 +1361,13 @@ async function completeInstall(
       if (freshContinuation && missingSecrets.length > 0) {
         throw new Error("installed bootstrap is missing credential names");
       }
-      if (missingSecrets.length > 0 || planWasMissingSecrets) {
+      if (missingSecrets.length > 0 || planWasMissingSecrets || replaceCredentials) {
         const secrets = await secretValues(
           environment,
           SECRET_NAMES,
           dependencies.secretInput,
         );
+        await assertControlCredentialCanReadBucket(plan, secrets, dependencies);
         const secretsFile = await writePrivateEnvironmentFile(
           tempDirectory,
           "secrets.env",
@@ -1436,6 +1464,7 @@ export async function applyInstall(
   input: {
     planPath: string;
     bootstrapReceipt?: BootstrapReceipt;
+    replaceCredentials?: boolean;
     persistBootstrapReceipt?: (receipt: BootstrapReceipt) => Promise<void>;
   },
   dependencies: InstallerDependencies,
@@ -1549,6 +1578,7 @@ export async function applyInstall(
     observed,
     freshContinuation,
     variableTransition,
+    input.replaceCredentials ?? false,
     dependencies,
   );
 }

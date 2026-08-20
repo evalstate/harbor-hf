@@ -59,6 +59,22 @@ export function parseSavedPlanOptions(
   };
 }
 
+export function parseApplyOptions(
+  args: readonly string[],
+): { space: string; stateDirectory?: string; replaceCredentials: boolean } | "help" {
+  if (args.includes("--help")) return "help";
+  const replacementFlags = args.filter((arg) => arg === "--replace-credentials");
+  if (replacementFlags.length > 1) throw new Error("invalid command arguments");
+  const saved = parseSavedPlanOptions(
+    args.filter((arg) => arg !== "--replace-credentials"),
+  );
+  if (saved === "help") return saved;
+  return {
+    ...saved,
+    replaceCredentials: replacementFlags.length === 1,
+  };
+}
+
 export function formatPlanOutput(
   plan: InstallPlan,
   customStateDirectory = false,

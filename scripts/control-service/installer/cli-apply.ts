@@ -2,7 +2,7 @@ import {
   cliMain,
   defaultDependencies,
   formatApplyOutput,
-  parseSavedPlanOptions,
+  parseApplyOptions,
 } from "./cli.js";
 import {
   findCurrentInstallPlanPath,
@@ -14,10 +14,10 @@ import {
 import { applyInstall } from "./workflow.js";
 
 const usage =
-  "Usage: npm run install:apply -- --space <namespace>/<space> [--state-dir <dir>]\n";
+  "Usage: npm run install:apply -- --space <namespace>/<space> [--state-dir <dir>] [--replace-credentials]\n";
 
 await cliMain(async () => {
-  const options = parseSavedPlanOptions(process.argv.slice(2));
+  const options = parseApplyOptions(process.argv.slice(2));
   if (options === "help") {
     process.stdout.write(usage);
     return;
@@ -33,6 +33,7 @@ await cliMain(async () => {
       {
         planPath,
         ...(bootstrapReceipt ? { bootstrapReceipt } : {}),
+        replaceCredentials: options.replaceCredentials,
         persistBootstrapReceipt: async (receipt) =>
           await writeBootstrapReceipt(planPath, receipt),
       },

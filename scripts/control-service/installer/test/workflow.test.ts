@@ -89,6 +89,7 @@ class FakeHttp implements HttpAdapter {
   readonly requests: { path: string; bearer?: string }[] = [];
   readyStatus = "ready";
   systemIntegrityError: string | null = null;
+  controlCredentialStatus = 200;
 
   async getJson(
     url: URL,
@@ -123,6 +124,14 @@ class FakeHttp implements HttpAdapter {
             operator_secrets: 2,
           },
         },
+      };
+    }
+    if (
+      url.pathname === "/api/buckets/example/control-artifacts/tree/control/schema=v1"
+    ) {
+      return {
+        status: this.controlCredentialStatus,
+        body: this.controlCredentialStatus === 200 ? [] : { error: "missing" },
       };
     }
     return { status: 404, body: { status: "missing" } };
@@ -1015,6 +1024,51 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls.filter((call) => call === "setSecrets")).toHaveLength(
       1,
     );
+  });
+
+  it("rejects a control credential that cannot read the artifact Bucket", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    setupResult.http.controlCredentialStatus = 404;
+
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "control credential cannot read the artifact Bucket",
+    );
+    expect(setupResult.hf.calls).not.toContain("setSecrets");
+    expect(setupResult.hf.state.space?.secretNames).toEqual([]);
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+  });
+
+  it("explicitly replaces complete credentials after preflight", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    setupResult.http.readyStatus = "rebuilding";
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "after remote mutation began",
+    );
+    setupResult.http.readyStatus = "ready";
+    setupResult.dependencies.environment = {
+      HARBOR_HF_INSTALL_CONTROL_SECRET: "replacement-control",
+      HARBOR_HF_INSTALL_INFERENCE_SECRET: "replacement-inference",
+    };
+
+    await expect(
+      applyInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          replaceCredentials: true,
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toMatchObject({ status: "installed" });
+    expect(setupResult.hf.calls.filter((call) => call === "setSecrets")).toHaveLength(
+      2,
+    );
+    expect(setupResult.http.requests).toContainEqual({
+      path: "/api/buckets/example/control-artifacts/tree/control/schema=v1",
+      bearer: "replacement-control",
+    });
   });
 
   it("returns failed verification to source-staged credential recovery", async () => {

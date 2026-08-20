@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { formatApplyOutput, formatPlanOutput, parseSavedPlanOptions } from "../cli.js";
+import {
+  formatApplyOutput,
+  formatPlanOutput,
+  parseApplyOptions,
+  parseSavedPlanOptions,
+} from "../cli.js";
 import { expectedVariables, type InstallPlan, manifestDigest } from "../model.js";
 
 function plan(): InstallPlan {
@@ -72,6 +77,30 @@ describe("installer CLI contract", () => {
         "invalid command arguments",
       );
     }
+  });
+
+  it("requires an explicit flag to replace stored credentials", () => {
+    expect(
+      parseApplyOptions(["--space", "example/control", "--replace-credentials"]),
+    ).toEqual({
+      space: "example/control",
+      replaceCredentials: true,
+    });
+    expect(parseApplyOptions(["--space", "example/control"])).toEqual({
+      space: "example/control",
+      replaceCredentials: false,
+    });
+    expect(() =>
+      parseApplyOptions([
+        "--space",
+        "example/control",
+        "--replace-credentials",
+        "--replace-credentials",
+      ]),
+    ).toThrow("invalid command arguments");
+    expect(() =>
+      parseSavedPlanOptions(["--space", "example/control", "--replace-credentials"]),
+    ).toThrow("invalid command arguments");
   });
 
   it("prints a path-free digest-free plan summary and next command", () => {
