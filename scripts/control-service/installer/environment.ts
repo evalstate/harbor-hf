@@ -1,5 +1,6 @@
 const ALLOWED_CHILD_ENVIRONMENT = [
   "HOME",
+  "HF_DEBUG",
   "HF_HOME",
   "LANG",
   "LC_ALL",
