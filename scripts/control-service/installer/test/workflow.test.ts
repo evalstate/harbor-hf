@@ -138,11 +138,13 @@ class FakeHf implements HfAdapter {
   readonly calls: string[] = [];
   readonly temporaryPaths: string[] = [];
   readonly uploadedBundleDirectories: string[] = [];
+  readonly secretWriteNames: string[][] = [];
   failCreateBucket = false;
   createBucketFailureCategory: "forbidden" | null = null;
   failCreateBucketResponse = false;
   failCreateSpaceResponse = false;
   failCreateWithUnmarkedRace = false;
+  failSetSecretsResponse = false;
   failSetSecretsPartially = false;
   failSetVariablesPartially = false;
   failSetVariablesAfterUpload = false;
@@ -260,6 +262,7 @@ class FakeHf implements HfAdapter {
     this.temporaryPaths.push(secretsFile);
     if (!this.state.space) throw new Error("missing Space");
     const values = parseEnvironmentFile(await readFile(secretsFile, "utf8"));
+    this.secretWriteNames.push(Object.keys(values).sort());
     if (this.failSetSecretsPartially) {
       this.state.space.secretNames = [
         ...new Set([
@@ -274,6 +277,7 @@ class FakeHf implements HfAdapter {
       ...new Set([...this.state.space.secretNames, ...Object.keys(values)]),
     ].sort();
     this.state.space.runtimeStage = "BUILDING";
+    if (this.failSetSecretsResponse) throw new Error("lost secret write response");
   }
 
   async setProtected(): Promise<void> {
@@ -972,10 +976,45 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls.filter((call) => call === "setSecrets")).toHaveLength(
       2,
     );
+    expect(setupResult.hf.secretWriteNames).toEqual([
+      ["HF_INFERENCE_TOKEN", "HF_TOKEN"],
+      ["HF_INFERENCE_TOKEN", "HF_TOKEN"],
+    ]);
     expect(setupResult.hf.state.space?.secretNames).toEqual([
       "HF_INFERENCE_TOKEN",
       "HF_TOKEN",
     ]);
+  });
+
+  it("adopts complete credentials after a lost secret write response", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    setupResult.hf.failSetSecretsResponse = true;
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "after remote mutation began",
+    );
+    expect(setupResult.hf.state.space?.variables.HARBOR_HF_INSTALL_PHASE).toBe(
+      "source_staged",
+    );
+    expect(setupResult.hf.state.space?.secretNames).toEqual([
+      "HF_INFERENCE_TOKEN",
+      "HF_TOKEN",
+    ]);
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+
+    setupResult.hf.failSetSecretsResponse = false;
+    setupResult.dependencies.environment = {};
+    setupResult.dependencies.secretInput = {
+      async read() {
+        throw new Error("complete credentials must not prompt");
+      },
+    };
+    await expect(complete(setupResult, bootstrapResult.receipt)).resolves.toMatchObject(
+      { status: "installed" },
+    );
+    expect(setupResult.hf.calls.filter((call) => call === "setSecrets")).toHaveLength(
+      1,
+    );
   });
 
   it("returns failed verification to source-staged credential recovery", async () => {
@@ -995,7 +1034,7 @@ describe("installer workflows", () => {
       { status: "installed" },
     );
     expect(setupResult.hf.calls.filter((call) => call === "setSecrets")).toHaveLength(
-      2,
+      1,
     );
   });
 

@@ -1282,11 +1282,6 @@ async function completeInstall(
         uploadSha,
       });
 
-      const secrets = await secretValues(
-        environment,
-        SECRET_NAMES,
-        dependencies.secretInput,
-      );
       const reattested = await observePlan(plan, dependencies);
       assertBootstrapPhase(plan, reattested, "source_staged", {
         requireBucket: true,
@@ -1295,20 +1290,38 @@ async function completeInstall(
         allowExpectedSecretSubset: true,
         uploadSha,
       });
-      const secretsFile = await writePrivateEnvironmentFile(
-        tempDirectory,
-        "secrets.env",
-        secrets,
+      const missingSecrets = SECRET_NAMES.filter(
+        (name) => !reattested.space?.secretNames.includes(name),
       );
-      await dependencies.hf.setSecrets(plan.targets.space_id, secretsFile);
-      await dependencies.hf.pause(plan.targets.space_id);
-      current = await observePlan(plan, dependencies);
-      assertBootstrapPhase(plan, current, "source_staged", {
-        requireBucket: true,
-        requirePaused: true,
-        requireAllSecrets: true,
-        uploadSha,
-      });
+      if (missingSecrets.length > 0) {
+        const secrets = await secretValues(
+          environment,
+          SECRET_NAMES,
+          dependencies.secretInput,
+        );
+        const secretsFile = await writePrivateEnvironmentFile(
+          tempDirectory,
+          "secrets.env",
+          secrets,
+        );
+        await dependencies.hf.setSecrets(plan.targets.space_id, secretsFile);
+        await dependencies.hf.pause(plan.targets.space_id);
+        current = await observePlan(plan, dependencies);
+        assertBootstrapPhase(plan, current, "source_staged", {
+          requireBucket: true,
+          requirePaused: true,
+          requireAllSecrets: true,
+          uploadSha,
+        });
+      } else {
+        assertBootstrapPhase(plan, reattested, "source_staged", {
+          requireBucket: true,
+          requirePaused: true,
+          requireAllSecrets: true,
+          uploadSha,
+        });
+        current = reattested;
+      }
     } else {
       const missingSecrets = SECRET_NAMES.filter(
         (name) => !current.space?.secretNames.includes(name),
