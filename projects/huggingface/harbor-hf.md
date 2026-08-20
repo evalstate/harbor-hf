@@ -26,6 +26,7 @@ Installer empty-bootstrap reset amendment approved at: 2026-08-20T15:37:03Z
 Installer source-staged retry amendment approved at: 2026-08-20T17:29:22Z
 Installer bounded-completion amendment approved at: 2026-08-20T17:38:24Z
 Installer activation-command amendment approved at: 2026-08-20T19:07:58Z
+Installer runbook amendment approved: 2026-08-19
 
 ### Scope
 
@@ -51,6 +52,7 @@ Installer activation-command amendment approved at: 2026-08-20T19:07:58Z
 - Complete one bounded source-staged retry after the operator installed both expected credential names interactively.
 - Diagnose and complete the operator-selected installer test bootstrap autonomously within its existing two-resource, free-hardware boundary.
 - Add guarded installer commands for canary activation, production promotion, and emergency write disablement.
+- Expand the README with an agent-oriented hosted-installation runbook and execution model that distinguishes the local npm installer, local Python operator CLI, hosted control service, reconciler, and remote workers.
 
 ### Limits
 
@@ -80,6 +82,7 @@ Installer activation-command amendment approved at: 2026-08-20T19:07:58Z
 - Limit the source-staged retry to adopting the already-present expected credential names without reading or rewriting values, re-uploading the exact saved source, setting the installed phase, restarting on free hardware, and running verification with writes disabled. Record only redacted command stages, pause on failure, create no resources, use no paid hardware, and do not push or open a pull request. Stop after success or the first failure.
 - Limit autonomous completion to the selected test Space and its existing private Bucket on `cpu-basic`, using the active local write-capable credential and the two already-installed expected secret names. Allow bounded status and log probes, exact-source uploads, managed-variable transitions, restarts, pauses, verification, and implementation fixes required to reach a verified installed state with writes disabled. Do not read, copy, replace, or expose credential values; create no additional resources; use no paid hardware; mutate no unrelated resource; and do not push or open a pull request.
 - Limit the activation-command amendment to implementation, tests, and documentation. Require exact installed bindings, authenticated system verification, explicit target confirmation, disabled-to-canary staging, evidence-gated canary-to-enabled promotion, explicit paid-hardware approval, fail-closed rollback, and emergency return to disabled writes. Do not activate or promote a hosted Space, change remote hardware, incur cost, move credentials, push, or open a pull request while implementing it.
+- Limit the installer-runbook amendment to public documentation and documentation checks. Use only placeholders, include explicit agent stop conditions, and do not run installer or hosted commands, handle credentials, mutate resources, spend, push, or open a pull request.
 
 ### Remaining gates
 
@@ -110,6 +113,7 @@ No project-scope amendment remains pending. Operational gates still apply:
 
 - At 2026-08-19T20:34:26Z, approved creating a local `<topic-branch>`, researching the permissions required by the local CLI control bearer token, correcting the README authentication instructions, and committing the authorization and documentation changes. No push, pull request, deployment, credential handling, paid resource, or runtime change is authorized.
 - At 2026-08-19T21:19:35Z, approved implementing deterministic npm plan, apply, and verify commands for a canonical protected control Space and private artifact Bucket, with exact release upload, disabled initial writes, safe secret handling, fail-closed adoption, focused tests, and terse README pointers. Running remote apply, creating or changing remote resources, handling real credentials, spending, pushing, and opening a pull request remain unauthorized.
+- Approved expanding the terse installer pointers into an agent-oriented high-level installation and execution-model runbook. This amendment is documentation-only and does not authorize running installer commands, hosted mutations, credentials, spending, push, or a pull request.
 
 ### 2026-08-20
 
