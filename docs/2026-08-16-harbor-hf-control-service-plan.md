@@ -433,6 +433,54 @@ worker retries the deterministic request, and reconciliation discovers a
 receipt that the API committed before a response was interrupted. The worker
 never receives `HF_TOKEN` or a writable canonical Bucket mount.
 
+An agent plugin in this repository must prove its own terminal state before it
+returns success to Harbor. The Pi plugin reads the captured `message_end`
+events, requires a final assistant event, and rejects a final
+`stopReason=error`. Earlier token use and an otherwise complete Harbor result do
+not make that trial successful.
+
+The plugin carries a safe, stable failure class through Harbor's existing
+`exception_info` field. The classes distinguish a transient provider failure,
+a provider policy failure, and another terminal provider failure. The plugin
+uses the trailing assistant error events so that a generic final error after an
+explicit `429` or `model_rate_limit` remains transient. Authentication, quota,
+and unavailable-model signals take policy precedence. A missing, malformed, or
+unknown final state fails closed as a non-retryable terminal failure. Public
+records and error messages do not include raw provider bodies, credentials, or
+private request data.
+
+The worker maps only the transient provider class to a retryable infrastructure
+outcome. Policy failures remain policy outcomes. Other terminal provider
+failures remain non-retryable agent outcomes. The existing physical-attempt
+receipt and `replacement_eligible` fields carry this decision, so no new public
+API or durable record version is needed. The locked launch policy remains the
+only authority for retry count, cost admission, and logical task selection.
+
+The provider repair is merged at worker revision
+`422cf445ce04cfc8f331ddeebfd88f6bc2c5eae9`. Its profile rollout adds new
+immutable records and leaves the historical canary and official five-trial
+profiles unchanged. The replacement profile family contains one trial-1 task.
+The diagnostic profile family contains the stable trial-1 projection of all 89
+source tasks in the official profile. Both deployment profiles pin the merged
+revision in the preparation command, execution command, `worker_revision`, and
+root bootstrap. Tests verify the bootstrap file hashes and canonical profile
+IDs. The replacement deployment accepts one task. The diagnostic deployment
+accepts 89 tasks at the approved concurrency of eight.
+
+The replacement and diagnostic launch policies require worker receipts, allow
+at most two preparation attempts and two infrastructure attempts, and publish
+as diagnostic evidence. Their reservations follow the existing per-action
+budget rules. Each policy also sets `max_campaign_ceiling_microusd`: 180,000,000
+for replacement and 300,000,000 for the diagnostic campaign.
+
+The service resolves the launch policy before it writes a campaign request or
+lock. It rejects a requested ceiling above the policy maximum before any durable
+campaign state or paid action exists. A requested ceiling at or below the
+maximum is stored unchanged in the request and lock and remains the runtime
+cumulative budget for reservations, observed spend, retries, and cleanup. The
+maximum is optional only so historical profile objects remain readable. The two
+new paid policies always include it, and no other field can override it.
+
 Completed, invalid, semantic, refusal, verifier, agent, and benchmark-timeout
 outcomes are terminal according to the locked policy. Only a proven retryable
 infrastructure outcome may receive a new physical attempt. A replacement never
@@ -620,6 +668,11 @@ coordination Dataset. Historical audit tools may continue to read it.
 
 - Change controller and wave workers to report physical attempt receipts rather
   than shared Git events.
+- Require each in-repository agent plugin to prove its final event before a
+  worker can report a complete attempt.
+- Carry stable provider failure classes through Harbor's existing
+  `exception_info` field and map only explicit transient failures to bounded
+  replacement.
 - Add Bucket discovery when callbacks are missed.
 - Add automatic one-task and multi-task infrastructure repair.
 - Preserve the independent endpoint watchdog.
@@ -656,6 +709,11 @@ The implementation is ready only when all of these pass:
 - A controller restart adopts Jobs and endpoints by deterministic action ID.
 - A representative 89-task campaign preserves every complete task after one
   injected sandbox infrastructure failure and reruns only the missing task.
+- A final Pi provider error cannot become a complete attempt because earlier
+  turns used tokens or Harbor wrote an exception-free result.
+- A trailing zero-token `429` followed by a generic provider error is a bounded
+  retryable infrastructure failure; policy and unknown terminal provider
+  failures are not automatically retried.
 - A semantic zero, refusal, benchmark timeout, and verifier failure remain
   terminal.
 - Publication failure retries without changing campaign or task state.
