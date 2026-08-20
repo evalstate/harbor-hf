@@ -7,13 +7,12 @@ import {
 import {
   currentInstallPlanPath,
   installerStateRoot,
-  readBootstrapReceipt,
   withInstallerStateLock,
 } from "./state.js";
-import { activateInstall } from "./workflow.js";
+import { disableInstall } from "./workflow.js";
 
 const usage =
-  "Usage: npm run install:activate -- --space <namespace>/<space> --confirm-space <namespace>/<space> [--state-dir <dir>]\n";
+  "Usage: npm run install:disable -- --space <namespace>/<space> --confirm-space <namespace>/<space> [--state-dir <dir>]\n";
 
 await cliMain(async () => {
   const options = parseConfirmationOptions(process.argv.slice(2));
@@ -24,13 +23,8 @@ await cliMain(async () => {
   const stateRoot = installerStateRoot(options.stateDirectory);
   await withInstallerStateLock(options.space, stateRoot, async () => {
     const planPath = await currentInstallPlanPath(options.space, stateRoot);
-    const receipt = await readBootstrapReceipt(planPath);
-    const result = await activateInstall(
-      {
-        planPath,
-        ...(receipt ? { bootstrapReceipt: receipt } : {}),
-        confirmSpace: options.confirmSpace,
-      },
+    const result = await disableInstall(
+      { planPath, confirmSpace: options.confirmSpace },
       defaultDependencies(),
     );
     process.stdout.write(formatActivationOutput(options.space, result));

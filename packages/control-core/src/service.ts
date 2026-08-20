@@ -253,9 +253,6 @@ export class ControlService {
     readonly store: ImmutableObjectStore,
     readonly projection: Projection,
     builtInProfiles: readonly LoadedProfile[],
-    private readonly options: {
-      campaignProfilesAllowed?: (profiles: readonly ResolvedProfile[]) => boolean;
-    } = {},
     readonly events = new EventBus(),
     readonly clock: Clock = systemClock,
   ) {
@@ -796,9 +793,6 @@ export class ControlService {
     if (existingLock) this.assertMatchingSubmission(existingLock, input);
 
     const profiles = existingLock?.profiles ?? this.resolver.resolve(input);
-    if (this.options.campaignProfilesAllowed?.(profiles) === false) {
-      throw new PolicyError("campaign profiles are not allowed in the current mode");
-    }
     const deployment = profileSpec<DeploymentProfileSpec>(profiles, "deployment");
     if (deployment.route !== "hf_job")
       throw new PolicyError("imported deployment profiles cannot launch campaigns");

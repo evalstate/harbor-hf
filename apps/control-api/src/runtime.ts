@@ -5,7 +5,6 @@ import {
   ControlService,
   FilesystemObjectStore,
   type ImmutableObjectStore,
-  type LoadedProfile,
   loadBuiltInProfiles,
   Projection,
   Reconciler,
@@ -34,49 +33,6 @@ export interface Runtime {
   close(): Promise<void>;
 }
 
-function builtInProfileId(
-  profiles: readonly LoadedProfile[],
-  kind: LoadedProfile["profile"]["profile_kind"],
-  name: string,
-): string {
-  const matches = profiles.filter(
-    (item) => item.profile.profile_kind === kind && item.profile.name === name,
-  );
-  if (matches.length !== 1) {
-    throw new Error(`expected one built-in ${kind} canary profile`);
-  }
-  return (matches[0] as LoadedProfile).profile_id;
-}
-
-function canaryProfilesAllowed(
-  profiles: readonly LoadedProfile[],
-): (resolved: readonly { kind: string; profile_id: string }[]) => boolean {
-  const required = new Map([
-    ["benchmark", builtInProfileId(profiles, "benchmark", "control-smoke")],
-    ["model", builtInProfileId(profiles, "model", "control-smoke")],
-    ["harness", builtInProfileId(profiles, "harness", "control-smoke")],
-    ["launch_policy", builtInProfileId(profiles, "launch_policy", "control-smoke")],
-  ]);
-  const deployments = new Set([
-    builtInProfileId(profiles, "deployment", "hf-cpu-smoke"),
-    builtInProfileId(profiles, "deployment", "hf-cpu-sandbox-smoke"),
-  ]);
-  return (resolved) => {
-    if (resolved.length !== 5) return false;
-    for (const [kind, profileId] of required) {
-      if (
-        !resolved.some(
-          (profile) => profile.kind === kind && profile.profile_id === profileId,
-        )
-      )
-        return false;
-    }
-    return resolved.some(
-      (profile) => profile.kind === "deployment" && deployments.has(profile.profile_id),
-    );
-  };
-}
-
 export async function createRuntime(config: AppConfig): Promise<Runtime> {
   if (config.store_mode === "filesystem" && !existsSync(config.bucket_root))
     throw new Error("filesystem object-store root is missing");
@@ -89,12 +45,7 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
       : new FilesystemObjectStore(config.bucket_root);
   const projection = await Projection.open(config.projection_path);
   const profiles = await loadBuiltInProfiles(config.profiles_root);
-  const canaryAllowed = canaryProfilesAllowed(profiles);
-  const service = new ControlService(config.namespace, store, projection, profiles, {
-    ...(config.write_mode === "canary"
-      ? { campaignProfilesAllowed: canaryAllowed }
-      : {}),
-  });
+  const service = new ControlService(config.namespace, store, projection, profiles);
   const authStore = await AuthStore.open(config.auth_path);
   const auth = new AuthenticationService(
     config.auth_mode,
@@ -119,14 +70,6 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
     observation_interval_ms: config.observe_interval_ms,
     worker_receipt_grace_ms: config.worker_receipt_grace_ms,
     batch_size: 16,
-    ...(config.write_mode === "canary"
-      ? {
-          campaign_allowed: async (campaignId: string) => {
-            const lock = await projection.campaignLock(campaignId);
-            return lock ? canaryAllowed(lock.profiles) : false;
-          },
-        }
-      : {}),
   });
   const abort = new AbortController();
   return {

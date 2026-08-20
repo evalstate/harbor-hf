@@ -54,9 +54,11 @@ agent. Detailed option syntax is available from:
 
 ```bash
 npm run install:plan -- --help
-npm run install:apply -- --help
+npm run install:provision -- --help
+npm run install:configure -- --help
 npm run install:verify -- --help
 npm run install:activate -- --help
+npm run install:disable -- --help
 ```
 
 ### Prerequisites and authorization
@@ -67,14 +69,15 @@ Before starting:
 2. Use Node.js `>=22.12.0`.
 3. Install Hugging Face CLI `>=1.23.0 <2.0.0`, authenticate it as the approved
    installer identity, and keep that exact CLI version and identity throughout
-   plan and apply.
+   plan, provision, and configure.
 4. Choose the explicit Space ID `<namespace>/<control-space>`. Never derive it
    from a URL. The default Bucket is
    `<namespace>/<control-space>-artifacts`; pass `--bucket` during planning only
    when a different approved canonical Bucket is required.
-5. Obtain explicit authorization before `install:apply`, credential transfer,
-   activation, hardware changes, or any other remote mutation. Planning reads
-   remote metadata but does not change remote resources.
+5. Obtain explicit authorization before `install:provision`,
+   `install:configure`, credential transfer, activation, hardware changes, or
+   any other remote mutation. Planning reads remote metadata but does not
+   change remote resources.
 6. Prepare two distinct, narrowly scoped service credentials for phase two:
    the control credential and the inference-only credential. Do not manually
    put either value in arguments, durable files, logs, plans, receipts, or
@@ -102,13 +105,13 @@ Review the reported Space, Bucket, access mode, `cpu-basic` hardware, disabled
 write mode, and proposed action before applying. Stop if any target or action
 is unexpected.
 
-### 2. Apply phase one
+### 2. Provision resources
 
 ```bash
-npm run install:apply -- --space '<namespace>/<control-space>'
+npm run install:provision -- --space '<namespace>/<control-space>'
 ```
 
-For a new installation, the first apply creates only:
+For a new installation, provision creates only:
 
 - the application-protected Docker Space on free `cpu-basic` hardware, stopped
   or paused with writes disabled;
@@ -116,16 +119,16 @@ For a new installation, the first apply creates only:
 - an owner-only local bootstrap receipt binding those exact resources.
 
 It does not upload source or request service credential values. Successful
-phase one reports `Bootstrap resources created`, `Secrets stored: no`, and
+provisioning reports `Provisioning verified`, `Secrets stored: no`, and
 `Source uploaded: no`.
 
-### 3. Apply phase two
+### 3. Configure the service
 
 After the exact source and destination of both credential transfers are
-approved, rerun the same command from an interactive terminal:
+approved, run configure from an interactive terminal:
 
 ```bash
-npm run install:apply -- --space '<namespace>/<control-space>'
+npm run install:configure -- --space '<namespace>/<control-space>'
 ```
 
 Phase two:
@@ -146,7 +149,7 @@ Phase two:
 
 On success it reports `Installation verified`, `Write mode: disabled`, and
 `Production ready: no`. A safely interrupted phase can normally be resumed by
-rerunning the same apply command with the same private state. Do not regenerate
+rerunning configure with the same private state. Do not regenerate
 the plan, replace credentials with `--replace-credentials`, or make manual
 provider changes merely to bypass a drift or safety error.
 
@@ -164,86 +167,40 @@ variables and secret names, runtime health, and disabled write mode.
 contract; require `authenticated_system: "passed"` before activation.
 Standalone verify reports the provider revision as platform-observed but does
 not attest that it equals the original upload SHA. Activation adds that
-stronger check against the SHA preserved by apply. Treat any failed check as a
+stronger check against the SHA preserved by configure. Treat any failed check as a
 stop condition; do not activate an unverified installation.
 
 Installations completed by an older installer may lack the upload-SHA
-attestation required by activation. Rerun `install:apply` once, then verify
+attestation required by activation. Rerun `install:configure` once, then verify
 again, to upload and attest the exact current plan.
 
-### 5. Enter canary mode
+### 5. Activate after operator inspection
 
-Activation uses an explicit operator bearer accepted by the installed control
-API. Install and configure the operator CLI as described below before entering
-canary mode.
-
-After authenticated verification, activate only the built-in control-smoke
-canary with an exact repeated target confirmation. Activation also requires an
-empty durable campaign projection and the exact upload-SHA receipt:
+Activation uses the same explicit operator bearer used for authenticated
+verification. It requires exact target confirmation, the saved upload
+attestation, an empty campaign projection, and unchanged inspected bindings:
 
 ```bash
 export HARBOR_HF_INSTALL_VERIFY_BEARER="$HARBOR_HF_CONTROL_BEARER_TOKEN"
 npm run install:activate -- \
   --space '<namespace>/<control-space>' \
-  --to canary \
   --confirm-space '<namespace>/<control-space>'
 ```
 
-This command verifies and enters canary mode; it does not itself submit the
-smoke campaign. Preserve a stable idempotency key and submit the only profile
-set admitted in canary mode:
+Activation pauses the Space, writes the complete enabled configuration,
+restarts it, and repeats exact source, resource, anonymous-health, and
+authenticated-system verification. It does not transfer credentials, run a
+benchmark, change hardware, or incur paid cost. On failure it restores disabled
+mode and verifies the Space is paused.
+
+Use the separate emergency command to disable writes and pause the Space. This
+path does not depend on a healthy control API:
 
 ```bash
-harbor-hf campaign submit \
-  --benchmark control-smoke \
-  --model control-smoke \
-  --harness control-smoke \
-  --deployment hf-cpu-smoke \
-  --launch-policy control-smoke \
-  --ceiling-microusd 0 \
-  --idempotency-key '<stable-control-smoke-key>' \
-  --yes
-```
-
-Record the returned campaign ID. The accepted response is not completion.
-Monitor the asynchronous campaign:
-
-```bash
-harbor-hf status
-harbor-hf campaign status '<campaign-id>'
-harbor-hf jobs
-harbor-hf endpoints
-harbor-hf results
-harbor-hf audit
-```
-
-Canary success requires all of the following:
-
-- system write mode remains `canary`, the projection is ready, and
-  `projection.integrity_error` is `null`;
-- campaign status is `completed`, every task is terminal,
-  `pending_actions` is `0`, and `cleanup_pending` is `false`;
-- `publication_status` is `published` and the immutable result appears in
-  `harbor-hf results`;
-- every managed endpoint, if present, has cleanup verified with zero ready
-  replicas;
-- observed and reserved spend remain within the zero-cost smoke ceiling.
-
-After preserving the canary evidence, return the installation to disabled and
-paused:
-
-```bash
-npm run install:activate -- \
+npm run install:disable -- \
   --space '<namespace>/<control-space>' \
-  --to disabled \
   --confirm-space '<namespace>/<control-space>'
 ```
-
-The same disabled transition is the emergency path and does not require a
-healthy control API.
-
-Production `enabled` promotion remains unavailable until durable canary
-evidence and separately approved paid always-on hardware are proven.
 
 ### Agent stop conditions
 
@@ -260,12 +217,12 @@ An automation agent must stop rather than improvise when:
   verification fails;
 - a campaign or action request has an ambiguous outcome; inspect durable
   campaign and audit state before deciding whether another request is safe;
-- the command requests manual deletion, paid hardware, production `enabled`
-  mode, or any resource outside the approved Space and Bucket.
+- the command requests manual deletion, paid hardware, an unapproved
+  activation, or any resource outside the approved Space and Bucket.
 
-If canary health is uncertain, use the emergency disabled transition shown
-above. It does not depend on a healthy control API and verifies that the Space
-ends disabled and paused.
+If enabled-service health is uncertain, use `install:disable`. It does not
+depend on a healthy control API and verifies that the Space ends disabled and
+paused.
 
 ## Install the operator CLI
 

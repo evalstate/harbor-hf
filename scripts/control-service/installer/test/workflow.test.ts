@@ -18,8 +18,11 @@ import type { SourceAdapter } from "../source.js";
 import {
   activateInstall,
   applyInstall,
+  configureInstall,
+  disableInstall,
   type InstallerDependencies,
   planInstall,
+  provisionInstall,
   verifyInstall,
 } from "../workflow.js";
 
@@ -96,7 +99,7 @@ class FakeHttp implements HttpAdapter {
   campaignItems: unknown[] = [];
 
   constructor(
-    private readonly currentWriteMode: () => "disabled" | "canary" | "enabled" = () =>
+    private readonly currentWriteMode: () => "disabled" | "enabled" | "enabled" = () =>
       "disabled",
   ) {}
 
@@ -366,7 +369,7 @@ async function setup(existingRevision?: string) {
   const identity = new FakeIdentity();
   const http = new FakeHttp(() => {
     const writeMode = hf.state.space?.variables.HARBOR_HF_WRITE_MODE;
-    return writeMode === "canary" || writeMode === "enabled" ? writeMode : "disabled";
+    return writeMode === "enabled" || writeMode === "enabled" ? writeMode : "disabled";
   });
   if (existingRevision) {
     hf.state = installedState(existingRevision, identity.principal);
@@ -477,7 +480,7 @@ function legacyInstalledState(revision: string, principal: Principal): RemoteSta
 }
 
 async function bootstrap(setupResult: Awaited<ReturnType<typeof setup>>) {
-  const result = await applyInstall(
+  const result = await provisionInstall(
     { planPath: setupResult.planPath },
     setupResult.dependencies,
   );
@@ -491,7 +494,7 @@ async function complete(
   setupResult: Awaited<ReturnType<typeof setup>>,
   receipt: Awaited<ReturnType<typeof bootstrap>>["receipt"],
 ) {
-  return await applyInstall(
+  return await configureInstall(
     {
       planPath: setupResult.planPath,
       bootstrapReceipt: receipt,
@@ -510,6 +513,29 @@ describe("installer workflows", () => {
     expect(first.planned.plan.install_id).toMatch(/^[a-f0-9]{64}$/);
     expect(second.planned.plan.install_id).toMatch(/^[a-f0-9]{64}$/);
     expect(first.planned.plan.install_id).not.toBe(second.planned.plan.install_id);
+  });
+
+  it("keeps provisioning and credential configuration as explicit boundaries", async () => {
+    const setupResult = await setup();
+    await expect(
+      configureInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+    ).rejects.toThrow("run install:provision");
+    expect(setupResult.hf.calls).not.toContain("createSpace");
+    expect(setupResult.hf.calls).not.toContain("createBucket");
+
+    const provisioned = await bootstrap(setupResult);
+    setupResult.hf.calls.length = 0;
+    await expect(
+      provisionInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: provisioned.receipt,
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toMatchObject({ status: "credentials_required" });
+    expect(setupResult.hf.calls).not.toContain("uploadMirror");
+    expect(setupResult.hf.calls).not.toContain("setSecrets");
   });
 
   it("plans and applies a fresh protected disabled-write installation", async () => {
@@ -566,7 +592,7 @@ describe("installer workflows", () => {
     }
   });
 
-  it("activates only a healthy authenticated installed Space into canary mode", async () => {
+  it("activates only a healthy authenticated installed Space into enabled mode", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     await complete(setupResult, bootstrapResult.receipt);
@@ -584,18 +610,17 @@ describe("installer workflows", () => {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
           confirmSpace: "example/control",
-          to: "canary",
         },
         setupResult.dependencies,
       ),
     ).resolves.toEqual({
       production_ready: false,
       space_url: ORIGIN,
-      write_mode: "canary",
+      write_mode: "enabled",
       runtime: "running",
       authenticated_system: "passed",
     });
-    expect(setupResult.hf.state.space?.variables.HARBOR_HF_WRITE_MODE).toBe("canary");
+    expect(setupResult.hf.state.space?.variables.HARBOR_HF_WRITE_MODE).toBe("enabled");
     expect(setupResult.hf.calls).toContain("restart");
     expect(setupResult.hf.calls).toContain("wait");
     expect(setupResult.hf.calls).not.toContain("setSecrets");
@@ -622,7 +647,6 @@ describe("installer workflows", () => {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
           confirmSpace: "example/control",
-          to: "canary",
         },
         setupResult.dependencies,
       ),
@@ -639,7 +663,6 @@ describe("installer workflows", () => {
         {
           planPath: setupResult.planPath,
           confirmSpace: "example/not-control",
-          to: "canary",
         },
         setupResult.dependencies,
       ),
@@ -647,7 +670,7 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls).toEqual([]);
   });
 
-  it("does not activate canary with an existing campaign projection", async () => {
+  it("does not activate enabled with an existing campaign projection", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     await complete(setupResult, bootstrapResult.receipt);
@@ -664,7 +687,6 @@ describe("installer workflows", () => {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
           confirmSpace: "example/control",
-          to: "canary",
         },
         setupResult.dependencies,
       ),
@@ -673,12 +695,12 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls).not.toContain("pause");
   });
 
-  it("disables an unhealthy already-running canary", async () => {
+  it("disables an unhealthy already-running enabled", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     await complete(setupResult, bootstrapResult.receipt);
     if (!setupResult.hf.state.space) throw new Error("test Space is missing");
-    setupResult.hf.state.space.variables.HARBOR_HF_WRITE_MODE = "canary";
+    setupResult.hf.state.space.variables.HARBOR_HF_WRITE_MODE = "enabled";
     setupResult.http.systemIntegrityError = "projection mismatch";
     setupResult.http.readyRequestCount = 0;
     setupResult.dependencies.environment = {
@@ -691,7 +713,6 @@ describe("installer workflows", () => {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
           confirmSpace: "example/control",
-          to: "canary",
         },
         setupResult.dependencies,
       ),
@@ -700,7 +721,7 @@ describe("installer workflows", () => {
     expect(setupResult.hf.state.space.runtimeStage).toBe("PAUSED");
   });
 
-  it("verifies disabled rollback after a failed canary restart", async () => {
+  it("verifies disabled rollback after a failed enabled restart", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     await complete(setupResult, bootstrapResult.receipt);
@@ -718,7 +739,6 @@ describe("installer workflows", () => {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
           confirmSpace: "example/control",
-          to: "canary",
         },
         setupResult.dependencies,
       ),
@@ -730,7 +750,7 @@ describe("installer workflows", () => {
     );
   });
 
-  it("disables and pauses canary mode without control API health", async () => {
+  it("disables and pauses legacy canary mode without control API health", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     await complete(setupResult, bootstrapResult.receipt);
@@ -741,12 +761,10 @@ describe("installer workflows", () => {
     setupResult.dependencies.environment = {};
 
     await expect(
-      activateInstall(
+      disableInstall(
         {
           planPath: setupResult.planPath,
-          bootstrapReceipt: bootstrapResult.receipt,
           confirmSpace: "example/control",
-          to: "disabled",
         },
         setupResult.dependencies,
       ),
@@ -769,30 +787,13 @@ describe("installer workflows", () => {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
           confirmSpace: "example/control",
-          to: "canary",
         },
         setupResult.dependencies,
       ),
     ).resolves.toMatchObject({
-      write_mode: "canary",
+      write_mode: "enabled",
       runtime: "running",
     });
-  });
-
-  it("rejects enabled promotion at the workflow boundary", async () => {
-    const setupResult = await setup();
-    setupResult.hf.calls.length = 0;
-    await expect(
-      activateInstall(
-        {
-          planPath: setupResult.planPath,
-          confirmSpace: "example/control",
-          to: "enabled" as "canary",
-        },
-        setupResult.dependencies,
-      ),
-    ).rejects.toThrow("durable canary evidence");
-    expect(setupResult.hf.calls).toEqual([]);
   });
 
   it("persists Bucket proof before returning the bootstrap result", async () => {

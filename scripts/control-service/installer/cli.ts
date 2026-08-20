@@ -63,7 +63,7 @@ export function parseSavedPlanOptions(
   };
 }
 
-export function parseApplyOptions(
+export function parseConfigureOptions(
   args: readonly string[],
 ): { space: string; stateDirectory?: string; replaceCredentials: boolean } | "help" {
   if (args.includes("--help")) return "help";
@@ -79,33 +79,22 @@ export function parseApplyOptions(
   };
 }
 
-export function parseActivationOptions(args: readonly string[]):
+export function parseConfirmationOptions(args: readonly string[]):
   | {
       space: string;
       confirmSpace: string;
-      to: "disabled" | "canary";
       stateDirectory?: string;
     }
   | "help" {
   const options = parseOptions(args, {
     space: { required: true },
-    to: { required: true },
     "confirm-space": { required: true },
     "state-dir": { required: false },
   });
   if (options === "help") return options;
-  if (options.to === "enabled") {
-    throw new Error(
-      "enabled promotion is unavailable: durable canary evidence and paid-hardware approval are not proven",
-    );
-  }
-  if (options.to !== "disabled" && options.to !== "canary") {
-    throw new Error("activation target must be disabled or canary");
-  }
   return {
     space: options.space as string,
     confirmSpace: options["confirm-space"] as string,
-    to: options.to,
     ...(options["state-dir"] ? { stateDirectory: options["state-dir"] as string } : {}),
   };
 }
@@ -124,6 +113,8 @@ export function formatPlanOutput(
         : observed.bucket
           ? "update installer-managed Space"
           : "update Space and create Bucket";
+  const nextCommand =
+    !observed.space || !observed.bucket ? "install:provision" : "install:configure";
   return [
     `Space:      ${plan.targets.space_id}`,
     `Bucket:     ${plan.targets.bucket_id}`,
@@ -135,35 +126,37 @@ export function formatPlanOutput(
     "Plan saved privately.",
     ...(!observed.space ? ["No service credentials are required for bootstrap."] : []),
     customStateDirectory
-      ? "Next: rerun install:apply with this Space and the same --state-dir."
-      : `Next: npm run install:apply -- --space ${plan.targets.space_id}`,
+      ? `Next: rerun ${nextCommand} with this Space and the same --state-dir.`
+      : `Next: npm run ${nextCommand} -- --space ${plan.targets.space_id}`,
     "",
   ].join("\n");
 }
 
-export function formatApplyOutput(
-  spaceId: string,
-  result: ApplyInstallResult,
+export function formatProvisionOutput(
+  result: Extract<ApplyInstallResult, { status: "credentials_required" }>,
   customStateDirectory = false,
 ): string {
-  if (result.status === "credentials_required") {
-    return [
-      "Bootstrap resources created.",
-      "",
-      `Space: ${result.space_id}`,
-      `Bucket: ${result.bucket_id}`,
-      "Runtime: paused",
-      "Write mode: disabled",
-      "Secrets stored: no",
-      "Source uploaded: no",
-      "",
-      "Create narrowly scoped control and inference-only tokens, then rerun:",
-      customStateDirectory
-        ? "npm run install:apply with this Space and the same --state-dir"
-        : `npm run install:apply -- --space ${spaceId}`,
-      "",
-    ].join("\n");
-  }
+  return [
+    "Provisioning verified.",
+    "",
+    `Space: ${result.space_id}`,
+    `Bucket: ${result.bucket_id}`,
+    "Runtime: paused",
+    "Write mode: disabled",
+    "Secrets stored: no",
+    "Source uploaded: no",
+    "",
+    customStateDirectory
+      ? "Next: rerun install:configure with this Space and the same --state-dir."
+      : `Next: npm run install:configure -- --space ${result.space_id}`,
+    "",
+  ].join("\n");
+}
+
+export function formatConfigureOutput(
+  spaceId: string,
+  result: Extract<ApplyInstallResult, { status: "installed" }>,
+): string {
   const verification = result.verification;
   return [
     "Installation verified.",
@@ -185,8 +178,8 @@ export function formatActivationOutput(
   result: ActivationResult,
 ): string {
   return [
-    result.write_mode === "canary"
-      ? "Canary activation verified."
+    result.write_mode === "enabled"
+      ? "Installation activated."
       : "Writes disabled and Space paused.",
     `Space: ${spaceId}`,
     `URL: ${result.space_url}`,
@@ -195,8 +188,8 @@ export function formatActivationOutput(
     `Write mode: ${result.write_mode}`,
     `Authenticated system: ${result.authenticated_system}`,
     "Production ready: no",
-    ...(result.write_mode === "canary"
-      ? ["", "Run only the built-in control smoke canary before promotion."]
+    ...(result.write_mode === "enabled"
+      ? ["", "Campaign submissions and reconciliation are enabled."]
       : []),
     "",
   ].join("\n");

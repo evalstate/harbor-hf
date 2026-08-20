@@ -91,60 +91,6 @@ async function putWorkerEvidence(
 }
 
 describe("control service", () => {
-  it("pages past denied actions without dispatching them", async () => {
-    const control = await createTestControl();
-    controls.push(control);
-    const intents = await Promise.all(
-      Array.from({ length: 17 }, async (_, index) => {
-        const intent = control.service.actionIntent(
-          `campaign-${index}`,
-          "campaign.cancel",
-          "campaign",
-          0,
-          {},
-          operator,
-        );
-        await control.service.writeAction(intent);
-        return intent;
-      }),
-    );
-    const ordered = await control.projection.pendingActions(17);
-    const deniedCampaigns = new Set(
-      ordered.slice(0, 16).map((intent) => intent.campaign_id),
-    );
-    const allowed = ordered[16];
-    if (!allowed) throw new Error("allowed test action is missing");
-    const external: ExternalActionPort = {
-      execute: vi.fn(async () => ({
-        outcome: "completed",
-        observed_state: "cancelled",
-      })),
-    };
-    const reconciler = new Reconciler(
-      control.service,
-      control.projection,
-      external,
-      new ResultPublisher(control.store, control.projection, control.service),
-      {
-        interval_ms: 100,
-        observation_interval_ms: 0,
-        batch_size: 16,
-        campaign_allowed: async (campaignId) => !deniedCampaigns.has(campaignId),
-      },
-    );
-
-    expect(await reconciler.tick()).toBe(1);
-    expect(external.execute).not.toHaveBeenCalled();
-    expect(await control.projection.action(allowed.action_id)).toMatchObject({
-      receipt_body: expect.any(String),
-    });
-    expect(await control.projection.pendingActions(17)).toEqual(
-      expect.arrayContaining(
-        intents.filter((intent) => intent.action_id !== allowed.action_id),
-      ),
-    );
-  });
-
   it("adopts idempotent submissions and completes a control smoke campaign", async () => {
     const control = await createTestControl();
     controls.push(control);

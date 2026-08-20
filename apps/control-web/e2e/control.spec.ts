@@ -6,7 +6,7 @@ const session = {
   actor: { username: "test-user", role: "operator", transport: "session" },
 };
 
-function system(writeMode: "disabled" | "canary" | "enabled" = "canary") {
+function system(writeMode: "disabled" | "enabled" = "enabled") {
   return {
     source_revision: "test-revision-0123456789abcdef",
     write_mode: writeMode,

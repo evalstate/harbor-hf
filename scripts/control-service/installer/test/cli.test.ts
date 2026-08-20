@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   formatActivationOutput,
-  formatApplyOutput,
+  formatConfigureOutput,
   formatPlanOutput,
-  parseActivationOptions,
-  parseApplyOptions,
+  formatProvisionOutput,
+  parseConfirmationOptions,
+  parseConfigureOptions,
   parseSavedPlanOptions,
 } from "../cli.js";
 import { expectedVariables, type InstallPlan, manifestDigest } from "../model.js";
@@ -83,17 +84,17 @@ describe("installer CLI contract", () => {
 
   it("requires an explicit flag to replace stored credentials", () => {
     expect(
-      parseApplyOptions(["--space", "example/control", "--replace-credentials"]),
+      parseConfigureOptions(["--space", "example/control", "--replace-credentials"]),
     ).toEqual({
       space: "example/control",
       replaceCredentials: true,
     });
-    expect(parseApplyOptions(["--space", "example/control"])).toEqual({
+    expect(parseConfigureOptions(["--space", "example/control"])).toEqual({
       space: "example/control",
       replaceCredentials: false,
     });
     expect(() =>
-      parseApplyOptions([
+      parseConfigureOptions([
         "--space",
         "example/control",
         "--replace-credentials",
@@ -105,43 +106,40 @@ describe("installer CLI contract", () => {
     ).toThrow("invalid command arguments");
   });
 
-  it("parses explicit canary activation and rejects enabled promotion", () => {
+  it("parses exact activation and disable confirmation", () => {
     expect(
-      parseActivationOptions([
+      parseConfirmationOptions([
         "--space",
         "example/control",
-        "--to",
-        "canary",
         "--confirm-space",
         "example/control",
       ]),
     ).toEqual({
       space: "example/control",
       confirmSpace: "example/control",
-      to: "canary",
     });
     expect(() =>
-      parseActivationOptions([
+      parseConfirmationOptions([
         "--space",
         "example/control",
         "--to",
-        "enabled",
+        "disabled",
         "--confirm-space",
         "example/control",
       ]),
-    ).toThrow("durable canary evidence");
+    ).toThrow("invalid command arguments");
   });
 
-  it("prints canary and emergency-disable activation results", () => {
+  it("prints activation and emergency-disable results", () => {
     expect(
       formatActivationOutput("example/control", {
         production_ready: false,
         space_url: "https://placeholder-control.hf.space",
-        write_mode: "canary",
+        write_mode: "enabled",
         runtime: "running",
         authenticated_system: "passed",
       }),
-    ).toContain("Run only the built-in control smoke canary");
+    ).toContain("Campaign submissions and reconciliation are enabled");
     expect(
       formatActivationOutput("example/control", {
         production_ready: false,
@@ -159,7 +157,9 @@ describe("installer CLI contract", () => {
     expect(output).toContain("Bucket:     example/control-artifacts");
     expect(output).toContain("Write mode: disabled");
     expect(output).toContain("No service credentials are required for bootstrap.");
-    expect(output).toContain("Next: npm run install:apply -- --space example/control");
+    expect(output).toContain(
+      "Next: npm run install:provision -- --space example/control",
+    );
     expect(output).not.toContain("sha256:");
     expect(output).not.toContain("/state-placeholder");
     expect(output).not.toContain("/repository-placeholder");
@@ -167,7 +167,7 @@ describe("installer CLI contract", () => {
   });
 
   it("keeps activation separate after a verified installation", () => {
-    const output = formatApplyOutput("example/control", {
+    const output = formatConfigureOutput("example/control", {
       status: "installed",
       verification: {
         production_ready: false,
@@ -186,7 +186,7 @@ describe("installer CLI contract", () => {
   });
 
   it("explains the successful credential-scoping bootstrap stop", () => {
-    const output = formatApplyOutput("example/control", {
+    const output = formatProvisionOutput({
       status: "credentials_required",
       production_ready: false,
       space_id: "example/control",
@@ -204,13 +204,12 @@ describe("installer CLI contract", () => {
         manifest_digest: `sha256:${"b".repeat(64)}`,
       },
     });
-    expect(output).toContain("Bootstrap resources created.");
+    expect(output).toContain("Provisioning verified.");
     expect(output).toContain("Secrets stored: no");
     expect(output).toContain("Source uploaded: no");
     expect(output).not.toContain("Installation verified.");
     expect(
-      formatApplyOutput(
-        "example/control",
+      formatProvisionOutput(
         {
           status: "credentials_required",
           production_ready: false,

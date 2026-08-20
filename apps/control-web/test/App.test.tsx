@@ -34,7 +34,7 @@ function session(username = "test-user"): SessionResponse {
   };
 }
 
-function system(writeMode: "disabled" | "canary" | "enabled" = "canary") {
+function system(writeMode: "disabled" | "enabled" = "enabled") {
   return {
     source_revision: "revision-0123456789abcdef",
     write_mode: writeMode,

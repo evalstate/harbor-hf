@@ -1054,7 +1054,7 @@ export class Projection {
       );
   }
 
-  async pendingActions(limit = 32, offset = 0): Promise<ActionIntent[]> {
+  async pendingActions(limit = 32): Promise<ActionIntent[]> {
     const rows = await this.db
       .selectFrom("actions")
       .select("intent_body")
@@ -1062,14 +1062,12 @@ export class Projection {
       .orderBy("created_at")
       .orderBy("action_id")
       .limit(limit)
-      .offset(offset)
       .execute();
     return rows.map((row) => JSON.parse(row.intent_body) as ActionIntent);
   }
 
   async unadvancedActions(
     limit = 32,
-    offset = 0,
   ): Promise<Array<{ intent: ActionIntent; receipt: ActionReceipt }>> {
     const rows = await this.db
       .selectFrom("actions")
@@ -1083,7 +1081,6 @@ export class Projection {
       .orderBy("actions.created_at")
       .orderBy("actions.action_id")
       .limit(limit)
-      .offset(offset)
       .execute();
     return rows.map((row) => ({
       intent: JSON.parse(row.intent_body) as ActionIntent,

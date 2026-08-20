@@ -901,7 +901,7 @@ async function verifyPlan(
     observedPhase(observed.space) !== "installed"
   ) {
     throw new Error(
-      "installation is awaiting credential completion; rerun install:apply",
+      "installation is awaiting credential completion; run install:configure",
     );
   }
   const expectedForRemote = observed.space
@@ -994,7 +994,7 @@ async function verifyPlan(
         campaigns.body.items.length !== 0 ||
         campaigns.body.next_cursor !== null
       ) {
-        throw new Error("canary activation requires an empty campaign projection");
+        throw new Error("activation requires an empty campaign projection");
       }
     }
   }
@@ -1021,7 +1021,7 @@ export async function verifyInstall(
 export interface ActivationResult {
   production_ready: false;
   space_url: string;
-  write_mode: "disabled" | "canary";
+  write_mode: "disabled" | "enabled";
   runtime: "paused" | "running";
   authenticated_system: "not_required" | "passed";
 }
@@ -1095,15 +1095,9 @@ export async function activateInstall(
     planPath: string;
     bootstrapReceipt?: BootstrapReceipt;
     confirmSpace: string;
-    to: "disabled" | "canary";
   },
   dependencies: InstallerDependencies,
 ): Promise<ActivationResult> {
-  if (input.to !== "disabled" && input.to !== "canary") {
-    throw new InstallerInputError(
-      "enabled promotion is unavailable: durable canary evidence and paid-hardware approval are not proven",
-    );
-  }
   const loaded = await readPrivatePlan(input.planPath);
   const { plan } = loaded;
   if (input.confirmSpace !== plan.targets.space_id) {
@@ -1122,6 +1116,11 @@ export async function activateInstall(
   );
   if (!observed.space) throw new Error("activation Space is missing");
   const currentMode = writeModeOf(observed.space);
+  if (currentMode === "canary") {
+    throw new InstallerInputError(
+      "legacy canary mode must be disabled before activation",
+    );
+  }
   const currentSpace = assertInstalledActivationState(plan, observed, currentMode);
   const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-activation-"));
   try {
@@ -1130,21 +1129,6 @@ export async function activateInstall(
       "variables-disabled.env",
       variablesForWriteMode(plan, currentSpace.origin, "disabled"),
     );
-    if (input.to === "disabled") {
-      const space = await forceDisabledAndPaused(plan, dependencies, disabledFile);
-      return {
-        production_ready: false,
-        space_url: validateOrigin(space.origin),
-        write_mode: "disabled",
-        runtime: "paused",
-        authenticated_system: "not_required",
-      };
-    }
-    if (currentMode === "enabled") {
-      throw new InstallerInputError(
-        "enabled Space must be disabled before canary activation",
-      );
-    }
     if (!(dependencies.environment ?? process.env).HARBOR_HF_INSTALL_VERIFY_BEARER) {
       throw new InstallerInputError(
         "HARBOR_HF_INSTALL_VERIFY_BEARER is required for activation",
@@ -1152,17 +1136,17 @@ export async function activateInstall(
     }
     if (!input.bootstrapReceipt?.uploaded_sha) {
       throw new InstallerInputError(
-        "activation requires an exact upload receipt; rerun install:apply",
+        "activation requires an exact upload receipt; rerun install:configure",
       );
     }
     assertReceipt(plan, loaded.digest, input.bootstrapReceipt);
     const expectedUploadSha = input.bootstrapReceipt.uploaded_sha;
-    const canaryFile = await writePrivateEnvironmentFile(
+    const enabledFile = await writePrivateEnvironmentFile(
       tempDirectory,
-      "variables-canary.env",
-      variablesForWriteMode(plan, currentSpace.origin, "canary"),
+      "variables-enabled.env",
+      variablesForWriteMode(plan, currentSpace.origin, "enabled"),
     );
-    let mutationStarted = currentMode === "canary";
+    let mutationStarted = currentMode === "enabled";
     try {
       if (currentSpace.runtimeStage !== "RUNNING") {
         mutationStarted = true;
@@ -1174,34 +1158,34 @@ export async function activateInstall(
         requireAuthenticated: true,
         requireEmptyCampaigns: currentMode === "disabled",
       });
-      if (currentMode === "canary") {
+      if (currentMode === "enabled") {
         return {
           production_ready: false,
           space_url: preflight.space_url,
-          write_mode: "canary",
+          write_mode: "enabled",
           runtime: "running",
           authenticated_system: "passed",
         };
       }
       mutationStarted = true;
       await dependencies.hf.pause(plan.targets.space_id);
-      await dependencies.hf.setVariables(plan.targets.space_id, canaryFile);
+      await dependencies.hf.setVariables(plan.targets.space_id, enabledFile);
       observed = await dependencies.hf.observe(
         plan.targets.namespace,
         plan.targets.space_id,
         plan.targets.bucket_id,
       );
-      assertInstalledActivationState(plan, observed, "canary");
+      assertInstalledActivationState(plan, observed, "enabled");
       await dependencies.hf.restart(plan.targets.space_id);
       await dependencies.hf.wait(plan.targets.space_id);
       const verification = await verifyPlan(plan, dependencies, expectedUploadSha, {
-        expectedWriteMode: "canary",
+        expectedWriteMode: "enabled",
         requireAuthenticated: true,
       });
       return {
         production_ready: false,
         space_url: verification.space_url,
-        write_mode: "canary",
+        write_mode: "enabled",
         runtime: "running",
         authenticated_system: "passed",
       };
@@ -1211,13 +1195,55 @@ export async function activateInstall(
         await forceDisabledAndPaused(plan, dependencies, disabledFile);
       } catch {
         throw new Error(
-          `canary activation failed and disabled rollback could not be verified${providerFailureSuffix(error)}`,
+          `activation failed and disabled rollback could not be verified${providerFailureSuffix(error)}`,
         );
       }
       throw new Error(
-        `canary activation failed; disabled rollback verified${providerFailureSuffix(error)}`,
+        `activation failed; disabled rollback verified${providerFailureSuffix(error)}`,
       );
     }
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+}
+
+export async function disableInstall(
+  input: { planPath: string; confirmSpace: string },
+  dependencies: InstallerDependencies,
+): Promise<ActivationResult> {
+  const { plan } = await readPrivatePlan(input.planPath);
+  if (input.confirmSpace !== plan.targets.space_id) {
+    throw new InstallerInputError("disable confirmation does not match Space");
+  }
+  const version = await dependencies.hf.version();
+  if (version !== plan.hf_cli_version) throw new Error("hf CLI version changed");
+  const principal = await dependencies.identity.resolve();
+  if (canonicalJson(principal) !== canonicalJson(plan.principal)) {
+    throw new Error("authenticated principal changed");
+  }
+  const observed = await dependencies.hf.observe(
+    plan.targets.namespace,
+    plan.targets.space_id,
+    plan.targets.bucket_id,
+  );
+  if (!observed.space) throw new Error("disable Space is missing");
+  const currentMode = writeModeOf(observed.space);
+  const currentSpace = assertInstalledActivationState(plan, observed, currentMode);
+  const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-disable-"));
+  try {
+    const disabledFile = await writePrivateEnvironmentFile(
+      tempDirectory,
+      "variables-disabled.env",
+      variablesForWriteMode(plan, currentSpace.origin, "disabled"),
+    );
+    const space = await forceDisabledAndPaused(plan, dependencies, disabledFile);
+    return {
+      production_ready: false,
+      space_url: validateOrigin(space.origin),
+      write_mode: "disabled",
+      runtime: "paused",
+      authenticated_system: "not_required",
+    };
   } finally {
     await rm(tempDirectory, { recursive: true, force: true });
   }
@@ -1731,6 +1757,7 @@ export async function applyInstall(
     bootstrapReceipt?: BootstrapReceipt;
     replaceCredentials?: boolean;
     persistBootstrapReceipt?: (receipt: BootstrapReceipt) => Promise<void>;
+    target?: "resources" | "installed";
   },
   dependencies: InstallerDependencies,
 ): Promise<ApplyInstallResult> {
@@ -1764,6 +1791,11 @@ export async function applyInstall(
   if (input.bootstrapReceipt && (!observed.space || !observed.bucket)) {
     throw new Error(
       "bootstrap receipt exists but a proven resource is missing; manual recovery is required",
+    );
+  }
+  if (input.target === "installed" && (!observed.space || !observed.bucket)) {
+    throw new InstallerInputError(
+      "configuration requires provisioned resources; run install:provision",
     );
   }
   const allowsBootstrapContinuation = isFreshPlan(plan) || isBootstrapPlan(plan);
@@ -1808,6 +1840,29 @@ export async function applyInstall(
       input.persistBootstrapReceipt,
     );
   }
+  if (input.target === "resources") {
+    if (
+      !input.bootstrapReceipt ||
+      !observed.space ||
+      !observed.bucket ||
+      observedPhase(observed.space) !== "credentials_required"
+    ) {
+      throw new InstallerInputError(
+        "provisioning is already complete or configuration has started",
+      );
+    }
+    assertFreshContinuationSafe(plan, observed);
+    return {
+      status: "credentials_required",
+      production_ready: false,
+      space_id: plan.targets.space_id,
+      bucket_id: plan.targets.bucket_id,
+      space_paused: true,
+      secrets_configured: false,
+      source_uploaded: false,
+      receipt: input.bootstrapReceipt,
+    };
+  }
   if (freshContinuation || allowsBootstrapContinuation) {
     if (!input.bootstrapReceipt) {
       throw new Error(
@@ -1848,4 +1903,35 @@ export async function applyInstall(
     input.bootstrapReceipt,
     input.persistBootstrapReceipt,
   );
+}
+
+export async function provisionInstall(
+  input: {
+    planPath: string;
+    bootstrapReceipt?: BootstrapReceipt;
+    persistBootstrapReceipt?: (receipt: BootstrapReceipt) => Promise<void>;
+  },
+  dependencies: InstallerDependencies,
+): Promise<CredentialsRequiredResult> {
+  const result = await applyInstall({ ...input, target: "resources" }, dependencies);
+  if (result.status !== "credentials_required") {
+    throw new Error("provisioning unexpectedly configured the installation");
+  }
+  return result;
+}
+
+export async function configureInstall(
+  input: {
+    planPath: string;
+    bootstrapReceipt?: BootstrapReceipt;
+    replaceCredentials?: boolean;
+    persistBootstrapReceipt?: (receipt: BootstrapReceipt) => Promise<void>;
+  },
+  dependencies: InstallerDependencies,
+): Promise<InstalledResult> {
+  const result = await applyInstall({ ...input, target: "installed" }, dependencies);
+  if (result.status !== "installed") {
+    throw new Error("configuration did not reach the installed state");
+  }
+  return result;
 }
