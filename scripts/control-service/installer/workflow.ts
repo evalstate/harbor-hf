@@ -322,6 +322,18 @@ function isBootstrapPlan(plan: InstallPlan): boolean {
   );
 }
 
+function isCredentialRebindPlan(plan: InstallPlan): boolean {
+  const observed = plan.observed_preconditions;
+  return (
+    observed.space !== null &&
+    observedPhase(observed.space) === "credentials_required" &&
+    observed.bucket === null &&
+    (observed.space.variables.HARBOR_HF_SOURCE_REVISION !== plan.source.revision ||
+      observed.space.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST !==
+        plan.bundle.manifest_digest)
+  );
+}
+
 function isLegacyMigrationPlan(plan: InstallPlan): boolean {
   return (
     plan.observed_preconditions.space !== null &&
@@ -628,14 +640,6 @@ export async function planInstall(
       );
     }
   }
-  if (phase && phase !== "installed") {
-    if (
-      observed.space?.variables.HARBOR_HF_SOURCE_REVISION !== sourceBefore.revision ||
-      observed.space.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST !== bundleManifestDigest
-    ) {
-      throw new Error("existing bootstrap does not match the current source");
-    }
-  }
   const plan: InstallPlan = {
     schema_version: "harbor-hf.install-plan.v2",
     install_id: installId,
@@ -660,6 +664,19 @@ export async function planInstall(
     expected_secret_names: [...SECRET_NAMES],
     observed_preconditions: observed,
   };
+  if (
+    phase &&
+    phase !== "installed" &&
+    (observed.space?.variables.HARBOR_HF_SOURCE_REVISION !== sourceBefore.revision ||
+      observed.space.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST !==
+        bundleManifestDigest)
+  ) {
+    if (phase === "credentials_required" && !observed.bucket) {
+      assertCredentialRebindSafe(plan, observed);
+    } else {
+      throw new Error("existing bootstrap does not match the current source");
+    }
+  }
   await mkdir(dirname(resolve(input.planPath)), { recursive: true, mode: 0o700 });
   return { ...(await writePrivatePlan(input.planPath, plan)), plan };
 }
@@ -977,6 +994,49 @@ function assertBootstrapPhase(
   }
 }
 
+function assertCredentialRebindSafe(plan: InstallPlan, state: RemoteState): void {
+  const space = state.space;
+  const installId = space?.variables.HARBOR_HF_INSTALL_ID;
+  const sourceRevision = space?.variables.HARBOR_HF_SOURCE_REVISION;
+  const manifest = space?.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST;
+  if (
+    !space ||
+    observedPhase(space) !== "credentials_required" ||
+    state.bucket ||
+    space.secretNames.length > 0 ||
+    !isCredentialBootstrapStopped(space.runtimeStage) ||
+    !installId ||
+    !isInstallId(installId) ||
+    installId !== plan.install_id ||
+    !sourceRevision ||
+    !/^[a-f0-9]{40}$/.test(sourceRevision) ||
+    !manifest ||
+    !/^sha256:[a-f0-9]{64}$/.test(manifest)
+  ) {
+    throw new Error("credential bootstrap cannot be rebound");
+  }
+  assertRemoteSafe(
+    state,
+    {
+      spaceId: plan.targets.space_id,
+      bucketId: plan.targets.bucket_id,
+      variables: expectedVariables(
+        plan.targets.namespace,
+        plan.targets.bucket_id,
+        space.origin,
+        plan.principal.subject,
+        sourceRevision,
+        {
+          installId,
+          manifestDigest: manifest,
+          phase: "credentials_required",
+        },
+      ),
+    },
+    { requireRunning: false, requireAllSecrets: false },
+  );
+}
+
 async function bootstrapFreshInstall(
   plan: InstallPlan,
   planDigest: string,
@@ -1003,11 +1063,20 @@ async function bootstrapFreshInstall(
       current = await observePlan(plan, dependencies);
     }
     if (!current.space) throw new Error("bootstrap Space metadata is unavailable");
-    assertBootstrapPhase(plan, current, "credentials_required", {
-      requireBucket: false,
-      requirePaused: false,
-      requireAllSecrets: false,
-    });
+    if (
+      current.space.variables.HARBOR_HF_SOURCE_REVISION === plan.source.revision &&
+      current.space.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST ===
+        plan.bundle.manifest_digest
+    ) {
+      assertBootstrapPhase(plan, current, "credentials_required", {
+        requireBucket: false,
+        requirePaused: false,
+        requireAllSecrets: false,
+      });
+    } else {
+      assertPreconditionsEqual(plan.observed_preconditions, current);
+      assertCredentialRebindSafe(plan, current);
+    }
 
     const resolved = concreteVariableRecord(
       variablesForPhase(plan, current.space.origin, "credentials_required"),
@@ -1347,10 +1416,19 @@ export async function applyInstall(
     plan.targets.space_id,
     plan.targets.bucket_id,
   );
+  if (input.bootstrapReceipt && (!observed.space || !observed.bucket)) {
+    throw new Error(
+      "bootstrap receipt exists but a proven resource is missing; manual recovery is required",
+    );
+  }
   const allowsBootstrapContinuation = isFreshPlan(plan) || isBootstrapPlan(plan);
+  const credentialRebind = isCredentialRebindPlan(plan);
   let freshContinuation = false;
   let variableTransition = false;
-  if (canonicalJson(plan.observed_preconditions) !== canonicalJson(observed)) {
+  if (credentialRebind) {
+    assertPreconditionsEqual(plan.observed_preconditions, observed);
+    assertCredentialRebindSafe(plan, observed);
+  } else if (canonicalJson(plan.observed_preconditions) !== canonicalJson(observed)) {
     if (allowsBootstrapContinuation && observed.space) {
       assertFreshContinuationSafe(plan, observed);
       freshContinuation = true;

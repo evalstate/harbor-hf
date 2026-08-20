@@ -27,7 +27,9 @@ import {
   findCurrentInstallPlanPath,
   installerStateRoot,
   prepareInstallState,
+  preserveBootstrapReceipt,
   readBootstrapReceipt,
+  withInstallerStateLock,
   writeBootstrapReceipt,
 } from "../state.js";
 
@@ -161,6 +163,19 @@ describe("private installer state", () => {
     await expect(currentInstallPlanPath("example/control", root)).rejects.toThrow(
       "unsupported install plan",
     );
+
+    await writeBootstrapReceipt(prepared.planPath, {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+      install_id: "f".repeat(64),
+      plan_digest: `sha256:${"d".repeat(64)}`,
+      space_id: "example/control",
+      bucket_id: "example/control-artifacts",
+      source_revision: "a".repeat(40),
+      manifest_digest: `sha256:${"b".repeat(64)}`,
+    });
+    await expect(findCurrentInstallPlanPath("example/control", root)).rejects.toThrow(
+      "manual recovery",
+    );
   });
 
   it("rejects target confusion and insecure pointer state", async () => {
@@ -182,6 +197,48 @@ describe("private installer state", () => {
     );
   });
 
+  it("does not hide a receipt when the selected plan file is missing", async () => {
+    const { root, prepared } = await savedState();
+    await writeBootstrapReceipt(prepared.planPath, {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+      install_id: "f".repeat(64),
+      plan_digest: `sha256:${"d".repeat(64)}`,
+      space_id: "example/control",
+      bucket_id: "example/control-artifacts",
+      source_revision: "a".repeat(40),
+      manifest_digest: `sha256:${"b".repeat(64)}`,
+    });
+    await rm(prepared.planPath);
+
+    await expect(findCurrentInstallPlanPath("example/control", root)).rejects.toThrow(
+      "manual recovery",
+    );
+  });
+
+  it("does not hide proof in an older plan generation", async () => {
+    const { directory, root, prepared } = await savedState();
+    await writeBootstrapReceipt(prepared.planPath, {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+      install_id: "f".repeat(64),
+      plan_digest: `sha256:${"d".repeat(64)}`,
+      space_id: "example/control",
+      bucket_id: "example/control-artifacts",
+      source_revision: "a".repeat(40),
+      manifest_digest: `sha256:${"b".repeat(64)}`,
+    });
+    const next = await prepareInstallState("example/control", root);
+    await mkdir(next.bundleDirectory);
+    await writePrivatePlan(
+      next.planPath,
+      plan(resolve(directory, "repository"), next.bundleDirectory),
+    );
+    await activateInstallState(next, "example/control");
+
+    await expect(findCurrentInstallPlanPath("example/control", root)).rejects.toThrow(
+      "outside the current installer generation",
+    );
+  });
+
   it("removes an uncommitted plan generation", async () => {
     const directory = await temporaryDirectory();
     const prepared = await prepareInstallState(
@@ -190,6 +247,33 @@ describe("private installer state", () => {
     );
     await discardInstallState(prepared);
     await expect(lstat(prepared.generationDirectory)).rejects.toThrow();
+  });
+
+  it("serializes plan and apply operations for one target", async () => {
+    const directory = await temporaryDirectory();
+    const root = resolve(directory, "state");
+    let release: (() => void) | undefined;
+    let entered: (() => void) | undefined;
+    const enteredPromise = new Promise<void>((resolvePromise) => {
+      entered = resolvePromise;
+    });
+    const releasePromise = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    const first = withInstallerStateLock("example/control", root, async () => {
+      entered?.();
+      await releasePromise;
+    });
+    await enteredPromise;
+
+    await expect(
+      withInstallerStateLock("example/control", root, async () => undefined),
+    ).rejects.toThrow("another installer");
+    release?.();
+    await first;
+    await expect(
+      withInstallerStateLock("example/control", root, async () => "released"),
+    ).resolves.toBe("released");
   });
 
   it("refuses to activate a prepared state object under another target", async () => {
@@ -284,6 +368,92 @@ describe("private installer state", () => {
     await expect(readBootstrapReceipt(next.planPath)).resolves.toMatchObject({
       plan_digest: nextWritten.digest,
       install_id: previous.plan.install_id,
+    });
+  });
+
+  it("does not discard Bucket proof when the remote Bucket disappears", async () => {
+    const { directory, root, prepared } = await savedState();
+    const previous = await readPrivatePlan(prepared.planPath);
+    await writeBootstrapReceipt(prepared.planPath, {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+      install_id: previous.plan.install_id,
+      plan_digest: previous.digest,
+      space_id: previous.plan.targets.space_id,
+      bucket_id: previous.plan.targets.bucket_id,
+      source_revision: previous.plan.source.revision,
+      manifest_digest: previous.plan.bundle.manifest_digest,
+    });
+    const next = await prepareInstallState("example/control", root);
+    await mkdir(next.bundleDirectory);
+    const nextWritten = await writePrivatePlan(
+      next.planPath,
+      plan(resolve(directory, "repository"), next.bundleDirectory),
+    );
+
+    await expect(
+      preserveBootstrapReceipt(
+        prepared.planPath,
+        next.planPath,
+        (await readPrivatePlan(next.planPath)).plan,
+        nextWritten.digest,
+        {
+          spacePresent: true,
+          bucketPresent: false,
+          phase: "credentials_required",
+        },
+      ),
+    ).rejects.toThrow("proven resource is missing");
+    await expect(readBootstrapReceipt(next.planPath)).resolves.toBeUndefined();
+  });
+
+  it("establishes proof in every exact installed plan generation", async () => {
+    const { directory, root, prepared } = await savedState();
+    const next = await prepareInstallState("example/control", root);
+    await mkdir(next.bundleDirectory);
+    const nextPlan = plan(resolve(directory, "repository"), next.bundleDirectory);
+    nextPlan.expected_variables.HARBOR_HF_PUBLIC_ORIGIN =
+      "https://example-control.hf.space";
+    nextPlan.observed_preconditions = {
+      namespaceListingsComplete: true,
+      space: {
+        id: "example/control",
+        private: true,
+        sdk: "docker",
+        origin: "https://example-control.hf.space",
+        sha: "a".repeat(40),
+        runtimeStage: "RUNNING",
+        hardware: "cpu-basic",
+        requestedHardware: "cpu-basic",
+        variables: Object.fromEntries(
+          Object.entries(nextPlan.expected_variables).filter(
+            (entry): entry is [string, string] => entry[1] !== null,
+          ),
+        ),
+        secretNames: ["HF_INFERENCE_TOKEN", "HF_TOKEN"],
+      },
+      bucket: {
+        id: "example/control-artifacts",
+        private: true,
+      },
+    };
+    const nextWritten = await writePrivatePlan(next.planPath, nextPlan);
+
+    await preserveBootstrapReceipt(
+      prepared.planPath,
+      next.planPath,
+      (await readPrivatePlan(next.planPath)).plan,
+      nextWritten.digest,
+      {
+        spacePresent: true,
+        bucketPresent: true,
+        phase: "installed",
+      },
+    );
+    await expect(readBootstrapReceipt(next.planPath)).resolves.toMatchObject({
+      plan_digest: nextWritten.digest,
+      install_id: nextPlan.install_id,
+      source_revision: nextPlan.source.revision,
+      manifest_digest: nextPlan.bundle.manifest_digest,
     });
   });
 });

@@ -562,6 +562,139 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls).not.toContain("setSecrets");
   });
 
+  it("rebinds changed source only before bootstrap Bucket proof exists", async () => {
+    const directory = await temporaryDirectory();
+    const repository = resolve(directory, "repository");
+    const hf = new FakeHf();
+    const identity = new FakeIdentity();
+    const dependencies: InstallerDependencies = {
+      hf,
+      source: new FakeSource(repository, OLD_REVISION),
+      identity,
+      http: new FakeHttp(),
+      environment: {},
+    };
+    const oldPlan = await planInstall(
+      {
+        space: "example/control",
+        bundleDirectory: resolve(directory, "old", "bundle"),
+        planPath: resolve(directory, "old", "plan.json"),
+      },
+      dependencies,
+    );
+    const variables = Object.fromEntries(
+      Object.entries(oldPlan.plan.expected_variables).filter(
+        (entry): entry is [string, string] => entry[1] !== null,
+      ),
+    );
+    variables.HARBOR_HF_INSTALL_PHASE = "credentials_required";
+    hf.state = {
+      namespaceListingsComplete: true,
+      space: {
+        id: "example/control",
+        private: true,
+        sdk: "docker",
+        origin: ORIGIN,
+        sha: OLD_REVISION,
+        runtimeStage: "NO_APP_FILE",
+        hardware: null,
+        requestedHardware: "cpu-basic",
+        variables,
+        secretNames: [],
+      },
+      bucket: { id: "example/control-artifacts", private: true },
+    };
+    dependencies.source = new FakeSource(repository);
+
+    await expect(
+      planInstall(
+        {
+          space: "example/control",
+          bundleDirectory: resolve(directory, "blocked", "bundle"),
+          planPath: resolve(directory, "blocked", "plan.json"),
+        },
+        dependencies,
+      ),
+    ).rejects.toThrow("does not match the current source");
+
+    hf.state.bucket = null;
+    if (!hf.state.space) throw new Error("test Space is missing");
+    hf.state.space.runtimeStage = "RUNNING";
+    await expect(
+      planInstall(
+        {
+          space: "example/control",
+          bundleDirectory: resolve(directory, "running", "bundle"),
+          planPath: resolve(directory, "running", "plan.json"),
+        },
+        dependencies,
+      ),
+    ).rejects.toThrow("cannot be rebound");
+
+    hf.state.space.runtimeStage = "NO_APP_FILE";
+    hf.state.space.secretNames = ["HF_TOKEN"];
+    await expect(
+      planInstall(
+        {
+          space: "example/control",
+          bundleDirectory: resolve(directory, "secret", "bundle"),
+          planPath: resolve(directory, "secret", "plan.json"),
+        },
+        dependencies,
+      ),
+    ).rejects.toThrow("cannot be rebound");
+
+    hf.state.space.secretNames = [];
+    const replacement = await planInstall(
+      {
+        space: "example/control",
+        bundleDirectory: resolve(directory, "replacement", "bundle"),
+        planPath: resolve(directory, "replacement", "plan.json"),
+      },
+      dependencies,
+    );
+    expect(replacement.plan.source.revision).toBe(REVISION);
+    const oldState = structuredClone(hf.state);
+    if (!hf.state.space) throw new Error("test Space is missing");
+    hf.state.space.variables = Object.fromEntries(
+      Object.entries(replacement.plan.expected_variables).filter(
+        (entry): entry is [string, string] => entry[1] !== null,
+      ),
+    );
+    hf.state.space.variables.HARBOR_HF_INSTALL_PHASE = "credentials_required";
+    hf.state.space.runtimeStage = "RUNNING";
+    hf.calls.length = 0;
+    await expect(
+      applyInstall({ planPath: replacement.path }, dependencies),
+    ).rejects.toThrow("drifted");
+    expect(hf.calls).not.toContain("setVariables");
+    expect(hf.calls).not.toContain("pause");
+    expect(hf.calls).not.toContain("createBucket");
+
+    hf.state.space.runtimeStage = "NO_APP_FILE";
+    await expect(
+      applyInstall({ planPath: replacement.path }, dependencies),
+    ).rejects.toThrow("drifted");
+    expect(hf.calls).not.toContain("setVariables");
+    expect(hf.calls).not.toContain("pause");
+    expect(hf.calls).not.toContain("createBucket");
+
+    hf.state = oldState;
+    hf.calls.length = 0;
+    await expect(
+      applyInstall({ planPath: replacement.path }, dependencies),
+    ).resolves.toMatchObject({
+      status: "credentials_required",
+      source_uploaded: false,
+      secrets_configured: false,
+    });
+    expect(hf.state.space?.variables.HARBOR_HF_SOURCE_REVISION).toBe(REVISION);
+    expect(hf.state.bucket).toEqual({
+      id: "example/control-artifacts",
+      private: true,
+    });
+  });
+
   it("pauses and fails closed when Bucket proof cannot be persisted", async () => {
     const setupResult = await setup();
     await expect(
@@ -605,6 +738,20 @@ describe("installer workflows", () => {
     ).rejects.toThrow("receipt does not match");
     expect(setupResult.hf.calls).not.toContain("pause");
     expect(setupResult.hf.calls).not.toContain("uploadMirror");
+  });
+
+  it("does not recreate proven resources when both disappear", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    setupResult.hf.state.space = null;
+    setupResult.hf.state.bucket = null;
+    setupResult.hf.calls.length = 0;
+
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "proven resource is missing",
+    );
+    expect(setupResult.hf.calls).not.toContain("createSpace");
+    expect(setupResult.hf.calls).not.toContain("createBucket");
   });
 
   it("reports that bootstrap verification is awaiting credential completion", async () => {

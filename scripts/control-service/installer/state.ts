@@ -1,6 +1,7 @@
 import { O_NOFOLLOW, O_RDONLY } from "node:constants";
 import { createHash, randomUUID } from "node:crypto";
-import type { Stats } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import {
   chmod,
   link,
@@ -8,6 +9,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readdir,
   rename,
   rm,
   stat,
@@ -16,6 +18,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { canonicalJson } from "./canonical.js";
 import {
+  type InstallPhase,
   type InstallPlan,
   isInstallId,
   parseTargetIds,
@@ -51,6 +54,38 @@ export interface PreparedInstallState {
   generationDirectory: string;
   bundleDirectory: string;
   planPath: string;
+}
+
+export async function withInstallerStateLock<T>(
+  spaceId: string,
+  stateRootInput: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  parseTargetIds(spaceId);
+  const stateRoot = resolve(stateRootInput);
+  await ensurePrivateDirectory(stateRoot);
+  const target = targetDirectory(stateRoot, spaceId);
+  await ensurePrivateDirectory(target);
+  const lockPath = resolve(target, ".operation.lock");
+  let handle: FileHandle;
+  try {
+    handle = await open(lockPath, "wx", 0o600);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "EEXIST"
+    ) {
+      throw new Error("another installer plan or apply operation is active");
+    }
+    throw error;
+  }
+  try {
+    return await operation();
+  } finally {
+    await handle.close();
+    await rm(lockPath, { force: true });
+  }
 }
 
 function targetKey(spaceId: string): string {
@@ -397,7 +432,7 @@ export async function writeBootstrapReceipt(
   await chmod(path, 0o600);
 }
 
-export async function currentInstallPlanPath(
+async function currentInstallPlanFilePath(
   spaceId: string,
   stateRootInput: string,
 ): Promise<string> {
@@ -416,7 +451,50 @@ export async function currentInstallPlanPath(
     throw new Error("installer state generation escapes its target");
   }
   await requirePrivateDirectory(generation);
-  const planPath = resolve(generation, "plan.json");
+  return resolve(generation, "plan.json");
+}
+
+async function bootstrapReceiptPaths(
+  spaceId: string,
+  stateRootInput: string,
+): Promise<string[]> {
+  const stateRoot = resolve(stateRootInput);
+  const target = targetDirectory(stateRoot, spaceId);
+  let entries: Dirent[];
+  try {
+    await requirePrivateDirectory(stateRoot);
+    await requirePrivateDirectory(target);
+    entries = await readdir(target, { withFileTypes: true });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return [];
+    }
+    throw error;
+  }
+  const paths: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^plan-[A-Za-z0-9]{6}$/.test(entry.name)) {
+      continue;
+    }
+    const generation = resolve(target, entry.name);
+    await requirePrivateDirectory(generation);
+    const planPath = resolve(generation, "plan.json");
+    if (await readBootstrapReceipt(planPath)) {
+      paths.push(planPath);
+    }
+  }
+  return paths;
+}
+
+export async function currentInstallPlanPath(
+  spaceId: string,
+  stateRootInput: string,
+): Promise<string> {
+  const planPath = await currentInstallPlanFilePath(spaceId, stateRootInput);
   const loaded = await readPrivatePlan(planPath);
   if (loaded.plan.targets.space_id !== spaceId) {
     throw new Error("saved plan target does not match the requested Space");
@@ -428,10 +506,43 @@ export async function findCurrentInstallPlanPath(
   spaceId: string,
   stateRootInput: string,
 ): Promise<string | undefined> {
+  const receiptPaths = await bootstrapReceiptPaths(spaceId, stateRootInput);
+  let planPath: string;
   try {
-    return await currentInstallPlanPath(spaceId, stateRootInput);
+    planPath = await currentInstallPlanFilePath(spaceId, stateRootInput);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      if (receiptPaths.length > 0) {
+        throw new Error(
+          "installer state pointer is missing while bootstrap proof exists; manual recovery is required",
+        );
+      }
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    const loaded = await readPrivatePlan(planPath);
+    if (loaded.plan.targets.space_id !== spaceId) {
+      throw new Error("saved plan target does not match the requested Space");
+    }
+    if (receiptPaths.length > 0 && !receiptPaths.includes(planPath)) {
+      throw new Error(
+        "bootstrap proof exists outside the current installer generation; manual recovery is required",
+      );
+    }
+    return planPath;
   } catch (error) {
     if (error instanceof UnsupportedInstallPlanError) {
+      if (receiptPaths.length > 0) {
+        throw new Error(
+          "unsupported installer state contains a bootstrap receipt; manual recovery is required",
+        );
+      }
       return undefined;
     }
     if (
@@ -439,7 +550,12 @@ export async function findCurrentInstallPlanPath(
       "code" in error &&
       (error as NodeJS.ErrnoException).code === "ENOENT"
     ) {
-      return undefined;
+      if (receiptPaths.length > 0) {
+        throw new Error(
+          "installer plan is missing beside a bootstrap receipt; manual recovery is required",
+        );
+      }
+      throw new Error("current installer plan is missing");
     }
     throw error;
   }
@@ -474,4 +590,113 @@ export async function carryBootstrapReceipt(
     plan_digest: nextPlanDigest,
   });
   return true;
+}
+
+function receiptForPlan(plan: InstallPlan, planDigest: string): BootstrapReceipt {
+  return {
+    schema_version: BOOTSTRAP_RECEIPT_SCHEMA,
+    install_id: plan.install_id,
+    plan_digest: planDigest,
+    space_id: plan.targets.space_id,
+    bucket_id: plan.targets.bucket_id,
+    source_revision: plan.source.revision,
+    manifest_digest: plan.bundle.manifest_digest,
+  };
+}
+
+async function assertReceiptMatchesPreviousPlan(
+  previousPlanPath: string,
+  receipt: BootstrapReceipt,
+): Promise<void> {
+  const previous = await readPrivatePlan(previousPlanPath);
+  if (
+    receipt.plan_digest !== previous.digest ||
+    receipt.install_id !== previous.plan.install_id ||
+    receipt.space_id !== previous.plan.targets.space_id ||
+    receipt.bucket_id !== previous.plan.targets.bucket_id ||
+    receipt.source_revision !== previous.plan.source.revision ||
+    receipt.manifest_digest !== previous.plan.bundle.manifest_digest
+  ) {
+    throw new Error("bootstrap receipt does not match the previous plan");
+  }
+}
+
+function assertInstalledReceiptAttestation(plan: InstallPlan): void {
+  const observed = plan.observed_preconditions;
+  if (
+    !observed.space ||
+    !observed.bucket ||
+    observed.space.id !== plan.targets.space_id ||
+    observed.bucket.id !== plan.targets.bucket_id ||
+    !observed.bucket.private ||
+    observed.space.variables.HARBOR_HF_INSTALL_PHASE !== "installed" ||
+    observed.space.variables.HARBOR_HF_INSTALL_ID !== plan.install_id
+  ) {
+    throw new Error("installed resources cannot establish bootstrap proof");
+  }
+}
+
+export async function preserveBootstrapReceipt(
+  previousPlanPath: string | undefined,
+  nextPlanPath: string,
+  nextPlan: InstallPlan,
+  nextPlanDigest: string,
+  remote: {
+    spacePresent: boolean;
+    bucketPresent: boolean;
+    phase: InstallPhase | null;
+  },
+): Promise<void> {
+  const receipt = previousPlanPath
+    ? await readBootstrapReceipt(previousPlanPath)
+    : undefined;
+  if (!receipt) {
+    if (remote.spacePresent && remote.bucketPresent && remote.phase === "installed") {
+      assertInstalledReceiptAttestation(nextPlan);
+      await writeBootstrapReceipt(
+        nextPlanPath,
+        receiptForPlan(nextPlan, nextPlanDigest),
+      );
+      return;
+    }
+    if (
+      remote.bucketPresent &&
+      (remote.phase === "credentials_required" || remote.phase === "source_staged")
+    ) {
+      throw new Error(
+        "bootstrap receipt is unavailable; the original private installer state is required",
+      );
+    }
+    return;
+  }
+  if (!remote.spacePresent || !remote.bucketPresent) {
+    throw new Error(
+      "bootstrap receipt exists but a proven resource is missing; manual recovery is required",
+    );
+  }
+  if (remote.phase === "installed") {
+    if (!previousPlanPath) {
+      throw new Error("bootstrap receipt has no previous installer plan");
+    }
+    await assertReceiptMatchesPreviousPlan(previousPlanPath, receipt);
+    assertInstalledReceiptAttestation(nextPlan);
+    await writeBootstrapReceipt(nextPlanPath, receiptForPlan(nextPlan, nextPlanDigest));
+    return;
+  }
+  if (remote.phase !== "credentials_required" && remote.phase !== "source_staged") {
+    return;
+  }
+  if (
+    !previousPlanPath ||
+    !(await carryBootstrapReceipt(
+      previousPlanPath,
+      nextPlanPath,
+      nextPlan,
+      nextPlanDigest,
+    ))
+  ) {
+    throw new Error(
+      "bootstrap receipt is unavailable; the original private installer state is required",
+    );
+  }
 }

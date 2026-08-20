@@ -5,9 +5,10 @@ import {
   parseSavedPlanOptions,
 } from "./cli.js";
 import {
-  currentInstallPlanPath,
+  findCurrentInstallPlanPath,
   installerStateRoot,
   readBootstrapReceipt,
+  withInstallerStateLock,
   writeBootstrapReceipt,
 } from "./state.js";
 import { applyInstall } from "./workflow.js";
@@ -21,24 +22,27 @@ await cliMain(async () => {
     process.stdout.write(usage);
     return;
   }
-  const planPath = await currentInstallPlanPath(
-    options.space,
-    installerStateRoot(options.stateDirectory),
-  );
-  const bootstrapReceipt = await readBootstrapReceipt(planPath);
-  const result = await applyInstall(
-    {
-      planPath,
-      ...(bootstrapReceipt ? { bootstrapReceipt } : {}),
-      persistBootstrapReceipt: async (receipt) =>
-        await writeBootstrapReceipt(planPath, receipt),
-    },
-    defaultDependencies(),
-  );
-  if (result.status === "credentials_required") {
-    await writeBootstrapReceipt(planPath, result.receipt);
-  }
-  process.stdout.write(
-    formatApplyOutput(options.space, result, Boolean(options.stateDirectory)),
-  );
+  const stateRoot = installerStateRoot(options.stateDirectory);
+  await withInstallerStateLock(options.space, stateRoot, async () => {
+    const planPath = await findCurrentInstallPlanPath(options.space, stateRoot);
+    if (!planPath) {
+      throw new Error("no supported current install plan is available");
+    }
+    const bootstrapReceipt = await readBootstrapReceipt(planPath);
+    const result = await applyInstall(
+      {
+        planPath,
+        ...(bootstrapReceipt ? { bootstrapReceipt } : {}),
+        persistBootstrapReceipt: async (receipt) =>
+          await writeBootstrapReceipt(planPath, receipt),
+      },
+      defaultDependencies(),
+    );
+    if (result.status === "credentials_required") {
+      await writeBootstrapReceipt(planPath, result.receipt);
+    }
+    process.stdout.write(
+      formatApplyOutput(options.space, result, Boolean(options.stateDirectory)),
+    );
+  });
 });
