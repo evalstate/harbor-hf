@@ -1,13 +1,19 @@
 import { O_NOFOLLOW, O_RDONLY } from "node:constants";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmod, lstat, open, readdir, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { canonicalJson, sha256 } from "./canonical.js";
 
-export const PLAN_SCHEMA = "harbor-hf.install-plan.v1";
-export const INSTALLER_MARKER = "harbor-hf.install-plan.v1";
-export const INSTALLER_VERSION = "1";
+export const PLAN_SCHEMA = "harbor-hf.install-plan.v2";
+export const INSTALLER_MARKER = "harbor-hf.install-plan.v2";
+export const INSTALLER_VERSION = "2";
 export const SECRET_NAMES = ["HF_INFERENCE_TOKEN", "HF_TOKEN"] as const;
+export const INSTALL_PHASES = [
+  "credentials_required",
+  "source_staged",
+  "installed",
+] as const;
+export type InstallPhase = (typeof INSTALL_PHASES)[number];
 
 export interface BundleFile {
   path: string;
@@ -48,6 +54,7 @@ export interface RemoteState {
 
 export interface InstallPlan {
   schema_version: typeof PLAN_SCHEMA;
+  install_id: string;
   production_ready: false;
   source: {
     revision: string;
@@ -74,10 +81,19 @@ const ID_PART = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const HF_CLI_VERSION = /^1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+const INSTALL_ID = /^[a-f0-9]{64}$/;
 
 export function isSupportedHfCliVersion(value: string): boolean {
   const match = value.match(HF_CLI_VERSION);
   return match !== null && BigInt(match[1] as string) >= 23n;
+}
+
+export function createInstallId(): string {
+  return randomBytes(32).toString("hex");
+}
+
+export function isInstallId(value: string): boolean {
+  return INSTALL_ID.test(value);
 }
 
 export function parseTargetIds(
@@ -133,11 +149,22 @@ export function expectedVariables(
   origin: string | null,
   subject: string,
   revision: string,
+  binding: {
+    installId: string;
+    manifestDigest: string;
+    phase: InstallPhase;
+  },
 ): Record<string, string | null> {
+  if (!isInstallId(binding.installId) || !DIGEST.test(binding.manifestDigest)) {
+    throw new Error("installer binding is invalid");
+  }
   return {
     HARBOR_HF_AUTH_MODE: "oauth",
     HARBOR_HF_BOOTSTRAP_OPERATOR_SUBJECTS: subject,
     HARBOR_HF_BUCKET_ID: bucketId,
+    HARBOR_HF_BUNDLE_MANIFEST_DIGEST: binding.manifestDigest,
+    HARBOR_HF_INSTALL_ID: binding.installId,
+    HARBOR_HF_INSTALL_PHASE: binding.phase,
     HARBOR_HF_INSTALLER_MARKER: INSTALLER_MARKER,
     HARBOR_HF_INSTALLER_VERSION: INSTALLER_VERSION,
     HARBOR_HF_NAMESPACE: namespace,
@@ -345,6 +372,7 @@ export function validatePlan(value: unknown): InstallPlan {
     value,
     [
       "schema_version",
+      "install_id",
       "production_ready",
       "source",
       "bundle",
@@ -358,6 +386,8 @@ export function validatePlan(value: unknown): InstallPlan {
     "install plan",
   );
   if (value.production_ready !== false) throw new Error("invalid production flag");
+  const installId = stringField(value, "install_id");
+  if (!isInstallId(installId)) throw new Error("install ID is invalid");
   const source = value.source;
   const bundle = value.bundle;
   const targets = value.targets;
@@ -483,6 +513,11 @@ export function validatePlan(value: unknown): InstallPlan {
     origin,
     subject,
     revision,
+    {
+      installId,
+      manifestDigest: stringField(bundle, "manifest_digest"),
+      phase: "installed",
+    },
   );
   if (canonicalJson(variableRecord) !== canonicalJson(requiredVariables)) {
     throw new Error("expected variables do not match the installer contract");

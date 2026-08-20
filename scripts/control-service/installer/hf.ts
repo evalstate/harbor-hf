@@ -222,7 +222,7 @@ export interface HfAdapter {
   createSpace(
     spaceId: string,
     variablesFile: string,
-    secretsFile: string,
+    secretsFile?: string,
   ): Promise<void>;
   createBucket(bucketId: string): Promise<void>;
   setVariables(spaceId: string, variablesFile: string): Promise<void>;
@@ -376,9 +376,9 @@ export class HfCli implements HfAdapter {
   async createSpace(
     spaceId: string,
     variablesFile: string,
-    secretsFile: string,
+    secretsFile?: string,
   ): Promise<void> {
-    const value = await this.json([
+    const args = [
       "repos",
       "create",
       spaceId,
@@ -392,9 +392,9 @@ export class HfCli implements HfAdapter {
       "--no-exist-ok",
       "--env-file",
       variablesFile,
-      "--secrets-file",
-      secretsFile,
-    ]);
+      ...(secretsFile ? ["--secrets-file", secretsFile] : []),
+    ];
+    const value = await this.json(args);
     assertMutation(value, spaceId);
   }
 

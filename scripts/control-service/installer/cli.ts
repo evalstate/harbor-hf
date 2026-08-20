@@ -5,7 +5,7 @@ import type { InstallPlan } from "./model.js";
 import { BoundedJsonProcess } from "./process.js";
 import { TtyInstallerSecretInput } from "./secret-input.js";
 import { GitSourceAdapter } from "./source.js";
-import type { InstallerDependencies, VerificationResult } from "./workflow.js";
+import type { ApplyInstallResult, InstallerDependencies } from "./workflow.js";
 
 export function defaultDependencies(): InstallerDependencies {
   const hf = new HfCli(new BoundedJsonProcess());
@@ -64,11 +64,15 @@ export function formatPlanOutput(
   customStateDirectory = false,
 ): string {
   const observed = plan.observed_preconditions;
-  const action = !observed.space
-    ? "create Space and Bucket"
-    : observed.bucket
-      ? "update installer-managed Space"
-      : "update Space and create Bucket";
+  const phase = observed.space?.variables.HARBOR_HF_INSTALL_PHASE;
+  const action =
+    phase === "credentials_required" || phase === "source_staged"
+      ? "continue paused credential bootstrap"
+      : !observed.space
+        ? "create paused bootstrap Space and Bucket"
+        : observed.bucket
+          ? "update installer-managed Space"
+          : "update Space and create Bucket";
   return [
     `Space:      ${plan.targets.space_id}`,
     `Bucket:     ${plan.targets.bucket_id}`,
@@ -78,6 +82,7 @@ export function formatPlanOutput(
     `Action:     ${action}`,
     "",
     "Plan saved privately.",
+    ...(!observed.space ? ["No service credentials are required for bootstrap."] : []),
     customStateDirectory
       ? "Next: rerun install:apply with this Space and the same --state-dir."
       : `Next: npm run install:apply -- --space ${plan.targets.space_id}`,
@@ -85,13 +90,36 @@ export function formatPlanOutput(
   ].join("\n");
 }
 
-export function formatApplyOutput(spaceId: string, result: VerificationResult): string {
+export function formatApplyOutput(
+  spaceId: string,
+  result: ApplyInstallResult,
+  customStateDirectory = false,
+): string {
+  if (result.status === "credentials_required") {
+    return [
+      "Bootstrap resources created.",
+      "",
+      `Space: ${result.space_id}`,
+      `Bucket: ${result.bucket_id}`,
+      "Runtime: paused",
+      "Write mode: disabled",
+      "Secrets stored: no",
+      "Source uploaded: no",
+      "",
+      "Create narrowly scoped control and inference-only tokens, then rerun:",
+      customStateDirectory
+        ? "npm run install:apply with this Space and the same --state-dir"
+        : `npm run install:apply -- --space ${spaceId}`,
+      "",
+    ].join("\n");
+  }
+  const verification = result.verification;
   return [
     "Installation verified.",
     `Space: ${spaceId}`,
-    `Anonymous health: ${result.anonymous_live}`,
-    `Authenticated system: ${result.authenticated_system}`,
-    `Source upload: ${result.source_upload_revision}`,
+    `Anonymous health: ${verification.anonymous_live}`,
+    `Authenticated system: ${verification.authenticated_system}`,
+    `Source upload: ${verification.source_upload_revision}`,
     "Write mode: disabled",
     "Production ready: no",
     "",

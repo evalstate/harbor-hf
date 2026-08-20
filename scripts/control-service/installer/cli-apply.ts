@@ -4,7 +4,12 @@ import {
   formatApplyOutput,
   parseSavedPlanOptions,
 } from "./cli.js";
-import { currentInstallPlanPath, installerStateRoot } from "./state.js";
+import {
+  currentInstallPlanPath,
+  installerStateRoot,
+  readBootstrapReceipt,
+  writeBootstrapReceipt,
+} from "./state.js";
 import { applyInstall } from "./workflow.js";
 
 const usage =
@@ -20,11 +25,20 @@ await cliMain(async () => {
     options.space,
     installerStateRoot(options.stateDirectory),
   );
+  const bootstrapReceipt = await readBootstrapReceipt(planPath);
   const result = await applyInstall(
     {
       planPath,
+      ...(bootstrapReceipt ? { bootstrapReceipt } : {}),
+      persistBootstrapReceipt: async (receipt) =>
+        await writeBootstrapReceipt(planPath, receipt),
     },
     defaultDependencies(),
   );
-  process.stdout.write(formatApplyOutput(options.space, result));
+  if (result.status === "credentials_required") {
+    await writeBootstrapReceipt(planPath, result.receipt);
+  }
+  process.stdout.write(
+    formatApplyOutput(options.space, result, Boolean(options.stateDirectory)),
+  );
 });

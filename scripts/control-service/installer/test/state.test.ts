@@ -16,14 +16,18 @@ import {
   expectedVariables,
   type InstallPlan,
   manifestDigest,
+  readPrivatePlan,
   writePrivatePlan,
 } from "../model.js";
 import {
   activateInstallState,
+  carryBootstrapReceipt,
   currentInstallPlanPath,
   discardInstallState,
   installerStateRoot,
   prepareInstallState,
+  readBootstrapReceipt,
+  writeBootstrapReceipt,
 } from "../state.js";
 
 const temporaryDirectories: string[] = [];
@@ -44,14 +48,17 @@ afterEach(async () => {
 
 function plan(repository: string, bundle: string): InstallPlan {
   const revision = "a".repeat(40);
+  const installId = "f".repeat(64);
+  const bundleDigest = manifestDigest([]);
   return {
-    schema_version: "harbor-hf.install-plan.v1",
+    schema_version: "harbor-hf.install-plan.v2",
+    install_id: installId,
     production_ready: false,
     source: { revision, repository_root: repository },
     bundle: {
       directory: bundle,
       manifest: [],
-      manifest_digest: manifestDigest([]),
+      manifest_digest: bundleDigest,
     },
     hf_cli_version: "1.23.0",
     targets: {
@@ -70,6 +77,11 @@ function plan(repository: string, bundle: string): InstallPlan {
       null,
       "stable-subject",
       revision,
+      {
+        installId,
+        manifestDigest: bundleDigest,
+        phase: "installed",
+      },
     ),
     expected_secret_names: ["HF_INFERENCE_TOKEN", "HF_TOKEN"],
     observed_preconditions: {
@@ -182,5 +194,78 @@ describe("private installer state", () => {
         "example/control",
       ),
     ).rejects.toThrow("does not match");
+  });
+
+  it("stores an idempotent owner-only bootstrap receipt beside the plan", async () => {
+    const { prepared } = await savedState();
+    const receipt = {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1" as const,
+      install_id: "f".repeat(64),
+      plan_digest: `sha256:${"d".repeat(64)}`,
+      space_id: "example/control",
+      bucket_id: "example/control-artifacts",
+      source_revision: "a".repeat(40),
+      manifest_digest: `sha256:${"b".repeat(64)}`,
+    };
+    await writeBootstrapReceipt(prepared.planPath, receipt);
+    await writeBootstrapReceipt(prepared.planPath, receipt);
+    await expect(readBootstrapReceipt(prepared.planPath)).resolves.toEqual(receipt);
+    const path = resolve(prepared.generationDirectory, "bootstrap-receipt.json");
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    await chmod(path, 0o644);
+    await expect(readBootstrapReceipt(prepared.planPath)).rejects.toThrow("owner-only");
+  });
+
+  it("atomically accepts concurrent writes of the same bootstrap receipt", async () => {
+    const { prepared } = await savedState();
+    const receipt = {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1" as const,
+      install_id: "f".repeat(64),
+      plan_digest: `sha256:${"d".repeat(64)}`,
+      space_id: "example/control",
+      bucket_id: "example/control-artifacts",
+      source_revision: "a".repeat(40),
+      manifest_digest: `sha256:${"b".repeat(64)}`,
+    };
+    await expect(
+      Promise.all([
+        writeBootstrapReceipt(prepared.planPath, receipt),
+        writeBootstrapReceipt(prepared.planPath, receipt),
+      ]),
+    ).resolves.toEqual([undefined, undefined]);
+    await expect(readBootstrapReceipt(prepared.planPath)).resolves.toEqual(receipt);
+  });
+
+  it("carries exact Bucket proof into a replacement plan generation", async () => {
+    const { directory, root, prepared } = await savedState();
+    const previous = await readPrivatePlan(prepared.planPath);
+    await writeBootstrapReceipt(prepared.planPath, {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+      install_id: previous.plan.install_id,
+      plan_digest: previous.digest,
+      space_id: previous.plan.targets.space_id,
+      bucket_id: previous.plan.targets.bucket_id,
+      source_revision: previous.plan.source.revision,
+      manifest_digest: previous.plan.bundle.manifest_digest,
+    });
+
+    const next = await prepareInstallState("example/control", root);
+    await mkdir(next.bundleDirectory);
+    const nextWritten = await writePrivatePlan(
+      next.planPath,
+      plan(resolve(directory, "repository"), next.bundleDirectory),
+    );
+    await expect(
+      carryBootstrapReceipt(
+        prepared.planPath,
+        next.planPath,
+        (await readPrivatePlan(next.planPath)).plan,
+        nextWritten.digest,
+      ),
+    ).resolves.toBe(true);
+    await expect(readBootstrapReceipt(next.planPath)).resolves.toMatchObject({
+      plan_digest: nextWritten.digest,
+      install_id: previous.plan.install_id,
+    });
   });
 });

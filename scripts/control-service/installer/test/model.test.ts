@@ -40,15 +40,23 @@ afterEach(async () => {
 });
 
 function plan(directory: string): InstallPlan {
+  const installId = "f".repeat(64);
+  const bundleDigest = manifestDigest([]);
   const variables = expectedVariables(
     "example",
     "example/control-artifacts",
     null,
     "stable-subject",
     "a".repeat(40),
+    {
+      installId,
+      manifestDigest: bundleDigest,
+      phase: "installed",
+    },
   );
   return {
-    schema_version: "harbor-hf.install-plan.v1",
+    schema_version: "harbor-hf.install-plan.v2",
+    install_id: installId,
     production_ready: false,
     source: {
       revision: "a".repeat(40),
@@ -57,7 +65,7 @@ function plan(directory: string): InstallPlan {
     bundle: {
       directory,
       manifest: [],
-      manifest_digest: manifestDigest([]),
+      manifest_digest: bundleDigest,
     },
     hf_cli_version: "1.23.0",
     targets: {
@@ -139,6 +147,20 @@ describe("installer model", () => {
     expect((await readFile(path, "utf8")).endsWith("\n")).toBe(true);
     await chmod(path, 0o644);
     await expect(readPrivatePlan(path)).rejects.toThrow("owner-only");
+  });
+
+  it("rejects legacy plans and invalid install identities", () => {
+    const directory = "/state-placeholder";
+    const legacy = structuredClone(plan(directory)) as unknown as Record<
+      string,
+      unknown
+    >;
+    legacy.schema_version = "harbor-hf.install-plan.v1";
+    expect(() => validatePlan(legacy)).toThrow("unsupported install plan");
+
+    const invalidIdentity = plan(directory);
+    invalidIdentity.install_id = "not-an-install-id";
+    expect(() => validatePlan(invalidIdentity)).toThrow("install ID");
   });
 
   it("rejects a plan that changes the exact disabled-write contract", async () => {

@@ -67,6 +67,22 @@ describe("Hugging Face CLI adapter", () => {
     expect(args).not.toContain("--private");
   });
 
+  it("creates bootstrap Spaces without transferring service secrets", async () => {
+    const processAdapter = new QueueProcess([
+      {
+        repo_id: "example/control",
+        url: "https://huggingface.co/spaces/example-org/control",
+      },
+    ]);
+    await new HfCli(processAdapter).createSpace(
+      "example/control",
+      "/tmp/variables.env",
+    );
+    const args = processAdapter.requests[0]?.args ?? [];
+    expect(args).toContain("--no-exist-ok");
+    expect(args).not.toContain("--secrets-file");
+  });
+
   it("classifies exact target absence from complete namespace listings", async () => {
     const processAdapter = new QueueProcess([
       { items: [{ id: "example/unrelated" }], next: null },

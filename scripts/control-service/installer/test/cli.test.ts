@@ -4,8 +4,11 @@ import { expectedVariables, type InstallPlan, manifestDigest } from "../model.js
 
 function plan(): InstallPlan {
   const revision = "a".repeat(40);
+  const installId = "f".repeat(64);
+  const bundleDigest = manifestDigest([]);
   return {
-    schema_version: "harbor-hf.install-plan.v1",
+    schema_version: "harbor-hf.install-plan.v2",
+    install_id: installId,
     production_ready: false,
     source: {
       revision,
@@ -14,7 +17,7 @@ function plan(): InstallPlan {
     bundle: {
       directory: "/state-placeholder/bundle",
       manifest: [],
-      manifest_digest: manifestDigest([]),
+      manifest_digest: bundleDigest,
     },
     hf_cli_version: "1.23.0",
     targets: {
@@ -33,6 +36,11 @@ function plan(): InstallPlan {
       null,
       "stable-subject",
       revision,
+      {
+        installId,
+        manifestDigest: bundleDigest,
+        phase: "installed",
+      },
     ),
     expected_secret_names: ["HF_INFERENCE_TOKEN", "HF_TOKEN"],
     observed_preconditions: {
@@ -71,6 +79,7 @@ describe("installer CLI contract", () => {
     expect(output).toContain("Space:      example/control");
     expect(output).toContain("Bucket:     example/control-artifacts");
     expect(output).toContain("Write mode: disabled");
+    expect(output).toContain("No service credentials are required for bootstrap.");
     expect(output).toContain("Next: npm run install:apply -- --space example/control");
     expect(output).not.toContain("sha256:");
     expect(output).not.toContain("/state-placeholder");
@@ -80,15 +89,67 @@ describe("installer CLI contract", () => {
 
   it("keeps activation separate after a verified installation", () => {
     const output = formatApplyOutput("example/control", {
-      production_ready: false,
-      anonymous_live: "passed",
-      anonymous_ready: "passed",
-      authenticated_system: "skipped",
-      source_upload_revision: "passed",
+      status: "installed",
+      verification: {
+        production_ready: false,
+        anonymous_live: "passed",
+        anonymous_ready: "passed",
+        authenticated_system: "skipped",
+        source_upload_revision: "passed",
+      },
     });
     expect(output).toContain("Installation verified.");
     expect(output).toContain("Write mode: disabled");
     expect(output).toContain("Production ready: no");
     expect(output).toContain("before activation");
+  });
+
+  it("explains the successful credential-scoping bootstrap stop", () => {
+    const output = formatApplyOutput("example/control", {
+      status: "credentials_required",
+      production_ready: false,
+      space_id: "example/control",
+      bucket_id: "example/control-artifacts",
+      space_paused: true,
+      secrets_configured: false,
+      source_uploaded: false,
+      receipt: {
+        schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+        install_id: "f".repeat(64),
+        plan_digest: `sha256:${"d".repeat(64)}`,
+        space_id: "example/control",
+        bucket_id: "example/control-artifacts",
+        source_revision: "a".repeat(40),
+        manifest_digest: `sha256:${"b".repeat(64)}`,
+      },
+    });
+    expect(output).toContain("Bootstrap resources created.");
+    expect(output).toContain("Secrets stored: no");
+    expect(output).toContain("Source uploaded: no");
+    expect(output).not.toContain("Installation verified.");
+    expect(
+      formatApplyOutput(
+        "example/control",
+        {
+          status: "credentials_required",
+          production_ready: false,
+          space_id: "example/control",
+          bucket_id: "example/control-artifacts",
+          space_paused: true,
+          secrets_configured: false,
+          source_uploaded: false,
+          receipt: {
+            schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+            install_id: "f".repeat(64),
+            plan_digest: `sha256:${"d".repeat(64)}`,
+            space_id: "example/control",
+            bucket_id: "example/control-artifacts",
+            source_revision: "a".repeat(40),
+            manifest_digest: `sha256:${"b".repeat(64)}`,
+          },
+        },
+        true,
+      ),
+    ).toContain("same --state-dir");
   });
 });
