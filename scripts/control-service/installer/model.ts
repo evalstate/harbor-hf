@@ -83,6 +83,8 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const HF_CLI_VERSION = /^1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const INSTALL_ID = /^[a-f0-9]{64}$/;
 
+export class UnsupportedInstallPlanError extends Error {}
+
 export function isSupportedHfCliVersion(value: string): boolean {
   const match = value.match(HF_CLI_VERSION);
   return match !== null && BigInt(match[1] as string) >= 23n;
@@ -366,7 +368,7 @@ function parseRemoteState(value: Record<string, unknown>): RemoteState {
 
 export function validatePlan(value: unknown): InstallPlan {
   if (!isRecord(value) || value.schema_version !== PLAN_SCHEMA) {
-    throw new Error("unsupported install plan");
+    throw new UnsupportedInstallPlanError("unsupported install plan");
   }
   requireExactKeys(
     value,

@@ -24,6 +24,7 @@ import {
   carryBootstrapReceipt,
   currentInstallPlanPath,
   discardInstallState,
+  findCurrentInstallPlanPath,
   installerStateRoot,
   prepareInstallState,
   readBootstrapReceipt,
@@ -143,6 +144,23 @@ describe("private installer state", () => {
     expect(
       await readFile(resolve(prepared.targetDirectory, "current.json"), "utf8"),
     ).toContain('"space_id":"example/control"');
+  });
+
+  it("allows planning to replace an unsupported legacy local plan", async () => {
+    const { root, prepared } = await savedState();
+    const legacy = JSON.parse(await readFile(prepared.planPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    legacy.schema_version = "harbor-hf.install-plan.v1";
+    await writeFile(prepared.planPath, `${JSON.stringify(legacy)}\n`);
+
+    await expect(
+      findCurrentInstallPlanPath("example/control", root),
+    ).resolves.toBeUndefined();
+    await expect(currentInstallPlanPath("example/control", root)).rejects.toThrow(
+      "unsupported install plan",
+    );
   });
 
   it("rejects target confusion and insecure pointer state", async () => {

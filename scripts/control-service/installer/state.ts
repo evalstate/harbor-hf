@@ -20,6 +20,7 @@ import {
   isInstallId,
   parseTargetIds,
   readPrivatePlan,
+  UnsupportedInstallPlanError,
 } from "./model.js";
 
 const STATE_SCHEMA = "harbor-hf.install-state.v1";
@@ -430,6 +431,9 @@ export async function findCurrentInstallPlanPath(
   try {
     return await currentInstallPlanPath(spaceId, stateRootInput);
   } catch (error) {
+    if (error instanceof UnsupportedInstallPlanError) {
+      return undefined;
+    }
     if (
       error instanceof Error &&
       "code" in error &&
