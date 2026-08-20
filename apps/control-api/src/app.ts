@@ -469,6 +469,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       },
     },
     crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
     xFrameOptions: false,
   });
   await app.register(swagger, {

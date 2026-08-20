@@ -475,6 +475,7 @@ describe("control API", () => {
     expect(live.headers["content-security-policy"]).toContain(
       "frame-ancestors 'self' https://huggingface.co",
     );
+    expect(live.headers["cross-origin-resource-policy"]).toBe("cross-origin");
     expect(live.headers["x-frame-options"]).toBeUndefined();
     expect((await app.inject({ method: "GET", url: "/health/ready" })).json()).toEqual({
       status: "ready",
