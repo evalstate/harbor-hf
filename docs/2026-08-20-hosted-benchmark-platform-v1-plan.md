@@ -7,6 +7,12 @@ tags: [harbor, hugging-face, benchmarks, harnesses]
 
 # Hosted benchmark platform v1 plan
 
+## TL;DR
+
+Harbor-HF already has the backend and web application needed to run fixed benchmarks on Hugging Face. The next step is to prove the system with a two-task canary and the approved five-trial campaign. We also need to classify infrastructure failures, add Terminus 2, and publish verified ATIF results to Harbor Hub.
+
+Platform credentials are hidden from benchmark agents today. Arbitrary user secrets are not supported until the system can scan every retained output and reject any run that leaks one.
+
 Harbor-HF already provides the control service, web application, immutable profiles, remote workers, evidence storage, and result publication needed for hosted benchmark runs. The next milestone is to prove this path with a real campaign, make infrastructure failures explicit, add Terminus 2 through the generic harness interface, and publish compatible results to Harbor Hub.
 
 A dedicated Hugging Face organization already exists for the hosted application and public result resources. This plan does not create another organization, repository, Space, Bucket, or control service.
