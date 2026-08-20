@@ -1,9 +1,11 @@
+import { spawnSync } from "node:child_process";
 import {
   chmod,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
   symlink,
@@ -274,6 +276,160 @@ describe("private installer state", () => {
     await expect(
       withInstallerStateLock("example/control", root, async () => "released"),
     ).resolves.toBe("released");
+  });
+
+  it("holds the advisory lock on the validated target file", async () => {
+    const directory = await temporaryDirectory();
+    const root = resolve(directory, "state");
+    let lockPath = "";
+
+    await withInstallerStateLock("example/control", root, async () => {
+      const targets = await readdir(root);
+      const target = targets[0];
+      if (!target) throw new Error("installer target directory is missing");
+      lockPath = resolve(root, target, ".operation.lock");
+
+      const competingLock = spawnSync("flock", [
+        "--exclusive",
+        "--nonblock",
+        lockPath,
+        "/bin/true",
+      ]);
+      expect(competingLock.status).toBe(1);
+    });
+
+    const lockAfterRelease = spawnSync("flock", [
+      "--exclusive",
+      "--nonblock",
+      lockPath,
+      "/bin/true",
+    ]);
+    expect(lockAfterRelease.status).toBe(0);
+  });
+
+  it("reclaims an owner-only lock after its process is gone", async () => {
+    const directory = await temporaryDirectory();
+    const root = resolve(directory, "state");
+    await withInstallerStateLock("example/control", root, async () => undefined);
+    const targets = await readdir(root);
+    const target = targets[0];
+    if (!target) throw new Error("installer target directory is missing");
+    const lockPath = resolve(root, target, ".operation.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        schema_version: "harbor-hf.installer-lock.v1",
+        pid: 2_147_483_647,
+        owner_nonce: "a".repeat(32),
+        boot_id: null,
+        process_start: null,
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    await expect(
+      withInstallerStateLock("example/control", root, async () => "recovered"),
+    ).resolves.toBe("recovered");
+    expect((await lstat(lockPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("ignores stale lock contents left by a prior host boot", async () => {
+    const directory = await temporaryDirectory();
+    const root = resolve(directory, "state");
+    await withInstallerStateLock("example/control", root, async () => undefined);
+    const targets = await readdir(root);
+    const target = targets[0];
+    if (!target) throw new Error("installer target directory is missing");
+    const lockPath = resolve(root, target, ".operation.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        schema_version: "harbor-hf.installer-lock.v1",
+        pid: process.pid,
+        owner_nonce: "b".repeat(32),
+        boot_id: "00000000-0000-0000-0000-000000000000",
+        process_start: null,
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    await expect(
+      withInstallerStateLock("example/control", root, async () => "recovered"),
+    ).resolves.toBe("recovered");
+  });
+
+  it("refuses an insecure operation lock file", async () => {
+    const directory = await temporaryDirectory();
+    const root = resolve(directory, "state");
+    await withInstallerStateLock("example/control", root, async () => undefined);
+    const targets = await readdir(root);
+    const target = targets[0];
+    if (!target) throw new Error("installer target directory is missing");
+    const lockPath = resolve(root, target, ".operation.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        schema_version: "harbor-hf.installer-lock.v1",
+        pid: process.pid,
+        owner_nonce: "c".repeat(32),
+        boot_id: "-".repeat(36),
+        process_start: null,
+      })}\n`,
+      { mode: 0o600 },
+    );
+    await chmod(lockPath, 0o644);
+
+    await expect(
+      withInstallerStateLock("example/control", root, async () => undefined),
+    ).rejects.toThrow("operation lock must be owner-only");
+  });
+
+  it("serializes simultaneous reclaimers of one stale lock", async () => {
+    const directory = await temporaryDirectory();
+    const root = resolve(directory, "state");
+    await withInstallerStateLock("example/control", root, async () => undefined);
+    const targets = await readdir(root);
+    const target = targets[0];
+    if (!target) throw new Error("installer target directory is missing");
+    const lockPath = resolve(root, target, ".operation.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        schema_version: "harbor-hf.installer-lock.v1",
+        pid: 2_147_483_647,
+        owner_nonce: "d".repeat(32),
+        boot_id: null,
+        process_start: null,
+      })}\n`,
+      { mode: 0o600 },
+    );
+    let active = 0;
+    let maximumActive = 0;
+    const outcomes = await Promise.allSettled(
+      Array.from(
+        { length: 32 },
+        async () =>
+          await withInstallerStateLock("example/control", root, async () => {
+            active += 1;
+            maximumActive = Math.max(maximumActive, active);
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+            active -= 1;
+          }),
+      ),
+    );
+
+    expect(maximumActive).toBe(1);
+    expect(outcomes.some((outcome) => outcome.status === "fulfilled")).toBe(true);
+    const rejectionMessages = outcomes
+      .filter(
+        (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+      )
+      .map((outcome) =>
+        outcome.reason instanceof Error ? outcome.reason.message : "non-error",
+      );
+    expect(new Set(rejectionMessages)).toEqual(
+      new Set(["another installer operation is active"]),
+    );
   });
 
   it("refuses to activate a prepared state object under another target", async () => {

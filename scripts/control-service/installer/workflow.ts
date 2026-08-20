@@ -1,7 +1,9 @@
+import { randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { canonicalJson } from "./canonical.js";
+import type { BucketWriteProbeAdapter } from "./bucket-write-probe.js";
 import { type HfAdapter, HfCommandFailure } from "./hf.js";
 import type { HttpAdapter } from "./http.js";
 import type { IdentityAdapter } from "./identity.js";
@@ -30,6 +32,7 @@ export interface InstallerDependencies {
   identity: IdentityAdapter;
   http: HttpAdapter;
   source: SourceAdapter;
+  bucketWriteProbe?: BucketWriteProbeAdapter;
   environment?: NodeJS.ProcessEnv;
   secretInput?: InstallerSecretInput;
 }
@@ -795,7 +798,7 @@ async function secretValues(
   return values;
 }
 
-async function assertControlCredentialCanReadBucket(
+async function assertControlCredentialCanUseBucket(
   plan: InstallPlan,
   secrets: Record<string, string>,
   dependencies: InstallerDependencies,
@@ -810,14 +813,23 @@ async function assertControlCredentialCanReadBucket(
   );
   url.searchParams.set("recursive", "true");
   url.searchParams.set("expand", "false");
-  const response = await dependencies.http.getJson(url, {
-    bearer: controlCredential,
-    timeoutMs: 30_000,
-    maxBytes: 256 * 1024,
-  });
-  if (response.status !== 200 || !Array.isArray(response.body)) {
+  try {
+    const response = await dependencies.http.getJson(url, {
+      bearer: controlCredential,
+      timeoutMs: 30_000,
+      maxBytes: 256 * 1024,
+    });
+    if (response.status !== 200 || !Array.isArray(response.body)) throw new Error();
+    if (!dependencies.bucketWriteProbe) throw new Error();
+    await dependencies.bucketWriteProbe.createAndVerify({
+      bucketId: plan.targets.bucket_id,
+      accessToken: controlCredential,
+      path: `installer/write-probes/schema=v1/${plan.install_id}/${randomBytes(16).toString("hex")}`,
+      bytes: new TextEncoder().encode("harbor-hf installer bucket write probe v1\n"),
+    });
+  } catch {
     throw new InstallerInputError(
-      `control credential needs read access to ${plan.targets.bucket_id}`,
+      `control credential needs read and write access to ${plan.targets.bucket_id}`,
     );
   }
 }
@@ -1611,7 +1623,7 @@ async function completeInstall(
           SECRET_NAMES,
           dependencies.secretInput,
         );
-        await assertControlCredentialCanReadBucket(plan, secrets, dependencies);
+        await assertControlCredentialCanUseBucket(plan, secrets, dependencies);
         const secretsFile = await writePrivateEnvironmentFile(
           tempDirectory,
           "secrets.env",
@@ -1653,7 +1665,7 @@ async function completeInstall(
           SECRET_NAMES,
           dependencies.secretInput,
         );
-        await assertControlCredentialCanReadBucket(plan, secrets, dependencies);
+        await assertControlCredentialCanUseBucket(plan, secrets, dependencies);
         const secretsFile = await writePrivateEnvironmentFile(
           tempDirectory,
           "secrets.env",

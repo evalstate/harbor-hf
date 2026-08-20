@@ -1,4 +1,5 @@
 import { HfCli } from "./hf.js";
+import { HuggingFaceBucketWriteProbe } from "./bucket-write-probe.js";
 import { BoundedHttpAdapter } from "./http.js";
 import { StableIdentityAdapter } from "./identity.js";
 import type { InstallPlan } from "./model.js";
@@ -16,6 +17,7 @@ export function defaultDependencies(): InstallerDependencies {
   const http = new BoundedHttpAdapter();
   return {
     hf,
+    bucketWriteProbe: new HuggingFaceBucketWriteProbe(),
     http,
     identity: new StableIdentityAdapter(hf, http),
     secretInput: new TtyInstallerSecretInput(),

@@ -66,7 +66,7 @@ npm run install:disable -- --help
 Before starting:
 
 1. Clone the exact source to install and run `npm ci`.
-2. Use Node.js `>=22.12.0`.
+2. Use Linux with util-linux `flock` available and Node.js `>=22.12.0`.
 3. Install Hugging Face CLI `>=1.23.0 <2.0.0`, authenticate it as the approved
    installer identity, and keep that exact CLI version and identity throughout
    plan, provision, and configure.
@@ -89,6 +89,9 @@ local state directory. Keep that state across phases and recovery attempts.
 When using `--state-dir`, pass the same value to every later command. Do not
 copy, delete, replace, or quarantine installer state during an active
 installation unless a reviewed recovery procedure explicitly requires it.
+Installer commands serialize operations per target. A valid lock whose process
+ended or whose host rebooted is released automatically by the operating
+system; a live, wrong-owner, or insecure lock remains a stop condition.
 
 ### 1. Plan
 
@@ -141,11 +144,18 @@ Phase two:
    `HARBOR_HF_INSTALL_CONTROL_SECRET` and
    `HARBOR_HF_INSTALL_INFERENCE_SECRET` process variables or, when absent,
    hidden terminal prompts;
-4. proves the proposed control credential can read the exact artifact Bucket;
+4. proves the proposed control credential can read the exact artifact Bucket,
+   creates a fresh non-secret object under
+   `installer/write-probes/schema=v1/`, and reads back its exact bytes;
 5. writes the paired Space secrets without recording their values;
 6. sets the complete installed configuration with writes disabled;
 7. starts the Space and verifies anonymous health and the exact uploaded
    revision.
+
+Write probes are retained as small capability attestations. Their paths and
+contents contain no credential-derived or operator-specific data. A fresh path
+is required for every credential acceptance so an existing object can never
+let a read-only replacement credential pass.
 
 On success it reports `Installation verified`, `Write mode: disabled`, and
 `Production ready: no`. A safely interrupted phase can normally be resumed by

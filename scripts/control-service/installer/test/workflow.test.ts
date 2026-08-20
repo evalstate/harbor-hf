@@ -11,6 +11,10 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type HfAdapter, HfCommandFailure } from "../hf.js";
+import type {
+  BucketWriteProbeAdapter,
+  BucketWriteProbeInput,
+} from "../bucket-write-probe.js";
 import type { HttpAdapter } from "../http.js";
 import type { IdentityAdapter } from "../identity.js";
 import { expectedVariables, type Principal, type RemoteState } from "../model.js";
@@ -359,6 +363,20 @@ class FakeHf implements HfAdapter {
   }
 }
 
+class FakeBucketWriteProbe implements BucketWriteProbeAdapter {
+  fail = false;
+  calls: Array<{ bucketId: string; path: string; bytes: Uint8Array }> = [];
+
+  async createAndVerify(input: BucketWriteProbeInput): Promise<void> {
+    this.calls.push({
+      bucketId: input.bucketId,
+      path: input.path,
+      bytes: Uint8Array.from(input.bytes),
+    });
+    if (this.fail) throw new Error("write forbidden");
+  }
+}
+
 async function setup(existingRevision?: string) {
   const directory = await temporaryDirectory();
   const repository = resolve(directory, "repository");
@@ -367,6 +385,7 @@ async function setup(existingRevision?: string) {
   const hf = new FakeHf();
   const source = new FakeSource(repository);
   const identity = new FakeIdentity();
+  const bucketWriteProbe = new FakeBucketWriteProbe();
   const http = new FakeHttp(() => {
     const writeMode = hf.state.space?.variables.HARBOR_HF_WRITE_MODE;
     return writeMode === "enabled" || writeMode === "enabled" ? writeMode : "disabled";
@@ -379,6 +398,7 @@ async function setup(existingRevision?: string) {
     source,
     identity,
     http,
+    bucketWriteProbe,
     environment: {
       HARBOR_HF_INSTALL_CONTROL_SECRET: "control-placeholder",
       HARBOR_HF_INSTALL_INFERENCE_SECRET: "inference-placeholder",
@@ -400,6 +420,7 @@ async function setup(existingRevision?: string) {
     source,
     identity,
     http,
+    bucketWriteProbe,
     dependencies,
     planned,
   };
@@ -1295,8 +1316,22 @@ describe("installer workflows", () => {
     setupResult.http.controlCredentialStatus = 404;
 
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
-      "control credential needs read access to example/control-artifacts",
+      "control credential needs read and write access to example/control-artifacts",
     );
+    expect(setupResult.hf.calls).not.toContain("setSecrets");
+    expect(setupResult.hf.state.space?.secretNames).toEqual([]);
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+  });
+
+  it("rejects a control credential that cannot create a fresh Bucket object", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    setupResult.bucketWriteProbe.fail = true;
+
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "control credential needs read and write access to example/control-artifacts",
+    );
+    expect(setupResult.bucketWriteProbe.calls).toHaveLength(1);
     expect(setupResult.hf.calls).not.toContain("setSecrets");
     expect(setupResult.hf.state.space?.secretNames).toEqual([]);
     expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
@@ -1331,6 +1366,16 @@ describe("installer workflows", () => {
     expect(setupResult.http.requests).toContainEqual({
       path: "/api/buckets/example/control-artifacts/tree/control/schema=v1",
       bearer: "replacement-control",
+    });
+    expect(setupResult.bucketWriteProbe.calls).toHaveLength(2);
+    expect(setupResult.bucketWriteProbe.calls[0]?.path).not.toBe(
+      setupResult.bucketWriteProbe.calls[1]?.path,
+    );
+    expect(setupResult.bucketWriteProbe.calls[1]).toMatchObject({
+      bucketId: "example/control-artifacts",
+      path: expect.stringMatching(
+        /^installer\/write-probes\/schema=v1\/[a-f0-9]{64}\/[a-f0-9]{32}$/,
+      ),
     });
   });
 

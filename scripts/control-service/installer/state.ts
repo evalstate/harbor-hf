@@ -1,4 +1,5 @@
-import { O_NOFOLLOW, O_RDONLY } from "node:constants";
+import { O_CREAT, O_NOFOLLOW, O_RDONLY, O_RDWR } from "node:constants";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
@@ -57,6 +58,61 @@ export interface PreparedInstallState {
   planPath: string;
 }
 
+async function acquireInstallerLock(path: string): Promise<FileHandle> {
+  const handle = await open(path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || (info.mode & 0o777) !== 0o600) {
+      throw new Error("installer operation lock must be owner-only");
+    }
+    assertOwned(info, "installer operation lock");
+    await acquireAdvisoryLock(handle);
+    return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+async function acquireAdvisoryLock(handle: FileHandle): Promise<void> {
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    // The parent retains the same Linux open file description after flock exits.
+    const locker = spawn("flock", ["--exclusive", "--nonblock", "3"], {
+      stdio: ["ignore", "ignore", "ignore", handle.fd],
+    });
+    const timeout = setTimeout(() => {
+      locker.kill();
+      rejectPromise(new Error("installer operation lock timed out"));
+    }, 5_000);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      locker.off("error", onError);
+      locker.off("exit", onExit);
+    };
+    const onError = () => {
+      cleanup();
+      rejectPromise(new Error("OS advisory locking is unavailable"));
+    };
+    const onExit = (code: number | null) => {
+      cleanup();
+      if (code === 0) {
+        resolvePromise();
+      } else {
+        rejectPromise(
+          new Error(
+            code === 1
+              ? "another installer operation is active"
+              : "installer operation lock failed",
+          ),
+        );
+      }
+    };
+    locker.once("error", onError);
+    locker.once("exit", onExit);
+    if (locker.exitCode !== null) onExit(locker.exitCode);
+  });
+}
+
 export async function withInstallerStateLock<T>(
   spaceId: string,
   stateRootInput: string,
@@ -68,25 +124,22 @@ export async function withInstallerStateLock<T>(
   const target = targetDirectory(stateRoot, spaceId);
   await ensurePrivateDirectory(target);
   const lockPath = resolve(target, ".operation.lock");
-  let handle: FileHandle;
+  const lock = await acquireInstallerLock(lockPath);
+  let outcome: { ok: true; value: T } | { ok: false; error: unknown };
   try {
-    handle = await open(lockPath, "wx", 0o600);
+    outcome = { ok: true, value: await operation() };
   } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      (error as NodeJS.ErrnoException).code === "EEXIST"
-    ) {
-      throw new Error("another installer plan or apply operation is active");
-    }
-    throw error;
+    outcome = { ok: false, error };
   }
+  let releaseError: unknown;
   try {
-    return await operation();
-  } finally {
-    await handle.close();
-    await rm(lockPath, { force: true });
+    await lock.close();
+  } catch (error) {
+    releaseError = error;
   }
+  if (!outcome.ok) throw outcome.error;
+  if (releaseError) throw releaseError;
+  return outcome.value;
 }
 
 function targetKey(spaceId: string): string {
