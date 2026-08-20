@@ -1,4 +1,4 @@
-import { cliMain, defaultDependencies, parseOptions } from "./cli.js";
+import { cliMain, defaultDependencies, formatPlanOutput, parseOptions } from "./cli.js";
 import { planInstall } from "./workflow.js";
 
 const usage =
@@ -24,5 +24,5 @@ await cliMain(async () => {
     },
     defaultDependencies(),
   );
-  process.stdout.write(`plan: ${result.path}\nconfirm: ${result.digest}\n`);
+  process.stdout.write(formatPlanOutput(result.path));
 });

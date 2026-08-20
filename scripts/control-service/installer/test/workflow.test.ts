@@ -350,7 +350,6 @@ describe("installer workflows", () => {
     const result = await applyInstall(
       {
         planPath: setupResult.planPath,
-        confirmation: setupResult.planned.digest,
       },
       setupResult.dependencies,
     );
@@ -381,7 +380,6 @@ describe("installer workflows", () => {
     await applyInstall(
       {
         planPath: setupResult.planPath,
-        confirmation: setupResult.planned.digest,
       },
       setupResult.dependencies,
     );
@@ -400,7 +398,6 @@ describe("installer workflows", () => {
     await applyInstall(
       {
         planPath: setupResult.planPath,
-        confirmation: setupResult.planned.digest,
       },
       setupResult.dependencies,
     );
@@ -419,7 +416,6 @@ describe("installer workflows", () => {
       applyInstall(
         {
           planPath: setupResult.planPath,
-          confirmation: setupResult.planned.digest,
         },
         setupResult.dependencies,
       ),
@@ -439,7 +435,6 @@ describe("installer workflows", () => {
       applyInstall(
         {
           planPath: setupResult.planPath,
-          confirmation: setupResult.planned.digest,
         },
         setupResult.dependencies,
       ),
@@ -460,7 +455,6 @@ describe("installer workflows", () => {
       applyInstall(
         {
           planPath: recovery.path,
-          confirmation: recovery.digest,
         },
         setupResult.dependencies,
       ),
@@ -474,7 +468,6 @@ describe("installer workflows", () => {
       applyInstall(
         {
           planPath: setupResult.planPath,
-          confirmation: setupResult.planned.digest,
         },
         setupResult.dependencies,
       ),
@@ -490,7 +483,6 @@ describe("installer workflows", () => {
       applyInstall(
         {
           planPath: setupResult.planPath,
-          confirmation: setupResult.planned.digest,
         },
         setupResult.dependencies,
       ),
@@ -514,7 +506,6 @@ describe("installer workflows", () => {
       applyInstall(
         {
           planPath: recovery.path,
-          confirmation: recovery.digest,
         },
         setupResult.dependencies,
       ),
@@ -567,10 +558,7 @@ describe("installer workflows", () => {
       private: true,
     };
     await expect(
-      applyInstall(
-        { planPath: drift.planPath, confirmation: drift.planned.digest },
-        drift.dependencies,
-      ),
+      applyInstall({ planPath: drift.planPath }, drift.dependencies),
     ).rejects.toThrow("drifted");
   });
 
@@ -604,7 +592,6 @@ describe("installer workflows", () => {
       await applyInstall(
         {
           planPath: setupResult.planPath,
-          confirmation: setupResult.planned.digest,
         },
         setupResult.dependencies,
       );
@@ -630,7 +617,6 @@ describe("installer workflows", () => {
       applyInstall(
         {
           planPath: setupResult.planPath,
-          confirmation: setupResult.planned.digest,
         },
         setupResult.dependencies,
       ),
@@ -642,7 +628,6 @@ describe("installer workflows", () => {
       applyInstall(
         {
           planPath: existing.planPath,
-          confirmation: existing.planned.digest,
         },
         existing.dependencies,
       ),
@@ -679,23 +664,13 @@ describe("installer workflows", () => {
     ).rejects.toThrow("system verification");
   });
 
-  it("rejects changed bundle content and confirmation digests", async () => {
+  it("rejects changed bundle content", async () => {
     const setupResult = await setup();
-    await expect(
-      applyInstall(
-        {
-          planPath: setupResult.planPath,
-          confirmation: `sha256:${"0".repeat(64)}`,
-        },
-        setupResult.dependencies,
-      ),
-    ).rejects.toThrow("confirmation");
     await writeFile(resolve(setupResult.bundle, "Dockerfile"), "changed\n");
     await expect(
       applyInstall(
         {
           planPath: setupResult.planPath,
-          confirmation: setupResult.planned.digest,
         },
         setupResult.dependencies,
       ),

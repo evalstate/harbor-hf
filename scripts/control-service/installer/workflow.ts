@@ -447,13 +447,10 @@ export async function verifyInstall(
 }
 
 export async function applyInstall(
-  input: { planPath: string; confirmation: string },
+  input: { planPath: string },
   dependencies: InstallerDependencies,
 ): Promise<VerificationResult> {
   const loaded = await readPrivatePlan(input.planPath);
-  if (loaded.digest !== input.confirmation) {
-    throw new Error("install plan confirmation digest does not match");
-  }
   const plan = loaded.plan;
   const version = await dependencies.hf.version();
   if (version !== plan.hf_cli_version) throw new Error("hf CLI version changed");

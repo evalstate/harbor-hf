@@ -42,6 +42,18 @@ export function parseOptions(
   return output;
 }
 
+export function parseApplyOptions(args: readonly string[]): { plan: string } | "help" {
+  const options = parseOptions(args, {
+    plan: { required: true },
+  });
+  if (options === "help") return options;
+  return { plan: options.plan as string };
+}
+
+export function formatPlanOutput(path: string): string {
+  return `plan: ${path}\n`;
+}
+
 export async function cliMain(action: () => Promise<void>): Promise<void> {
   try {
     await action();
