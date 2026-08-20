@@ -92,7 +92,8 @@ export default function App() {
     (session.error instanceof ApiError && session.error.status === 401) ||
     session.data?.authenticated === false;
   if (unauthorized) {
-    const returnTo = `${location.pathname}${location.search}${location.hash}`;
+    // Private Space embeds add signed query parameters that must not enter OAuth state.
+    const returnTo = location.pathname;
     return (
       <main className="grid min-h-screen place-items-center bg-slate-950 p-6 text-slate-100">
         <Card className="max-w-md text-center">

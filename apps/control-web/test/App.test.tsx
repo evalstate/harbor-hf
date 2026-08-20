@@ -73,15 +73,15 @@ afterEach(() => {
 });
 
 describe("control web", () => {
-  it("returns OAuth login to the current same-origin route", async () => {
+  it("returns OAuth login to the current path without iframe query credentials", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => json({ authenticated: false, login_url: "/auth/login" }, 401)),
     );
-    renderApp("/results?model=test");
+    renderApp(`/results?platform_access=${"x".repeat(600)}#private`);
     expect(
       await screen.findByRole("link", { name: /sign in with hugging face/i }),
-    ).toHaveAttribute("href", "/auth/login?return_to=%2Fresults%3Fmodel%3Dtest");
+    ).toHaveAttribute("href", "/auth/login?return_to=%2Fresults");
   });
 
   it("shows the username and never renders the OAuth subject", async () => {
