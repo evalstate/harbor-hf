@@ -19,6 +19,24 @@ The launch screen shows the resolved configuration and logical task count. It al
 
 Benchmark tasks run only on Hugging Face infrastructure. V1 does not accept user datasets or arbitrary task uploads. Complete sessions and worker evidence stay private. Public views contain normalized results, public provenance, and explicitly approved trace data only.
 
+## Secret handling and security status
+
+The current supported route keeps platform credentials outside the benchmark agent. The control credential stays in the control service. A root-owned loopback bridge holds the inference credential, while the agent receives a local URL and a non-secret placeholder key. Execution workers reject persistent credentials in their environment. They also reject trial evidence that contains the worker capability. Browser responses and public results omit raw evidence and credential-bearing fields.
+
+These controls protect credentials that the task cannot read. The hosted execution path does not yet provide complete handling for arbitrary user secrets. It archives the Harbor trial, including logs, sessions, and workspace output. Its direct leak check covers the worker capability, but it does not scan every retained file for every possible user secret. V1 therefore does not accept user-managed compute or model credentials.
+
+Support for user secrets requires all of the following controls:
+
+- each secret has one declared consumer and a locked visibility boundary.
+- launch credentials stay in the control service when remote workers do not need them.
+- model credentials stay in a trusted bridge when the benchmark agent does not need them.
+- exact known values are scanned across paths, symlinks, file bytes, logs, sessions, traces, results, and workspace output before evidence upload.
+- public candidates receive a second scan for known values and high-confidence credential patterns.
+- a finding quarantines and invalidates the attempt before publication.
+- canonical evidence is never rewritten to hide a leak.
+
+A scanner cannot guarantee safety after a secret becomes visible to an agent because the agent can transform or encode it. Process isolation is therefore the primary control. Scanning is the final fail-closed check.
+
 ## Current foundation
 
 The current system already includes:
