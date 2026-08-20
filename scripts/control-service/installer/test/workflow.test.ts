@@ -529,6 +529,39 @@ describe("installer workflows", () => {
     expect(persisted).toEqual(result.receipt);
   });
 
+  it("resumes provider-initialized empty Space creation without a local receipt", async () => {
+    const setupResult = await setup();
+    const variables = Object.fromEntries(
+      Object.entries(setupResult.planned.plan.expected_variables).filter(
+        (entry): entry is [string, string] => entry[1] !== null,
+      ),
+    );
+    variables.HARBOR_HF_INSTALL_PHASE = "credentials_required";
+    setupResult.hf.state.space = {
+      id: "example/control",
+      private: true,
+      sdk: "docker",
+      origin: ORIGIN,
+      sha: OLD_REVISION,
+      runtimeStage: "NO_APP_FILE",
+      hardware: null,
+      requestedHardware: "cpu-basic",
+      variables,
+      secretNames: [],
+    };
+
+    await expect(
+      applyInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+    ).resolves.toMatchObject({
+      status: "credentials_required",
+      source_uploaded: false,
+      secrets_configured: false,
+    });
+    expect(setupResult.hf.calls).toContain("createBucket");
+    expect(setupResult.hf.calls).not.toContain("uploadMirror");
+    expect(setupResult.hf.calls).not.toContain("setSecrets");
+  });
+
   it("pauses and fails closed when Bucket proof cannot be persisted", async () => {
     const setupResult = await setup();
     await expect(
@@ -682,17 +715,6 @@ describe("installer workflows", () => {
     expect(running.hf.calls).not.toContain("pause");
     expect(running.hf.calls).not.toContain("uploadMirror");
 
-    const sourcePresent = await setup();
-    const sourcePresentBootstrap = await bootstrap(sourcePresent);
-    if (!sourcePresent.hf.state.space) throw new Error("test Space is missing");
-    sourcePresent.hf.state.space.sha = UPLOAD_SHA;
-    sourcePresent.hf.calls.length = 0;
-    await expect(
-      complete(sourcePresent, sourcePresentBootstrap.receipt),
-    ).rejects.toThrow("before remote mutation began");
-    expect(sourcePresent.hf.calls).not.toContain("pause");
-    expect(sourcePresent.hf.calls).not.toContain("uploadMirror");
-
     const sourceStaged = await setup();
     const sourceStagedBootstrap = await bootstrap(sourceStaged);
     sourceStaged.hf.failSetSecretsPartially = true;
@@ -708,6 +730,23 @@ describe("installer workflows", () => {
     );
     expect(sourceStaged.hf.calls).not.toContain("pause");
     expect(sourceStaged.hf.calls).not.toContain("uploadMirror");
+  });
+
+  it("accepts provider-initialized metadata for a stopped empty bootstrap", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+    setupResult.hf.state.space.sha = OLD_REVISION;
+    setupResult.hf.state.space.runtimeStage = "NO_APP_FILE";
+    setupResult.hf.calls.length = 0;
+
+    await expect(complete(setupResult, bootstrapResult.receipt)).resolves.toMatchObject(
+      { status: "installed" },
+    );
+    expect(setupResult.hf.calls).toContain("uploadMirror");
+    expect(setupResult.hf.calls.indexOf("uploadMirror")).toBeLessThan(
+      setupResult.hf.calls.indexOf("setSecrets"),
+    );
   });
 
   it("rejects incomplete installed bootstrap credentials before mutation", async () => {

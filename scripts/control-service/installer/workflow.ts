@@ -242,6 +242,10 @@ function observedPhase(space: SpaceState): InstallPhase | null {
   return null;
 }
 
+function isCredentialBootstrapStopped(runtimeStage: string | null): boolean {
+  return runtimeStage === "PAUSED" || runtimeStage === "NO_APP_FILE";
+}
+
 function assertExactPlanBinding(plan: InstallPlan, state: RemoteState): void {
   const space = state.space;
   if (
@@ -286,9 +290,7 @@ function assertFreshCompletionEntrySafe(
   }
   if (
     phase === "credentials_required" &&
-    (space.runtimeStage !== "PAUSED" ||
-      space.secretNames.length > 0 ||
-      space.sha !== null)
+    (!isCredentialBootstrapStopped(space.runtimeStage) || space.secretNames.length > 0)
   ) {
     throw new Error("credential bootstrap entry state is invalid");
   }
@@ -949,11 +951,13 @@ function assertBootstrapPhase(
   if (!options.requireBucket && state.bucket) {
     throw new Error("an unproven Bucket appeared during bootstrap");
   }
-  if (options.requirePaused && state.space.runtimeStage !== "PAUSED") {
-    throw new Error("bootstrap Space is not PAUSED");
-  }
-  if (phase === "credentials_required" && state.space.sha !== null) {
-    throw new Error("credential bootstrap unexpectedly contains source");
+  if (
+    options.requirePaused &&
+    (phase === "credentials_required"
+      ? !isCredentialBootstrapStopped(state.space.runtimeStage)
+      : state.space.runtimeStage !== "PAUSED")
+  ) {
+    throw new Error("bootstrap Space is not safely stopped");
   }
   if (
     options.requireAllSecrets &&
