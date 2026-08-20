@@ -197,6 +197,19 @@ Local checks must prove:
   automatic retry;
 - mounted and remote Pi output paths retain evidence and run cleanup on every
   terminal class;
+- the replacement benchmark profile contains only the invalid trial-1 task and
+  excludes the sealed valid task;
+- the diagnostic benchmark profile contains exactly the 89 trial-1 tuples from
+  the official profile, in the same order;
+- preparation, execution, `worker_revision`, and root bootstrap all pin the
+  reviewed worker and exact file hashes;
+- replacement and diagnostic launch policies require receipts, keep bounded
+  attempts, publish as diagnostic evidence, and set the approved maximum
+  campaign ceiling;
+- a lower or exact requested ceiling is preserved, while an over-limit request
+  fails before durable campaign state exists;
+- historical profiles without a maximum remain readable;
+- the six historical canary and official profile files remain unchanged;
 - browser APIs omit lock contents and private paths together with topology and
   evidence references;
 - budget reservation and partial-worker recovery remain correct, together with
@@ -208,11 +221,34 @@ check PR comments and required CI before merge.
 
 ## Hosted checks
 
-Ship the worker repair before the profile update so each deployment profile can
-pin an immutable reviewed worker revision. Deploy the exact merged profile
-revision to the existing control Space without changing its resources,
-credentials, hardware, storage, or visibility. Verify the source revision,
-worker pin, write mode, projection integrity, and approved resource contract.
+The worker repair is merged at
+`422cf445ce04cfc8f331ddeebfd88f6bc2c5eae9`. Add a new profile family rather
+than changing the historical canary or official five-trial profiles:
+
+- `terminal-bench-2-1-replacement` contains only the invalid trial-1 task;
+- `terminal-bench-2-1-diagnostic-1` contains the 89 trial-1 tuples from the
+  official profile in the same order;
+- `tb21-deepseek-v4-flash-replacement` runs one task;
+- `tb21-deepseek-v4-flash-diagnostic-1` runs 89 tasks at concurrency eight;
+- `tb21-replacement` and `tb21-diagnostic-1` require worker receipts, keep two
+  preparation and infrastructure attempts, and publish as diagnostic evidence.
+
+Both deployment profiles pin the merged worker in the package URLs,
+`worker_revision`, and root bootstrap. Their bootstrap file hashes and canonical
+profile IDs must reproduce. Profile reservations follow the existing per-action
+budget rules.
+
+The replacement launch policy sets `max_campaign_ceiling_microusd` to
+180,000,000. The diagnostic launch policy sets it to 300,000,000. The service
+resolves that policy before it writes campaign state and rejects a larger
+requested ceiling. A lower or exact requested ceiling is stored unchanged and
+remains the cumulative runtime budget. The maximum is optional only for reading
+historical profiles. Both new policies require it.
+
+Deploy the exact merged profile revision to the existing control Space without
+changing its resources, credentials, hardware, storage, or visibility. Verify
+the source revision, all new aliases and immutable profile IDs, worker pin,
+write mode, projection integrity, and approved resource contract.
 
 Run one secret-free preparation canary, then one bounded execution and recovery
 canary. For the provider-error repair, the replacement canary contains only the
@@ -230,11 +266,12 @@ and cleanup in the high estimate. The hosted control plane must admit the
 worst-case next action within the approved cumulative ceiling before launch.
 
 The current Terminal-Bench 2.1 run has exactly 89 logical tasks and one trial
-per task. Its benchmark and launch-policy profiles must label it as diagnostic,
-contain 89 unique `trial-1` tasks, and leave the official five-trial profiles
-unchanged. Submit it once through the existing control API and use the existing
-Bucket for control and evidence. The result is single-trial diagnostic evidence
-and does not make an official five-trial or production-selection claim.
+per task. Its benchmark profile is the exact trial-1 projection of the official
+source-task set. Its launch policy labels the run as diagnostic. The historical
+canary and official five-trial profiles remain unchanged. Submit the diagnostic
+campaign once through the existing control API and use the existing Bucket for
+control and evidence. The result is single-trial diagnostic evidence and does
+not make an official five-trial or production-selection claim.
 
 Monitor every attempt, evidence manifest, result, spend event, publication,
 cleanup receipt, Sandbox, and Endpoint. Never rerun a sealed valid logical task.
