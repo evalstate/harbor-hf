@@ -2465,7 +2465,8 @@
                           "observed_state",
                           "resource_id",
                           "created_at",
-                          "inspect_url"
+                          "inspect_url",
+                          "cost_microusd"
                         ],
                         "properties": {
                           "action_id": {
@@ -2526,6 +2527,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "cost_microusd": {
+                            "type": "integer"
                           }
                         }
                       }

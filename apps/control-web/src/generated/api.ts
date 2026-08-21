@@ -1366,6 +1366,7 @@ export interface paths {
                                 /** Format: date-time */
                                 created_at: string;
                                 inspect_url: string | null;
+                                cost_microusd: number;
                             }[];
                             next_cursor: string | null;
                         };

@@ -1,6 +1,6 @@
-import type { ColumnDef } from "@tanstack/react-table";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { ColumnDef } from "@tanstack/react-table";
 import {
   AlertTriangle,
   ArrowRight,
@@ -19,9 +19,8 @@ import { useForm } from "react-hook-form";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { z } from "zod";
 import {
-  actOnCampaign,
-  submitCampaign,
   type AuditResponse,
+  actOnCampaign,
   type CampaignAction,
   type CampaignList,
   type CampaignSubmission,
@@ -30,10 +29,12 @@ import {
   type ProfileList,
   type ResultDetail,
   type ResultList,
+  submitCampaign,
   type TaskList,
 } from "./api";
 import { DataTable } from "./components/data-table";
 import { useControlState } from "./control-state";
+import { hints } from "./hints";
 import { PageHeader } from "./layout";
 import {
   estimateLaunchReservationMicrousd,
@@ -57,7 +58,6 @@ import {
   useTasks,
 } from "./queries";
 import { Badge, Button, Card, Empty, Hint, Progress, QueryContent } from "./ui";
-import { hints } from "./hints";
 
 type CampaignRow = CampaignList["items"][number];
 type TaskRow = TaskList["items"][number];
@@ -119,6 +119,15 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
       ),
     },
     {
+      accessorKey: "cost_microusd",
+      header: () => <Hint text={hints.jobs.cost}>Cost</Hint>,
+      cell: ({ getValue }) => {
+        const value = getValue();
+        if (typeof value !== "number") throw new Error("Job cost is missing");
+        return formatMoney(value);
+      },
+    },
+    {
       accessorKey: "created_at",
       header: () => <Hint text={hints.jobs.recorded}>Recorded</Hint>,
       cell: ({ getValue }) => formatDate(String(getValue())),
@@ -134,8 +143,8 @@ function CampaignJobs({ campaignId }: { campaignId: string }) {
         <Hint text={hints.campaign.jobs}>Jobs</Hint>
       </h2>
       <p className="mb-4 mt-1 text-sm text-slate-400">
-        HF Jobs launched for this campaign, with Hub inspect links and latest observed
-        state.
+        HF Jobs launched for this campaign, with Hub inspect links, latest observed
+        state, and recorded hardware cost.
       </p>
       <QueryContent query={query}>
         <DataTable

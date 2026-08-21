@@ -1905,12 +1905,13 @@ export class Projection {
    * Returns the latest row per HF Job. In-flight observe/cancel intents have no
    * receipt `resource_id` yet, so identity comes from the intent payload. A
    * pending poll does not replace the last receipt-backed observation.
+   * `cost_microusd` is the locked hardware cost on that latest receipt.
    */
   async jobs(
     limit = 100,
     offset = 0,
     campaignId?: string,
-  ): Promise<Selectable<ActionRow>[]> {
+  ): Promise<Array<Selectable<ActionRow> & { cost_microusd: number }>> {
     let query = this.db
       .selectFrom("actions")
       .selectAll()
@@ -1931,7 +1932,10 @@ export class Projection {
       if (existing.receipt_body === null && row.receipt_body !== null)
         latest.set(key, row);
     }
-    return [...latest.values()].slice(offset, offset + limit);
+    return [...latest.values()].slice(offset, offset + limit).map((row) => ({
+      ...row,
+      cost_microusd: receiptCostMicrousd(row),
+    }));
   }
 
   async endpoints(limit = 100, offset = 0): Promise<Selectable<EndpointRow>[]> {

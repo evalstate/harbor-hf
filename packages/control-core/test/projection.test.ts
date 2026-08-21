@@ -1,4 +1,4 @@
-import { sha256, type SandboxPolicy } from "@harbor-hf/contracts";
+import { type SandboxPolicy, sha256 } from "@harbor-hf/contracts";
 import { createTestControl, type TestControl } from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it } from "vitest";
 import { Projection, ProjectionIntegrityError } from "../src/projection.js";
@@ -245,10 +245,14 @@ describe("projection replay", () => {
   it("lists only the latest observed state for each Job", async () => {
     const control = await createTestControl();
     controls.push(control);
-    const submitted = await control.service.submit(input, "jobs-latest-state-key", {
-      subject: "operator",
-      role: "operator",
-    });
+    const submitted = await control.service.submit(
+      { ...input, ceiling_microusd: 100_000 },
+      "jobs-latest-state-key",
+      {
+        subject: "operator",
+        role: "operator",
+      },
+    );
     const actor = { subject: "operator" as const, role: "operator" as const };
     const resourceId = "job-latest-state";
     const payload = {
@@ -262,30 +266,35 @@ describe("projection replay", () => {
       generation: number;
       createdAt: string;
       observedState: string;
+      costMicrousd: number;
     }> = [
       {
         kind: "job.launch",
         generation: 0,
         createdAt: "2026-08-21T10:04:10.000Z",
         observedState: "SCHEDULING",
+        costMicrousd: 0,
       },
       {
         kind: "job.observe",
         generation: 0,
         createdAt: "2026-08-21T10:04:20.000Z",
         observedState: "SCHEDULING",
+        costMicrousd: 10_000,
       },
       {
         kind: "job.observe",
         generation: 1,
         createdAt: "2026-08-21T10:04:30.000Z",
         observedState: "RUNNING",
+        costMicrousd: 20_000,
       },
       {
         kind: "job.observe",
         generation: 2,
         createdAt: "2026-08-21T10:04:40.000Z",
         observedState: "ERROR",
+        costMicrousd: 40_000,
       },
     ];
     for (const record of records) {
@@ -303,6 +312,7 @@ describe("projection replay", () => {
         outcome: record.kind === "job.launch" ? "created" : "completed",
         observed_state: record.observedState,
         resource_id: resourceId,
+        cost_microusd: record.costMicrousd,
       });
     }
 
@@ -313,6 +323,7 @@ describe("projection replay", () => {
       action_kind: "job.observe",
       observed_state: "ERROR",
       resource_id: resourceId,
+      cost_microusd: 40_000,
     });
     expect(jobs[0]?.created_at).toBe("2026-08-21T10:04:40.000Z");
     expect(await control.projection.jobs(100, 0, submitted.campaign_id)).toHaveLength(

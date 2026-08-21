@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { ApiError, type SessionResponse } from "../src/api";
+import { formatMoney } from "../src/lib";
 import { keys } from "../src/queries";
 
 class FakeEventSource {
@@ -273,6 +274,7 @@ describe("control web", () => {
                 inspect_url:
                   "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
                 created_at: "2026-08-18T00:00:00.000Z",
+                cost_microusd: 1_000_000,
               },
             ],
             next_cursor: null,
@@ -314,6 +316,7 @@ describe("control web", () => {
                 inspect_url:
                   "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
                 created_at: "2026-08-18T00:00:00.000Z",
+                cost_microusd: 1_000_000,
               },
             ],
             next_cursor: null,
@@ -330,6 +333,7 @@ describe("control web", () => {
       "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
     );
     expect(link).toHaveAttribute("target", "_blank");
+    expect(screen.getByText(formatMoney(1_000_000))).toBeInTheDocument();
   });
 
   it("shows campaign request errors instead of a false not-found state", async () => {

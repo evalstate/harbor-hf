@@ -263,10 +263,11 @@ export const actionSchema = {
 export const jobSchema = {
   type: "object",
   additionalProperties: false,
-  required: [...actionSchema.required, "inspect_url"],
+  required: [...actionSchema.required, "inspect_url", "cost_microusd"],
   properties: {
     ...actionSchema.properties,
     inspect_url: nullableString,
+    cost_microusd: integer,
   },
 } as const;
 

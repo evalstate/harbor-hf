@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
@@ -17,7 +17,7 @@ import {
 import { mintWorkerCapability } from "@harbor-hf/control-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
-import { AuthStore, AuthenticationService, safeReturnPath } from "../src/auth.js";
+import { AuthenticationService, AuthStore, safeReturnPath } from "../src/auth.js";
 import type { AppConfig } from "../src/config.js";
 import { createRuntime, type Runtime } from "../src/runtime.js";
 
@@ -418,7 +418,7 @@ describe("control API", () => {
       method: "POST",
       url: "/api/v1/campaigns",
       headers: { "idempotency-key": "job-latest-state-key" },
-      payload: input,
+      payload: { ...input, ceiling_microusd: 100_000 },
     });
     expect(campaign.statusCode).toBe(202);
     const campaignId = campaign.json().campaign_id as string;
@@ -436,24 +436,28 @@ describe("control API", () => {
         generation: 0,
         createdAt: "2026-08-21T10:04:10.000Z",
         observedState: "SCHEDULING",
+        costMicrousd: 0,
       },
       {
         kind: "job.observe" as const,
         generation: 0,
         createdAt: "2026-08-21T10:04:20.000Z",
         observedState: "SCHEDULING",
+        costMicrousd: 10_000,
       },
       {
         kind: "job.observe" as const,
         generation: 1,
         createdAt: "2026-08-21T10:04:30.000Z",
         observedState: "RUNNING",
+        costMicrousd: 20_000,
       },
       {
         kind: "job.observe" as const,
         generation: 2,
         createdAt: "2026-08-21T10:04:40.000Z",
         observedState: "ERROR",
+        costMicrousd: 40_000,
       },
     ]) {
       const intent = runtime.service.actionIntent(
@@ -470,6 +474,7 @@ describe("control API", () => {
         outcome: record.kind === "job.launch" ? "created" : "completed",
         observed_state: record.observedState,
         resource_id: resourceId,
+        cost_microusd: record.costMicrousd,
       });
     }
     const jobs = await app.inject({ method: "GET", url: "/api/v1/jobs" });
@@ -478,6 +483,7 @@ describe("control API", () => {
       action_kind: string;
       observed_state: string | null;
       resource_id: string | null;
+      cost_microusd: number;
     }>;
     const matching = items.filter((item) => item.resource_id === resourceId);
     expect(matching).toHaveLength(1);
@@ -485,6 +491,7 @@ describe("control API", () => {
       action_kind: "job.observe",
       observed_state: "ERROR",
       resource_id: resourceId,
+      cost_microusd: 40_000,
       inspect_url: `https://huggingface.co/jobs/test/${resourceId}`,
     });
     const scoped = await app.inject({

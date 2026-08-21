@@ -4,7 +4,7 @@ export const hints = {
       "Queue, active campaigns, recorded spend, and Endpoint cleanup risk from the control projection.",
     campaigns:
       "Create and inspect campaigns. Logical tasks stay sealed; only infrastructure failures can be replaced.",
-    jobs: "Hugging Face Jobs launched by control, with Hub inspect links and the latest observed stage.",
+    jobs: "Hugging Face Jobs launched by control, with Hub inspect links, latest observed stage, and recorded hardware cost.",
     endpoints:
       "Inference Endpoints owned by campaigns. Completion requires a verified pause with zero ready replicas.",
     results:
@@ -101,6 +101,7 @@ export const hints = {
     observed:
       "Latest Hub stage copied onto the action receipt, such as RUNNING or COMPLETED.",
     recorded: "When this latest Job observation was written.",
+    cost: "Locked Job hardware cost from the latest observe or cancel receipt. Inference spend is on attempt receipts, not this row.",
   },
   endpoints: {
     endpoint: "Inference Endpoint id owned by a campaign.",

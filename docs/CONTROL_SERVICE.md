@@ -441,7 +441,7 @@ The React application provides:
 | `/campaigns` | Searchable and filterable campaign list. |
 | `/campaigns/:campaignId` | Campaign progress, task states, HF Jobs, cost, publication, cleanup, endpoint safety, and timeline. |
 | `/campaigns/:campaignId/tasks/:taskId` | Logical outcome, every physical attempt, and the HF Jobs that ran for the campaign. |
-| `/jobs` | Current HF Job identity, Hub inspect links, latest observed state, ownership, timing and infrastructure failures. |
+| `/jobs` | Current HF Job identity, Hub inspect links, latest observed state, recorded hardware cost, ownership, timing and infrastructure failures. |
 | `/endpoints` | Endpoint ownership, requested state, observed state, active cost, and cleanup. |
 | `/results` | Normalized results, comparisons, publication evidence, and provenance. |
 | `/profiles` | Immutable profiles, aliases, promotions, approval state, and resolved locks. |
