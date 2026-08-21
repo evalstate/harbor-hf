@@ -1,7 +1,9 @@
 import { join } from "node:path";
 import type {
   ActionAdvanced,
+  ActionDisposition,
   ActionIntent,
+  ActionReceipt,
   AttemptReceipt,
   BudgetEvent,
   EndpointResource,
@@ -15,21 +17,21 @@ import {
   sha256,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
+import { NoopActions } from "@harbor-hf/hf-adapters";
+import type { TestControl } from "@harbor-hf/test-fixtures";
 import { createTestControl } from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NoopActions } from "@harbor-hf/hf-adapters";
 import { Projection } from "../src/projection.js";
 import { ResultPublisher } from "../src/publication.js";
-import { ControlService, type AttemptInput } from "../src/service.js";
 import {
   AmbiguousExternalActionError,
   type ExternalActionContext,
   ExternalActionNotFoundError,
-  Reconciler,
   type ExternalActionPort,
   type ExternalActionResult,
+  Reconciler,
 } from "../src/reconciler.js";
-import type { TestControl } from "@harbor-hf/test-fixtures";
+import { type AttemptInput, ControlService } from "../src/service.js";
 
 const controls: TestControl[] = [];
 afterEach(async () =>
@@ -149,6 +151,31 @@ async function appendClosedSandboxAmbiguity(
     await control.service.append(closeAdvanced);
   }
   return command;
+}
+
+async function appendLegacySuppressedSandboxCommand(
+  control: TestControl,
+  campaignId: string,
+  taskId: string,
+  label: string,
+  receiptResourceId?: string | null,
+): Promise<{ command: ActionIntent; receipt: ActionReceipt }> {
+  const command = await appendClosedSandboxAmbiguity(
+    control,
+    campaignId,
+    taskId,
+    label,
+  );
+  const receipt = await control.service.receipt(command, {
+    outcome: "completed",
+    observed_state: "suppressed-sandbox-cleanup-ambiguous",
+    resource_id:
+      receiptResourceId === undefined
+        ? (command.payload.resource_id as string)
+        : receiptResourceId,
+  });
+  await control.service.markAdvanced(command, receipt);
+  return { command, receipt };
 }
 
 async function putWorkerEvidence(
@@ -2233,6 +2260,445 @@ describe("control service", () => {
     expect(await control.projection.action(cancellation.action_id)).toMatchObject({
       action_kind: "campaign.cancel",
     });
+  });
+
+  it("corrects historical Sandbox command dispositions without lifecycle effects", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "historical-disposition-campaign-key",
+      operator,
+    );
+    const first = await appendLegacySuppressedSandboxCommand(
+      control,
+      result.campaign_id,
+      "task-001",
+      "historical-first",
+    );
+    const second = await appendLegacySuppressedSandboxCommand(
+      control,
+      result.campaign_id,
+      "task-001",
+      "historical-second",
+    );
+    const before = await control.projection.campaign(result.campaign_id);
+    const beforeAttempts = await control.projection.campaignAttempts(
+      result.campaign_id,
+    );
+
+    const corrected = await control.service.correctHistoricalSandboxAmbiguities(
+      result.campaign_id,
+      "task-001",
+      {
+        action_ids: [second.command.action_id, first.command.action_id],
+        reason: "correct legacy non-replay-safe command state",
+        confirmed: true,
+      },
+      "historical-disposition-key",
+      operator,
+    );
+
+    expect(corrected.items).toHaveLength(2);
+    expect(corrected.items.every((item) => item.created)).toBe(true);
+    const repeated = await control.service.correctHistoricalSandboxAmbiguities(
+      result.campaign_id,
+      "task-001",
+      {
+        action_ids: [first.command.action_id, second.command.action_id],
+        reason: "correct legacy non-replay-safe command state",
+        confirmed: true,
+      },
+      "historical-disposition-key",
+      operator,
+    );
+    expect(repeated).toMatchObject({
+      batch_id: corrected.batch_id,
+      batch_digest: corrected.batch_digest,
+    });
+    expect(repeated.items.every((item) => !item.created)).toBe(true);
+    const views = await control.projection.actionDispositionViews(
+      result.campaign_id,
+      "task-001",
+    );
+    expect(views).toHaveLength(2);
+    expect(views).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          recorded_outcome: "completed",
+          recorded_observed_state: "suppressed-sandbox-cleanup-ambiguous",
+          effective_outcome: "failed",
+          effective_observed_state: "AMBIGUOUS",
+          effective_error_code: "sandbox_external_outcome_unknown",
+          reason_code: "historical_non_replay_safe_command_ambiguity",
+        }),
+      ]),
+    );
+    const audit = await control.projection.audit(null, 10_000);
+    const dispositionEvent = audit.find(
+      (event) =>
+        event.type === "action.disposition" &&
+        event.data.action_id === first.command.action_id,
+    );
+    expect(dispositionEvent?.data).toMatchObject({
+      corrected: true,
+      recorded_outcome: "completed",
+      recorded_observed_state: "suppressed-sandbox-cleanup-ambiguous",
+      effective_outcome: "failed",
+      effective_observed_state: "AMBIGUOUS",
+      effective_error_code: "sandbox_external_outcome_unknown",
+      reason_code: "historical_non_replay_safe_command_ambiguity",
+    });
+    expect(dispositionEvent?.data).not.toHaveProperty("source_receipt_digest");
+    expect(dispositionEvent?.data).not.toHaveProperty("close_action_id");
+    expect(
+      JSON.parse(
+        (await control.projection.action(first.command.action_id))?.receipt_body ??
+          "null",
+      ),
+    ).toEqual(first.receipt);
+    expect(await control.projection.campaign(result.campaign_id)).toEqual(before);
+    expect(await control.projection.campaignAttempts(result.campaign_id)).toEqual(
+      beforeAttempts,
+    );
+    await expect(
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        {
+          action_ids: [first.command.action_id],
+          reason: "changed batch",
+          confirmed: true,
+        },
+        "historical-disposition-key",
+        operator,
+      ),
+    ).rejects.toThrow("batch identity conflict");
+
+    const rebuilt = await Projection.open(`${control.root}/disposition-rebuild.sqlite`);
+    await rebuilt.rebuild(control.store);
+    expect(
+      await rebuilt.actionDispositionViews(result.campaign_id, "task-001"),
+    ).toMatchObject([
+      {
+        recorded_outcome: "completed",
+        effective_outcome: "failed",
+        effective_observed_state: "AMBIGUOUS",
+      },
+      {
+        recorded_outcome: "completed",
+        effective_outcome: "failed",
+        effective_observed_state: "AMBIGUOUS",
+      },
+    ]);
+    await rebuilt.close();
+
+    await control.store.create(
+      sandboxActionResultPath(result.campaign_id, first.command.action_id),
+      new TextEncoder().encode('{"result":"late"}\n'),
+    );
+    const conflicting = await Projection.open(
+      `${control.root}/disposition-conflict.sqlite`,
+    );
+    await expect(conflicting.rebuild(control.store)).rejects.toThrow("durable result");
+    expect(conflicting.system()).toMatchObject({
+      ready: false,
+      integrity_error: expect.stringContaining("durable result"),
+    });
+    await conflicting.close();
+  });
+
+  it("adopts concurrent historical disposition correction", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "concurrent-disposition-campaign-key",
+      operator,
+    );
+    const legacy = await appendLegacySuppressedSandboxCommand(
+      control,
+      result.campaign_id,
+      "task-001",
+      "concurrent-disposition",
+    );
+    const input = {
+      action_ids: [legacy.command.action_id],
+      reason: "adopt concurrent correction",
+      confirmed: true,
+    };
+    const results = await Promise.all([
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        input,
+        "concurrent-disposition-key",
+        operator,
+      ),
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        input,
+        "concurrent-disposition-key",
+        { subject: "another-operator", role: "operator" },
+      ),
+    ]);
+    expect(
+      results.flatMap((item) => item.items).filter((item) => item.created),
+    ).toHaveLength(1);
+    expect(
+      await control.projection.actionDispositionViews(result.campaign_id, "task-001"),
+    ).toHaveLength(1);
+  });
+
+  it("resumes a partially written historical disposition batch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "partial-disposition-campaign-key",
+      operator,
+    );
+    const first = await appendLegacySuppressedSandboxCommand(
+      control,
+      result.campaign_id,
+      "task-001",
+      "partial-first",
+    );
+    const second = await appendLegacySuppressedSandboxCommand(
+      control,
+      result.campaign_id,
+      "task-001",
+      "partial-second",
+    );
+    const originalCreate = control.store.create.bind(control.store);
+    let dispositionWrites = 0;
+    const create = vi
+      .spyOn(control.store, "create")
+      .mockImplementation(async (key, bytes) => {
+        if (key.endsWith("/zzz-disposition.json")) {
+          dispositionWrites += 1;
+          if (dispositionWrites === 2)
+            throw new Error("simulated disposition batch interruption");
+        }
+        return originalCreate(key, bytes);
+      });
+    const input = {
+      action_ids: [first.command.action_id, second.command.action_id],
+      reason: "resume an interrupted correction batch",
+      confirmed: true,
+    };
+    await expect(
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        input,
+        "partial-disposition-key",
+        operator,
+      ),
+    ).rejects.toThrow("simulated disposition batch interruption");
+    create.mockRestore();
+    expect(
+      await control.projection.actionDispositionViews(result.campaign_id, "task-001"),
+    ).toHaveLength(1);
+
+    const resumed = await control.service.correctHistoricalSandboxAmbiguities(
+      result.campaign_id,
+      "task-001",
+      input,
+      "partial-disposition-key",
+      operator,
+    );
+    expect(resumed.items.filter((item) => item.created)).toHaveLength(1);
+    expect(
+      await control.projection.actionDispositionViews(result.campaign_id, "task-001"),
+    ).toHaveLength(2);
+  });
+
+  it("rejects historical disposition correction without complete proof", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "invalid-disposition-campaign-key",
+      operator,
+    );
+    const resultBearing = await appendLegacySuppressedSandboxCommand(
+      control,
+      result.campaign_id,
+      "task-001",
+      "result-bearing-disposition",
+    );
+    await expect(
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        {
+          action_ids: [resultBearing.command.action_id],
+          reason: "confirmation is required",
+          confirmed: false,
+        },
+        "invalid-disposition-confirmation-key",
+        operator,
+      ),
+    ).rejects.toThrow("explicit confirmation");
+    await expect(
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        {
+          action_ids: [resultBearing.command.action_id],
+          reason: "operator access is required",
+          confirmed: true,
+        },
+        "invalid-disposition-reader-key",
+        { subject: "reader", role: "reader" },
+      ),
+    ).rejects.toThrow("requires an operator");
+    await control.store.create(
+      sandboxActionResultPath(result.campaign_id, resultBearing.command.action_id),
+      new TextEncoder().encode('{"result":"present"}\n'),
+    );
+    await expect(
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        {
+          action_ids: [resultBearing.command.action_id],
+          reason: "must reject the durable result",
+          confirmed: true,
+        },
+        "invalid-disposition-result-key",
+        operator,
+      ),
+    ).rejects.toThrow("durable result");
+
+    const open = await appendClosedSandboxAmbiguity(
+      control,
+      result.campaign_id,
+      "task-001",
+      "open-disposition",
+      "none",
+    );
+    const openReceipt = await control.service.receipt(open, {
+      outcome: "completed",
+      observed_state: "suppressed-sandbox-cleanup-ambiguous",
+      resource_id: open.payload.resource_id as string,
+    });
+    await control.service.markAdvanced(open, openReceipt);
+    await expect(
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        {
+          action_ids: [open.action_id],
+          reason: "must reject the open Sandbox",
+          confirmed: true,
+        },
+        "invalid-disposition-open-key",
+        operator,
+      ),
+    ).rejects.toThrow("no terminal Sandbox close");
+    expect(
+      await control.projection.actionDispositionViews(result.campaign_id, "task-001"),
+    ).toEqual([]);
+  });
+
+  it("rejects disposition proof with a mismatched source resource", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "mismatched-source-resource-campaign-key",
+      operator,
+    );
+    const legacy = await appendLegacySuppressedSandboxCommand(
+      control,
+      result.campaign_id,
+      "task-001",
+      "mismatched-source-resource",
+      "another-sandbox-resource",
+    );
+    expect(legacy.receipt.resource_id).toBe("another-sandbox-resource");
+    expect(legacy.command.payload.resource_id).toBe(
+      "sandbox-resource-mismatched-source-resource",
+    );
+    expect(
+      JSON.parse(
+        (await control.projection.action(legacy.command.action_id))?.receipt_body ??
+          "null",
+      ),
+    ).toMatchObject({ resource_id: "another-sandbox-resource" });
+    await expect(
+      control.service.correctHistoricalSandboxAmbiguities(
+        result.campaign_id,
+        "task-001",
+        {
+          action_ids: [legacy.command.action_id],
+          reason: "reject inconsistent source and close evidence",
+          confirmed: true,
+        },
+        "mismatched-source-resource-key",
+        operator,
+      ),
+    ).rejects.toThrow("source resource does not match");
+
+    const close = (await control.projection.campaignActions(result.campaign_id)).find(
+      (action) => action.action_kind === "sandbox.close",
+    );
+    if (!close?.receipt_body) throw new Error("test close receipt is missing");
+    const closeReceipt = JSON.parse(close.receipt_body) as ActionReceipt;
+    const reason = "reject inconsistent source and close evidence";
+    const reasonCode = "historical_non_replay_safe_command_ambiguity" as const;
+    const batchId = deterministicId(
+      "disposition-batch",
+      result.campaign_id,
+      "task-001",
+      sha256("mismatched-source-resource-key"),
+    );
+    const disposition: ActionDisposition = {
+      schema_version: "v1",
+      kind: "action.disposition",
+      record_id: deterministicId("disposition", legacy.command.action_id),
+      created_at: "2026-08-21T00:00:00.000Z",
+      actor: operator,
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      action_id: legacy.command.action_id,
+      source_receipt_id: legacy.receipt.record_id,
+      source_receipt_digest: sha256(canonicalJson(legacy.receipt)),
+      close_action_id: close.action_id,
+      close_receipt_id: closeReceipt.record_id,
+      close_receipt_digest: sha256(canonicalJson(closeReceipt)),
+      batch_id: batchId,
+      batch_digest: sha256(
+        canonicalJson({
+          action_ids: [legacy.command.action_id],
+          reason_code: reasonCode,
+          reason,
+        }),
+      ),
+      batch_size: 1,
+      effective_outcome: "failed",
+      effective_observed_state: "AMBIGUOUS",
+      effective_error_code: "sandbox_external_outcome_unknown",
+      reason_code: reasonCode,
+      reason,
+    };
+    await expect(control.service.append(disposition)).rejects.toThrow(
+      "source resource mismatch",
+    );
+    const rebuilt = await Projection.open(
+      `${control.root}/mismatched-source-resource.sqlite`,
+    );
+    await expect(rebuilt.rebuild(control.store)).rejects.toThrow(
+      "source resource mismatch",
+    );
+    expect(rebuilt.system()).toMatchObject({
+      ready: false,
+      integrity_error: expect.stringContaining("source resource mismatch"),
+    });
+    await rebuilt.close();
   });
 
   it("rejects a Sandbox reservation before it crosses the campaign ceiling", async () => {
