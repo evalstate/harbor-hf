@@ -169,12 +169,30 @@ runtime does not require that benchmark name.
 ## Cost and recovery
 
 Preparation has its own small CPU reservation. Execution reservation is checked
-only after the exact prepared tasks and limits are known. Both reservations and all replacements count against the same campaign
-ceiling. Sandbox use and inference count too, as does cleanup.
+only after the exact prepared tasks and limits are known. Both reservations and
+all replacements count against the same campaign ceiling. Sandbox use and
+inference count too, as does cleanup.
 
 A preparation failure cannot start benchmark execution. A deterministic shared
 worker defect stops the affected campaign. A missing execution receipt can
 launch only the tasks that remain unsealed, using the same prepared lock.
+
+A post-dispatch `sandbox.exec` failure is different from a replayable transport
+failure. The control operation becomes `failed` with observed state `AMBIGUOUS`
+and error code `sandbox_external_outcome_unknown`. It has no result object and
+the same action identity cannot execute again. `action.advanced` ends the
+control action without claiming that the external command did not run.
+
+A process exit can leave an older dispatch without a receipt. Infrastructure
+retry settles it only after a matching create action and durable terminal
+Sandbox close prove that the resource cannot produce another effect. Recovery
+is limited to the selected campaign and task, checks that no result exists, and
+appends the ambiguous receipt and advancement. Cancellation leaves a dispatched
+command unresolved while it closes the Sandbox, then settles the command after
+the close fence; it never suppresses the command as completed. Operator and
+automatic infrastructure retries use the same recovery gate before reservation
+or replacement launch. No command is replayed and no historical record is
+changed.
 
 ## Verification
 
@@ -187,6 +205,16 @@ Local checks must prove:
 - changed source, task, image, profile, or Harbor version fails closed;
 - duplicate preparation and ambiguous Job launch are adopted without a second
   remote create;
+- a post-dispatch Sandbox command exception writes no result, writes a safe
+  failed and `AMBIGUOUS` receipt, advances the action, and returns a bounded
+  `sandbox_action_ambiguous` error;
+- the same Sandbox command key cannot call the adapter again after ambiguity,
+  including after restart and projection rebuild;
+- an older dispatched command can be settled only for the selected campaign and
+  task after a matching terminal Sandbox close, and open or mismatched resources
+  fail closed;
+- retry and cancellation drain only close-fenced ambiguous commands and never
+  scan another campaign;
 - retries cannot replace the prepared lock;
 - task-specific resources come from Harbor and remain within deployment limits;
 - capabilities separate preparation from execution and Sandbox operations;
@@ -258,6 +286,23 @@ input and output tokens, exact model and provider evidence, credential
 isolation, valid content-addressed evidence, publication, Sandbox close, budget
 reconciliation, and no active Endpoint. Retry only an eligible transient
 physical attempt within the locked attempt and cost limits.
+
+If a post-dispatch Sandbox command response is lost, the related physical
+attempt is invalid infrastructure evidence. Operator-specific incident
+identities, counts, spend, and attempt state stay in the private launch record.
+The failed attempt, evidence, spend, and consumed attempt count remain
+immutable.
+
+Paid work stops until a reviewed control-only repair makes new post-dispatch
+errors terminally ambiguous and lets the existing retry operation settle
+close-fenced commands. Command completion and settlement use the same
+action-specific finalization fence, and settlement checks the durable result and
+receipt again while it holds that fence. The control release must pass source,
+readiness, write, projection, resource, profile, and zero-Endpoint checks before
+recovery. The existing retry operation may then use only the remaining attempt
+allowed by the locked policy for the same unsealed task. It cannot reset spend,
+change the lock, or run a sealed valid task. A repeated control failure stops the
+campaign without another execution.
 
 Use the preserved valid sample and the valid replacement sample for a private
 measured launch review. Record raw duration, token, cost, and reward values, and

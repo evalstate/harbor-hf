@@ -411,6 +411,85 @@ This is the transactional outbox pattern expressed with immutable Bucket
 objects and deterministic HF labels. The single control writer removes the need
 for a Git parent-commit claim.
 
+### Sandbox command ambiguity
+
+`sandbox.exec` is not replay-safe. A lost response can mean that the command ran,
+did not run, or ran without returning a result. The service must keep that
+uncertainty visible and must not leave the action pending forever.
+
+When the Sandbox adapter throws after dispatch, `executeSandboxAction` writes no
+result. It appends an action receipt with `outcome=failed`,
+`observed_state=AMBIGUOUS`, and
+`error_code=sandbox_external_outcome_unknown`, appends `action.advanced`, and
+returns a safe `503 sandbox_action_ambiguous` response. The raw adapter error,
+remote body, command, URL, resource identity, credential, and private topology
+do not cross the API boundary. A repeated idempotency key returns a conflict and
+does not call the adapter.
+
+A process exit between dispatch and receipt still leaves an older ambiguous
+action. Before infrastructure retry or cancellation, the service performs a
+bounded query for dispatched `sandbox.exec` actions in the selected campaign
+and task that have no result or receipt. It can settle one only when all of the
+following facts are durable:
+
+- the action belongs to the selected campaign and task;
+- its `sandbox_create_action_id` and resource identity match the owning create
+  action;
+- the canonical result path is absent;
+- no receipt exists;
+- a matching Sandbox close receipt completed in a terminal observed state; and
+- the close action is advanced.
+
+Settlement appends the same failed ambiguous receipt and advancement. It never
+replays the command or writes a result. Command execution and settlement use the
+same action-specific finalization fence. The fence covers the external call,
+result persistence, receipt, and advancement. Settlement waits for an in-flight
+command, then checks the result and receipt again while it holds the fence. A
+mismatch, an open Sandbox, an existing result, a conflicting receipt, or an
+unsupported action stops recovery. Operator and automatic infrastructure-retry
+paths settle only their selected task and then verify that no unresolved
+non-replay-safe Sandbox action remains before they reserve or launch a
+replacement. Cancellation never marks a dispatched command as completed. It
+leaves open resources on the existing cleanup path, verifies close, and then
+settles the close-fenced command as failed and ambiguous. There is no global
+sweep, new route, fallback reader, or second durable format.
+
+The durable result key must have one shared implementation so execution and
+recovery check the same bytes. The current action receipt schema already accepts
+`failed`, `AMBIGUOUS`, and the stable error code, so the expected change needs no
+schema or generated-file update. Historical records keep their meaning.
+`action.advanced` states that the control lifecycle ended; it does not state that
+the external effect was absent.
+
+Operator-specific incident identities, action counts, spend, and attempt state
+stay in a private hash-checked snapshot. Public documentation records only the
+general recovery contract. Recovery preserves the failed attempt, its evidence,
+observed spend, campaign lock, task digest, profiles, ceiling, and consumed
+attempt count.
+
+Implementation and rollout use this order:
+
+1. preserve the private hash-checked incident snapshot;
+2. add the shared result path, typed safe error, ambiguous receipt writer,
+   bounded projection query, action-specific finalization fence, and close-gated
+   settlement;
+3. test live exceptions, hard-crash leftovers, same-key replay, restart,
+   projection rebuild, command-completion races, concurrent settlement, retry,
+   cancellation, and every fail-closed ownership check;
+4. confirm the worker revision and all profile files remain unchanged;
+5. pass local, generated, image, privacy, review, and CI gates;
+6. deploy the exact repair merge to the existing control Space and verify the
+   unchanged resource contract; and
+7. invoke the existing infrastructure-retry operation only after private checks
+   prove that the locked retry remains eligible.
+
+The retry can use only the remaining attempt allowed by the immutable launch
+policy. It cannot reset spend, change the lock, or include a sealed valid task.
+A repeated control failure or a policy, provenance, credential, budget, or
+cleanup failure stops paid work. The diagnostic campaign stays blocked until
+the replacement is a valid published sample and the private measured launch
+review passes.
+
 ## Trial completion and repair
 
 A worker receives a fixed set of logical task IDs and new physical attempt IDs.
