@@ -641,6 +641,65 @@ describe("control web", () => {
     expect(screen.getByText("Benchmark timeout").className).toContain("amber");
   });
 
+  it("keeps publication identity and Bucket outputs on the result detail, not the list", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/results"))
+          return json({
+            items: [
+              {
+                publication_id: "publication-one",
+                campaign_id: "run-gpt-oss-20b-opencode-off-providers-a1b2c3d4e5f6",
+                status: "published",
+                catalog_digest: "sha256:catalog",
+                published_at: "2026-08-21T00:00:00.000Z",
+                benchmark: "control-smoke",
+                model: "control-smoke",
+                harness: "control-smoke",
+                agent: "control-smoke",
+                publication_role: "diagnostic",
+                task_count: 2,
+                scored_task_count: 2,
+                primary_metric: { name: "mean_reward", value: 0.5, unit: "score" },
+                pass_rate: 0.5,
+                inference_cost_microusd: 55_929,
+                outputs_prefix: "results/schema=v1/publications/publication-one",
+                outputs_url:
+                  "https://huggingface.co/buckets/example-org/artifacts/tree/results/schema%3Dv1/publications/publication-one",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/results");
+    expect(
+      await screen.findByRole("columnheader", { name: /run/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /control-smoke/i })).toHaveAttribute(
+      "href",
+      "/results/publication-one",
+    );
+    expect(
+      screen.queryByRole("columnheader", { name: /publication/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: /bucket outputs/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: /scored tasks/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /open hugging face bucket outputs/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows pass rate, token cost, and a Bucket outputs link on a published result", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(

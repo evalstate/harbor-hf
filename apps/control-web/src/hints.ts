@@ -8,7 +8,7 @@ export const hints = {
     endpoints:
       "Inference Endpoints owned by runs. Completion requires a verified pause with zero ready replicas.",
     results:
-      "Published catalog scores after runs finish. Pass rate, 95% CIs, token cost, and a Hub link to the Bucket prefix for generated outputs. This is not the live run queue.",
+      "Published catalog scores after runs finish. Open a result for pass rate CIs, token cost, publication identity, and the Bucket prefix. This is not the live run queue.",
     profiles:
       "Immutable benchmark, model, harness, deployment, and launch-policy records. Runs lock aliases at submit time.",
     audit:

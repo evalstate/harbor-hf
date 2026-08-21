@@ -38,7 +38,7 @@ export function DataTable<T>({
   if (data.length === 0) return <Empty>{empty}</Empty>;
   return (
     <div className="overflow-x-auto rounded-xl border border-slate-800">
-      <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
+      <table className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-900/90 text-xs uppercase tracking-wider text-slate-400">
           {table.getHeaderGroups().map((group) => (
             <tr key={group.id}>

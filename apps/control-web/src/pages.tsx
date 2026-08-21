@@ -120,9 +120,20 @@ function campaignStatusNote(campaign: CampaignRow): string {
   return `${publication}. ${failed} sealed ${failed === 1 ? "task" : "tasks"} did not succeed.`;
 }
 
-function RunName({ campaignId, to }: { campaignId: string; to: string }) {
+function RunName({
+  campaignId,
+  to,
+  className,
+}: {
+  campaignId: string;
+  to: string;
+  className?: string;
+}) {
   return (
-    <Link className={cn(runNameClass, "text-cyan-300 hover:underline")} to={to}>
+    <Link
+      className={cn(runNameClass, "text-cyan-300 hover:underline", className)}
+      to={to}
+    >
       {campaignId}
     </Link>
   );
@@ -1401,24 +1412,13 @@ export function ResultsPage() {
     {
       accessorKey: "campaign_id",
       header: () => <Hint text={hints.campaign.identity}>Run</Hint>,
-      meta: { className: "min-w-[22rem] max-w-[40rem]" },
+      meta: { className: "max-w-[16rem]" },
       cell: ({ row }) => (
         <RunName
           campaignId={row.original.campaign_id}
+          className="min-w-0 max-w-[16rem] truncate"
           to={`/runs/${row.original.campaign_id}`}
         />
-      ),
-    },
-    {
-      accessorKey: "publication_id",
-      header: () => <Hint text={hints.results.publication}>Publication</Hint>,
-      cell: ({ row }) => (
-        <Link
-          className="font-mono text-xs text-cyan-300 hover:underline"
-          to={`/results/${row.original.publication_id}`}
-        >
-          {shortId(row.original.publication_id)}
-        </Link>
       ),
     },
     {
@@ -1427,14 +1427,17 @@ export function ResultsPage() {
         <Hint text={hints.results.modelBenchmark}>Model and benchmark</Hint>
       ),
       cell: ({ row }) => (
-        <div>
+        <Link
+          className="block text-cyan-300 hover:underline"
+          to={`/results/${row.original.publication_id}`}
+        >
           <div className="max-w-52 truncate font-medium">
             {String(row.original.model ?? "—")}
           </div>
           <div className="max-w-52 truncate text-xs text-slate-500">
             {String(row.original.benchmark ?? "")}
           </div>
-        </div>
+        </Link>
       ),
     },
     {
@@ -1465,19 +1468,6 @@ export function ResultsPage() {
           : formatMoney(row.original.inference_cost_microusd),
     },
     {
-      id: "outputs",
-      header: () => <Hint text={hints.results.outputs}>Bucket outputs</Hint>,
-      cell: ({ row }) => <BucketOutputsLink item={row.original} />,
-    },
-    {
-      id: "tasks",
-      header: () => <Hint text={hints.results.scoredTasks}>Scored tasks</Hint>,
-      cell: ({ row }) =>
-        row.original.task_count === null || row.original.task_count === undefined
-          ? "—"
-          : `${row.original.scored_task_count ?? 0}/${row.original.task_count}`,
-    },
-    {
       accessorKey: "status",
       header: () => <Hint text={hints.results.state}>State</Hint>,
       cell: ({ getValue }) => (
@@ -1494,7 +1484,7 @@ export function ResultsPage() {
     <>
       <PageHeader
         title="Results"
-        description="Published catalog scores after every logical task is sealed. Open a row for pass rate, 95% CIs, token cost, and the Hugging Face Bucket prefix that holds the generated outputs."
+        description="Published catalog scores after every logical task is sealed. Open a model for pass rate CIs, publication identity, and the Hugging Face Bucket prefix."
       />
       <form
         className="mb-5 grid gap-3 rounded-xl border border-slate-800 bg-slate-950/70 p-4 sm:grid-cols-2 xl:grid-cols-4"
