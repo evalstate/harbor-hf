@@ -15,7 +15,9 @@ current package has separate modules for:
 - Hermes through Chat Completions;
 - embedded OpenClaw through Chat Completions;
 - OpenClaw with the genuine Codex runtime through Responses;
-- Pi through Chat Completions.
+- Pi through Chat Completions;
+- DeepSeek Harness through Chat Completions;
+- OpenCode through Chat Completions.
 
 Each module owns installation, configuration, invocation, session collection,
 and ATIF-v1.7 conversion. One agent's runtime files or trajectory converter

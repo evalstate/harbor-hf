@@ -67,9 +67,10 @@ receives only its loopback route and placeholder key.
 ## Custom Provider Agents
 
 Every provider-backed agent is loaded through Harbor's public
-`AgentConfig.import_path` field. Hermes, OpenClaw, OpenClaw Codex, and Pi live in
-separate modules under the `harbor-hf-agents` package. New provider executions
-do not select Harbor built-ins and have no fallback to them.
+`AgentConfig.import_path` field. Hermes, OpenClaw, OpenClaw Codex, Pi, DeepSeek
+Harness, and OpenCode live in separate modules under the `harbor-hf-agents`
+package. New provider executions do not select Harbor built-ins and have no
+fallback to them.
 
 One internal registry validates the logical agent name, import path, required
 wire API, permitted non-secret parameters, trajectory schema, session
