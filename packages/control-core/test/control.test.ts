@@ -23,7 +23,6 @@ import { createTestControl } from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Projection } from "../src/projection.js";
 import { ResultPublisher } from "../src/publication.js";
-import { runIdentity, runUnique } from "../src/run-id.js";
 import {
   AmbiguousExternalActionError,
   type ExternalActionContext,
@@ -32,6 +31,7 @@ import {
   type ExternalActionResult,
   Reconciler,
 } from "../src/reconciler.js";
+import { runIdentity, runUnique } from "../src/run-id.js";
 import { type AttemptInput, ControlService } from "../src/service.js";
 
 const controls: TestControl[] = [];
@@ -733,7 +733,7 @@ describe("control service", () => {
       execute.mock.calls.some(([intent]) => intent.action_kind === "job.launch"),
     ).toBe(false);
     expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
-      status: "completed",
+      status: "cancelled",
       terminal_tasks: 1,
       publication_status: "published",
     });
@@ -797,7 +797,7 @@ describe("control service", () => {
       [{ outcome: "cancelled", replacement_eligible: 0 }],
     );
     expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
-      status: "completed",
+      status: "cancelled",
       terminal_tasks: 1,
       pending_actions: 0,
       publication_status: "published",
@@ -856,7 +856,7 @@ describe("control service", () => {
 
     expect(observedKinds).not.toContain("job.cancel");
     expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
-      status: "completed",
+      status: "cancelled",
       terminal_tasks: 1,
     });
   });
@@ -1098,7 +1098,7 @@ describe("control service", () => {
     });
     const campaign = await control.projection.campaign(result.campaign_id);
     expect(campaign).toMatchObject({
-      status: "completed",
+      status: "cancelled",
       terminal_tasks: 1,
     });
   });
@@ -1343,7 +1343,7 @@ describe("control service", () => {
       ),
     ).toBe(false);
     expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
-      status: "completed",
+      status: "cancelled",
       terminal_tasks: 1,
       reserved_microusd: 0,
       observed_microusd: 0,
@@ -1649,7 +1649,7 @@ describe("control service", () => {
     expect(cancelled).toBe(true);
     expect(remoteJobExists).toBe(false);
     expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
-      status: "completed",
+      status: "cancelled",
       terminal_tasks: 1,
     });
   });

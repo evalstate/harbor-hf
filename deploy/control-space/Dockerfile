@@ -10,7 +10,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/control-core/package.json packages/control-core/package.json
 COPY packages/hf-adapters/package.json packages/hf-adapters/package.json
 COPY packages/test-fixtures/package.json packages/test-fixtures/package.json
-RUN npm ci
+RUN npm ci || npm ci
 
 COPY apps/control-api apps/control-api
 COPY apps/control-web apps/control-web

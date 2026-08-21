@@ -510,6 +510,16 @@ describe("control web", () => {
                 ceiling_microusd: 0,
                 created_at: "2026-08-16T01:00:00Z",
               },
+              {
+                campaign_id: "campaign-cancelled",
+                status: "cancelled",
+                terminal_tasks: 2,
+                successful_tasks: 1,
+                total_tasks: 2,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T02:00:00Z",
+              },
             ],
             next_cursor: null,
           });
@@ -519,6 +529,10 @@ describe("control web", () => {
     renderApp("/campaigns");
     expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
     expect(screen.getByText("Completed with failures").className).toContain("amber");
+    const cancelledBadge = screen
+      .getAllByText("Cancelled")
+      .find((element) => element.tagName === "SPAN");
+    expect(cancelledBadge?.className).toContain("orange");
     const successBadge = screen
       .getAllByText("Completed", { exact: true })
       .find((element) => element.tagName === "SPAN");
@@ -653,7 +667,7 @@ describe("control web", () => {
           return json({
             campaign_id: "campaign-cancelled",
             created_at: "2026-08-18T00:00:00.000Z",
-            status: "completed",
+            status: "cancelled",
             publication_status: "published",
             total_tasks: 1,
             terminal_tasks: 1,
@@ -683,9 +697,18 @@ describe("control web", () => {
       }),
     );
     renderApp("/campaigns/campaign-cancelled");
-    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
-    expect(screen.getByText("Cancelled").className).toContain("orange");
-    expect(screen.getByText("Cancelled").className).not.toContain("amber");
+    expect(
+      await screen.findByText("Published. 1 sealed task cancelled."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Completed with failures")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /cancel run/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen
+        .getAllByText("Cancelled")
+        .some((element) => element.className.includes("orange")),
+    ).toBe(true);
   });
 
   it("keeps publication identity and Bucket outputs on the result detail, not the list", async () => {

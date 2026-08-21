@@ -1671,6 +1671,7 @@ export class Projection {
     const terminal = Number(taskCounts.terminal);
     const successful = Number(successCounts.successful);
     const pending = Number(actionCounts.pending);
+    const cancelled = await this.hasCampaignAction(row.campaign_id, "campaign.cancel");
     const reserved = budgets.reduce(
       (sum, item) =>
         item.event_kind === "reserve"
@@ -1689,8 +1690,9 @@ export class Projection {
     );
     let status = "queued";
     if (terminal === total && total > 0)
-      status =
-        publication?.status === "published" && !cleanupPending
+      status = cancelled
+        ? "cancelled"
+        : publication?.status === "published" && !cleanupPending
           ? "completed"
           : "publishing";
     else if (pending > 0 || terminal > 0) status = "active";

@@ -93,6 +93,10 @@ type ResultRow = ResultList["items"][number];
 type ResultTask = NonNullable<ResultDetail["tasks"]>[number];
 type AuditRow = AuditResponse["items"][number];
 
+function campaignIsFinished(status: string): boolean {
+  return status === "completed" || status === "cancelled";
+}
+
 function campaignHasSealedFailures(campaign: CampaignRow): boolean {
   return (
     campaign.status === "completed" &&
@@ -114,6 +118,10 @@ function campaignStatusNote(campaign: CampaignRow): string {
   const publication = campaign.publication_status
     ? humanize(campaign.publication_status)
     : "Not published";
+  if (campaign.status === "cancelled") {
+    const cancelled = campaign.total_tasks - campaign.successful_tasks;
+    return `${publication}. ${cancelled} sealed ${cancelled === 1 ? "task" : "tasks"} cancelled.`;
+  }
   if (campaign.status !== "completed") return publication;
   if (campaign.successful_tasks === campaign.total_tasks) return publication;
   const failed = campaign.total_tasks - campaign.successful_tasks;
@@ -404,7 +412,7 @@ export function OverviewPage() {
   const endpoints = useEndpoints();
   const system = useSystem();
   const items = campaigns.data?.items ?? [];
-  const active = items.filter((item) => item.status !== "completed").length;
+  const active = items.filter((item) => !campaignIsFinished(item.status)).length;
   const failures = items.filter((item) =>
     ["failed", "manual_intervention"].includes(item.status),
   ).length;
@@ -978,7 +986,7 @@ export function CampaignsPage() {
       />
       {launching ? <LaunchPanel onClose={() => setLaunching(false)} /> : null}
       <nav className="mb-4 flex gap-2" aria-label="Filter runs">
-        {["all", "active", "publishing", "completed"].map((status) => (
+        {["all", "active", "publishing", "completed", "cancelled"].map((status) => (
           <Button
             key={status}
             variant={filter === status ? "secondary" : "ghost"}
@@ -1077,7 +1085,7 @@ export function CampaignPage() {
         titleClassName="break-all font-mono text-lg sm:text-xl"
         description="Run lock, logical outcomes, cost and publication state."
         action={
-          item.status !== "completed" ? (
+          !campaignIsFinished(item.status) ? (
             <Button
               variant="destructive"
               disabled={!writesAllowed || cancel.isPending}
