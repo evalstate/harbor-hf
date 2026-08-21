@@ -31,6 +31,7 @@ Installer runbook amendment approved: 2026-08-19
 Installer lifecycle simplification approved: 2026-08-19
 Upstream merge amendment approved: 2026-08-19
 Installer credential-and-lock hardening approved: 2026-08-19
+Installer scope-and-source hardening approved: 2026-08-19
 
 ### Scope
 
@@ -60,6 +61,7 @@ Installer credential-and-lock hardening approved: 2026-08-19
 - Replace the implicit two-pass apply and installer canary workflow with explicit provision, configure, verify, activate, and emergency-disable commands. Activation enables the inspected installation without changing hardware, transferring credentials, or embedding benchmark, model, or harness names in runtime policy.
 - Fetch the canonical upstream default branch, preview and merge it into the current local topic branch, resolve any conflicts without discarding either side's intended behavior, and verify the integrated tree.
 - Harden installer credential acceptance with a fresh exact-Bucket create/read-back probe before storing a proposed control credential, and make owner-only installer operation locks safely reclaimable after confirmed process death or host reboot.
+- Require exact non-mutating fine-grained scope attestation before storing a proposed control credential, make source-staged recovery stop on receipt/Space SHA drift without overwriting attested source, and remove credential checks that enumerate durable control records.
 
 ### Limits
 
@@ -82,6 +84,7 @@ Installer credential-and-lock hardening approved: 2026-08-19
 - For the approved Terminal-Bench 2.1 campaign, use one bounded representative canary and then continue without another conversational prompt only when the hosted control plane admits the measured worst-case cost for 89 tasks and five trials under the existing USD 300 total project limit. Count setup, canaries, retries, recovery, and cleanup. Allow only infrastructure replacements; never rerun a terminal semantic outcome.
 - Limit the README authentication amendment to documentation and its authorization metadata. Do not push, open a pull request, deploy, spend, transfer or expose credentials, or change runtime behavior.
 - Limit the installer amendment to implementation, tests, and terse README pointers. Do not execute a remote apply, create or alter remote resources, move credentials, incur cost, push, or open a pull request. Preserve unrelated worktree and index changes.
+- Limit installer scope-and-source hardening to local implementation, tests, documentation, and commits. Do not use real credentials, run hosted probes or installer remote commands, mutate resources, activate writes, incur cost, push, or open a pull request.
 - Limit the installer diagnostic apply to the existing protected, free-hardware bootstrap and its canonical private Bucket. Do not upload application source, prompt for or move service credentials, activate writes, create any other resource, incur paid compute, push, or open a pull request. Stop after the phase-one result or first failure.
 - Limit autonomous installer diagnosis to the selected protected, free-hardware test Space and its one empty private test Bucket. Direct probes may create and, when required for deterministic recovery, delete only that empty test Bucket. Do not upload application source, read or move service credentials, activate writes, use paid hardware, mutate unrelated resources, push, or open a pull request. Stop after phase one succeeds or a concrete provider defect is isolated.
 - Limit the phase-two recovery to re-uploading the exact previously planned source, adopting only the already-present expected secret names without reading or rewriting credential values, setting the installed phase, restarting on free hardware, and running verification with writes disabled. Create no resources, use no paid hardware, pause on failure, and do not push or open a pull request. This one recovery supersedes the earlier source-upload prohibition only for these exact actions.
@@ -127,6 +130,7 @@ No project-scope amendment remains pending. Operational gates still apply:
 - Approved replacing implicit two-pass apply with explicit provision and configure phases, replacing installer canary activation with direct operator-confirmed activation of the inspected installation, adding a separate emergency disable command, and removing name-based canary policy. Activation must not change hardware or incur cost. No hosted mutation, credential handling, push, or pull request is authorized.
 - Approved fetching and locally merging the canonical upstream default branch into the current topic branch, including bounded conflict resolution and verification. No push, pull request, hosted mutation, credential handling, or spend is authorized.
 - Approved requiring a fresh Bucket create/read-back capability probe before accepting a proposed control credential and safely reclaiming valid owner-only installer locks after confirmed process death or reboot. This is local implementation and test authorization only; no real credential or hosted probe is authorized.
+- Approved strict non-mutating fine-grained control-credential scope attestation, fail-closed receipt/Space source-SHA recovery, removal of recursive durable-record listing during credential checks, focused tests, documentation, and local commits. No real credential, hosted probe, installer remote command, resource mutation, activation, spend, push, or pull request is authorized.
 
 ### 2026-08-20
 
