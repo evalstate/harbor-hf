@@ -1,7 +1,10 @@
 # Provider agents and security
 
 Provider-backed Harbor runs load external custom agents from
-`packages/harbor-hf-agents`. Upstream Harbor remains unchanged. The worker
+`packages/harbor-hf-agents`. Upstream Harbor remains unchanged except for the
+time-boxed Harbor 0.21.0 empty-metrics sitecustomize patch. Delete
+`harbor_0210_empty_metrics.py` when the pinned Harbor version includes
+[PR 2681](https://github.com/harbor-framework/harbor/pull/2681). The worker
 revision pins orchestration and the complete custom-agent package.
 
 ## Supported boundary
@@ -12,7 +15,9 @@ current package has separate modules for:
 - Hermes through Chat Completions;
 - embedded OpenClaw through Chat Completions;
 - OpenClaw with the genuine Codex runtime through Responses;
-- Pi through Chat Completions.
+- Pi through Chat Completions;
+- DeepSeek Harness through Chat Completions;
+- OpenCode through Chat Completions.
 
 Each module owns installation, configuration, invocation, session collection,
 and ATIF-v1.7 conversion. One agent's runtime files or trajectory converter

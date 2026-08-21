@@ -142,7 +142,12 @@ def _campaign_action(
     yes: bool,
 ) -> None:
     if not yes:
-        typer.confirm(f"Apply {action} to {campaign_id}?", abort=True)
+        prompt = (
+            f"Cancel run {campaign_id}?"
+            if action == "cancel"
+            else f"Apply {action} to {campaign_id}?"
+        )
+        typer.confirm(prompt, abort=True)
     key = str(uuid4())
     typer.echo(json.dumps({"idempotency_key": key}), err=True)
     _echo(
@@ -166,7 +171,7 @@ def campaign_cancel(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Cancel open logical tasks without deleting evidence."""
+    """Cancel a run's open logical tasks without deleting evidence."""
     _campaign_action(campaign_id, "cancel", reason=reason, yes=yes)
 
 

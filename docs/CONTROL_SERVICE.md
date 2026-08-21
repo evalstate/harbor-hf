@@ -88,6 +88,13 @@ persistent secrets or inference access. Harbor resolves the job. The worker
 submits one `prepared.trial` record per logical task and then one `prepared.job`
 record through a short-lived capability.
 
+Execution workers pin Harbor 0.21.0 and invoke it without a dataset source
+label when replaying one exact prepared task. If Harbor exits nonzero only
+after writing a successful trial result, the worker still requires that exact
+durable result and its prepared lock before it can submit a completed attempt.
+A missing result, a mismatched lock, or a trial-level exception remains a
+failure. Harbor-HF does not patch Harbor internals.
+
 The prepared records contain the exact Harbor trial locks and the data needed
 for admission, including source and task digests, resolved image digests,
 resources, phase time limits, agent settings, and Harbor version. The final
@@ -415,7 +422,7 @@ Campaign pages show:
 
 - total logical tasks and sealed outcomes;
 - active tasks and infrastructure replacements;
-- terminal invalid, policy, cancellation, verifier and benchmark failures;
+- terminal invalid, provider-rejected, agent, cancellation, verifier and benchmark failures;
 - physical attempt counts;
 - reserved, observed and reconciled cost plus the approved ceiling;
 - requested and observed endpoint state;
@@ -430,6 +437,27 @@ inference spend. The total is not a Hugging Face invoice.
 
 A campaign is not complete while publication or required endpoint cleanup is
 unresolved. Publication failure does not reopen completed benchmark work.
+
+## Leaderboard snapshot
+
+The private result catalog remains candidate material. The rows shown on the
+leaderboard are a derived SQLite object under
+`results/schema=v1/leaderboard/` in the canonical Bucket.
+
+The configuration digest hashes benchmark identity, model identity, harness
+identity, trial count, reasoning effort, inference provider, and Harbor version
+from the campaign lock. Worker revision, Job IDs, and cost are excluded.
+
+Only catalogs with `publication_role=final`, quality `clean`, run outcome
+`complete`, and `scored_task_count` equal to `task_count` enter that snapshot.
+Diagnostic, cancelled, mixed, and policy-failed catalogs stay private.
+
+Each SQLite file is content-addressed. The snapshot receipt is written after
+the database bytes. Rank is computed at read time. The latest published
+eligible row wins for a configuration digest.
+
+Anonymous HTTP access to the snapshot is a separate grant. This object lives in
+the existing Bucket and does not add a second store.
 
 ## Web routes
 
@@ -451,10 +479,13 @@ The interface supports keyboard navigation, narrow viewports, light and dark
 color schemes, visible focus, and reduced motion. Labels use hover explanations
 for campaign launch fields, spend, Jobs, Endpoints, results, and other operator
 controls. Tables virtualize only when a measured row count requires it. Every
-status also has text and an icon; color is never the only signal. Complete
+status also has text and an icon; color is never the only signal. Scored-success
 outcomes are green, sealed timeouts and cancellations are yellow, and failures
-are red. A finished campaign with sealed non-success tasks is labeled Completed
-with failures, not Completed.
+are red. Outcome badges spell out the sealed result: scored success, provider
+rejected the request, agent ended without a score, and the other catalogued
+outcomes. Raw tokens such as `policy` and `agent` are not shown. Hover the
+badge for the sealed-versus-retryable distinction. A finished campaign with
+sealed non-success tasks is labeled Completed with failures, not Completed.
 
 ## Authentication and authorization
 

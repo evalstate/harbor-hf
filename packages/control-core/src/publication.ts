@@ -5,7 +5,8 @@ import type {
   PublicationReceipt,
 } from "@harbor-hf/contracts";
 import { canonicalJson, deterministicId, sha256 } from "@harbor-hf/contracts";
-import { parquetWriteBuffer, type BasicType } from "hyparquet-writer";
+import { type BasicType, parquetWriteBuffer } from "hyparquet-writer";
+import { refreshLeaderboardSnapshot } from "./leaderboard.js";
 import type { Projection } from "./projection.js";
 import type { ControlService } from "./service.js";
 import type { ImmutableObjectStore } from "./store.js";
@@ -311,6 +312,7 @@ export class ResultPublisher {
       `results/schema=v1/publications/${publicationId}/receipt.json`,
       receiptBytes,
     );
+    await refreshLeaderboardSnapshot(this.store, this.projection);
     await this.service.writePublication(receipt);
     return receipt;
   }

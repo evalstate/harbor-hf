@@ -17,6 +17,7 @@ export const schemas = {
   controlRecord: load("control-record-v1.schema.json"),
   preparedJobSubmission: load("prepared-job-submission-v1.schema.json"),
   resultCatalog: load("result-catalog-v1.schema.json"),
+  leaderboardSnapshot: load("leaderboard-snapshot-v1.schema.json"),
   workerEvidenceManifest: load("worker-evidence-manifest-v1.schema.json"),
 } as const;
 
@@ -33,6 +34,7 @@ const validators = {
   controlRecord: ajv.compile(schemas.controlRecord),
   preparedJobSubmission: ajv.compile(schemas.preparedJobSubmission),
   resultCatalog: ajv.compile(schemas.resultCatalog),
+  leaderboardSnapshot: ajv.compile(schemas.leaderboardSnapshot),
   workerEvidenceManifest: ajv.compile(schemas.workerEvidenceManifest),
 } as const;
 
@@ -79,6 +81,10 @@ export function validatePreparedJobSubmission<T>(value: unknown): T {
 
 export function validateResultCatalog<T>(value: unknown): T {
   return validate<T>(validators.resultCatalog, value, "result catalog");
+}
+
+export function validateLeaderboardSnapshot<T>(value: unknown): T {
+  return validate<T>(validators.leaderboardSnapshot, value, "leaderboard snapshot");
 }
 
 export function validateWorkerEvidenceManifest<T>(value: unknown): T {

@@ -1,20 +1,24 @@
 FROM node:22.22.0-bookworm@sha256:2e3d655fd1e3ffaa6b5f23ee9f3905a0fd9e8c0a65df94c8ae6e4d18a0f48870 AS build
 
-# Production omit skips Playwright, Vitest, and Biome. Those packages have
-# crashed Space image builds with npm's "Exit handler never called".
+# Production omit skips Playwright, Vitest, and Biome. Prefer IPv4 and retry
+# transient registry failures while fetching only from the public registry.
 ENV NODE_ENV=production \
     HOME=/tmp \
+    NODE_OPTIONS=--dns-result-order=ipv4first \
     npm_config_audit=false \
     npm_config_fund=false \
     npm_config_update_notifier=false \
     npm_config_cache=/tmp/npm-cache \
     npm_config_userconfig=/tmp/npmrc \
-    npm_config_registry=https://registry.npmjs.org \
+    npm_config_registry=https://registry.npmjs.org/ \
     npm_config_replace_registry_host=always \
+    npm_config_fetch_retries=5 \
+    npm_config_fetch_retry_mintimeout=20000 \
+    npm_config_fetch_retry_maxtimeout=120000 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
 
-COPY package.json package-lock.json tsconfig.json tsconfig.base.json tsconfig.space.json ./
+COPY package.json package-lock.json tsconfig.json tsconfig.base.json tsconfig.space.json .npmrc ./
 COPY apps/control-api/package.json apps/control-api/package.json
 COPY apps/control-web/package.json apps/control-web/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -22,7 +26,7 @@ COPY packages/control-core/package.json packages/control-core/package.json
 COPY packages/hf-adapters/package.json packages/hf-adapters/package.json
 COPY packages/test-fixtures/package.json packages/test-fixtures/package.json
 # Keep the npm log in the Space build output when the installer aborts.
-RUN npm ci --omit=dev --no-audit --no-fund --maxsockets=1 --foreground-scripts \
+RUN npm ci --omit=dev --no-audit --no-fund --foreground-scripts \
     || (for log in /tmp/npm-cache/_logs/*-debug-0.log /root/.npm/_logs/*-debug-0.log; do \
           if [ -f "$log" ]; then echo "--- $log ---"; cat "$log"; fi; \
         done; exit 1)

@@ -30,7 +30,7 @@ export const hints = {
     unsafeEndpoints:
       "Endpoints that are not verified paused with zero ready replicas. A campaign cannot complete while any remain.",
     spendChart:
-      "Observed cost per recent campaign, in USD. Reserved budget and the hard ceiling are tracked separately.",
+      "Observed cost per recent run, in USD, from oldest to newest. Reserved budget and the hard ceiling are tracked separately.",
     writeMode:
       "Whether this Space accepts operator mutations. Your OAuth role is checked separately from this switch.",
     sourceRevision: "Exact Harbor-HF git revision running in this Space.",
@@ -85,7 +85,7 @@ export const hints = {
       "Verified pause with zero ready replicas is required before the campaign can complete.",
     jobs: "Hugging Face Jobs launched for this campaign. Preparation and execution are separate Jobs when preparation is required.",
     outcome:
-      "Sealed logical result for this task. Complete is a scored success. Timeout, cancellation, and other sealed failures cannot be rerun.",
+      "Sealed logical result for this task. Hover the badge for the exact meaning. Scored success is a verifier pass. Provider rejected the request means the inference API refused the locked call. Agent ended without a score means the agent loop finished without a pass. Infrastructure failures can be replaced; the other sealed failures cannot.",
     selectedAttempt:
       "The physical attempt chosen as the logical outcome. Infrastructure replacements create a new attempt.",
     inputDigest: "Digest of the locked task input. Retries must use this same input.",

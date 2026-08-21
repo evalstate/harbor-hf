@@ -298,7 +298,7 @@ also present in the service access list.
 
 ## Start a run
 
-The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. Approved harnesses also include DeepSeek Harness (`dsh`) and Pi. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
+The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. OpenCode, DeepSeek Harness (`dsh`), and Pi all call the locked sandbox inference route. They do not read a Job-level API key. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
 
 The CLI submits the same lock through promoted profile aliases:
 
@@ -340,7 +340,7 @@ harbor-hf results
 harbor-hf audit
 ```
 
-The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Execution Job logs stream Harbor trial stdout as the trial runs. The Results list shows pass rate, primary metric, and token cost. Open a result for the Wilson 95% CI, publication identity, and the Hub link to the Bucket prefix that holds the generated objects. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
+The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. Logical task outcomes use full phrases (scored success, provider rejected the request, agent ended without a score) instead of the raw `complete`, `policy`, and `agent` tokens. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Execution Job logs stream Harbor trial stdout as the trial runs. Execution workers preserve a successful exact durable trial result if Harbor exits nonzero only after writing that result; a missing or exceptional trial result remains a failure. The Results list shows pass rate, primary metric, and token cost. Open a result for the Wilson 95% CI, publication identity, and the Hub link to the Bucket prefix that holds the generated objects. Eligible final, clean, fully scored catalogs are also written as a SQLite snapshot under `results/schema=v1/leaderboard/` in the Bucket. Diagnostic and incomplete catalogs stay off that snapshot. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
 
 ## Repair infrastructure failures
 
@@ -356,7 +356,7 @@ harbor-hf campaign retry-infrastructure <campaign-id> \
 Cancellation also preserves existing evidence:
 
 ```bash
-harbor-hf campaign cancel <campaign-id> --yes
+harbor-hf campaign cancel <run-id> --yes
 ```
 
 Publication is independent of execution. A publication retry rebuilds deterministic result objects from sealed task receipts and does not rerun model work.

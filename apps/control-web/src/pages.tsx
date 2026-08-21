@@ -79,6 +79,7 @@ import {
   Card,
   Empty,
   Hint,
+  OutcomeBadge,
   Progress,
   QueryContent,
   statusTextClass,
@@ -128,20 +129,9 @@ function campaignStatusNote(campaign: CampaignRow): string {
   return `${publication}. ${failed} sealed ${failed === 1 ? "task" : "tasks"} did not succeed.`;
 }
 
-function RunName({
-  campaignId,
-  to,
-  className,
-}: {
-  campaignId: string;
-  to: string;
-  className?: string;
-}) {
+function RunName({ campaignId, to }: { campaignId: string; to: string }) {
   return (
-    <Link
-      className={cn(runNameClass, "text-cyan-300 hover:underline", className)}
-      to={to}
-    >
+    <Link className={cn(runNameClass, "text-cyan-300 hover:underline")} to={to}>
       {campaignId}
     </Link>
   );
@@ -151,7 +141,7 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   const campaignColumn: ColumnDef<JobRow> = {
     accessorKey: "campaign_id",
     header: () => <Hint text={hints.jobs.campaign}>Run</Hint>,
-    meta: { className: "min-w-[22rem] max-w-[40rem]" },
+    meta: { className: "min-w-0" },
     cell: ({ getValue }) => (
       <RunName campaignId={String(getValue())} to={`/runs/${String(getValue())}`} />
     ),
@@ -311,50 +301,112 @@ const launchSchema = z.object({
     .refine((value) => value, "Confirm the resolved target and cost ceiling"),
 });
 
-function SpendChart({ data }: { data: Array<{ name: string; spend: number }> }) {
+/** Plot observed run spend oldest to newest, with a USD Y scale. */
+function SpendChart({
+  data,
+}: {
+  data: Array<{ name: string; spendMicrousd: number }>;
+}) {
   const width = 640;
-  const height = 240;
-  const padding = 24;
-  const maximum = Math.max(...data.map((item) => item.spend), 1);
+  const height = 248;
+  const left = 96;
+  const right = 16;
+  const top = 16;
+  const bottom = 44;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const observed = data.map((item) => item.spendMicrousd);
+  const maximum = Math.max(...observed, 0);
+  const scale = maximum > 0 ? maximum : 1_000_000;
   const point = (value: number, index: number) => {
     const x =
       data.length === 1
-        ? width / 2
-        : padding + (index / (data.length - 1)) * (width - padding * 2);
-    const y = height - padding - (value / maximum) * (height - padding * 2);
+        ? left + plotWidth / 2
+        : left + (index / (data.length - 1)) * plotWidth;
+    const y = top + plotHeight - (value / scale) * plotHeight;
     return [x, y] as const;
   };
-  const points = data.map((item, index) => point(item.spend, index));
+  const points = data.map((item, index) => point(item.spendMicrousd, index));
   const line = points.map(([x, y]) => `${x},${y}`).join(" ");
-  const area = `${padding},${height - padding} ${line} ${width - padding},${height - padding}`;
+  const baseline = top + plotHeight;
+  const area = `${left},${baseline} ${line} ${left + plotWidth},${baseline}`;
+  const ticks = [0, 0.5, 1].map((ratio) => ({
+    ratio,
+    y: top + plotHeight - ratio * plotHeight,
+    label: formatMoney(ratio * scale),
+  }));
+  const yAxisCenter = top + plotHeight / 2;
   return (
     <svg
       className="h-full w-full"
       viewBox={`0 0 ${width} ${height}`}
       role="img"
-      aria-label="Observed run spend trend"
+      aria-label="Observed run spend in USD, from oldest run to newest"
     >
-      <title>Observed run spend trend</title>
+      <title>Observed run spend in USD, from oldest run to newest</title>
       <defs>
         <linearGradient id="spend-gradient" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.45" />
           <stop offset="100%" stopColor="#22d3ee" stopOpacity="0.03" />
         </linearGradient>
       </defs>
-      {[0.25, 0.5, 0.75, 1].map((ratio) => {
-        const y = height - padding - ratio * (height - padding * 2);
-        return (
+      {ticks.map((tick) => (
+        <g key={tick.ratio}>
           <line
-            key={ratio}
-            x1={padding}
-            x2={width - padding}
-            y1={y}
-            y2={y}
+            x1={left}
+            x2={left + plotWidth}
+            y1={tick.y}
+            y2={tick.y}
             stroke="#1e293b"
             strokeDasharray="4 6"
           />
-        );
-      })}
+          <text
+            x={left - 8}
+            y={tick.y}
+            dy="0.35em"
+            textAnchor="end"
+            className="fill-slate-400"
+            fontSize="11"
+          >
+            {tick.label}
+          </text>
+        </g>
+      ))}
+      <line
+        x1={left}
+        x2={left}
+        y1={top}
+        y2={baseline}
+        stroke="#334155"
+        strokeWidth="1.5"
+      />
+      <line
+        x1={left}
+        x2={left + plotWidth}
+        y1={baseline}
+        y2={baseline}
+        stroke="#334155"
+        strokeWidth="1.5"
+      />
+      <text
+        x={14}
+        y={yAxisCenter}
+        transform={`rotate(-90 14 ${yAxisCenter})`}
+        textAnchor="middle"
+        className="fill-slate-400"
+        fontSize="12"
+      >
+        Observed spend (USD)
+      </text>
+      <text
+        x={left + plotWidth / 2}
+        y={height - 10}
+        textAnchor="middle"
+        className="fill-slate-400"
+        fontSize="12"
+      >
+        Runs, oldest to newest
+      </text>
       <polygon points={area} fill="url(#spend-gradient)" />
       <polyline
         points={line}
@@ -366,7 +418,7 @@ function SpendChart({ data }: { data: Array<{ name: string; spend: number }> }) 
       />
       {points.map(([x, y], index) => (
         <circle key={data[index]?.name} cx={x} cy={y} r="4" fill="#67e8f9">
-          <title>{`${data[index]?.name}: ${formatMoney(data[index]?.spend ?? 0)}`}</title>
+          <title>{`${data[index]?.name}: ${formatMoney(data[index]?.spendMicrousd ?? 0)}`}</title>
         </circle>
       ))}
     </svg>
@@ -426,10 +478,7 @@ export function OverviewPage() {
     .slice(-20)
     .map((item) => ({
       name: item.campaign_id,
-      spend: item.observed_microusd / 1_000_000,
-      progress: item.total_tasks
-        ? Math.round((item.terminal_tasks / item.total_tasks) * 100)
-        : 0,
+      spendMicrousd: item.observed_microusd,
     }));
   return (
     <QueryContent query={campaigns}>
@@ -1067,7 +1116,7 @@ export function CampaignsPage() {
       {
         accessorKey: "campaign_id",
         header: () => <Hint text={hints.campaign.identity}>Run</Hint>,
-        meta: { className: "min-w-[22rem] max-w-[40rem]" },
+        meta: { className: "min-w-0" },
         cell: ({ row }) => (
           <RunName
             campaignId={row.original.campaign_id}
@@ -1088,16 +1137,14 @@ export function CampaignsPage() {
         id: "progress",
         header: () => <Hint text={hints.campaign.logicalTasks}>Logical progress</Hint>,
         cell: ({ row }) => (
-          <div className="min-w-40">
-            <Progress
-              label={`${row.original.terminal_tasks}/${row.original.total_tasks} tasks`}
-              value={
-                row.original.total_tasks
-                  ? (row.original.terminal_tasks / row.original.total_tasks) * 100
-                  : 0
-              }
-            />
-          </div>
+          <Progress
+            label={`${row.original.terminal_tasks}/${row.original.total_tasks} tasks`}
+            value={
+              row.original.total_tasks
+                ? (row.original.terminal_tasks / row.original.total_tasks) * 100
+                : 0
+            }
+          />
         ),
       },
       {
@@ -1139,7 +1186,7 @@ export function CampaignsPage() {
         }
       />
       {launching ? <LaunchPanel onClose={() => setLaunching(false)} /> : null}
-      <nav className="mb-4 flex gap-2" aria-label="Filter runs">
+      <nav className="mb-4 flex flex-wrap gap-2" aria-label="Filter runs">
         {["all", "active", "publishing", "completed", "cancelled"].map((status) => (
           <Button
             key={status}
@@ -1208,9 +1255,7 @@ export function CampaignPage() {
       accessorKey: "terminal_outcome",
       header: () => <Hint text={hints.campaign.outcome}>Outcome</Hint>,
       cell: ({ getValue }) => (
-        <Badge status={String(getValue() ?? "pending")}>
-          {humanize(String(getValue() ?? "pending"))}
-        </Badge>
+        <OutcomeBadge outcome={String(getValue() ?? "pending")} />
       ),
     },
     {
@@ -1387,9 +1432,7 @@ export function TaskPage() {
               <Hint text={hints.campaign.outcome}>Outcome</Hint>
             </dt>
             <dd className="mt-1">
-              <Badge status={detail.data.task.terminal_outcome ?? "pending"}>
-                {humanize(detail.data.task.terminal_outcome ?? "pending")}
-              </Badge>
+              <OutcomeBadge outcome={detail.data.task.terminal_outcome} />
             </dd>
           </div>
           <div>
@@ -1420,7 +1463,7 @@ export function TaskPage() {
                 </p>
                 <p className="mt-1 font-mono text-sm">{attempt.attempt_id}</p>
               </div>
-              <Badge status={attempt.outcome}>{humanize(attempt.outcome)}</Badge>
+              <OutcomeBadge outcome={attempt.outcome} />
             </div>
             <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-3">
               <div>
@@ -1497,7 +1540,7 @@ export function EndpointsPage() {
     {
       accessorKey: "campaign_id",
       header: () => <Hint text={hints.endpoints.campaign}>Run</Hint>,
-      meta: { className: "min-w-[22rem] max-w-[40rem]" },
+      meta: { className: "min-w-0" },
       cell: ({ getValue }) => (
         <RunName campaignId={String(getValue())} to={`/runs/${String(getValue())}`} />
       ),
@@ -1574,11 +1617,10 @@ export function ResultsPage() {
     {
       accessorKey: "campaign_id",
       header: () => <Hint text={hints.campaign.identity}>Run</Hint>,
-      meta: { className: "max-w-[16rem]" },
+      meta: { className: "min-w-0" },
       cell: ({ row }) => (
         <RunName
           campaignId={row.original.campaign_id}
-          className="min-w-0 max-w-[16rem] truncate"
           to={`/runs/${row.original.campaign_id}`}
         />
       ),
@@ -1862,9 +1904,7 @@ export function ResultPage() {
     {
       accessorKey: "outcome",
       header: () => <Hint text={hints.results.taskOutcome}>Outcome</Hint>,
-      cell: ({ getValue }) => (
-        <Badge status={String(getValue())}>{humanize(String(getValue()))}</Badge>
-      ),
+      cell: ({ getValue }) => <OutcomeBadge outcome={String(getValue())} />,
     },
     {
       accessorKey: "reward",
@@ -2117,7 +2157,7 @@ export function AuditPage() {
     {
       id: "record_id",
       header: () => <Hint text={hints.audit.identity}>Identity</Hint>,
-      meta: { className: "min-w-[22rem] max-w-[40rem]" },
+      meta: { className: "min-w-0" },
       cell: ({ row }) => {
         const campaignId = row.original.data.campaign_id;
         if (typeof campaignId === "string")

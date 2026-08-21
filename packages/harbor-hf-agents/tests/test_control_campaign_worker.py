@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import sys
 import time
 from dataclasses import replace
@@ -185,6 +186,49 @@ def test_reconstructs_portable_git_task(monkeypatch: pytest.MonkeyPatch) -> None
     }
 
 
+def test_omits_dataset_source_from_harbor_run_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure(monkeypatch)
+    lock = _trial_lock()
+    lock["task"]["source"] = "example-dataset"
+    monkeypatch.setattr(
+        worker,
+        "_read_prepared_trial",
+        lambda _c, _t: {**_prepared_trial(), "trial_lock": lock},
+    )
+    task = worker._locked_config(_lock()).tasks[0]
+    payload = worker._task_source(task)
+
+    assert task.trial_lock.task.source == "example-dataset"
+    assert "source" not in payload
+    assert payload == {
+        "path": "tasks/task-a",
+        "git_url": "https://github.com/example/benchmark.git",
+        "git_commit_id": "b" * 40,
+    }
+
+
+def test_harbor_run_config_uses_adhoc_progress_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch)
+    lock = _trial_lock()
+    lock["task"]["source"] = "example-dataset"
+    monkeypatch.setattr(
+        worker,
+        "_read_prepared_trial",
+        lambda _c, _t: {**_prepared_trial(), "trial_lock": lock},
+    )
+    config = worker._locked_config(_lock())
+    path = worker._job_config(config, config.tasks[0], tmp_path)
+    written = json.loads(path.read_text())
+    task_config = written["tasks"][0]
+
+    assert task_config["source"] != "example-dataset"
+    assert written["datasets"] == []
+
+
 def _scheduler_config(
     monkeypatch: pytest.MonkeyPatch, *, task_count: int = 3
 ) -> worker.WorkerConfig:
@@ -283,7 +327,25 @@ def test_stops_refilling_after_task_failure(
             False,
             ("agent", False),
         ),
+        (
+            {
+                "exception_info": {
+                    "exception_type": "IndexError",
+                    "exception_traceback": "Job._update_metric_display",
+                }
+            },
+            "",
+            False,
+            ("agent", False),
+        ),
         (None, "Sandbox API failed", False, ("infrastructure", True)),
+        (None, "IndexError: list index out of range", False, ("infrastructure", True)),
+        (
+            {"exception_info": None},
+            "IndexError: list index out of range\n_update_metric_display",
+            False,
+            ("complete", False),
+        ),
         (None, "AgentAuthenticationError", False, ("policy", False)),
         (None, "", True, ("benchmark_timeout", False)),
         (

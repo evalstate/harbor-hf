@@ -52,7 +52,7 @@ export function Layout({
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen overflow-x-hidden bg-slate-950 text-slate-100">
       <a
         className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded focus:bg-cyan-400 focus:px-3 focus:py-2 focus:text-slate-950"
         href="#main"
@@ -186,7 +186,10 @@ export function Layout({
           </div>
         </div>
       </aside>
-      <main id="main" className="min-h-screen px-4 py-8 sm:px-6 lg:ml-72 lg:px-10">
+      <main
+        id="main"
+        className="min-h-screen min-w-0 overflow-x-hidden px-4 py-8 sm:px-6 lg:ml-72 lg:px-10"
+      >
         {serviceError ? <ErrorNotice error={serviceError} stale /> : null}
         {children}
       </main>

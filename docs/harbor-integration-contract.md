@@ -9,7 +9,11 @@ the isolated legacy reader.
 
 Harbor owns the job config, task resolution, custom-agent loading, environment
 config, trial execution, locks, results, verifier rewards, exceptions, timing,
-token usage, and trial artifact inventory. Upstream Harbor remains unchanged.
+token usage, and trial artifact inventory. Upstream Harbor remains unchanged;
+Harbor-HF uses only its public APIs and does not monkeypatch Harbor internals.
+When a Harbor CLI process exits after writing a trial result, Harbor-HF accepts
+success only if that durable result has no trial exception and its emitted lock
+exactly matches the prepared lock.
 
 `harbor-hf` owns campaign and physical execution identity, Hugging Face
 infrastructure, immutable request storage, endpoint cleanup, infrastructure
@@ -60,9 +64,10 @@ receives only its loopback route and placeholder key.
 ## Custom Provider Agents
 
 Every provider-backed agent is loaded through Harbor's public
-`AgentConfig.import_path` field. Hermes, OpenClaw, OpenClaw Codex, and Pi live in
-separate modules under the `harbor-hf-agents` package. New provider executions
-do not select Harbor built-ins and have no fallback to them.
+`AgentConfig.import_path` field. Hermes, OpenClaw, OpenClaw Codex, Pi, DeepSeek
+Harness, and OpenCode live in separate modules under the `harbor-hf-agents`
+package. New provider executions do not select Harbor built-ins and have no
+fallback to them.
 
 One internal registry validates the logical agent name, import path, required
 wire API, permitted non-secret parameters, trajectory schema, session

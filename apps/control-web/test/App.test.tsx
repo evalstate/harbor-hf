@@ -233,6 +233,55 @@ describe("control web", () => {
     expect(screen.getByText(/safe-request-id/)).toBeInTheDocument();
   });
 
+  it("labels both axes on the overview spend chart", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system("enabled"));
+        if (path.includes("/endpoints")) return json({ items: [], next_cursor: null });
+        if (path.includes("/campaigns"))
+          return json({
+            items: [
+              {
+                campaign_id: "run-newer",
+                status: "completed",
+                terminal_tasks: 2,
+                successful_tasks: 2,
+                total_tasks: 2,
+                observed_microusd: 50_000,
+                ceiling_microusd: 1_000_000,
+                created_at: "2026-08-21T21:00:00.000Z",
+              },
+              {
+                campaign_id: "run-older",
+                status: "completed",
+                terminal_tasks: 1,
+                successful_tasks: 1,
+                total_tasks: 1,
+                observed_microusd: 10_000,
+                ceiling_microusd: 1_000_000,
+                created_at: "2026-08-21T20:00:00.000Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/");
+    expect(
+      await screen.findByRole("img", {
+        name: /observed run spend in usd, from oldest run to newest/i,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Observed spend (USD)")).toBeInTheDocument();
+    expect(screen.getByText("Runs, oldest to newest")).toBeInTheDocument();
+    expect(screen.getByText(formatMoney(50_000))).toBeInTheDocument();
+  });
+
   it("disables mutation controls when deployment writes are disabled", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
@@ -609,6 +658,10 @@ describe("control web", () => {
       }),
     );
     renderApp("/runs");
+    const table = await screen.findByRole("table");
+    expect(table).toHaveClass("table-fixed");
+    expect(table.parentElement).toHaveClass("overflow-hidden");
+    expect(table.parentElement).not.toHaveClass("overflow-x-auto");
     expect(await screen.findByRole("link", { name: runName })).toHaveAttribute(
       "href",
       `/runs/${runName}`,
@@ -669,8 +722,8 @@ describe("control web", () => {
     expect(
       screen.getByText("Published. 1 sealed task did not succeed."),
     ).toBeInTheDocument();
-    expect(screen.getByText("Complete").className).toContain("emerald");
-    expect(screen.getByText("Benchmark timeout").className).toContain("amber");
+    expect(screen.getByText("Scored success").className).toContain("emerald");
+    expect(screen.getByText("Timed out").className).toContain("amber");
   });
 
   it("shows cancelled outcomes in orange", async () => {
@@ -729,6 +782,62 @@ describe("control web", () => {
     ).toBe(true);
   });
 
+  it("labels provider and agent failures in words", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-failed"))
+          return json({
+            campaign_id: "campaign-failed",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 2,
+            terminal_tasks: 2,
+            successful_tasks: 0,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-failed/tasks"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-failed",
+                task_id: "policy-task",
+                input_digest: "sha256:aa",
+                terminal_outcome: "policy",
+                selected_attempt_id: "attempt-policy",
+              },
+              {
+                campaign_id: "campaign-failed",
+                task_id: "agent-task",
+                input_digest: "sha256:bb",
+                terminal_outcome: "agent",
+                selected_attempt_id: "attempt-agent",
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-failed");
+    expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
+    expect(screen.getByText("Provider rejected the request")).toBeInTheDocument();
+    expect(screen.getByText("Agent ended without a score")).toBeInTheDocument();
+    expect(screen.queryByText(/^Policy$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Agent$/)).not.toBeInTheDocument();
+  });
+
   it("keeps publication identity and Bucket outputs on the result detail, not the list", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
@@ -767,6 +876,9 @@ describe("control web", () => {
       }),
     );
     renderApp("/results");
+    const table = await screen.findByRole("table");
+    expect(table).toHaveClass("table-fixed");
+    expect(table.parentElement).not.toHaveClass("overflow-x-auto");
     expect(
       await screen.findByRole("columnheader", { name: /run/i }),
     ).toBeInTheDocument();
@@ -871,6 +983,6 @@ describe("control web", () => {
       "https://huggingface.co/buckets/example-org/artifacts/tree/results/schema%3Dv1/publications/publication-one",
     );
     expect(screen.getByText("task-a")).toBeInTheDocument();
-    expect(screen.getByText("Benchmark timeout")).toBeInTheDocument();
+    expect(screen.getByText("Timed out")).toBeInTheDocument();
   });
 });

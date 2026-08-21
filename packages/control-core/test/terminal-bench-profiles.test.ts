@@ -289,7 +289,9 @@ describe("Terminal-Bench 2.1 profiles", () => {
     expect(harness.agent).toBe("opencode");
     expect(harness.revision).toBe("1.18.20");
     expect(harness.reasoning_effort).toBe("off");
-    expect(harborAgent.name).toBe("opencode");
+    expect(harborAgent.import_path).toBe(
+      "harbor_hf_agents.opencode.agent:OpenCodeAgent",
+    );
     expect(harborAgent.model_name).toBe(model.harbor_model_name);
     expect(deployment.models).toEqual(["gpt-oss-20b"]);
     expect(deployment.harnesses).toEqual(["opencode"]);

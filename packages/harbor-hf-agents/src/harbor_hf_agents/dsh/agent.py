@@ -34,16 +34,6 @@ from harbor_hf_agents.support.sandbox_inference_route import (
     use_sandbox_inference_route,
 )
 
-
-def _json_field(record: object, key: str) -> object:
-    if not isinstance(record, dict):
-        return None
-    payload = cast(dict[str, object], record)
-    if key not in payload:
-        return None
-    return payload[key]
-
-
 _PACKAGE = "@deepseek-ai/dsh"
 _DSH_HOME = "/installed-agent/dsh-home"
 _PATCH_PATH = f"{_DSH_HOME}/cordis.patch.yml"
@@ -285,9 +275,9 @@ class DshAgent(IsolatedProviderAgent):
             return ""
         parts: list[str] = []
         for block in blocks:
-            if _json_field(block, "type") != kind:
+            if not isinstance(block, dict) or block.get("type") != kind:
                 continue
-            text = _json_field(block, "text")
+            text = block.get("text")
             if isinstance(text, str) and text:
                 parts.append(text)
         return "\n".join(parts)
@@ -298,9 +288,9 @@ class DshAgent(IsolatedProviderAgent):
             return []
         calls: list[ToolCall] = []
         for block in blocks:
-            if _json_field(block, "type") != "tool-call":
+            if not isinstance(block, dict) or block.get("type") != "tool-call":
                 continue
-            raw_arguments = _json_field(block, "arguments")
+            raw_arguments = block.get("arguments")
             arguments: dict[str, Any] = {}
             if isinstance(raw_arguments, str) and raw_arguments:
                 try:
@@ -313,8 +303,8 @@ class DshAgent(IsolatedProviderAgent):
                     )
             calls.append(
                 ToolCall(
-                    tool_call_id=str(_json_field(block, "id") or ""),
-                    function_name=str(_json_field(block, "name") or ""),
+                    tool_call_id=str(block.get("id") or ""),
+                    function_name=str(block.get("name") or ""),
                     arguments=arguments,
                 )
             )
@@ -325,34 +315,31 @@ class DshAgent(IsolatedProviderAgent):
         if not isinstance(usage, dict):
             return 0
         payload = cast(dict[str, object], usage)
-        if key not in payload:
-            return 0
-        value = payload[key]
+        value = payload.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             return 0
         return value
 
-    def _build_metrics(self, usage: object) -> Metrics | None:
+    @classmethod
+    def _build_metrics(cls, usage: object) -> Metrics | None:
         if not isinstance(usage, dict):
             return None
-        input_tokens = self._token_count(usage, "inputTokens")
-        cache_read = self._token_count(usage, "cacheReadTokens")
-        cache_write = self._token_count(usage, "cacheWriteTokens")
-        output_tokens = self._token_count(usage, "outputTokens")
+        input_tokens = cls._token_count(usage, "inputTokens")
+        cache_read = cls._token_count(usage, "cacheReadTokens")
+        cache_write = cls._token_count(usage, "cacheWriteTokens")
+        output_tokens = cls._token_count(usage, "outputTokens")
         payload = cast(dict[str, object], usage)
-        extra: dict[str, Any] = {}
-        for key, value in payload.items():
-            if not isinstance(key, str):
-                continue
-            if key in {"inputTokens", "outputTokens", "cacheReadTokens"}:
-                continue
-            extra[key] = value
+        extra = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"inputTokens", "outputTokens", "cacheReadTokens"}
+        }
         return Metrics(
             prompt_tokens=input_tokens + cache_read + cache_write,
             completion_tokens=output_tokens,
             cached_tokens=cache_read,
             cost_usd=None,
-            extra=extra if extra else None,
+            extra=extra or None,
         )
 
     def _convert_session(self) -> Trajectory | None:  # noqa: C901 -- parser branches
@@ -381,28 +368,27 @@ class DshAgent(IsolatedProviderAgent):
         total_completion = 0
         total_cached = 0
         for event in events:
-            event_type = _json_field(event, "type")
-            if event_type != "assistant" and event_type != "tool/result":
+            if event.get("type") != "assistant" and event.get("type") != "tool/result":
                 continue
-            data = _json_field(event, "data")
+            data = event.get("data")
             if not isinstance(data, dict):
                 continue
-            if event_type == "tool/result":
-                call_id = str(_json_field(data, "id") or "")
+            if event.get("type") == "tool/result":
+                call_id = str(data.get("id") or "")
                 if call_id in calls_to_step:
                     calls_to_step[call_id].observation = Observation(
                         results=[
                             ObservationResult(
                                 source_call_id=call_id,
                                 content=self._block_text(
-                                    _json_field(data, "content"), kind="text"
+                                    data.get("content"), kind="text"
                                 ),
                             )
                         ]
                     )
                 continue
-            content = _json_field(data, "content")
-            metrics = self._build_metrics(_json_field(data, "usage"))
+            content = data.get("content")
+            metrics = self._build_metrics(data.get("usage"))
             if metrics is not None:
                 total_prompt += metrics.prompt_tokens or 0
                 total_completion += metrics.completion_tokens or 0
