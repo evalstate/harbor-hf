@@ -1,20 +1,6 @@
 FROM node:22.22.0-bookworm@sha256:2e3d655fd1e3ffaa6b5f23ee9f3905a0fd9e8c0a65df94c8ae6e4d18a0f48870 AS build
 
-# Production omit skips Playwright, Vitest, and Biome. Those packages have
-# crashed Space image builds with npm's "Exit handler never called".
-ENV NODE_ENV=production \
-    HOME=/tmp \
-    NODE_OPTIONS=--dns-result-order=ipv4first \
-    npm_config_audit=false \
-    npm_config_fund=false \
-    npm_config_update_notifier=false \
-    npm_config_cache=/tmp/npm-cache \
-    npm_config_userconfig=/tmp/npmrc \
-    npm_config_fetch_retries=5 \
-    npm_config_fetch_retry_mintimeout=10000 \
-    npm_config_fetch_retry_maxtimeout=60000 \
-    npm_config_fetch_timeout=60000 \
-    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV NODE_ENV=development
 WORKDIR /app
 
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
@@ -24,11 +10,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/control-core/package.json packages/control-core/package.json
 COPY packages/hf-adapters/package.json packages/hf-adapters/package.json
 COPY packages/test-fixtures/package.json packages/test-fixtures/package.json
-# npm can abort with "Exit handler never called" after registry timeouts.
-RUN npm ci --omit=dev --no-audit --no-fund \
-    || (for log in /tmp/npm-cache/_logs/*-debug-0.log /root/.npm/_logs/*-debug-0.log; do \
-          if [ -f "$log" ]; then echo "--- $log ---"; cat "$log"; fi; \
-        done; exit 1)
+RUN npm ci
 
 COPY apps/control-api apps/control-api
 COPY apps/control-web apps/control-web
