@@ -46,14 +46,21 @@ export function doubleReservationMicrousd(estimatedMicrousd: number): number {
   return estimatedMicrousd * 2;
 }
 
+export function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
 export function deploymentKind(
   spec: Record<string, unknown>,
 ): DeploymentKind | "other" {
+  if (typeof spec.inference_provider === "string" && spec.inference_provider.length > 0)
+    return "providers";
   const template = spec.sandbox_template;
   if (!template || typeof template !== "object") return "other";
   const upstream = (template as Record<string, unknown>).inference_upstream;
   if (typeof upstream !== "string" || upstream.length === 0) return "other";
   if (upstream.includes("router.huggingface.co")) return "providers";
+  if (upstream === "<redacted>") return "other";
   return "endpoints";
 }
 
@@ -76,15 +83,20 @@ export function profileLabel(
 ): string {
   if (kind === "benchmark") {
     const benchmark = typeof spec.benchmark === "string" ? spec.benchmark : alias;
-    const tasks = Array.isArray(spec.task_ids) ? spec.task_ids.length : 0;
+    const sources = Array.isArray(spec.source_task_ids)
+      ? new Set(spec.source_task_ids).size
+      : 0;
+    const tasks =
+      sources > 0 ? sources : Array.isArray(spec.task_ids) ? spec.task_ids.length : 0;
     const trials = Array.isArray(spec.trial_indices)
       ? new Set(spec.trial_indices).size
       : 0;
     const name =
       benchmark === "terminal-bench-2-1" ? "Terminal-Bench 2.1" : humanize(benchmark);
     if (tasks === 0) return name;
-    if (trials > 1) return `${name} · ${tasks} tasks · ${trials} trials`;
-    return `${name} · ${tasks} tasks`;
+    if (trials > 1)
+      return `${name} · ${counted(tasks, "task")} with ${counted(trials, "trial")} each`;
+    return `${name} · ${counted(tasks, "task")}`;
   }
   if (kind === "model")
     return typeof spec.model_id === "string" ? spec.model_id : alias;
