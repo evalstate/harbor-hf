@@ -100,6 +100,7 @@ describe("HuggingFaceActions", () => {
           HARBOR_HF_ACTION_ID: base.action_id,
           HARBOR_HF_TASK_IDS_JSON: '["task-one","task-two"]',
           HARBOR_HF_CONTROL_URL: "https://control.example",
+          PYTHONUNBUFFERED: "1",
         });
         expect(request.environment.HARBOR_HF_WORKER_CAPABILITY).toMatch(/^v1\./);
         expect(
@@ -158,6 +159,7 @@ describe("HuggingFaceActions", () => {
         expect(request.environment).toMatchObject({
           HARBOR_HF_WORKER_ROLE: "preparation",
           HARBOR_HF_WORKER_REVISION: "abcdef0",
+          PYTHONUNBUFFERED: "1",
         });
         expect(
           verifyWorkerCapability(

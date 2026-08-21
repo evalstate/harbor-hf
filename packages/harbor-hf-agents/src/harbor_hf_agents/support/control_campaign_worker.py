@@ -8,9 +8,11 @@ import copy
 import json
 import math
 import os
+import signal
 import subprocess
 import tarfile
 import tempfile
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -501,22 +503,57 @@ def _submit_attempt(
     )
 
 
-def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
-    path = _job_config(config, task, root)
+def _log(event: dict[str, object]) -> None:
+    print(json.dumps(event, sort_keys=True), flush=True)
+
+
+def _run_logged_command(command: list[str], timeout_seconds: int) -> tuple[str, bool]:
+    """Copy command output to this Job's logs and kill the process group on timeout."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    chunks: list[str] = []
+
+    def _copy() -> None:
+        if process.stdout is None:
+            return
+        for line in process.stdout:
+            chunks.append(line)
+            print(line, end="", flush=True)
+
+    reader = threading.Thread(target=_copy, daemon=True)
+    reader.start()
     timed_out = False
     try:
-        process = subprocess.run(
-            ["harbor", "run", "--config", str(path), "--yes"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=task.timeout_seconds + 600,
-        )
-        output = process.stdout
-    except subprocess.TimeoutExpired as error:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
         timed_out = True
-        raw = error.stdout or ""
-        output = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            process.kill()
+        process.wait()
+    reader.join(timeout=30)
+    return "".join(chunks), timed_out
+
+
+def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
+    path = _job_config(config, task, root)
+    _log(
+        {
+            "status": "task_start",
+            "task_id": task.task_id,
+            "timeout_seconds": task.timeout_seconds,
+        }
+    )
+    output, timed_out = _run_logged_command(
+        ["harbor", "run", "--config", str(path), "--yes"],
+        task.timeout_seconds + 600,
+    )
     result_path = _result_path(root, task)
     if not result_path:
         raise RuntimeError("Harbor did not write a trial result")
@@ -598,6 +635,14 @@ def main() -> None:  # noqa: C901 -- bounded orchestration
         raise RuntimeError("control worker role is invalid")
     if os.environ.get("HF_TOKEN") or os.environ.get("HF_INFERENCE_TOKEN"):
         raise RuntimeError("control worker must not receive persistent credentials")
+    _log(
+        {
+            "status": "starting",
+            "action_id": _required("HARBOR_HF_ACTION_ID"),
+            "campaign_id": _required("HARBOR_HF_CAMPAIGN_ID"),
+            "task_ids": list(_assigned_task_ids()),
+        }
+    )
     lock = _read_lock(_required("HARBOR_HF_CAMPAIGN_ID"))
     config = _locked_config(lock)
     if version("harbor") != config.harbor_version:
@@ -612,18 +657,15 @@ def main() -> None:  # noqa: C901 -- bounded orchestration
                 f"{len(failures)} control worker task(s) failed before receipt; "
                 f"first={type(failures[0]).__name__}"
             ) from failures[0]
-        print(
-            json.dumps(
-                {
-                    "status": "complete",
-                    "campaign_id": config.campaign_id,
-                    "action_id": config.action_id,
-                    "task_count": len(completed),
-                    "assigned_task_count": len(config.tasks),
-                    "partial": len(completed) < len(config.tasks),
-                },
-                sort_keys=True,
-            )
+        _log(
+            {
+                "status": "complete",
+                "campaign_id": config.campaign_id,
+                "action_id": config.action_id,
+                "task_count": len(completed),
+                "assigned_task_count": len(config.tasks),
+                "partial": len(completed) < len(config.tasks),
+            }
         )
 
 

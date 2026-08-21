@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import sys
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
@@ -326,3 +327,20 @@ def test_computes_conservative_token_cost(monkeypatch: pytest.MonkeyPatch) -> No
     result = {"agent_result": {"n_input_tokens": 1_000_000, "n_output_tokens": 500_000}}
 
     assert worker._cost_microusd(config, result) == 200_000
+
+
+def test_streams_command_output_and_kills_a_hung_process(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output, timed_out = worker._run_logged_command(
+        [
+            sys.executable,
+            "-c",
+            "print('hello-from-worker', flush=True); import time; time.sleep(30)",
+        ],
+        1,
+    )
+
+    assert timed_out is True
+    assert "hello-from-worker" in output
+    assert "hello-from-worker" in capsys.readouterr().out

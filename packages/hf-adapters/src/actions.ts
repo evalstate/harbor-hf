@@ -330,6 +330,7 @@ export class HuggingFaceActions implements ExternalActionPort {
           HARBOR_HF_CONTROL_URL: this.config.controlUrl,
           HARBOR_HF_WORKER_CAPABILITY: capability,
           HARBOR_HF_WORKER_ROLE: role,
+          PYTHONUNBUFFERED: "1",
           ...(typeof intent.payload.worker_revision === "string"
             ? { HARBOR_HF_WORKER_REVISION: intent.payload.worker_revision }
             : {}),
