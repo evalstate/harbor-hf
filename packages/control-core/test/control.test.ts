@@ -23,6 +23,7 @@ import { createTestControl } from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Projection } from "../src/projection.js";
 import { ResultPublisher } from "../src/publication.js";
+import { runIdentity, runUnique } from "../src/run-id.js";
 import {
   AmbiguousExternalActionError,
   type ExternalActionContext,
@@ -261,6 +262,9 @@ describe("control service", () => {
       control.service.submit(submission, "same-request-key", operator),
       control.service.submit(submission, "same-request-key", operator),
     ]);
+    expect(first.campaign_id).toMatch(
+      /^run-control-smoke-control-smoke-off-none-[a-f0-9]{12}$/,
+    );
     expect(second).toMatchObject({ campaign_id: first.campaign_id, adopted: true });
     const publisher = new ResultPublisher(
       control.store,
@@ -300,6 +304,23 @@ describe("control service", () => {
       run_outcome: "complete",
       strict_pass_count: null,
     });
+  });
+
+  it("keeps an idempotency key bound to the first run even when the combo slug would change", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const first = await control.service.submit(submission, "shared-run-key", operator);
+    await expect(
+      control.service.submit(
+        { ...submission, harness: "opencode" },
+        "shared-run-key",
+        operator,
+      ),
+    ).rejects.toThrow(
+      "idempotency key already belongs to a different campaign request",
+    );
+    expect(first.campaign_id).toMatch(/^run-control-smoke-control-smoke-off-none-/);
+    expect(await control.projection.campaigns()).toHaveLength(1);
   });
 
   it("rejects a campaign ceiling below its launch reservation", async () => {
@@ -349,12 +370,13 @@ describe("control service", () => {
     });
 
     const overKey = "profile-ceiling-over-key";
-    const overCampaignId = deterministicId(
-      "campaign",
-      "test",
-      operator.subject,
-      sha256(overKey),
-    );
+    const overCampaignId = runIdentity({
+      model: "control-smoke",
+      harness: "control-smoke",
+      reasoning: "off",
+      runtime: "none",
+      unique: runUnique("test", operator.subject, sha256(overKey)),
+    });
     await expect(
       control.service.submit(
         { ...submission, ceiling_microusd: 101 },

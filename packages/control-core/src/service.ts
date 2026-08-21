@@ -51,6 +51,7 @@ import {
   validatePreparedCampaignProfiles,
 } from "./profiles.js";
 import type { Projection } from "./projection.js";
+import { runIdentity, runUnique, runtimeKind } from "./run-id.js";
 import {
   createJson,
   ImmutableConflictError,
@@ -807,12 +808,8 @@ export class ControlService {
         "campaign submission requires explicit confirmation",
       );
     const keyDigest = sha256(idempotencyKey);
-    const campaignId = deterministicId(
-      "campaign",
-      this.namespace,
-      actor.subject,
-      keyDigest,
-    );
+    const existingId = await this.projection.campaignIdForIdempotency(keyDigest);
+    const campaignId = existingId ?? this.newRunId(input, actor, keyDigest);
     const actionId = deterministicId(
       "action",
       campaignId,
@@ -923,6 +920,29 @@ export class ControlService {
       status_url: `/api/v1/campaigns/${campaignId}`,
       adopted: Boolean(existingRequest || existingLock),
     };
+  }
+
+  /**
+   * Name a new run `run-<model>-<harness>-<reasoning>-<runtime>-<unique>`.
+   *
+   * The unique suffix is derived from the namespace, actor, and idempotency
+   * key so a repeated request adopts the same identity.
+   */
+  private newRunId(
+    input: CampaignSubmissionV1,
+    actor: Actor,
+    keyDigest: string,
+  ): string {
+    const profiles = this.resolver.resolve(input);
+    const harness = profileSpec<HarnessProfileSpec>(profiles, "harness");
+    const deployment = profileSpec<DeploymentProfileSpec>(profiles, "deployment");
+    return runIdentity({
+      model: input.model,
+      harness: harness.agent,
+      reasoning: harness.reasoning_effort ?? "off",
+      runtime: runtimeKind(deployment),
+      unique: runUnique(this.namespace, actor.subject, keyDigest),
+    });
   }
 
   private assertMatchingRequest(

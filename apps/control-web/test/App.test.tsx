@@ -548,6 +548,42 @@ describe("control web", () => {
     expect(create).toBeEnabled();
   });
 
+  it("shows the full run name instead of a truncated campaign id", async () => {
+    const runName = "run-gpt-oss-20b-opencode-off-providers-a1b2c3d4e5f6";
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/campaigns"))
+          return json({
+            items: [
+              {
+                campaign_id: runName,
+                status: "queued",
+                terminal_tasks: 0,
+                successful_tasks: 0,
+                total_tasks: 89,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T00:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/runs");
+    expect(await screen.findByRole("link", { name: runName })).toHaveAttribute(
+      "href",
+      `/runs/${runName}`,
+    );
+    expect(screen.queryByText(/run-gpt-oss-20…/)).not.toBeInTheDocument();
+  });
+
   it("keeps campaign completed distinct from a timed-out task", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(

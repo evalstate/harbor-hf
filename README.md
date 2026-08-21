@@ -26,7 +26,7 @@ The CLI uses the active Hugging Face login only to authenticate HTTPS requests t
 
 ## Start a run
 
-The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto the run.
+The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
 
 The CLI submits the same lock through promoted profile aliases:
 

@@ -56,6 +56,7 @@ import {
   formatPercentInterval,
   formatTokens,
   humanize,
+  runNameClass,
   shortId,
 } from "./lib";
 import {
@@ -119,17 +120,21 @@ function campaignStatusNote(campaign: CampaignRow): string {
   return `${publication}. ${failed} sealed ${failed === 1 ? "task" : "tasks"} did not succeed.`;
 }
 
+function RunName({ campaignId, to }: { campaignId: string; to: string }) {
+  return (
+    <Link className={cn(runNameClass, "text-cyan-300 hover:underline")} to={to}>
+      {campaignId}
+    </Link>
+  );
+}
+
 function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   const campaignColumn: ColumnDef<JobRow> = {
     accessorKey: "campaign_id",
     header: () => <Hint text={hints.jobs.campaign}>Run</Hint>,
+    meta: { className: "min-w-[22rem] max-w-[40rem]" },
     cell: ({ getValue }) => (
-      <Link
-        className="font-mono text-xs text-cyan-300"
-        to={`/runs/${String(getValue())}`}
-      >
-        {shortId(String(getValue()))}
-      </Link>
+      <RunName campaignId={String(getValue())} to={`/runs/${String(getValue())}`} />
     ),
   };
   return [
@@ -400,7 +405,7 @@ export function OverviewPage() {
     .reverse()
     .slice(-20)
     .map((item) => ({
-      name: shortId(item.campaign_id),
+      name: item.campaign_id,
       spend: item.observed_microusd / 1_000_000,
       progress: item.total_tasks
         ? Math.round((item.terminal_tasks / item.total_tasks) * 100)
@@ -461,6 +466,18 @@ export function OverviewPage() {
                   </div>
                 )}
               </div>
+              {items.length > 0 ? (
+                <ul className="mt-4 space-y-2 border-t border-slate-800 pt-4">
+                  {[...items].slice(0, 8).map((item) => (
+                    <li key={item.campaign_id}>
+                      <RunName
+                        campaignId={item.campaign_id}
+                        to={`/runs/${item.campaign_id}`}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </Card>
             <Card>
               <div className="flex items-center justify-between">
@@ -877,13 +894,12 @@ export function CampaignsPage() {
       {
         accessorKey: "campaign_id",
         header: () => <Hint text={hints.campaign.identity}>Run</Hint>,
+        meta: { className: "min-w-[22rem] max-w-[40rem]" },
         cell: ({ row }) => (
-          <Link
-            className="font-mono text-xs text-cyan-300 hover:underline"
+          <RunName
+            campaignId={row.original.campaign_id}
             to={`/runs/${row.original.campaign_id}`}
-          >
-            {shortId(row.original.campaign_id)}
-          </Link>
+          />
         ),
       },
       {
@@ -1046,7 +1062,8 @@ export function CampaignPage() {
   return (
     <QueryContent query={campaign}>
       <PageHeader
-        title={shortId(campaignId)}
+        title={campaignId}
+        titleClassName="break-all font-mono text-lg sm:text-xl"
         description="Run lock, logical outcomes, cost and publication state."
         action={
           item.status !== "completed" ? (
@@ -1079,8 +1096,8 @@ export function CampaignPage() {
               Cancel campaign?
             </h2>
             <p className="mt-2 text-sm text-slate-300">
-              Target <span className="font-mono">{shortId(campaignId)}</span> has{" "}
-              {item.total_tasks - item.terminal_tasks} open logical tasks.
+              Target <span className="break-all font-mono text-xs">{campaignId}</span>{" "}
+              has {item.total_tasks - item.terminal_tasks} open logical tasks.
             </p>
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
               <div>
@@ -1306,14 +1323,10 @@ export function EndpointsPage() {
     },
     {
       accessorKey: "campaign_id",
-      header: () => <Hint text={hints.endpoints.campaign}>Campaign</Hint>,
+      header: () => <Hint text={hints.endpoints.campaign}>Run</Hint>,
+      meta: { className: "min-w-[22rem] max-w-[40rem]" },
       cell: ({ getValue }) => (
-        <Link
-          className="font-mono text-xs text-cyan-300"
-          to={`/runs/${String(getValue())}`}
-        >
-          {shortId(String(getValue()))}
-        </Link>
+        <RunName campaignId={String(getValue())} to={`/runs/${String(getValue())}`} />
       ),
     },
     {
@@ -1385,6 +1398,17 @@ export function ResultsPage() {
   };
   const query = useResults(navigation.cursor, filters);
   const columns: ColumnDef<ResultRow>[] = [
+    {
+      accessorKey: "campaign_id",
+      header: () => <Hint text={hints.campaign.identity}>Run</Hint>,
+      meta: { className: "min-w-[22rem] max-w-[40rem]" },
+      cell: ({ row }) => (
+        <RunName
+          campaignId={row.original.campaign_id}
+          to={`/runs/${row.original.campaign_id}`}
+        />
+      ),
+    },
     {
       accessorKey: "publication_id",
       header: () => <Hint text={hints.results.publication}>Publication</Hint>,
@@ -1815,14 +1839,9 @@ export function ResultPage() {
           <ResultField label="Benchmark revision" value={item.benchmark_revision} />
           <ResultField label="Harness revision" value={item.harness_revision} />
           <div>
-            <dt className="text-slate-500">Campaign</dt>
+            <dt className="text-slate-500">Run</dt>
             <dd className="mt-1">
-              <Link
-                className="break-all font-mono text-xs text-cyan-300 hover:underline"
-                to={`/runs/${item.campaign_id}`}
-              >
-                {item.campaign_id}
-              </Link>
+              <RunName campaignId={item.campaign_id} to={`/runs/${item.campaign_id}`} />
             </dd>
           </div>
         </dl>
@@ -1946,11 +1965,17 @@ export function AuditPage() {
     {
       id: "record_id",
       header: () => <Hint text={hints.audit.identity}>Identity</Hint>,
-      cell: ({ row }) => (
-        <span className="font-mono text-xs">
-          {shortId(String(row.original.data.record_id ?? row.original.id))}
-        </span>
-      ),
+      meta: { className: "min-w-[22rem] max-w-[40rem]" },
+      cell: ({ row }) => {
+        const campaignId = row.original.data.campaign_id;
+        if (typeof campaignId === "string")
+          return <RunName campaignId={campaignId} to={`/runs/${campaignId}`} />;
+        return (
+          <span className="font-mono text-xs">
+            {shortId(String(row.original.data.record_id ?? row.original.id))}
+          </span>
+        );
+      },
     },
     {
       id: "digest",

@@ -1515,6 +1515,19 @@ export class Projection {
     return row?.request_body ? (JSON.parse(row.request_body) as CampaignRequest) : null;
   }
 
+  async campaignIdForIdempotency(keyDigest: string): Promise<string | null> {
+    const rows = await this.db
+      .selectFrom("campaigns")
+      .select(["campaign_id", "request_body"])
+      .execute();
+    for (const row of rows) {
+      if (!row.request_body) continue;
+      const request = JSON.parse(row.request_body) as CampaignRequest;
+      if (request.idempotency_key_digest === keyDigest) return row.campaign_id;
+    }
+    return null;
+  }
+
   async campaignLock(campaignId: string): Promise<CampaignLock | null> {
     const row = await this.db
       .selectFrom("campaigns")
