@@ -374,6 +374,67 @@ export const publicationSchema = {
       ],
     },
     result_path: nullableString,
+    pass_count: nullableInteger,
+    pass_rate: { anyOf: [{ type: "number" }, { type: "null" }] },
+    pass_rate_ci95: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["low", "high"],
+          properties: {
+            low: { type: "number" },
+            high: { type: "number" },
+          },
+        },
+        { type: "null" },
+      ],
+    },
+    input_tokens: nullableInteger,
+    output_tokens: nullableInteger,
+    inference_cost_microusd: nullableInteger,
+    mean_task_cost_microusd: { anyOf: [{ type: "number" }, { type: "null" }] },
+    task_cost_ci95: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["low", "high"],
+          properties: {
+            low: { type: "number" },
+            high: { type: "number" },
+          },
+        },
+        { type: "null" },
+      ],
+    },
+    observed_cost_microusd: nullableInteger,
+    outputs_prefix: nullableString,
+    outputs_url: nullableString,
+    hf_uri: nullableString,
+    tasks: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "task_id",
+          "outcome",
+          "reward",
+          "cost_microusd",
+          "input_tokens",
+          "output_tokens",
+        ],
+        properties: {
+          task_id: { type: "string" },
+          outcome: { type: "string" },
+          reward: { anyOf: [{ type: "number" }, { type: "null" }] },
+          cost_microusd: { type: "integer" },
+          input_tokens: nullableInteger,
+          output_tokens: nullableInteger,
+        },
+      },
+    },
     benchmark_revision: nullableString,
     model_revision: nullableString,
     harness_revision: nullableString,

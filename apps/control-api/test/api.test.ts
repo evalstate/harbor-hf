@@ -980,6 +980,11 @@ describe("control API", () => {
       primary_metric: { value: 0.75 },
       status: "published",
       catalog_source_digest: catalog.source_digest,
+      pass_count: 1,
+      pass_rate: 1 / 89,
+      outputs_prefix: "imports",
+      outputs_url: `https://huggingface.co/buckets/${runtime.config.bucket_id}/tree/imports`,
+      hf_uri: `hf://buckets/${runtime.config.bucket_id}/imports`,
     });
     const filtered = await app.inject({
       method: "GET",

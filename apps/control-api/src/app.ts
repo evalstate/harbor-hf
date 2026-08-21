@@ -32,6 +32,7 @@ import {
   preparedSandboxPolicy,
   preparationRequired,
   staticSandboxPolicy,
+  summarizePublishedResult,
   verifyWorkerCapability,
 } from "@harbor-hf/control-core";
 import cookie from "@fastify/cookie";
@@ -357,6 +358,39 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
     item.profile_ids = Object.fromEntries(
       lock.profiles.map((profile) => [profile.kind, profile.profile_id]),
     );
+  }
+  for (const item of byId.values()) {
+    const campaignId = typeof item.campaign_id === "string" ? item.campaign_id : null;
+    const publicationId =
+      typeof item.publication_id === "string" ? item.publication_id : null;
+    if (!publicationId) continue;
+    const campaign = campaignId ? await runtime.projection.campaign(campaignId) : null;
+    const projectedTasks = campaignId ? await runtime.projection.tasks(campaignId) : [];
+    const projectedAttempts = campaignId
+      ? await runtime.projection.campaignAttempts(campaignId)
+      : [];
+    const summary = summarizePublishedResult({
+      bucketId: runtime.config.bucket_id,
+      publicationId,
+      resultPath: typeof item.result_path === "string" ? item.result_path : null,
+      catalogTaskCount: typeof item.task_count === "number" ? item.task_count : null,
+      catalogStrictPassCount:
+        typeof item.strict_pass_count === "number" ? item.strict_pass_count : null,
+      observedCostMicrousd: campaign?.observed_microusd ?? null,
+      tasks: projectedTasks.map((task) => ({
+        task_id: task.task_id,
+        terminal_outcome: task.terminal_outcome,
+        selected_attempt_id: task.selected_attempt_id,
+      })),
+      attempts: projectedAttempts.map((attempt) => ({
+        attempt_id: attempt.attempt_id,
+        task_id: attempt.task_id,
+        outcome: attempt.outcome,
+        cost_microusd: attempt.cost_microusd,
+        metrics: JSON.parse(attempt.metrics_body) as Record<string, number>,
+      })),
+    });
+    Object.assign(item, summary);
   }
   return [...byId.values()];
 }

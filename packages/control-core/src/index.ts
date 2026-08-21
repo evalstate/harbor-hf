@@ -5,5 +5,6 @@ export * from "./profiles.js";
 export * from "./projection.js";
 export * from "./publication.js";
 export * from "./reconciler.js";
+export * from "./result-summary.js";
 export * from "./service.js";
 export * from "./store.js";

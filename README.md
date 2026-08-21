@@ -66,7 +66,7 @@ harbor-hf results
 harbor-hf audit
 ```
 
-The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
+The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. The Results page shows the published pass rate with a Wilson 95% CI, token cost total and per task with a Wald 95% CI, and a Hub link to the Bucket prefix that holds the generated result objects. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
 
 ## Repair infrastructure failures
 

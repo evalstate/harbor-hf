@@ -9,6 +9,7 @@ import {
   ExternalLink,
   Gauge,
   PauseCircle,
+  Percent,
   PlayCircle,
   Plus,
   RefreshCw,
@@ -41,6 +42,9 @@ import {
   estimateLaunchReservationMicrousd,
   formatDate,
   formatMoney,
+  formatPercent,
+  formatPercentInterval,
+  formatTokens,
   humanize,
   shortId,
 } from "./lib";
@@ -75,6 +79,7 @@ type JobRow = JobList["items"][number];
 type EndpointRow = EndpointList["items"][number];
 type ProfileRow = ProfileList["items"][number];
 type ResultRow = ResultList["items"][number];
+type ResultTask = NonNullable<ResultDetail["tasks"]>[number];
 type AuditRow = AuditResponse["items"][number];
 
 function campaignHasSealedFailures(campaign: CampaignRow): boolean {
@@ -1344,6 +1349,25 @@ export function ResultsPage() {
       },
     },
     {
+      id: "pass_rate",
+      header: () => <Hint text={hints.results.passRate}>Pass rate</Hint>,
+      cell: ({ row }) => formatPassRate(row.original),
+    },
+    {
+      id: "inference_cost",
+      header: () => <Hint text={hints.results.tokenCost}>Token cost</Hint>,
+      cell: ({ row }) =>
+        row.original.inference_cost_microusd === null ||
+        row.original.inference_cost_microusd === undefined
+          ? "—"
+          : formatMoney(row.original.inference_cost_microusd),
+    },
+    {
+      id: "outputs",
+      header: () => <Hint text={hints.results.outputs}>Bucket outputs</Hint>,
+      cell: ({ row }) => <BucketOutputsLink item={row.original} />,
+    },
+    {
       id: "tasks",
       header: () => <Hint text={hints.results.scoredTasks}>Scored tasks</Hint>,
       cell: ({ row }) =>
@@ -1368,7 +1392,7 @@ export function ResultsPage() {
     <>
       <PageHeader
         title="Results"
-        description="Search normalized results and open stable detail views with allowlisted provenance."
+        description="Published catalog scores after every logical task is sealed. Open a row for pass rate, 95% CIs, token cost, and the Hugging Face Bucket prefix that holds the generated outputs."
       />
       <form
         className="mb-5 grid gap-3 rounded-xl border border-slate-800 bg-slate-950/70 p-4 sm:grid-cols-2 xl:grid-cols-4"
@@ -1523,6 +1547,41 @@ function ResultField({
   );
 }
 
+function formatPassRate(item: {
+  pass_rate?: number | null;
+  pass_rate_ci95?: { low: number; high: number } | null;
+}): string {
+  if (item.pass_rate === null || item.pass_rate === undefined) return "—";
+  const rate = formatPercent(item.pass_rate);
+  return item.pass_rate_ci95
+    ? `${rate} (${formatPercentInterval(item.pass_rate_ci95)})`
+    : rate;
+}
+
+function BucketOutputsLink({
+  item,
+}: {
+  item: {
+    outputs_url?: string | null;
+    outputs_prefix?: string | null;
+    hf_uri?: string | null;
+  };
+}) {
+  if (!item.outputs_url) return <span className="text-slate-500">—</span>;
+  return (
+    <a
+      className="inline-flex max-w-64 items-center gap-1 font-mono text-xs text-cyan-300 hover:underline"
+      href={item.outputs_url}
+      rel="noreferrer"
+      target="_blank"
+    >
+      <span className="truncate">{item.outputs_prefix ?? "Open Bucket"}</span>
+      <ExternalLink size={12} aria-hidden="true" />
+      <span className="sr-only">Open Hugging Face Bucket outputs</span>
+    </a>
+  );
+}
+
 export function ResultPage() {
   const { publicationId = "" } = useParams();
   const result = useResult(publicationId);
@@ -1533,19 +1592,67 @@ export function ResultPage() {
       </QueryContent>
     );
   const item: ResultDetail = result.data;
+  const taskColumns: ColumnDef<ResultTask>[] = [
+    {
+      accessorKey: "task_id",
+      header: () => <Hint text={hints.results.taskId}>Task</Hint>,
+      cell: ({ row }) => (
+        <Link
+          className="font-mono text-xs text-cyan-300 hover:underline"
+          to={`/campaigns/${item.campaign_id}/tasks/${row.original.task_id}`}
+        >
+          {row.original.task_id}
+        </Link>
+      ),
+    },
+    {
+      accessorKey: "outcome",
+      header: () => <Hint text={hints.results.taskOutcome}>Outcome</Hint>,
+      cell: ({ getValue }) => (
+        <Badge status={String(getValue())}>{humanize(String(getValue()))}</Badge>
+      ),
+    },
+    {
+      accessorKey: "reward",
+      header: () => <Hint text={hints.results.taskReward}>Reward</Hint>,
+      cell: ({ getValue }) => {
+        const value = getValue();
+        return value === null || value === undefined ? "—" : Number(value).toFixed(2);
+      },
+    },
+    {
+      accessorKey: "cost_microusd",
+      header: () => <Hint text={hints.results.taskCost}>Token cost</Hint>,
+      cell: ({ row }) => formatMoney(row.original.cost_microusd),
+    },
+    {
+      id: "tokens",
+      header: () => <Hint text={hints.results.taskTokens}>Tokens</Hint>,
+      cell: ({ row }) =>
+        `${formatTokens(row.original.input_tokens)} in / ${formatTokens(row.original.output_tokens)} out`,
+    },
+  ];
   return (
     <QueryContent query={result}>
       <PageHeader
         title={shortId(item.publication_id)}
-        description="Result scores, revisions, campaign identity, and browser-safe provenance."
+        description="Published pass rate, 95% confidence intervals, token cost, and the Bucket prefix for generated result objects."
       />
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <Stat
-          label="Status"
-          value={humanize(item.status)}
-          note={item.quality ? humanize(item.quality) : "No quality label"}
-          icon={RefreshCw}
-          hint={hints.results.state}
+          label="Pass rate"
+          value={
+            item.pass_rate === null || item.pass_rate === undefined
+              ? "—"
+              : formatPercent(item.pass_rate)
+          }
+          note={
+            item.pass_rate_ci95
+              ? `${item.pass_count ?? 0}/${item.task_count ?? 0} complete. 95% CI ${formatPercentInterval(item.pass_rate_ci95)}`
+              : `${item.pass_count ?? 0}/${item.task_count ?? 0} complete`
+          }
+          icon={Percent}
+          hint={hints.results.passRate}
         />
         <Stat
           label="Primary metric"
@@ -1557,6 +1664,30 @@ export function ResultPage() {
           }
           icon={Gauge}
           hint={hints.results.primaryMetric}
+        />
+        <Stat
+          label="Token cost"
+          value={
+            item.inference_cost_microusd === null ||
+            item.inference_cost_microusd === undefined
+              ? "—"
+              : formatMoney(item.inference_cost_microusd)
+          }
+          note={tokenCostNote(item)}
+          icon={CircleDollarSign}
+          hint={hints.results.tokenCost}
+        />
+        <Stat
+          label="Observed cost"
+          value={
+            item.observed_cost_microusd === null ||
+            item.observed_cost_microusd === undefined
+              ? "—"
+              : formatMoney(item.observed_cost_microusd)
+          }
+          note="Attempt receipts plus recorded Job and Sandbox hardware"
+          icon={CircleDollarSign}
+          hint={hints.results.observedCost}
         />
         <Stat
           label="Scored tasks"
@@ -1574,12 +1705,34 @@ export function ResultPage() {
         />
       </div>
       <Card className="mt-6">
+        <h2 className="font-semibold">Bucket outputs</h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Normalized Parquet tables, the publication receipt, and catalog objects live
+          under this prefix in the canonical artifact Bucket. The browser has no Bucket
+          credential. The Hub page uses your Hugging Face login.
+        </p>
+        <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
+          <div>
+            <dt className="text-slate-500">
+              <Hint text={hints.results.outputs}>Hub path</Hint>
+            </dt>
+            <dd className="mt-1">
+              <BucketOutputsLink item={item} />
+            </dd>
+          </div>
+          <ResultField label="hf URI" value={item.hf_uri} hint={hints.results.hfUri} />
+          <ResultField label="Result record path" value={item.result_path} />
+        </dl>
+      </Card>
+      <Card className="mt-6">
         <h2 className="font-semibold">Result</h2>
         <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-3">
           <ResultField label="Model" value={item.model} />
           <ResultField label="Benchmark" value={item.benchmark} />
           <ResultField label="Agent" value={item.agent ?? item.harness} />
           <ResultField label="Outcome" value={item.run_outcome} />
+          <ResultField label="Quality" value={item.quality} />
+          <ResultField label="Status" value={item.status} />
           <ResultField label="Model revision" value={item.model_revision} />
           <ResultField label="Benchmark revision" value={item.benchmark_revision} />
           <ResultField label="Harness revision" value={item.harness_revision} />
@@ -1597,6 +1750,20 @@ export function ResultPage() {
         </dl>
       </Card>
       <Card className="mt-6">
+        <h2 className="font-semibold">Selected tasks</h2>
+        <p className="mt-1 text-sm text-slate-500">
+          One sealed attempt per locked task. Token cost is the inference receipt for
+          that attempt, not Job hardware.
+        </p>
+        <div className="mt-4">
+          <DataTable
+            columns={taskColumns}
+            data={item.tasks ?? []}
+            empty="No selected attempt metrics are projected for this publication"
+          />
+        </div>
+      </Card>
+      <Card className="mt-6">
         <h2 className="font-semibold">Allowlisted provenance</h2>
         <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
           <ResultField label="Publication ID" value={item.publication_id} />
@@ -1607,7 +1774,6 @@ export function ResultPage() {
             value={item.catalog_source_digest}
           />
           <ResultField label="Profile source revision" value={item.source_revision} />
-          <ResultField label="Result record path" value={item.result_path} />
           {Object.entries(item.profile_ids ?? {}).map(([kind, id]) => (
             <ResultField key={kind} label={`${humanize(kind)} profile ID`} value={id} />
           ))}
@@ -1615,6 +1781,19 @@ export function ResultPage() {
       </Card>
     </QueryContent>
   );
+}
+
+function tokenCostNote(item: ResultDetail): string {
+  const tokens = `${formatTokens(item.input_tokens)} in / ${formatTokens(item.output_tokens)} out`;
+  if (
+    item.mean_task_cost_microusd === null ||
+    item.mean_task_cost_microusd === undefined
+  )
+    return tokens;
+  const mean = `Mean ${formatMoney(item.mean_task_cost_microusd)} / task`;
+  return item.task_cost_ci95
+    ? `${tokens}. ${mean}. 95% CI ${formatMoney(item.task_cost_ci95.low)}–${formatMoney(item.task_cost_ci95.high)}`
+    : `${tokens}. ${mean}`;
 }
 
 export function ProfilesPage() {

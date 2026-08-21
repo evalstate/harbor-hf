@@ -8,7 +8,7 @@ export const hints = {
     endpoints:
       "Inference Endpoints owned by campaigns. Completion requires a verified pause with zero ready replicas.",
     results:
-      "Normalized published scores and allowlisted provenance. This is not the live campaign queue.",
+      "Published catalog scores after campaigns finish. Pass rate, 95% CIs, token cost, and a Hub link to the Bucket prefix for generated outputs. This is not the live campaign queue.",
     profiles:
       "Immutable benchmark, model, harness, deployment, and launch-policy records. Campaigns lock aliases at submit time.",
     audit:
@@ -125,7 +125,21 @@ export const hints = {
     order: "Ascending or descending order for the sort field.",
     publication: "Stable publication identity for this normalized result.",
     modelBenchmark: "Locked model and benchmark names copied onto the catalog row.",
-    primaryMetric: "Headline score and unit from the publication.",
+    primaryMetric: "Headline score and unit from the publication, usually mean reward.",
+    passRate:
+      "Complete sealed tasks over the locked task count, with a Wilson 95% confidence interval.",
+    tokenCost:
+      "Sum of selected-attempt inference receipts. The 95% interval is a Wald interval on the per-task mean.",
+    observedCost:
+      "Attempt receipts plus recorded Job and Sandbox hardware for the source campaign.",
+    outputs:
+      "Hugging Face Bucket prefix for this publication's receipt and generated result objects. Opens the Hub browser. The Space never sends the Bucket credential to the browser.",
+    hfUri: "hf:// URI for the same Bucket prefix, for CLI and SDK tools.",
+    taskId: "Locked task identity. Opens the campaign task page.",
+    taskOutcome: "Sealed outcome of the selected attempt.",
+    taskReward: "Harbor reward on the selected attempt, usually 0 or 1.",
+    taskCost: "Inference receipt for the selected attempt, in USD.",
+    taskTokens: "Prompt and completion tokens recorded on the selected attempt.",
     scoredTasks:
       "How many locked tasks contributed a score, over the locked task count.",
     state: "Whether this publication is published, pending, or failed.",

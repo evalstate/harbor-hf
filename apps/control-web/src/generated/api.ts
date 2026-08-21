@@ -1549,6 +1549,32 @@ export interface paths {
                                     unit: string;
                                 } | null;
                                 result_path?: string | null;
+                                pass_count?: number | null;
+                                pass_rate?: number | null;
+                                pass_rate_ci95?: {
+                                    low: number;
+                                    high: number;
+                                } | null;
+                                input_tokens?: number | null;
+                                output_tokens?: number | null;
+                                inference_cost_microusd?: number | null;
+                                mean_task_cost_microusd?: number | null;
+                                task_cost_ci95?: {
+                                    low: number;
+                                    high: number;
+                                } | null;
+                                observed_cost_microusd?: number | null;
+                                outputs_prefix?: string | null;
+                                outputs_url?: string | null;
+                                hf_uri?: string | null;
+                                tasks?: {
+                                    task_id: string;
+                                    outcome: string;
+                                    reward: number | null;
+                                    cost_microusd: number;
+                                    input_tokens: number | null;
+                                    output_tokens: number | null;
+                                }[];
                                 benchmark_revision?: string | null;
                                 model_revision?: string | null;
                                 harness_revision?: string | null;
@@ -1621,6 +1647,32 @@ export interface paths {
                                 unit: string;
                             } | null;
                             result_path?: string | null;
+                            pass_count?: number | null;
+                            pass_rate?: number | null;
+                            pass_rate_ci95?: {
+                                low: number;
+                                high: number;
+                            } | null;
+                            input_tokens?: number | null;
+                            output_tokens?: number | null;
+                            inference_cost_microusd?: number | null;
+                            mean_task_cost_microusd?: number | null;
+                            task_cost_ci95?: {
+                                low: number;
+                                high: number;
+                            } | null;
+                            observed_cost_microusd?: number | null;
+                            outputs_prefix?: string | null;
+                            outputs_url?: string | null;
+                            hf_uri?: string | null;
+                            tasks?: {
+                                task_id: string;
+                                outcome: string;
+                                reward: number | null;
+                                cost_microusd: number;
+                                input_tokens: number | null;
+                                output_tokens: number | null;
+                            }[];
                             benchmark_revision?: string | null;
                             model_revision?: string | null;
                             harness_revision?: string | null;

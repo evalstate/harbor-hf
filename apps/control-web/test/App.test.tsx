@@ -607,4 +607,90 @@ describe("control web", () => {
     expect(screen.getByText("Complete").className).toContain("emerald");
     expect(screen.getByText("Benchmark timeout").className).toContain("amber");
   });
+
+  it("shows pass rate, token cost, and a Bucket outputs link on a published result", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/results/publication-one"))
+          return json({
+            publication_id: "publication-one",
+            campaign_id: "campaign-one",
+            status: "published",
+            catalog_digest: "sha256:catalog",
+            published_at: "2026-08-21T00:00:00.000Z",
+            run_id: null,
+            benchmark: "control-smoke",
+            model: "control-smoke",
+            harness: "control-smoke",
+            inference_provider: "hf-cpu-smoke",
+            run_outcome: "mixed",
+            quality: "degraded",
+            publication_role: "diagnostic",
+            task_count: 2,
+            scored_task_count: 2,
+            strict_pass_count: 1,
+            primary_metric: { name: "mean_reward", value: 0.5, unit: "score" },
+            result_path: "results/schema=v1/publications/publication-one/receipt.json",
+            benchmark_revision: null,
+            model_revision: null,
+            harness_revision: null,
+            agent: "control-smoke",
+            source_revision: "revision-test",
+            catalog_source_digest: "sha256:source",
+            profile_ids: {},
+            pass_count: 1,
+            pass_rate: 0.5,
+            pass_rate_ci95: { low: 0.095, high: 0.905 },
+            input_tokens: 192_573,
+            output_tokens: 28_999,
+            inference_cost_microusd: 55_929,
+            mean_task_cost_microusd: 27_964.5,
+            task_cost_ci95: { low: 14_000, high: 41_000 },
+            observed_cost_microusd: 56_526,
+            outputs_prefix: "results/schema=v1/publications/publication-one",
+            outputs_url:
+              "https://huggingface.co/buckets/example-org/artifacts/tree/results/schema%3Dv1/publications/publication-one",
+            hf_uri:
+              "hf://buckets/example-org/artifacts/results/schema=v1/publications/publication-one",
+            tasks: [
+              {
+                task_id: "task-a",
+                outcome: "complete",
+                reward: 1,
+                cost_microusd: 21_000,
+                input_tokens: 1000,
+                output_tokens: 40,
+              },
+              {
+                task_id: "task-b",
+                outcome: "benchmark_timeout",
+                reward: 0,
+                cost_microusd: 34_929,
+                input_tokens: 191_573,
+                output_tokens: 28_959,
+              },
+            ],
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/results/publication-one");
+    expect(await screen.findByText("50.0%")).toBeInTheDocument();
+    expect(screen.getByText(/95% CI 9.5%–90.5%/)).toBeInTheDocument();
+    expect(screen.getByText(formatMoney(55_929))).toBeInTheDocument();
+    const bucketLink = screen.getByRole("link", {
+      name: /open hugging face bucket outputs/i,
+    });
+    expect(bucketLink).toHaveAttribute(
+      "href",
+      "https://huggingface.co/buckets/example-org/artifacts/tree/results/schema%3Dv1/publications/publication-one",
+    );
+    expect(screen.getByText("task-a")).toBeInTheDocument();
+    expect(screen.getByText("Benchmark timeout")).toBeInTheDocument();
+  });
 });

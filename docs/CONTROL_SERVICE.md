@@ -443,7 +443,7 @@ The React application provides:
 | `/campaigns/:campaignId/tasks/:taskId` | Logical outcome, every physical attempt, and the HF Jobs that ran for the campaign. |
 | `/jobs` | Current HF Job identity, Hub inspect links, latest observed state, recorded hardware cost, ownership, timing and infrastructure failures. |
 | `/endpoints` | Endpoint ownership, requested state, observed state, active cost, and cleanup. |
-| `/results` | Normalized results, comparisons, publication evidence, and provenance. |
+| `/results` | Published catalog: pass rate, 95% CIs, token cost, Bucket output links, and provenance. |
 | `/profiles` | Immutable profiles, aliases, promotions, approval state, and resolved locks. |
 | `/audit` | Recorded receipts, effective dispositions, actors, integrity failures, and policy stops. |
 
