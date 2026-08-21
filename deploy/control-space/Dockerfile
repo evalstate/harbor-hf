@@ -4,15 +4,16 @@ FROM node:22.22.0-bookworm@sha256:2e3d655fd1e3ffaa6b5f23ee9f3905a0fd9e8c0a65df94
 # crashed Space image builds with npm's "Exit handler never called".
 ENV NODE_ENV=production \
     HOME=/tmp \
+    NODE_OPTIONS=--dns-result-order=ipv4first \
     npm_config_audit=false \
     npm_config_fund=false \
     npm_config_update_notifier=false \
     npm_config_cache=/tmp/npm-cache \
     npm_config_userconfig=/tmp/npmrc \
-    npm_config_fetch_retries=20 \
-    npm_config_fetch_retry_mintimeout=20000 \
-    npm_config_fetch_retry_maxtimeout=120000 \
-    npm_config_fetch_timeout=300000 \
+    npm_config_fetch_retries=5 \
+    npm_config_fetch_retry_mintimeout=10000 \
+    npm_config_fetch_retry_maxtimeout=60000 \
+    npm_config_fetch_timeout=60000 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
 
