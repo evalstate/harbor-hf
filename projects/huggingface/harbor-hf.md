@@ -42,6 +42,7 @@ Installer redundant-confirmation removal approved: 2026-08-19
 Installer bearer-variable simplification approved: 2026-08-19
 Upstream safe-integration amendment approved: 2026-08-19
 Leaderboard-snapshot amendment approved at: 2026-08-21T20:06:00Z
+Installer control-scope warning amendment approved at: 2026-08-21T23:56:40Z
 
 ### Scope
 
@@ -83,6 +84,7 @@ Leaderboard-snapshot amendment approved at: 2026-08-21T20:06:00Z
 - Use `HARBOR_HF_CONTROL_BEARER_TOKEN` directly for installer authenticated verification and activation instead of requiring the redundant `HARBOR_HF_INSTALL_VERIFY_BEARER` alias.
 - Merge the canonical upstream default branch locally while preserving the hardened installer, replace benchmark-specific web launch-policy routing with promoted-profile selection, and bound and redact streamed Harbor output before provider logs and evidence.
 - Add a leaderboard snapshot in the existing canonical `<artifact-bucket>`: a configuration digest, mechanical eligibility, and a derived SQLite file of the rows shown on the board. Keep one Space and one Bucket. Do not add an anonymous public leaderboard route until a later amendment.
+- Accept the Endpoint-inference permission that the provider necessarily couples to Endpoint management on the fine-grained control credential. Report additional fine-grained grants as prominent installer warnings instead of blocking installation, and make credential failures distinguish missing required permissions from the fresh Bucket write/read-back proof.
 
 ### Limits
 
@@ -129,6 +131,8 @@ Leaderboard-snapshot amendment approved at: 2026-08-21T20:06:00Z
 - The configuration digest hashes benchmark identity, model identity, harness identity, trial count, reasoning effort, inference provider, and Harbor version from the campaign lock. It excludes worker revision, Job IDs, and cost.
 - Only `publication_role=final`, quality `clean`, fully scored campaigns enter the leaderboard snapshot. Diagnostic, cancelled, mixed, and policy-failed catalogs stay private candidate material.
 - Store each snapshot as an immutable SQLite object under the existing results prefix. Do not create another Bucket, Dataset, Space, or result service. Anonymous leaderboard HTTP access is outside this amendment.
+- Keep the control credential fine-grained, owned by the selected user or organization namespace, and capable of the exact Bucket, Job, Endpoint-management, and provider-implied Endpoint-inference operations. Missing required permissions, the wrong namespace, a non-fine-grained credential, or a failed fresh Bucket write/read-back proof remain hard failures. Gated access, global grants, unrelated scoped entities, and additional permissions produce conspicuous non-blocking warnings. Never pass the control credential to a worker or use it for inference.
+- Limit the installer control-scope warning amendment to local implementation, tests, documentation, and commits. Do not inspect or transfer a real credential, run a hosted installer command or probe, mutate a hosted resource, activate writes, spend, push, or open a pull request.
 
 ### Remaining gates
 
@@ -188,3 +192,4 @@ No project-scope amendment remains pending. Operational gates still apply:
 
 - At 2026-08-21T10:31:00Z, approved enabling production writes on the hosted control Space and launching campaigns beyond the built-in control-smoke canary. This does not authorize a new persistent resource, credential, or bypass of the measured substantial paid-compute gate. Existing cost, inventory, credential, and semantic-outcome limits remain.
 - At 2026-08-21T20:06:00Z, approved a derived leaderboard SQLite snapshot in the canonical `<artifact-bucket>`. The configuration digest includes trial count, reasoning, provider, and Harbor version. Only final, clean, fully scored campaigns appear. No second persistent resource and no anonymous leaderboard API in this amendment.
+- At 2026-08-21T23:56:40Z, approved allowing the provider-implied Endpoint-inference permission on the fine-grained control credential and changing additional fine-grained grants from blockers into prominent installer warnings. Missing required permissions, wrong ownership, non-fine-grained credentials, and failed Bucket write proof remain blockers. This amendment authorizes local implementation, tests, documentation, and commits only.
