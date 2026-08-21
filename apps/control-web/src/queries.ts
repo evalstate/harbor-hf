@@ -142,12 +142,24 @@ export const useTask = (campaign: string, task: string) =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
-export const useJobs = (cursor?: string) =>
+export const JOBS_REFRESH_INTERVAL_MS = 10_000;
+
+export const useJobs = (cursor?: string, campaignId?: string) =>
   useQuery({
-    queryKey: [...keys.jobs, cursor ?? null],
-    queryFn: () => request<JobList>(collectionUrl("/api/v1/jobs", cursor)),
+    queryKey: [...keys.jobs, campaignId ?? null, cursor ?? null],
+    queryFn: () =>
+      request<JobList>(
+        collectionUrl("/api/v1/jobs", cursor, undefined, {
+          campaign_id: campaignId,
+        }),
+      ),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
+    staleTime: 5_000,
+    refetchInterval: JOBS_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    enabled: campaignId === undefined || Boolean(campaignId),
   });
 export const useEndpoints = (cursor?: string) =>
   useQuery({

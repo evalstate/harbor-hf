@@ -420,6 +420,17 @@ def main() -> None:
     if os.environ.get("HF_TOKEN") or os.environ.get("HF_INFERENCE_TOKEN"):
         raise RuntimeError("preparation worker must not receive persistent credentials")
     campaign_id = _required("HARBOR_HF_CAMPAIGN_ID")
+    print(
+        json.dumps(
+            {
+                "status": "starting",
+                "campaign_id": campaign_id,
+                "action_id": _required("HARBOR_HF_ACTION_ID"),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     lock = _read_campaign_lock(campaign_id)
     asyncio.run(_prepare(lock))
     print(
@@ -430,7 +441,8 @@ def main() -> None:
                 "task_count": len(lock.get("tasks", [])),
             },
             sort_keys=True,
-        )
+        ),
+        flush=True,
     )
 
 

@@ -18,6 +18,16 @@ function required(value: string | undefined, field: string): string {
   return value;
 }
 
+export function sandboxActionResultPath(campaignId: string, actionId: string): string {
+  for (const [name, value] of [
+    ["campaign_id", campaignId],
+    ["action_id", actionId],
+  ] as const) {
+    if (!idPattern.test(value)) throw new Error(`${name} is not a safe identifier`);
+  }
+  return `sandbox-results/schema=v1/${campaignId}/${actionId}/result.json`;
+}
+
 export function workerEvidenceObjectPath(
   campaignId: string,
   actionId: string,
@@ -58,6 +68,8 @@ export function controlRecordPath(record: RecordIdentity): string {
       return `${root}/campaigns/${required(record.campaign_id, "campaign_id")}/actions/${required(record.action_id, "action_id")}/q-dispatch.json`;
     case "action.receipt":
       return `${root}/campaigns/${required(record.campaign_id, "campaign_id")}/actions/${required(record.action_id, "action_id")}/receipt.json`;
+    case "action.disposition":
+      return `${root}/campaigns/${required(record.campaign_id, "campaign_id")}/actions/${required(record.action_id, "action_id")}/zzz-disposition.json`;
     case "action.advanced":
       return `${root}/campaigns/${required(record.campaign_id, "campaign_id")}/actions/${required(record.action_id, "action_id")}/zz-advanced.json`;
     case "attempt.receipt":

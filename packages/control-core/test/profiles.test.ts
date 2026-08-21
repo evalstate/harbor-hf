@@ -62,6 +62,7 @@ function deployment(): DeploymentProfileSpec {
     job_command: ["run-worker"],
     preparation_job_command: ["prepare-worker"],
     hardware: "cpu-upgrade",
+    active_hourly_cost_microusd: 30_000,
     timeout_seconds: 86_400,
     preparation_timeout_seconds: 3_600,
     trusted_worker: true,

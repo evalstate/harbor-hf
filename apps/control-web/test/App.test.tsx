@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { ApiError, type SessionResponse } from "../src/api";
+import { formatMoney } from "../src/lib";
 import { keys } from "../src/queries";
 
 class FakeEventSource {
@@ -51,6 +52,83 @@ function system(writeMode: "disabled" | "enabled" = "enabled") {
   };
 }
 
+function launchProfiles() {
+  const createdAt = "2026-08-16T00:00:00.000Z";
+  const approved = (alias: string, kind: string, spec: Record<string, unknown>) => ({
+    source: "built-in",
+    promotion_state: "approved",
+    alias,
+    approved_aliases: [alias],
+    created_at: createdAt,
+    profile_id: `sha256:${kind}-${alias}`,
+    profile_kind: kind,
+    name: alias,
+    spec,
+  });
+  return {
+    items: [
+      approved("terminal-bench-2-1-diagnostic-1", "benchmark", {
+        benchmark: "terminal-bench-2-1",
+        task_ids: ["task-a", "task-b"],
+        trial_indices: [1, 1],
+      }),
+      approved("gpt-oss-20b", "model", {
+        model_id: "openai/gpt-oss-20b",
+        revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+      }),
+      approved("opencode", "harness", {
+        agent: "opencode",
+        reasoning_effort: "off",
+      }),
+      approved("tb21-gpt-oss-20b-opencode-providers", "deployment", {
+        models: ["gpt-oss-20b"],
+        harnesses: ["opencode"],
+        sandbox_template: {
+          inference_upstream: "https://router.huggingface.co/v1",
+        },
+      }),
+      approved("tb21-diagnostic-1", "launch_policy", {
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 5_100_000,
+        publication_role: "diagnostic",
+      }),
+      approved("control-smoke", "benchmark", { task_ids: ["task-001"] }),
+      approved("control-smoke", "model", { revision: "sha256:model" }),
+      approved("control-smoke", "harness", { agent: "control-smoke" }),
+      approved("hf-cpu-smoke", "deployment", {
+        models: ["control-smoke"],
+        harnesses: ["control-smoke"],
+        hardware: "cpu-basic",
+      }),
+      approved("control-smoke", "launch_policy", {
+        max_infrastructure_attempts: 1,
+        reservation_microusd: 0,
+        publication_role: "diagnostic",
+      }),
+    ],
+    next_cursor: null,
+  };
+}
+
+function stubLaunchPage(onSubmit?: (value: Record<string, unknown>) => void) {
+  vi.stubGlobal("EventSource", FakeEventSource);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.includes("auth/session")) return json(session());
+      if (path.includes("/system")) return json(system());
+      if (path.endsWith("/api/v1/campaigns") && init?.method === "POST") {
+        onSubmit?.(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return new Promise<Response>(() => undefined);
+      }
+      if (path.includes("/campaigns")) return json({ items: [], next_cursor: null });
+      if (path.includes("/profiles")) return json(launchProfiles());
+      throw new Error(`unexpected request: ${path}`);
+    }),
+  );
+}
+
 function renderApp(path = "/", client?: QueryClient) {
   const queryClient =
     client ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -73,15 +151,15 @@ afterEach(() => {
 });
 
 describe("control web", () => {
-  it("returns OAuth login to the current same-origin route", async () => {
+  it("returns OAuth login to the current path without iframe query credentials", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => json({ authenticated: false, login_url: "/auth/login" }, 401)),
     );
-    renderApp("/results?model=test");
+    renderApp(`/results?platform_access=${"x".repeat(600)}#private`);
     expect(
       await screen.findByRole("link", { name: /sign in with hugging face/i }),
-    ).toHaveAttribute("href", "/auth/login?return_to=%2Fresults%3Fmodel%3Dtest");
+    ).toHaveAttribute("href", "/auth/login?return_to=%2Fresults");
   });
 
   it("shows the username and never renders the OAuth subject", async () => {
@@ -168,11 +246,11 @@ describe("control web", () => {
       }),
     );
     renderApp("/campaigns");
-    expect(await screen.findByRole("button", { name: "Launch" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Start a run" })).toBeDisabled();
     expect(screen.getByText(/role grants permission/i)).toBeInTheDocument();
   });
 
-  it("requires a separate acknowledgement before campaign cancellation", async () => {
+  it("requires a separate acknowledgement before run cancellation", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -188,6 +266,7 @@ describe("control web", () => {
             publication_status: null,
             total_tasks: 3,
             terminal_tasks: 1,
+            successful_tasks: 1,
             pending_actions: 1,
             observed_microusd: 1_000_000,
             reserved_microusd: 2_000_000,
@@ -196,17 +275,144 @@ describe("control web", () => {
           });
         if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
           return json({ items: [], next_cursor: null });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
         throw new Error(`unexpected request: ${path}`);
       }),
     );
     renderApp("/campaigns/campaign-1");
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole("button", { name: /cancel campaign/i }));
+    await user.click(await screen.findByRole("button", { name: /cancel run/i }));
     const confirm = screen.getByRole("button", { name: /confirm cancellation/i });
     expect(confirm).toBeDisabled();
     await user.click(screen.getByRole("checkbox"));
     expect(confirm).toBeEnabled();
+  });
+
+  it("lists campaign Jobs with Hub inspect links", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-1"))
+          return json({
+            campaign_id: "campaign-1",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 1,
+            terminal_tasks: 1,
+            successful_tasks: 1,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-1/tasks/control-smoke-task"))
+          return json({
+            task: {
+              campaign_id: "campaign-1",
+              task_id: "control-smoke-task",
+              input_digest: "sha256:aa",
+              terminal_outcome: "complete",
+              selected_attempt_id: "attempt-1",
+            },
+            attempts: [
+              {
+                attempt_id: "attempt-1",
+                action_id: "action-job-1",
+                campaign_id: "campaign-1",
+                task_id: "control-smoke-task",
+                outcome: "complete",
+                replacement_eligible: false,
+                cost_microusd: 0,
+                metrics: { reward: 1 },
+                created_at: "2026-08-18T00:00:00.000Z",
+              },
+            ],
+          });
+        if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
+          return json({ items: [], next_cursor: null });
+        if (path.includes("/api/v1/jobs?campaign_id=campaign-1"))
+          return json({
+            items: [
+              {
+                action_id: "action-job-1",
+                campaign_id: "campaign-1",
+                action_kind: "job.observe",
+                generation: 1,
+                target: "693994e21a39f67af5a41ad0",
+                outcome: "completed",
+                observed_state: "COMPLETED",
+                resource_id: "693994e21a39f67af5a41ad0",
+                inspect_url:
+                  "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+                created_at: "2026-08-18T00:00:00.000Z",
+                cost_microusd: 1_000_000,
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-1/tasks/control-smoke-task");
+    const link = await screen.findByRole("link", {
+      name: /693994e21a39f67af5a41ad0/i,
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+    );
+    expect(screen.getByRole("heading", { name: "Jobs" })).toBeInTheDocument();
+  });
+
+  it("links Jobs to the Hub inspect page", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/jobs"))
+          return json({
+            items: [
+              {
+                action_id: "action-job-1",
+                campaign_id: "campaign-job-1",
+                action_kind: "job.launch",
+                generation: 1,
+                target: "task-1",
+                outcome: "created",
+                observed_state: "RUNNING",
+                resource_id: "693994e21a39f67af5a41ad0",
+                inspect_url:
+                  "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+                created_at: "2026-08-18T00:00:00.000Z",
+                cost_microusd: 1_000_000,
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/jobs");
+    const link = await screen.findByRole("link", {
+      name: /693994e21a39f67af5a41ad0/i,
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+    );
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(screen.getByText(formatMoney(1_000_000))).toBeInTheDocument();
   });
 
   it("shows campaign request errors instead of a false not-found state", async () => {
@@ -234,7 +440,7 @@ describe("control web", () => {
     );
     renderApp("/campaigns/campaign-error");
     expect(await screen.findByText("Forbidden")).toBeInTheDocument();
-    expect(screen.queryByText("Campaign not found")).not.toBeInTheDocument();
+    expect(screen.queryByText("Run not found")).not.toBeInTheDocument();
   });
 
   it("keeps collection cursors in the URL and loads later pages", async () => {
@@ -255,6 +461,7 @@ describe("control web", () => {
                 campaign_id: laterPage ? "campaign-second" : "campaign-first",
                 status: "active",
                 terminal_tasks: 0,
+                successful_tasks: 0,
                 total_tasks: 1,
                 observed_microusd: 0,
                 ceiling_microusd: 0,
@@ -274,5 +481,396 @@ describe("control web", () => {
     await user.click(screen.getByRole("button", { name: "Next" }));
     expect(await screen.findByText("campaign-second")).toBeInTheDocument();
     expect(requests.some((path) => path.includes("cursor=cursor-one"))).toBe(true);
+  });
+
+  it("labels finished campaigns with sealed failures separately from complete success", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/campaigns"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-success",
+                status: "completed",
+                terminal_tasks: 1,
+                successful_tasks: 1,
+                total_tasks: 1,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T00:00:00Z",
+              },
+              {
+                campaign_id: "campaign-timeout",
+                status: "completed",
+                terminal_tasks: 2,
+                successful_tasks: 1,
+                total_tasks: 2,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T01:00:00Z",
+              },
+              {
+                campaign_id: "campaign-cancelled",
+                status: "cancelled",
+                terminal_tasks: 2,
+                successful_tasks: 1,
+                total_tasks: 2,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T02:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns");
+    expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
+    expect(screen.getByText("Completed with failures").className).toContain("amber");
+    const cancelledBadge = screen
+      .getAllByText("Cancelled")
+      .find((element) => element.tagName === "SPAN");
+    expect(cancelledBadge?.className).toContain("orange");
+    const successBadge = screen
+      .getAllByText("Completed", { exact: true })
+      .find((element) => element.tagName === "SPAN");
+    expect(successBadge?.className).toContain("emerald");
+  });
+
+  it("explains the cost ceiling on hover", async () => {
+    stubLaunchPage();
+    renderApp("/runs");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Start a run" }));
+    expect(
+      screen.getByText(/defaults to twice the estimated reservation/i, {
+        hidden: true,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("requires confirmation and submits the selected promoted launch policy", async () => {
+    let submission: Record<string, unknown> | undefined;
+    stubLaunchPage((value) => {
+      submission = value;
+    });
+    renderApp("/campaigns");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Start a run" }));
+    const launchPolicy = screen.getByRole("combobox", { name: "Launch policy" });
+    expect(launchPolicy).toHaveValue("");
+    await user.selectOptions(launchPolicy, "control-smoke");
+    expect(launchPolicy).toHaveValue("control-smoke");
+    const create = screen.getByRole("button", { name: "Start run" });
+    expect(create).toBeDisabled();
+    await user.click(screen.getByRole("checkbox"));
+    expect(create).toBeEnabled();
+    await user.selectOptions(launchPolicy, "tb21-diagnostic-1");
+    expect(create).toBeDisabled();
+    await user.selectOptions(launchPolicy, "control-smoke");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(create);
+    await waitFor(() => expect(submission).toBeDefined());
+    expect(submission?.launch_policy).toBe("control-smoke");
+  });
+
+  it("shows the full run name instead of a truncated campaign id", async () => {
+    const runName = "run-gpt-oss-20b-opencode-off-providers-a1b2c3d4e5f6";
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/campaigns"))
+          return json({
+            items: [
+              {
+                campaign_id: runName,
+                status: "queued",
+                terminal_tasks: 0,
+                successful_tasks: 0,
+                total_tasks: 89,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T00:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/runs");
+    expect(await screen.findByRole("link", { name: runName })).toHaveAttribute(
+      "href",
+      `/runs/${runName}`,
+    );
+    expect(screen.queryByText(/run-gpt-oss-20…/)).not.toBeInTheDocument();
+  });
+
+  it("keeps campaign completed distinct from a timed-out task", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed"))
+          return json({
+            campaign_id: "campaign-mixed",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 2,
+            terminal_tasks: 2,
+            successful_tasks: 1,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-mixed/tasks"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-mixed",
+                task_id: "timeout-task",
+                input_digest: "sha256:aa",
+                terminal_outcome: "benchmark_timeout",
+                selected_attempt_id: "attempt-timeout",
+              },
+              {
+                campaign_id: "campaign-mixed",
+                task_id: "complete-task",
+                input_digest: "sha256:bb",
+                terminal_outcome: "complete",
+                selected_attempt_id: "attempt-complete",
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-mixed");
+    expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
+    expect(
+      screen.getByText("Published. 1 sealed task did not succeed."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Complete").className).toContain("emerald");
+    expect(screen.getByText("Benchmark timeout").className).toContain("amber");
+  });
+
+  it("shows cancelled outcomes in orange", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-cancelled"))
+          return json({
+            campaign_id: "campaign-cancelled",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "cancelled",
+            publication_status: "published",
+            total_tasks: 1,
+            terminal_tasks: 1,
+            successful_tasks: 0,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-cancelled/tasks"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-cancelled",
+                task_id: "cancelled-task",
+                input_digest: "sha256:cc",
+                terminal_outcome: "cancelled",
+                selected_attempt_id: "attempt-cancelled",
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-cancelled");
+    expect(
+      await screen.findByText("Published. 1 sealed task cancelled."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Completed with failures")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /cancel run/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen
+        .getAllByText("Cancelled")
+        .some((element) => element.className.includes("orange")),
+    ).toBe(true);
+  });
+
+  it("keeps publication identity and Bucket outputs on the result detail, not the list", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/results"))
+          return json({
+            items: [
+              {
+                publication_id: "publication-one",
+                campaign_id: "run-gpt-oss-20b-opencode-off-providers-a1b2c3d4e5f6",
+                status: "published",
+                catalog_digest: "sha256:catalog",
+                published_at: "2026-08-21T00:00:00.000Z",
+                benchmark: "control-smoke",
+                model: "control-smoke",
+                harness: "control-smoke",
+                agent: "control-smoke",
+                publication_role: "diagnostic",
+                task_count: 2,
+                scored_task_count: 2,
+                primary_metric: { name: "mean_reward", value: 0.5, unit: "score" },
+                pass_rate: 0.5,
+                inference_cost_microusd: 55_929,
+                outputs_prefix: "results/schema=v1/publications/publication-one",
+                outputs_url:
+                  "https://huggingface.co/buckets/example-org/artifacts/tree/results/schema%3Dv1/publications/publication-one",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/results");
+    expect(
+      await screen.findByRole("columnheader", { name: /run/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /control-smoke/i })).toHaveAttribute(
+      "href",
+      "/results/publication-one",
+    );
+    expect(
+      screen.queryByRole("columnheader", { name: /publication/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: /bucket outputs/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: /scored tasks/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /open hugging face bucket outputs/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows pass rate, token cost, and a Bucket outputs link on a published result", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/results/publication-one"))
+          return json({
+            publication_id: "publication-one",
+            campaign_id: "campaign-one",
+            status: "published",
+            catalog_digest: "sha256:catalog",
+            published_at: "2026-08-21T00:00:00.000Z",
+            run_id: null,
+            benchmark: "control-smoke",
+            model: "control-smoke",
+            harness: "control-smoke",
+            inference_provider: "hf-cpu-smoke",
+            run_outcome: "mixed",
+            quality: "degraded",
+            publication_role: "diagnostic",
+            task_count: 2,
+            scored_task_count: 2,
+            strict_pass_count: 1,
+            primary_metric: { name: "mean_reward", value: 0.5, unit: "score" },
+            result_path: "results/schema=v1/publications/publication-one/receipt.json",
+            benchmark_revision: null,
+            model_revision: null,
+            harness_revision: null,
+            agent: "control-smoke",
+            source_revision: "revision-test",
+            catalog_source_digest: "sha256:source",
+            profile_ids: {},
+            pass_count: 1,
+            pass_rate: 0.5,
+            pass_rate_ci95: { low: 0.095, high: 0.905 },
+            input_tokens: 192_573,
+            output_tokens: 28_999,
+            inference_cost_microusd: 55_929,
+            mean_task_cost_microusd: 27_964.5,
+            task_cost_ci95: { low: 14_000, high: 41_000 },
+            observed_cost_microusd: 56_526,
+            outputs_prefix: "results/schema=v1/publications/publication-one",
+            outputs_url:
+              "https://huggingface.co/buckets/example-org/artifacts/tree/results/schema%3Dv1/publications/publication-one",
+            hf_uri:
+              "hf://buckets/example-org/artifacts/results/schema=v1/publications/publication-one",
+            tasks: [
+              {
+                task_id: "task-a",
+                outcome: "complete",
+                reward: 1,
+                cost_microusd: 21_000,
+                input_tokens: 1000,
+                output_tokens: 40,
+              },
+              {
+                task_id: "task-b",
+                outcome: "benchmark_timeout",
+                reward: 0,
+                cost_microusd: 34_929,
+                input_tokens: 191_573,
+                output_tokens: 28_959,
+              },
+            ],
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/results/publication-one");
+    expect(await screen.findByText("50.0%")).toBeInTheDocument();
+    expect(screen.getByText(/95% CI 9.5%–90.5%/)).toBeInTheDocument();
+    expect(screen.getByText(formatMoney(55_929))).toBeInTheDocument();
+    const bucketLink = screen.getByRole("link", {
+      name: /open hugging face bucket outputs/i,
+    });
+    expect(bucketLink).toHaveAttribute(
+      "href",
+      "https://huggingface.co/buckets/example-org/artifacts/tree/results/schema%3Dv1/publications/publication-one",
+    );
+    expect(screen.getByText("task-a")).toBeInTheDocument();
+    expect(screen.getByText("Benchmark timeout")).toBeInTheDocument();
   });
 });

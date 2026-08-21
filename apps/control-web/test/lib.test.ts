@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { estimateLaunchReservationMicrousd } from "../src/lib";
+import {
+  estimateLaunchReservationMicrousd,
+  formatPercent,
+  formatPercentInterval,
+  formatTokens,
+} from "../src/lib";
 
 describe("launch reservation estimate", () => {
   it("counts one execution reservation per worker Job", () => {
@@ -27,5 +32,14 @@ describe("launch reservation estimate", () => {
         { reservation_microusd: 1_000_000 },
       ),
     ).toBe(3_000_000);
+  });
+});
+
+describe("result formatting", () => {
+  it("renders percents and token counts for the Results page", () => {
+    expect(formatPercent(0.5)).toBe("50.0%");
+    expect(formatPercentInterval({ low: 0.095, high: 0.905 })).toBe("9.5%–90.5%");
+    expect(formatTokens(191_573).replace(/\D/g, "")).toBe("191573");
+    expect(formatTokens(null)).toBe("—");
   });
 });

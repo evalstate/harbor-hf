@@ -41,9 +41,26 @@ export function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
+export function formatPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+export function formatPercentInterval(interval: { low: number; high: number }): string {
+  return `${formatPercent(interval.low)}–${formatPercent(interval.high)}`;
+}
+
+export function formatTokens(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+}
+
+/** Digests and Job IDs stay compact. Run names stay complete. */
 export function shortId(value: string): string {
   return value.length > 24 ? `${value.slice(0, 14)}…${value.slice(-7)}` : value;
 }
+
+export const runNameClass =
+  "block min-w-[20rem] max-w-[40rem] break-all font-mono text-xs";
 
 export function humanize(value: string): string {
   return value

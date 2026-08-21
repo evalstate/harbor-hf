@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
@@ -10,13 +10,14 @@ import {
   canonicalJson,
   controlRecordPath,
   deterministicId,
+  sandboxActionResultPath,
   sha256,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
 import { mintWorkerCapability } from "@harbor-hf/control-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
-import { AuthStore, AuthenticationService, safeReturnPath } from "../src/auth.js";
+import { AuthenticationService, AuthStore, safeReturnPath } from "../src/auth.js";
 import type { AppConfig } from "../src/config.js";
 import { createRuntime, type Runtime } from "../src/runtime.js";
 
@@ -113,6 +114,7 @@ function sandboxDeploymentRecords(): Array<ProfileObject | ProfilePromotion> {
     job_image: `registry.example/worker@sha256:${"a".repeat(64)}`,
     job_command: ["python", "-m", "worker"] as [string, ...string[]],
     hardware: "cpu-basic",
+    active_hourly_cost_microusd: 10_000,
     timeout_seconds: 7_200,
     trusted_worker: true,
     inference_token: "forbidden" as const,
@@ -383,6 +385,133 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("exposes Hub inspect URLs for Jobs", async () => {
+    const { runtime, app } = await setup();
+    const campaign = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "job-inspect-campaign-key" },
+      payload: input,
+    });
+    expect(campaign.statusCode).toBe(202);
+    await runtime.reconciler.tick();
+    const jobs = await app.inject({ method: "GET", url: "/api/v1/jobs" });
+    expect(jobs.statusCode).toBe(200);
+    const items = jobs.json().items as Array<{
+      resource_id: string | null;
+      inspect_url: string | null;
+    }>;
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(item.inspect_url).toBe(
+        item.resource_id === null
+          ? null
+          : `https://huggingface.co/jobs/test/${encodeURIComponent(item.resource_id)}`,
+      );
+    }
+    await app.close();
+  });
+
+  it("returns the latest observed state for each Job", async () => {
+    const { runtime, app } = await setup();
+    const campaign = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "job-latest-state-key" },
+      payload: { ...input, ceiling_microusd: 100_000 },
+    });
+    expect(campaign.statusCode).toBe(202);
+    const campaignId = campaign.json().campaign_id as string;
+    const actor = { subject: "operator" as const, role: "operator" as const };
+    const resourceId = "job-latest-state";
+    const payload = {
+      task_ids: ["control-smoke-task"],
+      max_infrastructure_attempts: 1,
+      success_without_worker_receipt: true,
+      resource_id: resourceId,
+    };
+    for (const record of [
+      {
+        kind: "job.launch" as const,
+        generation: 0,
+        createdAt: "2026-08-21T10:04:10.000Z",
+        observedState: "SCHEDULING",
+        costMicrousd: 0,
+      },
+      {
+        kind: "job.observe" as const,
+        generation: 0,
+        createdAt: "2026-08-21T10:04:20.000Z",
+        observedState: "SCHEDULING",
+        costMicrousd: 10_000,
+      },
+      {
+        kind: "job.observe" as const,
+        generation: 1,
+        createdAt: "2026-08-21T10:04:30.000Z",
+        observedState: "RUNNING",
+        costMicrousd: 20_000,
+      },
+      {
+        kind: "job.observe" as const,
+        generation: 2,
+        createdAt: "2026-08-21T10:04:40.000Z",
+        observedState: "ERROR",
+        costMicrousd: 40_000,
+      },
+    ]) {
+      const intent = runtime.service.actionIntent(
+        campaignId,
+        record.kind,
+        resourceId,
+        record.generation,
+        payload,
+        actor,
+        record.createdAt,
+      );
+      await runtime.service.writeAction(intent);
+      await runtime.service.receipt(intent, {
+        outcome: record.kind === "job.launch" ? "created" : "completed",
+        observed_state: record.observedState,
+        resource_id: resourceId,
+        cost_microusd: record.costMicrousd,
+      });
+    }
+    const jobs = await app.inject({ method: "GET", url: "/api/v1/jobs" });
+    expect(jobs.statusCode).toBe(200);
+    const items = jobs.json().items as Array<{
+      action_kind: string;
+      observed_state: string | null;
+      resource_id: string | null;
+      cost_microusd: number;
+    }>;
+    const matching = items.filter((item) => item.resource_id === resourceId);
+    expect(matching).toHaveLength(1);
+    expect(matching[0]).toMatchObject({
+      action_kind: "job.observe",
+      observed_state: "ERROR",
+      resource_id: resourceId,
+      cost_microusd: 40_000,
+      inspect_url: `https://huggingface.co/jobs/test/${resourceId}`,
+    });
+    const scoped = await app.inject({
+      method: "GET",
+      url: `/api/v1/jobs?campaign_id=${encodeURIComponent(campaignId)}`,
+    });
+    expect(scoped.statusCode).toBe(200);
+    expect(
+      (scoped.json().items as Array<{ campaign_id: string }>).every(
+        (item) => item.campaign_id === campaignId,
+      ),
+    ).toBe(true);
+    const empty = await app.inject({
+      method: "GET",
+      url: "/api/v1/jobs?campaign_id=campaign-missing",
+    });
+    expect(empty.json().items).toEqual([]);
+    await app.close();
+  });
+
   it("limits worker capabilities to their campaign action routes", async () => {
     const { runtime, app } = await setup();
     const submission = await runtime.service.submit(
@@ -471,6 +600,11 @@ describe("control API", () => {
     expect(live.json()).toEqual({ status: "live" });
     expect(live.headers["x-content-type-options"]).toBe("nosniff");
     expect(live.headers["content-security-policy"]).toContain("default-src 'self'");
+    expect(live.headers["content-security-policy"]).toContain(
+      "frame-ancestors 'self' https://huggingface.co",
+    );
+    expect(live.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+    expect(live.headers["x-frame-options"]).toBeUndefined();
     expect((await app.inject({ method: "GET", url: "/health/ready" })).json()).toEqual({
       status: "ready",
     });
@@ -846,6 +980,11 @@ describe("control API", () => {
       primary_metric: { value: 0.75 },
       status: "published",
       catalog_source_digest: catalog.source_digest,
+      pass_count: 1,
+      pass_rate: 1 / 89,
+      outputs_prefix: "imports",
+      outputs_url: `https://huggingface.co/buckets/${runtime.config.bucket_id}/tree/imports`,
+      hf_uri: `hf://buckets/${runtime.config.bucket_id}/imports`,
     });
     const filtered = await app.inject({
       method: "GET",
@@ -1346,6 +1485,222 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("terminalizes an ambiguous Sandbox command without replay", async () => {
+    const records = sandboxDeploymentRecords();
+    const { runtime, app } = await setup("enabled", async (seedRuntime) => {
+      for (const record of records)
+        await seedRuntime.store.create(
+          controlRecordPath(record),
+          new TextEncoder().encode(canonicalJson(record)),
+        );
+    });
+    const submission = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "sandbox-ambiguous-campaign-key" },
+      payload: {
+        ...input,
+        deployment: "hf-sandbox-test",
+        ceiling_microusd: 20_000_000,
+      },
+    });
+    expect(submission.statusCode).toBe(202);
+    const campaignId = submission.json().campaign_id as string;
+    await runtime.reconciler.tick();
+    const lock = await runtime.projection.campaignLock(campaignId);
+    if (!lock) throw new Error("campaign lock is missing");
+    const launch = (await runtime.projection.campaignActions(campaignId)).find(
+      (action) => action.action_kind === "job.launch",
+    );
+    if (!launch) throw new Error("campaign admission did not create a Job launch");
+    const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
+      namespace: runtime.config.namespace,
+      campaign_id: campaignId,
+      campaign_lock_digest: sha256(canonicalJson(lock)),
+      action_id: launch.action_id,
+      task_ids: ["control-smoke-task"],
+      operations: ["campaign.read", "sandbox.create", "sandbox.exec", "sandbox.close"],
+      expires_at: Math.floor(Date.now() / 1000) + 60,
+    });
+    const capabilityHeaders = {
+      "x-harbor-hf-worker-capability": capability,
+    };
+    vi.spyOn(
+      runtime.sandboxes as NonNullable<Runtime["sandboxes"]>,
+      "lifecycle",
+    ).mockImplementation(async (intent) => ({
+      outcome: intent.action_kind === "sandbox.create" ? "created" : "completed",
+      observed_state: intent.action_kind === "sandbox.close" ? "CANCELED" : "RUNNING",
+      resource_id: "private-ambiguous-sandbox-resource",
+    }));
+    const execute = vi
+      .spyOn(runtime.sandboxes as NonNullable<Runtime["sandboxes"]>, "execute")
+      .mockRejectedValue(
+        new Error(
+          "private adapter response at https://private.example.invalid contains topology",
+        ),
+      );
+    const create = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
+      headers: {
+        ...capabilityHeaders,
+        "idempotency-key": "sandbox-ambiguous-create-key",
+      },
+    });
+    expect(create.statusCode).toBe(200);
+    const sandboxId = create.json().sandbox_id as string;
+    const execUrl = `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/exec`;
+    const execInput = {
+      method: "POST" as const,
+      url: execUrl,
+      headers: {
+        ...capabilityHeaders,
+        "idempotency-key": "sandbox-ambiguous-command-key",
+      },
+      payload: {
+        command: ["python", "worker.py"],
+        cwd: "/app",
+        timeout_seconds: 60,
+      },
+    };
+    const failed = await app.inject(execInput);
+    expect(failed.statusCode).toBe(503);
+    expect(failed.json()).toMatchObject({
+      error: {
+        code: "sandbox_action_ambiguous",
+        message: "Sandbox action outcome is unknown and cannot be replayed",
+        request_id: expect.any(String),
+      },
+    });
+    expect(JSON.stringify(failed.json())).not.toContain("private.example.invalid");
+    expect(execute).toHaveBeenCalledOnce();
+    const command = (await runtime.projection.campaignActions(campaignId)).find(
+      (action) => action.action_kind === "sandbox.exec",
+    );
+    if (!command?.receipt_body) throw new Error("ambiguous receipt is missing");
+    expect(JSON.parse(command.receipt_body)).toMatchObject({
+      outcome: "failed",
+      observed_state: "AMBIGUOUS",
+      error_code: "sandbox_external_outcome_unknown",
+    });
+    expect(await runtime.projection.actionAdvanced(command.action_id)).toBe(true);
+    const resultPath = sandboxActionResultPath(campaignId, command.action_id);
+    const resultPrefix = resultPath.slice(0, -"/result.json".length);
+    expect(await runtime.store.list(resultPrefix)).toEqual([]);
+    expect(
+      await runtime.projection.pendingDispatchedSandboxExecActions(
+        campaignId,
+        "control-smoke-task",
+      ),
+    ).toEqual([]);
+
+    const repeated = await app.inject(execInput);
+    expect(repeated.statusCode).toBe(409);
+    expect(repeated.json()).toMatchObject({
+      error: { code: "idempotency_conflict" },
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    const close = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}`,
+      headers: {
+        ...capabilityHeaders,
+        "idempotency-key": "sandbox-ambiguous-close-key",
+      },
+    });
+    expect(close.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("keeps historical disposition correction operator-scoped and redacted", async () => {
+    const { runtime, app } = await setup("enabled");
+    const correct = vi
+      .spyOn(runtime.service, "correctHistoricalSandboxAmbiguities")
+      .mockResolvedValue({
+        batch_id: "disposition-batch-safe",
+        batch_digest: `sha256:${"a".repeat(64)}`,
+        items: [
+          {
+            action_id: "action-safe",
+            disposition_record_id: "disposition-action-safe",
+            created: true,
+          },
+        ],
+      });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns/campaign-safe/tasks/task-safe/action-dispositions",
+      headers: { "idempotency-key": "disposition-request-key" },
+      payload: {
+        action_ids: ["action-safe"],
+        reason: "correct a proved historical observation",
+        confirmed: true,
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toEqual({
+      batch_id: "disposition-batch-safe",
+      batch_digest: `sha256:${"a".repeat(64)}`,
+      items: [
+        {
+          action_id: "action-safe",
+          disposition_record_id: "disposition-action-safe",
+          created: true,
+        },
+      ],
+    });
+    expect(correct).toHaveBeenCalledWith(
+      "campaign-safe",
+      "task-safe",
+      {
+        action_ids: ["action-safe"],
+        reason: "correct a proved historical observation",
+        confirmed: true,
+      },
+      "disposition-request-key",
+      expect.objectContaining({ role: "operator" }),
+    );
+    expect(JSON.stringify(response.json())).not.toContain("close_action_id");
+    expect(JSON.stringify(response.json())).not.toContain("resource_id");
+
+    vi.spyOn(runtime.projection, "actionDispositionViews").mockResolvedValue([
+      {
+        action_id: "action-safe",
+        campaign_id: "campaign-safe",
+        task_id: "task-safe",
+        recorded_outcome: "completed",
+        recorded_observed_state: "suppressed-sandbox-cleanup-ambiguous",
+        effective_outcome: "failed",
+        effective_observed_state: "AMBIGUOUS",
+        effective_error_code: "sandbox_external_outcome_unknown",
+        reason_code: "historical_non_replay_safe_command_ambiguity",
+        corrected_at: "2026-08-21T00:00:00Z",
+        actor_role: "operator",
+        disposition_record_id: "disposition-action-safe",
+        batch_id: "disposition-batch-safe",
+        batch_size: 1,
+      },
+    ]);
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/v1/campaigns/campaign-safe/tasks/task-safe/action-dispositions",
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      items: [
+        {
+          recorded_outcome: "completed",
+          effective_outcome: "failed",
+          effective_observed_state: "AMBIGUOUS",
+        },
+      ],
+      next_cursor: null,
+    });
+    expect(JSON.stringify(listed.json())).not.toContain("receipt_digest");
+    await app.close();
+  });
+
   it("returns a client error for an unknown profile alias", async () => {
     const { app } = await setup("enabled");
     const response = await app.inject({
@@ -1465,6 +1820,52 @@ describe("authentication state", () => {
     expect(safeReturnPath("/\\evil.example", callback)).toBe("/");
     expect(safeReturnPath("//evil.example", callback)).toBe("/");
     expect(safeReturnPath("https://evil.example", callback)).toBe("/");
+  });
+
+  it("uses secure partitioned cookies for embedded OAuth sessions", async () => {
+    const { runtime, app } = await setup();
+    vi.spyOn(runtime.auth, "login").mockResolvedValue({
+      flow_id: "flow-id",
+      url: new URL("https://identity.example/authorize"),
+    });
+    vi.spyOn(runtime.auth, "callback").mockResolvedValue({
+      session_id: "session-id",
+      csrf: "csrf-token",
+      return_to: "/results",
+      expires_at: Date.now() + 60_000,
+    });
+
+    const login = await app.inject({ method: "GET", url: "/auth/login" });
+    expect(login.statusCode).toBe(302);
+    expect(login.headers["set-cookie"]).toContain("hhf_oauth_flow=flow-id");
+    expect(login.headers["set-cookie"]).toContain("SameSite=None");
+    expect(login.headers["set-cookie"]).toContain("Partitioned");
+
+    const callback = await app.inject({
+      method: "GET",
+      url: "/auth/callback?code=test-code&state=test-state",
+      headers: { cookie: "hhf_oauth_flow=flow-id" },
+    });
+    expect(callback.statusCode).toBe(302);
+    const callbackCookies = callback.headers["set-cookie"];
+    expect(callbackCookies).toHaveLength(3);
+    for (const setCookie of callbackCookies ?? []) {
+      expect(setCookie).toContain("Secure");
+      expect(setCookie).toContain("SameSite=None");
+      expect(setCookie).toContain("Partitioned");
+    }
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/auth/logout",
+      headers: { cookie: "hhf_session=session-id; hhf_csrf=csrf-token" },
+    });
+    expect(logout.statusCode).toBe(204);
+    for (const setCookie of logout.headers["set-cookie"] ?? []) {
+      expect(setCookie).toContain("SameSite=None");
+      expect(setCookie).toContain("Partitioned");
+    }
+    await app.close();
   });
 
   it("stores opaque sessions and rejects the wrong CSRF token", async () => {

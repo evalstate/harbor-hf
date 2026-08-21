@@ -321,6 +321,7 @@ export interface paths {
                                 observed_microusd: number;
                                 total_tasks: number;
                                 terminal_tasks: number;
+                                successful_tasks: number;
                                 pending_actions: number;
                                 publication_status: string | null;
                                 cleanup_pending: boolean;
@@ -409,6 +410,7 @@ export interface paths {
                             observed_microusd: number;
                             total_tasks: number;
                             terminal_tasks: number;
+                            successful_tasks: number;
                             pending_actions: number;
                             publication_status: string | null;
                             cleanup_pending: boolean;
@@ -1026,6 +1028,122 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/action-dispositions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    campaign_id: string;
+                    task_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                action_id: string;
+                                campaign_id: string;
+                                task_id: string;
+                                recorded_outcome: string;
+                                recorded_observed_state: string;
+                                effective_outcome: string;
+                                effective_observed_state: string;
+                                effective_error_code: string;
+                                reason_code: string;
+                                /** Format: date-time */
+                                corrected_at: string;
+                                actor_role: string;
+                                disposition_record_id: string;
+                                batch_id: string;
+                                batch_size: number;
+                            }[];
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    campaign_id: string;
+                    task_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        action_ids: string[];
+                        reason: string;
+                        /** @enum {unknown} */
+                        confirmed: true;
+                    };
+                };
+            };
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            batch_id: string;
+                            batch_digest: string;
+                            items: {
+                                action_id: string;
+                                disposition_record_id: string;
+                                created: boolean;
+                            }[];
+                        };
+                    };
+                };
+                /** @description Default Response */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            batch_id: string;
+                            batch_digest: string;
+                            items: {
+                                action_id: string;
+                                disposition_record_id: string;
+                                created: boolean;
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns/{campaign_id}/actions": {
         parameters: {
             query?: never;
@@ -1223,6 +1341,7 @@ export interface paths {
                 query?: {
                     cursor?: string;
                     limit?: number;
+                    campaign_id?: string;
                 };
                 header?: never;
                 path?: never;
@@ -1248,6 +1367,8 @@ export interface paths {
                                 resource_id: string | null;
                                 /** Format: date-time */
                                 created_at: string;
+                                inspect_url: string | null;
+                                cost_microusd: number;
                             }[];
                             next_cursor: string | null;
                         };
@@ -1428,6 +1549,32 @@ export interface paths {
                                     unit: string;
                                 } | null;
                                 result_path?: string | null;
+                                pass_count?: number | null;
+                                pass_rate?: number | null;
+                                pass_rate_ci95?: {
+                                    low: number;
+                                    high: number;
+                                } | null;
+                                input_tokens?: number | null;
+                                output_tokens?: number | null;
+                                inference_cost_microusd?: number | null;
+                                mean_task_cost_microusd?: number | null;
+                                task_cost_ci95?: {
+                                    low: number;
+                                    high: number;
+                                } | null;
+                                observed_cost_microusd?: number | null;
+                                outputs_prefix?: string | null;
+                                outputs_url?: string | null;
+                                hf_uri?: string | null;
+                                tasks?: {
+                                    task_id: string;
+                                    outcome: string;
+                                    reward: number | null;
+                                    cost_microusd: number;
+                                    input_tokens: number | null;
+                                    output_tokens: number | null;
+                                }[];
                                 benchmark_revision?: string | null;
                                 model_revision?: string | null;
                                 harness_revision?: string | null;
@@ -1500,6 +1647,32 @@ export interface paths {
                                 unit: string;
                             } | null;
                             result_path?: string | null;
+                            pass_count?: number | null;
+                            pass_rate?: number | null;
+                            pass_rate_ci95?: {
+                                low: number;
+                                high: number;
+                            } | null;
+                            input_tokens?: number | null;
+                            output_tokens?: number | null;
+                            inference_cost_microusd?: number | null;
+                            mean_task_cost_microusd?: number | null;
+                            task_cost_ci95?: {
+                                low: number;
+                                high: number;
+                            } | null;
+                            observed_cost_microusd?: number | null;
+                            outputs_prefix?: string | null;
+                            outputs_url?: string | null;
+                            hf_uri?: string | null;
+                            tasks?: {
+                                task_id: string;
+                                outcome: string;
+                                reward: number | null;
+                                cost_microusd: number;
+                                input_tokens: number | null;
+                                output_tokens: number | null;
+                            }[];
                             benchmark_revision?: string | null;
                             model_revision?: string | null;
                             harness_revision?: string | null;

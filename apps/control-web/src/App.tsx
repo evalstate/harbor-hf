@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Route, Routes, useLocation } from "react-router-dom";
-import { ApiError, signOut, type SessionResponse } from "./api";
+import { ApiError, type SessionResponse, signOut } from "./api";
 import { ControlStateProvider, type DisplayActor } from "./control-state";
 import { Layout } from "./layout";
 import {
@@ -59,6 +59,9 @@ function AuthenticatedApp({
         {system.data ? (
           <Routes>
             <Route path="/" element={<OverviewPage />} />
+            <Route path="/runs" element={<CampaignsPage />} />
+            <Route path="/runs/:campaignId" element={<CampaignPage />} />
+            <Route path="/runs/:campaignId/tasks/:taskId" element={<TaskPage />} />
             <Route path="/campaigns" element={<CampaignsPage />} />
             <Route path="/campaigns/:campaignId" element={<CampaignPage />} />
             <Route path="/campaigns/:campaignId/tasks/:taskId" element={<TaskPage />} />
@@ -92,7 +95,8 @@ export default function App() {
     (session.error instanceof ApiError && session.error.status === 401) ||
     session.data?.authenticated === false;
   if (unauthorized) {
-    const returnTo = `${location.pathname}${location.search}${location.hash}`;
+    // Private Space embeds add signed query parameters that must not enter OAuth state.
+    const returnTo = location.pathname;
     return (
       <main className="grid min-h-screen place-items-center bg-slate-950 p-6 text-slate-100">
         <Card className="max-w-md text-center">

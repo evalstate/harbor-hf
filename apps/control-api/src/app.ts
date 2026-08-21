@@ -11,6 +11,7 @@ import type {
 import {
   canonicalJson,
   deterministicId,
+  sandboxActionResultPath,
   schemas,
   sha256,
   validateResultCatalog,
@@ -22,12 +23,15 @@ import {
   IdempotencyConflictError,
   PolicyError,
   ProfileResolutionError,
+  SandboxActionAmbiguousError,
+  type ActionDispositionCorrectionInput,
   type ControlEvent,
   type WorkerCapability,
   type WorkerOperation,
   preparedSandboxPolicy,
   preparationRequired,
   staticSandboxPolicy,
+  summarizePublishedResult,
   verifyWorkerCapability,
 } from "@harbor-hf/control-core";
 import cookie from "@fastify/cookie";
@@ -42,7 +46,9 @@ import Fastify, {
 } from "fastify";
 import {
   acceptedSchema,
-  actionSchema,
+  actionDispositionCorrectionResultSchema,
+  actionDispositionCorrectionSchema,
+  actionDispositionViewSchema,
   attemptAcceptedSchema,
   auditSchema,
   campaignListSchema,
@@ -51,6 +57,7 @@ import {
   evidenceAcceptedSchema,
   evidenceUploadSchema,
   itemList,
+  jobSchema,
   profileSchema,
   publicationSchema,
   sessionSchema,
@@ -73,6 +80,18 @@ declare module "fastify" {
     authSession?: SessionRow;
     workerCapability?: WorkerCapability;
   }
+}
+
+// Partitioned cookies remain available inside the cross-site Hub iframe without
+// becoming shared third-party cookies across unrelated top-level sites.
+const embeddedCookiePolicy = {
+  partitioned: true,
+  sameSite: "none",
+  secure: true,
+} as const;
+
+function hubJobInspectUrl(namespace: string, jobId: string): string {
+  return `https://huggingface.co/jobs/${encodeURIComponent(namespace)}/${encodeURIComponent(jobId)}`;
 }
 
 function actor(request: FastifyRequest): AuthenticatedActor {
@@ -182,10 +201,6 @@ function requireWorkerOperation(
   return capability;
 }
 
-function sandboxResultPath(campaignId: string, actionId: string): string {
-  return `sandbox-results/schema=v1/${campaignId}/${actionId}/result.json`;
-}
-
 function requireAllowedSandboxPath(path: string, policy: SandboxPolicy): string {
   if (!posix.isAbsolute(path) || posix.normalize(path) !== path)
     throw new PolicyError("sandbox path must be normalized and absolute");
@@ -250,6 +265,14 @@ const paginationQuerySchema = {
   properties: {
     cursor: { type: "string", maxLength: 128 },
     limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+  },
+} as const;
+
+const jobsQuerySchema = {
+  type: "object",
+  properties: {
+    ...paginationQuerySchema.properties,
+    campaign_id: { type: "string", minLength: 1, maxLength: 160 },
   },
 } as const;
 
@@ -334,6 +357,39 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
     item.profile_ids = Object.fromEntries(
       lock.profiles.map((profile) => [profile.kind, profile.profile_id]),
     );
+  }
+  for (const item of byId.values()) {
+    const campaignId = typeof item.campaign_id === "string" ? item.campaign_id : null;
+    const publicationId =
+      typeof item.publication_id === "string" ? item.publication_id : null;
+    if (!publicationId) continue;
+    const campaign = campaignId ? await runtime.projection.campaign(campaignId) : null;
+    const projectedTasks = campaignId ? await runtime.projection.tasks(campaignId) : [];
+    const projectedAttempts = campaignId
+      ? await runtime.projection.campaignAttempts(campaignId)
+      : [];
+    const summary = summarizePublishedResult({
+      bucketId: runtime.config.bucket_id,
+      publicationId,
+      resultPath: typeof item.result_path === "string" ? item.result_path : null,
+      catalogTaskCount: typeof item.task_count === "number" ? item.task_count : null,
+      catalogStrictPassCount:
+        typeof item.strict_pass_count === "number" ? item.strict_pass_count : null,
+      observedCostMicrousd: campaign?.observed_microusd ?? null,
+      tasks: projectedTasks.map((task) => ({
+        task_id: task.task_id,
+        terminal_outcome: task.terminal_outcome,
+        selected_attempt_id: task.selected_attempt_id,
+      })),
+      attempts: projectedAttempts.map((attempt) => ({
+        attempt_id: attempt.attempt_id,
+        task_id: attempt.task_id,
+        outcome: attempt.outcome,
+        cost_microusd: attempt.cost_microusd,
+        metrics: JSON.parse(attempt.metrics_body) as Record<string, number>,
+      })),
+    });
+    Object.assign(item, summary);
   }
   return [...byId.values()];
 }
@@ -447,10 +503,12 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         imgSrc: ["'self'", "data:"],
         connectSrc: ["'self'"],
         objectSrc: ["'none'"],
-        frameAncestors: ["'none'"],
+        frameAncestors: ["'self'", "https://huggingface.co"],
       },
     },
     crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    xFrameOptions: false,
   });
   await app.register(swagger, {
     openapi: {
@@ -551,47 +609,74 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       payload,
       domainActor(request),
     );
-    const existing = await runtime.projection.action(intent.action_id);
-    const resultPath = sandboxResultPath(campaignId, intent.action_id);
-    const resultPrefix = resultPath.slice(0, -"/result.json".length);
-    const resultEntry = (await runtime.store.list(resultPrefix)).find(
-      (entry) => entry.key === resultPath,
-    );
-    if (resultEntry) {
-      await runtime.service.writeAction(intent);
-      const bytes = await runtime.store.read(resultPath);
-      const stored = JSON.parse(new TextDecoder().decode(bytes)) as {
-        external: {
-          outcome: ActionReceipt["outcome"];
-          observed_state: string;
-          resource_id?: string | null;
-          cost_microusd?: number | null;
-        };
-        result: T;
-      };
-      if (!existing?.receipt_body) {
-        const receipt = await runtime.service.receipt(intent, stored.external);
-        await runtime.service.markAdvanced(intent, receipt);
-      }
-      return stored.result;
-    }
-    if (existing?.receipt_body)
-      throw new PolicyError("Sandbox action receipt is missing its durable result");
-    const dispatched = await runtime.projection.actionDispatch(intent.action_id);
-    await runtime.service.writeAction(intent);
-    if (dispatched && !replaySafe)
-      throw new IdempotencyConflictError(
-        "ambiguous sandbox command cannot be replayed; inspect state and use a new key",
+    return runtime.service.withSandboxActionFinalization(intent.action_id, async () => {
+      const existing = await runtime.projection.action(intent.action_id);
+      const resultPath = sandboxActionResultPath(campaignId, intent.action_id);
+      const resultPrefix = resultPath.slice(0, -"/result.json".length);
+      const resultEntry = (await runtime.store.list(resultPrefix)).find(
+        (entry) => entry.key === resultPath,
       );
-    await runtime.service.dispatchAction(
-      intent,
-      new Date(Date.now() + 30_000).toISOString(),
-    );
-    const output = await execute(intent, Boolean(dispatched) && !ownsDispatch);
-    await createJson(runtime.store, resultPath, output);
-    const receipt = await runtime.service.receipt(intent, output.external);
-    await runtime.service.markAdvanced(intent, receipt);
-    return output.result;
+      if (resultEntry) {
+        await runtime.service.writeAction(intent);
+        const bytes = await runtime.store.read(resultPath);
+        const stored = JSON.parse(new TextDecoder().decode(bytes)) as {
+          external: {
+            outcome: ActionReceipt["outcome"];
+            observed_state: string;
+            resource_id?: string | null;
+            cost_microusd?: number | null;
+          };
+          result: T;
+        };
+        if (!existing?.receipt_body) {
+          const receipt = await runtime.service.receipt(intent, stored.external);
+          await runtime.service.markAdvanced(intent, receipt);
+        }
+        return stored.result;
+      }
+      if (existing?.receipt_body) {
+        const receipt = JSON.parse(existing.receipt_body) as ActionReceipt;
+        if (
+          receipt.outcome === "failed" &&
+          receipt.observed_state === "AMBIGUOUS" &&
+          receipt.error_code === "sandbox_external_outcome_unknown"
+        )
+          throw new IdempotencyConflictError(
+            "ambiguous Sandbox action cannot be replayed",
+          );
+        throw new PolicyError("Sandbox action receipt is missing its durable result");
+      }
+      const dispatched = await runtime.projection.actionDispatch(intent.action_id);
+      await runtime.service.writeAction(intent);
+      if (dispatched && !replaySafe)
+        throw new IdempotencyConflictError(
+          "ambiguous sandbox command cannot be replayed; inspect state and use a new key",
+        );
+      await runtime.service.dispatchAction(
+        intent,
+        new Date(Date.now() + 30_000).toISOString(),
+      );
+      let output: Awaited<ReturnType<typeof execute>>;
+      try {
+        output = await execute(intent, Boolean(dispatched) && !ownsDispatch);
+      } catch (error) {
+        if (!replaySafe) {
+          const receipt = await runtime.service.ambiguousSandboxReceipt(
+            intent,
+            domainActor(request),
+          );
+          await runtime.service.markAdvanced(intent, receipt);
+          throw new SandboxActionAmbiguousError(
+            "Sandbox action outcome is unknown and cannot be replayed",
+          );
+        }
+        throw error;
+      }
+      await createJson(runtime.store, resultPath, output);
+      const receipt = await runtime.service.receipt(intent, output.external);
+      await runtime.service.markAdvanced(intent, receipt);
+      return output.result;
+    });
   };
 
   app.addHook("onRequest", async (request, reply) => {
@@ -874,9 +959,8 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       const query = request.query as { return_to?: string };
       const login = await runtime.auth.login(query.return_to ?? "/");
       reply.setCookie("hhf_oauth_flow", login.flow_id, {
+        ...embeddedCookiePolicy,
         httpOnly: true,
-        secure: true,
-        sameSite: "lax",
         path: "/auth/callback",
         maxAge: 600,
       });
@@ -903,18 +987,19 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         flowId,
         new URL(request.url, runtime.config.public_origin),
       );
-      reply.clearCookie("hhf_oauth_flow", { path: "/auth/callback" });
+      reply.clearCookie("hhf_oauth_flow", {
+        ...embeddedCookiePolicy,
+        path: "/auth/callback",
+      });
       reply.setCookie("hhf_session", callback.session_id, {
+        ...embeddedCookiePolicy,
         httpOnly: true,
-        secure: true,
-        sameSite: "strict",
         path: "/",
         expires: new Date(callback.expires_at),
       });
       reply.setCookie("hhf_csrf", callback.csrf, {
+        ...embeddedCookiePolicy,
         httpOnly: false,
-        secure: true,
-        sameSite: "strict",
         path: "/",
         expires: new Date(callback.expires_at),
       });
@@ -930,8 +1015,8 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     async (request, reply) => {
       const sessionId = request.cookies.hhf_session;
       if (sessionId) runtime.auth.store.deleteSession(sessionId);
-      reply.clearCookie("hhf_session", { path: "/" });
-      reply.clearCookie("hhf_csrf", { path: "/" });
+      reply.clearCookie("hhf_session", { ...embeddedCookiePolicy, path: "/" });
+      reply.clearCookie("hhf_csrf", { ...embeddedCookiePolicy, path: "/" });
       return reply.code(204).send();
     },
   );
@@ -1628,6 +1713,65 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     },
   );
 
+  app.get(
+    "/api/v1/campaigns/:campaign_id/tasks/:task_id/action-dispositions",
+    {
+      schema: {
+        tags: ["campaigns", "audit"],
+        querystring: paginationQuerySchema,
+        response: { 200: itemList(actionDispositionViewSchema) },
+      },
+    },
+    async (request) => {
+      const { campaign_id, task_id } = request.params as {
+        campaign_id: string;
+        task_id: string;
+      };
+      const query = request.query as { cursor?: string; limit?: number };
+      const limit = query.limit ?? 50;
+      const offset = cursorOffset(query.cursor);
+      const items = await runtime.projection.actionDispositionViews(
+        campaign_id,
+        task_id,
+        limit + 1,
+        offset,
+      );
+      return offsetPage(items, offset, limit);
+    },
+  );
+
+  app.post(
+    "/api/v1/campaigns/:campaign_id/tasks/:task_id/action-dispositions",
+    {
+      schema: {
+        tags: ["campaigns", "audit"],
+        body: actionDispositionCorrectionSchema,
+        response: {
+          200: actionDispositionCorrectionResultSchema,
+          201: actionDispositionCorrectionResultSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("campaign writes are disabled before cutover");
+      const { campaign_id, task_id } = request.params as {
+        campaign_id: string;
+        task_id: string;
+      };
+      const result = await runtime.service.correctHistoricalSandboxAmbiguities(
+        campaign_id,
+        task_id,
+        request.body as ActionDispositionCorrectionInput,
+        idempotencyKey(request),
+        domainActor(request),
+      );
+      return reply
+        .code(result.items.some((item) => item.created) ? 201 : 200)
+        .send(result);
+    },
+  );
+
   app.post(
     "/api/v1/campaigns/:campaign_id/actions",
     {
@@ -1758,16 +1902,30 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     {
       schema: {
         tags: ["resources"],
-        querystring: paginationQuerySchema,
-        response: { 200: itemList(actionSchema) },
+        querystring: jobsQuerySchema,
+        response: { 200: itemList(jobSchema) },
       },
     },
     async (request) => {
-      const query = request.query as { cursor?: string; limit?: number };
+      const query = request.query as {
+        cursor?: string;
+        limit?: number;
+        campaign_id?: string;
+      };
       const limit = query.limit ?? 50;
       const offset = cursorOffset(query.cursor);
-      const items = await runtime.projection.jobs(limit + 1, offset);
-      return offsetPage(items, offset, limit);
+      const items = await runtime.projection.jobs(limit + 1, offset, query.campaign_id);
+      return offsetPage(
+        items.map((item) => ({
+          ...item,
+          inspect_url:
+            item.resource_id === null
+              ? null
+              : hubJobInspectUrl(runtime.config.namespace, item.resource_id),
+        })),
+        offset,
+        limit,
+      );
     },
   );
   app.get(
@@ -1982,6 +2140,10 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       status = 422;
       code = "profile_resolution_failed";
       message = error.message;
+    } else if (error instanceof SandboxActionAmbiguousError) {
+      status = 503;
+      code = "sandbox_action_ambiguous";
+      message = "Sandbox action outcome is unknown and cannot be replayed";
     } else if (error instanceof WorkerScopeError) {
       status = 403;
       code = "worker_scope_rejected";

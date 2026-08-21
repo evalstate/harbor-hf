@@ -169,12 +169,58 @@ runtime does not require that benchmark name.
 ## Cost and recovery
 
 Preparation has its own small CPU reservation. Execution reservation is checked
-only after the exact prepared tasks and limits are known. Both reservations and all replacements count against the same campaign
-ceiling. Sandbox use and inference count too, as does cleanup.
+only after the exact prepared tasks and limits are known. Both reservations and
+all replacements count against the same campaign ceiling. Sandbox use and
+inference count too, as does cleanup.
 
 A preparation failure cannot start benchmark execution. A deterministic shared
 worker defect stops the affected campaign. A missing execution receipt can
 launch only the tasks that remain unsealed, using the same prepared lock.
+
+A post-dispatch `sandbox.exec` failure is different from a replayable transport
+failure. The control operation becomes `failed` with observed state `AMBIGUOUS`
+and error code `sandbox_external_outcome_unknown`. It has no result object and
+the same action identity cannot execute again. `action.advanced` ends the
+control action without claiming that the external command did not run.
+
+A process exit can leave an older dispatch without a receipt. Infrastructure
+retry settles it only after a matching create action and durable terminal
+Sandbox close prove that the resource cannot produce another effect. Recovery
+is limited to the selected campaign and task, checks that no result exists, and
+appends the ambiguous receipt and advancement. Cancellation leaves a dispatched
+command unresolved while it closes the Sandbox, then settles the command after
+the close fence; it never suppresses the command as completed. Operator and
+automatic infrastructure retries use the same recovery gate before reservation
+or replacement launch. No command is replayed and no historical record is
+changed.
+
+An older release may already have written a completed/suppressed receipt for the
+unknown command. That receipt remains immutable. A separate
+`action.disposition` record binds the exact source receipt and one matching
+advanced terminal close receipt by canonical digest. Its only allowed effective
+state is `failed/AMBIGUOUS/sandbox_external_outcome_unknown`, with the fixed
+historical ambiguity reason code.
+
+The source receipt resource can be null in this fixed legacy class because the
+old suppression writer omitted the observation. If it is non-null, it must
+exactly equal the mandatory command intent resource. A conflicting non-null
+value fails closed. One control-core predicate applies this rule during service
+admission and projection replay. The intent, create receipt, and terminal close
+intent and receipt must still identify the same resource in the same campaign
+and task. The durable result must be absent, and the dispatch and advancements
+must match.
+
+Operators submit a bounded campaign and task batch through the authenticated
+control service. The batch sorts and locks target actions, validates every item
+before append, and carries a deterministic batch ID and digest. The same request
+adopts a partial batch after a process exit. A changed action set, reason, or
+proof conflicts. There is no automatic scan or backfill.
+
+Projection keeps the recorded receipt and effective disposition separate. A
+final integrity pass checks every proof after replay and keeps the service
+unready on a mismatch or later result object. Correction changes no attempt,
+selection, budget, publication, cleanup, or resource state and cannot authorize
+execution. Sample acceptance remains a separate review.
 
 ## Verification
 
@@ -187,6 +233,30 @@ Local checks must prove:
 - changed source, task, image, profile, or Harbor version fails closed;
 - duplicate preparation and ambiguous Job launch are adopted without a second
   remote create;
+- a post-dispatch Sandbox command exception writes no result, writes a safe
+  failed and `AMBIGUOUS` receipt, advances the action, and returns a bounded
+  `sandbox_action_ambiguous` error;
+- the same Sandbox command key cannot call the adapter again after ambiguity,
+  including after restart and projection rebuild;
+- an older dispatched command can be settled only for the selected campaign and
+  task after a matching terminal Sandbox close, and open or mismatched resources
+  fail closed;
+- retry and cancellation drain only close-fenced ambiguous commands and never
+  scan another campaign;
+- a historical disposition accepts a null source receipt resource only for the
+  exact legacy state and only when the intent, create receipt, and advanced
+  terminal close bind the same resource;
+- a matching non-null source receipt resource remains valid, while a conflicting
+  non-null value fails before append and during rebuild;
+- service admission and projection replay use the same resource predicate;
+- recorded and effective action states remain visible together after shuffled
+  replay and an empty-filesystem rebuild;
+- matching partial and concurrent correction batches adopt, while a changed
+  action set, reason, or proof conflicts;
+- a read-only preflight uses the exact deployed predicate on the private target
+  set and rejects a synthetic conflicting non-null resource before any write;
+- correction changes no lifecycle counter or record and cannot schedule a retry,
+  publication, Job, Sandbox, or Endpoint action;
 - retries cannot replace the prepared lock;
 - task-specific resources come from Harbor and remain within deployment limits;
 - capabilities separate preparation from execution and Sandbox operations;
@@ -259,11 +329,37 @@ isolation, valid content-addressed evidence, publication, Sandbox close, budget
 reconciliation, and no active Endpoint. Retry only an eligible transient
 physical attempt within the locked attempt and cost limits.
 
-Use the preserved valid sample and the valid replacement sample for a private
-measured launch review. Record raw duration, token, cost, and reward values, and
-label any p50 or p95 value with its sample count. Include setup, bounded retries,
-and cleanup in the high estimate. The hosted control plane must admit the
-worst-case next action within the approved cumulative ceiling before launch.
+If a post-dispatch Sandbox command response is lost, the related physical
+attempt is invalid infrastructure evidence. Operator-specific incident
+identities, counts, spend, and attempt state stay in the private launch record.
+The failed attempt, evidence, spend, and consumed attempt count remain
+immutable.
+
+Paid work stops until both historical receipt states and the selected sample are
+reviewed. Deploy the exact disposition release to the existing control Space
+without changing resources. Verify source, readiness, writes, projection,
+profiles, Bucket privacy, zero running Jobs, and zero active Endpoint replicas.
+Then prepare one private batch from durable receipt and close evidence and submit
+it once. Rebuild from the Bucket and prove that recorded receipts remain
+completed/suppressed while effective states are failed/AMBIGUOUS. Campaign,
+attempt, selection, reward, publication, spend, cleanup, Job, Sandbox, and
+Endpoint state must remain unchanged.
+
+No replacement attempt remains. Do not unseal or rerun the task and do not create
+another replacement campaign. Run a separate read-only acceptance review for
+the existing selected attempt. Check its final Pi event, tokens, provider and
+worker provenance, credential isolation, evidence hashes, benchmark-timeout and
+reward, diagnostic publication, cost, close, Jobs, Sandboxes, and Endpoints. The
+correction itself does not make the sample valid.
+
+Only after that review passes, use the preserved valid sample and the accepted
+replacement sample for a private measured launch review. Record raw duration,
+token, cost, and reward values, and label any p50 or p95 value with its sample
+count. Include setup, bounded retries, and cleanup in the high estimate. Apply
+the practical-significance and paid-compute gates. The hosted control plane must
+admit the worst-case next action within the approved cumulative ceiling before
+launch. If the sample review fails, stop because no third attempt or replacement
+campaign is authorized.
 
 The current Terminal-Bench 2.1 run has exactly 89 logical tasks and one trial
 per task. Its benchmark profile is the exact trial-1 projection of the official
@@ -292,8 +388,10 @@ The work is complete when:
   a Harbor agent plugin;
 - every campaign execution is bound to one verified Harbor lock;
 - the merged implementation is deployed and verified through hosted canaries;
-- the provider-error replacement canary reruns only the invalid task and proves
-  a successful final Pi event, evidence, isolation, publication, and cleanup;
+- reviewed historical dispositions preserve original receipts, expose effective
+  ambiguity, rebuild cleanly, and change no lifecycle state;
+- the existing provider-error replacement sample passes the separate final Pi,
+  token, provenance, evidence, isolation, publication, cost, and cleanup review;
 - the 89-task, one-trial Terminal-Bench 2.1 diagnostic campaign is complete and
   published without a five-trial claim;
 - all 89 logical tasks are sealed, no action or cleanup is pending, cumulative

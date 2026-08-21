@@ -8,7 +8,14 @@ import {
 } from "@tanstack/react-table";
 import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
 import { useState } from "react";
+import { cn } from "../lib";
 import { Empty } from "../ui";
+
+function columnClass(meta: unknown): string | undefined {
+  if (!meta || typeof meta !== "object" || !("className" in meta)) return undefined;
+  const className = meta.className;
+  return typeof className === "string" ? className : undefined;
+}
 
 export function DataTable<T>({
   columns,
@@ -31,12 +38,18 @@ export function DataTable<T>({
   if (data.length === 0) return <Empty>{empty}</Empty>;
   return (
     <div className="overflow-x-auto rounded-xl border border-slate-800">
-      <table className="w-full min-w-[720px] border-collapse text-left text-sm">
+      <table className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-900/90 text-xs uppercase tracking-wider text-slate-400">
           {table.getHeaderGroups().map((group) => (
             <tr key={group.id}>
               {group.headers.map((header) => (
-                <th className="px-4 py-3 font-medium" key={header.id}>
+                <th
+                  className={cn(
+                    "px-4 py-3 font-medium",
+                    columnClass(header.column.columnDef.meta),
+                  )}
+                  key={header.id}
+                >
                   {header.isPlaceholder ? null : (
                     <button
                       className="inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
@@ -65,7 +78,13 @@ export function DataTable<T>({
               key={row.id}
             >
               {row.getVisibleCells().map((cell) => (
-                <td className="px-4 py-3 align-top text-slate-200" key={cell.id}>
+                <td
+                  className={cn(
+                    "px-4 py-3 align-top text-slate-200",
+                    columnClass(cell.column.columnDef.meta),
+                  )}
+                  key={cell.id}
+                >
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
                 </td>
               ))}

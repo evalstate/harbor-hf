@@ -1,11 +1,12 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.8/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
   "files": {
     "includes": [
       "**",
       "!!.git",
       "!!.fast-agent",
       "!!.venv",
+      "!!**/.venv",
       "!!assets",
       "!!mutants",
       "!!**/node_modules",

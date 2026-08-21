@@ -9,8 +9,8 @@ import {
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
-const WORKER_REVISION = "422cf445ce04cfc8f331ddeebfd88f6bc2c5eae9";
-const PREVIOUS_WORKER_REVISION = "0b199c7cdec7cfcdbdbd48819ca146dc79e45dc3";
+const WORKER_REVISION = "eec0829abf75e8d3f271c8114462a2ffc3dfecbf";
+const PREVIOUS_WORKER_REVISION = "422cf445ce04cfc8f331ddeebfd88f6bc2c5eae9";
 const BRIDGE_DIGESTS = [
   "a67e6442b5a9be11591699aaf8a861c021ac1e49c10bcd09992ab562098ea2eb",
   "ec80056b2eba539040bd411848b8e09f5dfce2066f715f814f40c8d909222da4",
@@ -131,10 +131,16 @@ describe("Terminal-Bench 2.1 profiles", () => {
     expect(new Set(diagnostic.source_task_ids as string[]).size).toBe(89);
     expect(new Set(diagnostic.trial_indices as number[])).toEqual(new Set([1]));
 
+    const canaryJob = record(canary.harbor_job);
     const replacementJob = record(replacement.harbor_job);
     const diagnosticJob = record(diagnostic.harbor_job);
+    const officialJob = record(official.harbor_job);
     expect(replacementJob.n_attempts).toBe(1);
     expect(replacementJob.n_concurrent_trials).toBe(1);
+    expect(canaryJob.agent_timeout_multiplier).toBe(4);
+    expect(replacementJob.agent_timeout_multiplier).toBe(4);
+    expect(officialJob.agent_timeout_multiplier).toBeUndefined();
+    expect(diagnosticJob.agent_timeout_multiplier).toBeUndefined();
     expect(diagnosticJob.n_attempts).toBe(1);
     expect(diagnosticJob.n_concurrent_trials).toBe(8);
     expect(replacement.revision).toBe(official.revision);
@@ -227,5 +233,71 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(spec.success_without_worker_receipt).toBe(false);
       expect(spec.publication_role).toBe("diagnostic");
     }
+  });
+
+  it("pins gpt-oss-20b and DeepSeek Harness for provider runs", async () => {
+    const model = record((await profile("model", "gpt-oss-20b")).spec);
+    const harness = record((await profile("harness", "dsh")).spec);
+    const deployment = record(
+      (await profile("deployment", "tb21-gpt-oss-20b-dsh-providers")).spec,
+    );
+    const harborAgent = record(harness.harbor_agent);
+
+    expect(harness.agent).toBe("dsh");
+    expect(harness.revision).toBe("0.1.0-rc.7");
+    expect(harness.reasoning_effort).toBe("off");
+    expect(harborAgent.import_path).toBe("harbor_hf_agents.dsh.agent:DshAgent");
+    expect(harborAgent.model_name).toBe(model.harbor_model_name);
+    expect(deployment.models).toEqual(["gpt-oss-20b"]);
+    expect(deployment.harnesses).toEqual(["dsh"]);
+    expect(deployment.inference_provider).toBe("together");
+  });
+
+  it("pins DeepSeek V4 Flash to DeepSeek Harness for provider runs", async () => {
+    const model = record(
+      (await profile("model", "deepseek-v4-flash-0731-together")).spec,
+    );
+    const harness = record(
+      (await profile("harness", "dsh-high-deepseek-v4-flash-0731-together")).spec,
+    );
+    const deployment = record(
+      (await profile("deployment", "tb21-deepseek-v4-flash-dsh-providers")).spec,
+    );
+    const harborAgent = record(harness.harbor_agent);
+    const kwargs = record(harborAgent.kwargs);
+
+    expect(harness.agent).toBe("dsh");
+    expect(harness.reasoning_effort).toBe("high");
+    expect(harborAgent.import_path).toBe("harbor_hf_agents.dsh.agent:DshAgent");
+    expect(harborAgent.model_name).toBe(model.harbor_model_name);
+    expect(kwargs.thinking_format).toBe("deepseek");
+    expect(deployment.models).toEqual(["deepseek-v4-flash-0731-together"]);
+    expect(deployment.harnesses).toEqual(["dsh-high-deepseek-v4-flash-0731-together"]);
+  });
+
+  it("pins gpt-oss-20b and OpenCode for provider runs", async () => {
+    const model = record((await profile("model", "gpt-oss-20b")).spec);
+    const harness = record((await profile("harness", "opencode")).spec);
+    const deployment = record(
+      (await profile("deployment", "tb21-gpt-oss-20b-opencode-providers")).spec,
+    );
+    const harborAgent = record(harness.harbor_agent);
+
+    expect(model.model_id).toBe("openai/gpt-oss-20b");
+    expect(model.revision).toBe("6cee5e81ee83917806bbde320786a8fb61efebee");
+    expect(model.harbor_model_name).toBe("openai/openai/gpt-oss-20b:together");
+    expect(harness.agent).toBe("opencode");
+    expect(harness.revision).toBe("1.18.20");
+    expect(harness.reasoning_effort).toBe("off");
+    expect(harborAgent.name).toBe("opencode");
+    expect(harborAgent.model_name).toBe(model.harbor_model_name);
+    expect(deployment.models).toEqual(["gpt-oss-20b"]);
+    expect(deployment.harnesses).toEqual(["opencode"]);
+    expect(deployment.inference_provider).toBe("together");
+    expect(deployment.input_price_microusd_per_million_tokens).toBe(50_000);
+    expect(deployment.output_price_microusd_per_million_tokens).toBe(200_000);
+    expect(record(deployment.sandbox_template).inference_upstream).toBe(
+      "https://router.huggingface.co/v1",
+    );
   });
 });

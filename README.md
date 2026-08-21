@@ -296,9 +296,11 @@ the configured HTTPS control API and does not access the Bucket directly. A
 valid token does not grant control access unless its Hugging Face identity is
 also present in the service access list.
 
-## Launch a campaign
+## Start a run
 
-A campaign selects promoted benchmark, model, harness, deployment, and launch-policy profiles. The control service resolves those aliases into an immutable campaign lock before creating physical work.
+The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. Approved harnesses also include DeepSeek Harness (`dsh`) and Pi. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
+
+The CLI submits the same lock through promoted profile aliases:
 
 ```bash
 harbor-hf campaign submit \
@@ -325,6 +327,8 @@ harbor-hf campaign submit \
 
 Repeating that command with the same actor and key adopts the existing campaign. It does not create a second logical run.
 
+Harbor `harbor_job` fields on a benchmark profile are forwarded into the preparation lock. Diagnostic canary and replacement profiles set `agent_timeout_multiplier` to 4 so the agent gets one hour on the 900-second Terminal-Bench tasks. Official five-trial profiles keep Harbor's published timeouts. A sealed `benchmark_timeout` cannot be retried; submit a new campaign with a new idempotency key.
+
 ## Monitor work and results
 
 ```bash
@@ -336,7 +340,7 @@ harbor-hf results
 harbor-hf audit
 ```
 
-The same information is available in the Space's web console. The browser uses same-origin API requests and never receives the Bucket credential.
+The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Execution Job logs stream Harbor trial stdout as the trial runs. The Results list shows pass rate, primary metric, and token cost. Open a result for the Wilson 95% CI, publication identity, and the Hub link to the Bucket prefix that holds the generated objects. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
 
 ## Repair infrastructure failures
 

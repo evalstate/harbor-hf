@@ -411,6 +411,155 @@ This is the transactional outbox pattern expressed with immutable Bucket
 objects and deterministic HF labels. The single control writer removes the need
 for a Git parent-commit claim.
 
+### Sandbox command ambiguity
+
+`sandbox.exec` is not replay-safe. A lost response can mean that the command ran,
+did not run, or ran without returning a result. The service must keep that
+uncertainty visible and must not leave the action pending forever.
+
+When the Sandbox adapter throws after dispatch, `executeSandboxAction` writes no
+result. It appends an action receipt with `outcome=failed`,
+`observed_state=AMBIGUOUS`, and
+`error_code=sandbox_external_outcome_unknown`, appends `action.advanced`, and
+returns a safe `503 sandbox_action_ambiguous` response. The raw adapter error,
+remote body, command, URL, resource identity, credential, and private topology
+do not cross the API boundary. A repeated idempotency key returns a conflict and
+does not call the adapter.
+
+A process exit between dispatch and receipt still leaves an older ambiguous
+action. Before infrastructure retry or cancellation, the service performs a
+bounded query for dispatched `sandbox.exec` actions in the selected campaign
+and task that have no result or receipt. It can settle one only when all of the
+following facts are durable:
+
+- the action belongs to the selected campaign and task;
+- its `sandbox_create_action_id` and resource identity match the owning create
+  action;
+- the canonical result path is absent;
+- no receipt exists;
+- a matching Sandbox close receipt completed in a terminal observed state; and
+- the close action is advanced.
+
+Settlement appends the same failed ambiguous receipt and advancement. It never
+replays the command or writes a result. Command execution and settlement use the
+same action-specific finalization fence. The fence covers the external call,
+result persistence, receipt, and advancement. Settlement waits for an in-flight
+command, then checks the result and receipt again while it holds the fence. A
+mismatch, an open Sandbox, an existing result, a conflicting receipt, or an
+unsupported action stops recovery. Operator and automatic infrastructure-retry
+paths settle only their selected task and then verify that no unresolved
+non-replay-safe Sandbox action remains before they reserve or launch a
+replacement. Cancellation never marks a dispatched command as completed. It
+leaves open resources on the existing cleanup path, verifies close, and then
+settles the close-fenced command as failed and ambiguous. There is no global
+sweep, new route, fallback reader, or second durable format.
+
+The durable result key has one shared implementation so execution and recovery
+check the same bytes. The action receipt schema already accepts `failed`,
+`AMBIGUOUS`, and the stable error code, so new exceptions and missing-receipt
+recovery need no receipt-schema change. A historical action that already has the
+wrong receipt needs the separate disposition contract below. Historical receipt
+bytes keep their meaning. `action.advanced` states that the control lifecycle
+ended; it does not state that the external effect was absent.
+
+Operator-specific incident identities, action counts, spend, and attempt state
+stay in a private hash-checked snapshot. Public documentation records only the
+general recovery contract. Recovery preserves the attempts, evidence, observed
+spend, campaign lock, task digest, profiles, ceiling, terminal selection, and
+publication.
+
+### Historical action dispositions
+
+The missing-receipt repair does not cover a command that an older release
+already marked completed. Those receipt bytes remain immutable. A separate
+`action.disposition` record preserves the recorded receipt and gives the action
+a corrected effective control meaning.
+
+The first disposition class is fixed to the proved legacy state. The target must
+be a dispatched `sandbox.exec` with an advanced
+`completed/suppressed-sandbox-cleanup-ambiguous` receipt, no error code, and no
+durable result. Its effective state is fixed to
+`failed/AMBIGUOUS/sandbox_external_outcome_unknown`, with reason code
+`historical_non_replay_safe_command_ambiguity`. The schema provides no
+free-form outcome or reason-code extension.
+
+The record binds the exact source receipt and one matching terminal close
+receipt by record ID and canonical digest. The source receipt resource can be
+null in this fixed legacy class because the old suppression writer omitted the
+observation. If it is non-null, it must exactly equal the mandatory
+`sandbox.exec` intent resource. A conflicting non-null value fails closed. One
+pure control-core predicate applies this rule in service admission, projection
+replay, tests, and the private preflight.
+
+Validation still checks the same campaign, task, create action, intent resource,
+create receipt resource, dispatch, both advancements, terminal close intent and
+receipt resource, and result absence. If more than one close qualifies, sort by
+receipt time and action ID and bind the first. The close prevents future effects
+from that Sandbox. Earlier command effects remain unknown.
+
+One target action has one deterministic disposition record at
+`zzz-disposition.json`. A campaign and task correction request carries a bounded
+sorted action list, a batch ID derived from the hashed idempotency key, and a
+batch digest over the action list, fixed reason code, and operator reason. The
+service acquires every target action finalization fence in sorted order and
+validates the full batch before it writes the first record. Matching partial and
+concurrent batches adopt existing records. A changed action set, proof, or
+reason conflicts.
+
+SQLite stores dispositions separately from receipts. Recorded outcome and state
+remain unchanged. Explicit effective fields show the failed and ambiguous
+meaning. Projection rebuild loads records in any order and then checks every
+receipt, digest, ownership link, close, advancement, and missing result. A
+broken proof or later result keeps the service unready.
+
+The authenticated operator route and CLI return only safe batch and disposition
+identities plus created or adopted status. Audit views show recorded and
+effective semantics together. They do not expose commands, resources, proof
+digests, result paths, credentials, or topology.
+
+Disposition records do not enter lifecycle counters or queues. They cannot
+change attempts, retry limits, task selection, outcome, reward, spend, cleanup,
+publication, or resources. They cannot start execution or inference. Stores
+without dispositions keep their current meaning, and no global scan or backfill
+runs.
+
+The disposition contract, API, CLI, path, projection table, and batch handling
+are already deployed. The null-resource repair uses this order:
+
+1. preserve the private hash-checked deployment blocker snapshot and every
+   source proof digest;
+2. add one shared source-resource predicate and use it in service admission and
+   projection integrity;
+3. test null acceptance, exact non-null acceptance, conflicting non-null
+   rejection, missing intent rejection, rebuild parity, and zero lifecycle side
+   effects;
+4. leave JSON Schema, generated artifacts, API, CLI, paths, batch identity,
+   worker revision, profiles, workload settings, attempt limits, publication
+   role, and ceilings unchanged;
+5. update the canonical proof text and pass local, generated, image, privacy,
+   review, and CI gates;
+6. deploy the exact repair merge to the existing control Space and verify
+   health, projection, profiles, Bucket privacy, resource counts, zero running
+   Jobs, and zero active Endpoint replicas;
+7. run the exact deployed predicate over the private reviewed target set and
+   require a synthetic conflicting non-null value to fail before any write;
+8. submit the existing private reviewed batch once through the authenticated
+   service;
+9. restart only the existing Space, rebuild from the Bucket, and prove that
+   original receipt hashes are unchanged, recorded and effective states are both
+   visible, and campaign, attempts, selection, publication, spend, cleanup,
+   Jobs, Sandboxes, and Endpoints did not change; and
+10. perform a separate read-only sample acceptance review.
+
+The correction does not authorize another replacement attempt or a new
+campaign. The sealed task remains sealed, its existing benchmark-timeout outcome
+and degraded diagnostic publication remain unchanged, and the valid-sample
+counter changes only if the separate review passes every final-Pi, token,
+provenance, isolation, evidence, cost, close, and cleanup gate. If that sample
+fails, stop because no third attempt or replacement campaign is authorized. If
+it passes, run practical-significance and paid-compute reviews before the
+private two-sample launch review and the 89-task diagnostic submission.
+
 ## Trial completion and repair
 
 A worker receives a fixed set of logical task IDs and new physical attempt IDs.
@@ -714,6 +863,14 @@ The implementation is ready only when all of these pass:
 - A trailing zero-token `429` followed by a generic provider error is a bounded
   retryable infrastructure failure; policy and unknown terminal provider
   failures are not automatically retried.
+- A valid historical disposition preserves the completed/suppressed receipt and
+  exposes a separate effective failed/AMBIGUOUS state.
+- A disposition with wrong action, receipt, result, ownership, close, digest,
+  advancement, batch, or reason fails before correction.
+- A partial disposition batch resumes only from the identical request, and a
+  clean rebuild selects the same recorded and effective states.
+- A disposition changes no attempt, task selection, budget, publication,
+  cleanup, Job, Sandbox, or Endpoint state and cannot authorize work.
 - A semantic zero, refusal, benchmark timeout, and verifier failure remain
   terminal.
 - Publication failure retries without changing campaign or task state.

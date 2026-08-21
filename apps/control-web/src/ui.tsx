@@ -1,6 +1,13 @@
 import { cva, type VariantProps } from "class-variance-authority";
-import type * as React from "react";
+import { CircleHelp } from "lucide-react";
+import {
+  type ButtonHTMLAttributes,
+  type HTMLAttributes,
+  type ReactNode,
+  useId,
+} from "react";
 import { ApiError } from "./api";
+import { BADGE_TONE_CLASS, badgeTone } from "./badge-tone";
 import { cn } from "./lib";
 
 const buttonVariants = cva(
@@ -24,12 +31,50 @@ export function Button({
   className,
   variant,
   ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> &
-  VariantProps<typeof buttonVariants>) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & VariantProps<typeof buttonVariants>) {
   return <button className={cn(buttonVariants({ variant }), className)} {...props} />;
 }
 
-export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+export function Hint({
+  text,
+  children,
+  icon = false,
+}: {
+  text: string;
+  children: ReactNode;
+  icon?: boolean;
+}) {
+  const id = useId();
+  return (
+    <span className="group relative inline-flex max-w-full items-center gap-1">
+      <span className="cursor-help border-b border-dotted border-slate-500">
+        {children}
+      </span>
+      {icon ? (
+        <button
+          type="button"
+          className="grid h-5 w-5 shrink-0 place-items-center rounded text-slate-500 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+          aria-label={
+            typeof children === "string" ? `Explain ${children}` : "Explain this field"
+          }
+          aria-describedby={id}
+        >
+          <CircleHelp size={13} />
+        </button>
+      ) : null}
+      <span
+        id={id}
+        role="tooltip"
+        aria-hidden="true"
+        className="pointer-events-none invisible absolute bottom-full left-0 z-50 mb-2 w-72 max-w-[calc(100vw-1.5rem)] rounded-lg border border-slate-700 bg-slate-900 p-3 text-left text-xs leading-5 text-slate-300 opacity-0 shadow-xl group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
+export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
       className={cn(
@@ -41,26 +86,15 @@ export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElemen
   );
 }
 
-export function Badge({
-  status,
-  children,
-}: {
-  status?: string;
-  children: React.ReactNode;
-}) {
-  const tone =
-    status === "completed" || status === "published" || status === "ready"
-      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-      : status === "failed" || status === "error"
-        ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
-        : status === "active" || status === "running"
-          ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-300"
-          : "border-amber-500/40 bg-amber-500/10 text-amber-300";
+export type { BadgeTone } from "./badge-tone";
+export { badgeTone, statusTextClass } from "./badge-tone";
+
+export function Badge({ status, children }: { status?: string; children: ReactNode }) {
   return (
     <span
       className={cn(
         "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-        tone,
+        BADGE_TONE_CLASS[badgeTone(status)],
       )}
     >
       {children}
@@ -86,7 +120,7 @@ export function Progress({ value, label }: { value: number; label: string }) {
   );
 }
 
-export function Empty({ children }: { children: React.ReactNode }) {
+export function Empty({ children }: { children: ReactNode }) {
   return <Card className="py-12 text-center text-sm text-slate-400">{children}</Card>;
 }
 
@@ -175,7 +209,7 @@ export function QueryContent({
   children,
 }: {
   query: QueryStateLike;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   if (query.isPending && query.data === undefined) return <Loading />;
   if (query.error && query.data === undefined)

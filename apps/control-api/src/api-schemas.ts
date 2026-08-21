@@ -16,6 +16,7 @@ export const campaignViewSchema = {
     "observed_microusd",
     "total_tasks",
     "terminal_tasks",
+    "successful_tasks",
     "pending_actions",
     "publication_status",
     "cleanup_pending",
@@ -29,6 +30,7 @@ export const campaignViewSchema = {
     observed_microusd: integer,
     total_tasks: integer,
     terminal_tasks: integer,
+    successful_tasks: integer,
     pending_actions: integer,
     publication_status: nullableString,
     cleanup_pending: { type: "boolean" },
@@ -54,6 +56,84 @@ export const acceptedSchema = {
     action_id: { type: "string" },
     status_url: { type: "string" },
     adopted: { type: "boolean" },
+  },
+} as const;
+
+export const actionDispositionCorrectionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["action_ids", "reason", "confirmed"],
+  properties: {
+    action_ids: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100,
+      uniqueItems: true,
+      items: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{1,159}$" },
+    },
+    reason: { type: "string", minLength: 1, maxLength: 1000 },
+    confirmed: { const: true },
+  },
+} as const;
+
+export const actionDispositionCorrectionResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["batch_id", "batch_digest", "items"],
+  properties: {
+    batch_id: { type: "string" },
+    batch_digest: { type: "string" },
+    items: {
+      type: "array",
+      maxItems: 100,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["action_id", "disposition_record_id", "created"],
+        properties: {
+          action_id: { type: "string" },
+          disposition_record_id: { type: "string" },
+          created: { type: "boolean" },
+        },
+      },
+    },
+  },
+} as const;
+
+export const actionDispositionViewSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "action_id",
+    "campaign_id",
+    "task_id",
+    "recorded_outcome",
+    "recorded_observed_state",
+    "effective_outcome",
+    "effective_observed_state",
+    "effective_error_code",
+    "reason_code",
+    "corrected_at",
+    "actor_role",
+    "disposition_record_id",
+    "batch_id",
+    "batch_size",
+  ],
+  properties: {
+    action_id: { type: "string" },
+    campaign_id: { type: "string" },
+    task_id: { type: "string" },
+    recorded_outcome: { type: "string" },
+    recorded_observed_state: { type: "string" },
+    effective_outcome: { type: "string" },
+    effective_observed_state: { type: "string" },
+    effective_error_code: { type: "string" },
+    reason_code: { type: "string" },
+    corrected_at: { type: "string", format: "date-time" },
+    actor_role: { type: "string" },
+    disposition_record_id: { type: "string" },
+    batch_id: { type: "string" },
+    batch_size: integer,
   },
 } as const;
 
@@ -182,6 +262,17 @@ export const actionSchema = {
   },
 } as const;
 
+export const jobSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [...actionSchema.required, "inspect_url", "cost_microusd"],
+  properties: {
+    ...actionSchema.properties,
+    inspect_url: nullableString,
+    cost_microusd: integer,
+  },
+} as const;
+
 export const endpointSchema = {
   type: "object",
   additionalProperties: false,
@@ -283,6 +374,67 @@ export const publicationSchema = {
       ],
     },
     result_path: nullableString,
+    pass_count: nullableInteger,
+    pass_rate: { anyOf: [{ type: "number" }, { type: "null" }] },
+    pass_rate_ci95: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["low", "high"],
+          properties: {
+            low: { type: "number" },
+            high: { type: "number" },
+          },
+        },
+        { type: "null" },
+      ],
+    },
+    input_tokens: nullableInteger,
+    output_tokens: nullableInteger,
+    inference_cost_microusd: nullableInteger,
+    mean_task_cost_microusd: { anyOf: [{ type: "number" }, { type: "null" }] },
+    task_cost_ci95: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["low", "high"],
+          properties: {
+            low: { type: "number" },
+            high: { type: "number" },
+          },
+        },
+        { type: "null" },
+      ],
+    },
+    observed_cost_microusd: nullableInteger,
+    outputs_prefix: nullableString,
+    outputs_url: nullableString,
+    hf_uri: nullableString,
+    tasks: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "task_id",
+          "outcome",
+          "reward",
+          "cost_microusd",
+          "input_tokens",
+          "output_tokens",
+        ],
+        properties: {
+          task_id: { type: "string" },
+          outcome: { type: "string" },
+          reward: { anyOf: [{ type: "number" }, { type: "null" }] },
+          cost_microusd: { type: "integer" },
+          input_tokens: nullableInteger,
+          output_tokens: nullableInteger,
+        },
+      },
+    },
     benchmark_revision: nullableString,
     model_revision: nullableString,
     harness_revision: nullableString,
