@@ -189,6 +189,7 @@ describe("control web", () => {
             publication_status: null,
             total_tasks: 3,
             terminal_tasks: 1,
+            successful_tasks: 1,
             pending_actions: 1,
             observed_microusd: 1_000_000,
             reserved_microusd: 2_000_000,
@@ -228,6 +229,7 @@ describe("control web", () => {
             publication_status: "published",
             total_tasks: 1,
             terminal_tasks: 1,
+            successful_tasks: 1,
             pending_actions: 0,
             observed_microusd: 0,
             reserved_microusd: 0,
@@ -382,6 +384,7 @@ describe("control web", () => {
                 campaign_id: laterPage ? "campaign-second" : "campaign-first",
                 status: "active",
                 terminal_tasks: 0,
+                successful_tasks: 0,
                 total_tasks: 1,
                 observed_microusd: 0,
                 ceiling_microusd: 0,
@@ -490,5 +493,62 @@ describe("control web", () => {
     expect(
       screen.getByText(/admission and repair rules/i, { hidden: true }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps campaign completed distinct from a timed-out task", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed"))
+          return json({
+            campaign_id: "campaign-mixed",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 2,
+            terminal_tasks: 2,
+            successful_tasks: 1,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-mixed/tasks"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-mixed",
+                task_id: "timeout-task",
+                input_digest: "sha256:aa",
+                terminal_outcome: "benchmark_timeout",
+                selected_attempt_id: "attempt-timeout",
+              },
+              {
+                campaign_id: "campaign-mixed",
+                task_id: "complete-task",
+                input_digest: "sha256:bb",
+                terminal_outcome: "complete",
+                selected_attempt_id: "attempt-complete",
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-mixed");
+    expect(await screen.findByText("Completed")).toBeInTheDocument();
+    expect(
+      screen.getByText("Published. 1 sealed task did not succeed."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Complete").className).toContain("emerald");
+    expect(screen.getByText("Benchmark timeout").className).toContain("amber");
   });
 });

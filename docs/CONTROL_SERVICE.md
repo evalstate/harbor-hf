@@ -451,7 +451,9 @@ The interface supports keyboard navigation, narrow viewports, light and dark
 color schemes, visible focus, and reduced motion. Labels use hover explanations
 for campaign launch fields, spend, Jobs, Endpoints, results, and other operator
 controls. Tables virtualize only when a measured row count requires it. Every
-status also has text and an icon; color is never the only signal.
+status also has text and an icon; color is never the only signal. Complete
+outcomes are green, sealed timeouts and cancellations are yellow, and failures
+are red.
 
 ## Authentication and authorization
 

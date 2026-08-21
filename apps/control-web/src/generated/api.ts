@@ -321,6 +321,7 @@ export interface paths {
                                 observed_microusd: number;
                                 total_tasks: number;
                                 terminal_tasks: number;
+                                successful_tasks: number;
                                 pending_actions: number;
                                 publication_status: string | null;
                                 cleanup_pending: boolean;
@@ -409,6 +410,7 @@ export interface paths {
                             observed_microusd: number;
                             total_tasks: number;
                             terminal_tasks: number;
+                            successful_tasks: number;
                             pending_actions: number;
                             publication_status: string | null;
                             cleanup_pending: boolean;

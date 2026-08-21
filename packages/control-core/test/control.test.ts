@@ -278,6 +278,7 @@ describe("control service", () => {
     expect(await control.projection.campaign(first.campaign_id)).toMatchObject({
       status: "completed",
       terminal_tasks: 1,
+      successful_tasks: 1,
       total_tasks: 1,
       publication_status: "published",
     });

@@ -37,6 +37,7 @@ import { useControlState } from "./control-state";
 import { hints } from "./hints";
 import { PageHeader } from "./layout";
 import {
+  cn,
   estimateLaunchReservationMicrousd,
   formatDate,
   formatMoney,
@@ -57,7 +58,16 @@ import {
   useTask,
   useTasks,
 } from "./queries";
-import { Badge, Button, Card, Empty, Hint, Progress, QueryContent } from "./ui";
+import {
+  Badge,
+  Button,
+  Card,
+  Empty,
+  Hint,
+  Progress,
+  QueryContent,
+  statusTextClass,
+} from "./ui";
 
 type CampaignRow = CampaignList["items"][number];
 type TaskRow = TaskList["items"][number];
@@ -66,6 +76,25 @@ type EndpointRow = EndpointList["items"][number];
 type ProfileRow = ProfileList["items"][number];
 type ResultRow = ResultList["items"][number];
 type AuditRow = AuditResponse["items"][number];
+
+function campaignResultStatus(campaign: CampaignRow): string {
+  if (
+    campaign.status === "completed" &&
+    campaign.successful_tasks !== campaign.total_tasks
+  )
+    return "warning";
+  return campaign.status;
+}
+
+function campaignStatusNote(campaign: CampaignRow): string {
+  const publication = campaign.publication_status
+    ? humanize(campaign.publication_status)
+    : "Not published";
+  if (campaign.status !== "completed") return publication;
+  if (campaign.successful_tasks === campaign.total_tasks) return publication;
+  const failed = campaign.total_tasks - campaign.successful_tasks;
+  return `${publication}. ${failed} sealed ${failed === 1 ? "task" : "tasks"} did not succeed.`;
+}
 
 function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   const campaignColumn: ColumnDef<JobRow> = {
@@ -302,12 +331,14 @@ function Stat({
   note,
   icon: Icon,
   hint,
+  status,
 }: {
   label: string;
   value: string;
   note: string;
   icon: typeof Clock3;
   hint?: string;
+  status?: string;
 }) {
   return (
     <Card>
@@ -316,7 +347,9 @@ function Stat({
           <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
             {hint ? <Hint text={hint}>{label}</Hint> : label}
           </p>
-          <p className="mt-2 text-2xl font-semibold text-white">{value}</p>
+          <p className={cn("mt-2 text-2xl font-semibold", statusTextClass(status))}>
+            {value}
+          </p>
           <p className="mt-1 text-xs text-slate-500">{note}</p>
         </div>
         <span className="rounded-lg bg-cyan-400/10 p-2 text-cyan-300">
@@ -758,8 +791,10 @@ export function CampaignsPage() {
       {
         accessorKey: "status",
         header: () => <Hint text={hints.campaign.status}>State</Hint>,
-        cell: ({ getValue }) => (
-          <Badge status={String(getValue())}>{humanize(String(getValue()))}</Badge>
+        cell: ({ getValue, row }) => (
+          <Badge status={campaignResultStatus(row.original)}>
+            {humanize(String(getValue()))}
+          </Badge>
         ),
       },
       {
@@ -1000,9 +1035,10 @@ export function CampaignPage() {
         <Stat
           label="Status"
           value={humanize(item.status)}
-          note={item.publication_status ?? "Not published"}
+          note={campaignStatusNote(item)}
           icon={RefreshCw}
           hint={hints.campaign.status}
+          status={campaignResultStatus(item)}
         />
         <Stat
           label="Logical tasks"
@@ -1153,7 +1189,7 @@ export function JobsPage() {
     <>
       <PageHeader
         title="Jobs"
-        description="Current HF Job identity, ownership, and latest observed infrastructure state."
+        description="Current HF Job identity, ownership, latest observed state, and recorded hardware cost."
       />
       <QueryContent query={query}>
         <DataTable columns={jobColumns(true)} data={query.data?.items ?? []} />

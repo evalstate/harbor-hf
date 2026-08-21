@@ -354,6 +354,7 @@
                           "observed_microusd",
                           "total_tasks",
                           "terminal_tasks",
+                          "successful_tasks",
                           "pending_actions",
                           "publication_status",
                           "cleanup_pending"
@@ -382,6 +383,9 @@
                             "type": "integer"
                           },
                           "terminal_tasks": {
+                            "type": "integer"
+                          },
+                          "successful_tasks": {
                             "type": "integer"
                           },
                           "pending_actions": {
@@ -554,6 +558,7 @@
                     "observed_microusd",
                     "total_tasks",
                     "terminal_tasks",
+                    "successful_tasks",
                     "pending_actions",
                     "publication_status",
                     "cleanup_pending"
@@ -582,6 +587,9 @@
                       "type": "integer"
                     },
                     "terminal_tasks": {
+                      "type": "integer"
+                    },
+                    "successful_tasks": {
                       "type": "integer"
                     },
                     "pending_actions": {

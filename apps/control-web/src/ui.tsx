@@ -1,12 +1,13 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import { CircleHelp } from "lucide-react";
 import {
-  useId,
   type ButtonHTMLAttributes,
   type HTMLAttributes,
   type ReactNode,
+  useId,
 } from "react";
 import { ApiError } from "./api";
+import { BADGE_TONE_CLASS, badgeTone } from "./badge-tone";
 import { cn } from "./lib";
 
 const buttonVariants = cva(
@@ -88,20 +89,15 @@ export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   );
 }
 
+export type { BadgeTone } from "./badge-tone";
+export { badgeTone, statusTextClass } from "./badge-tone";
+
 export function Badge({ status, children }: { status?: string; children: ReactNode }) {
-  const tone =
-    status === "completed" || status === "published" || status === "ready"
-      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-      : status === "failed" || status === "error"
-        ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
-        : status === "active" || status === "running"
-          ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-300"
-          : "border-amber-500/40 bg-amber-500/10 text-amber-300";
   return (
     <span
       className={cn(
         "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-        tone,
+        BADGE_TONE_CLASS[badgeTone(status)],
       )}
     >
       {children}

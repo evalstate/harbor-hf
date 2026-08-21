@@ -22,7 +22,7 @@ export const hints = {
   },
   overview: {
     active:
-      "Campaigns that are not completed. Completed means every logical task is terminal, publication succeeded, and Endpoint cleanup is verified.",
+      "Campaigns that are not completed. Completed means every logical task is sealed, publication succeeded, and Endpoint cleanup is verified. It does not mean every task scored complete.",
     policyStops:
       "Campaigns in failed or manual-intervention state. The reconciler stopped and an operator must inspect the audit trail.",
     observedSpend:
@@ -74,7 +74,7 @@ export const hints = {
     identity:
       "Immutable campaign id. Open it to see the lock, logical tasks, Jobs, and recorded spend.",
     status:
-      "Derived campaign state from locked tasks, pending actions, publication, and Endpoint cleanup.",
+      "Campaign lifecycle: queued, active, publishing, or completed. Completed means every logical task is sealed, publication finished, and Endpoint cleanup is verified. It does not mean every task scored complete.",
     logicalTasks:
       "Terminal logical outcomes over the locked task count. Pending actions are in-flight Jobs, Sandboxes, or other control work.",
     observedCost:
@@ -82,7 +82,8 @@ export const hints = {
     endpointCleanup:
       "Verified pause with zero ready replicas is required before the campaign can complete.",
     jobs: "Hugging Face Jobs launched for this campaign. Preparation and execution are separate Jobs when preparation is required.",
-    outcome: "Sealed logical result for this task. A terminal outcome cannot be rerun.",
+    outcome:
+      "Sealed logical result for this task. Complete is a scored success. Timeout, cancellation, and other sealed failures cannot be rerun.",
     selectedAttempt:
       "The physical attempt chosen as the logical outcome. Infrastructure replacements create a new attempt.",
     inputDigest: "Digest of the locked task input. Retries must use this same input.",

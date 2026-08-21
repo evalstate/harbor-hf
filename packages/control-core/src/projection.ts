@@ -213,6 +213,7 @@ export interface CampaignView {
   observed_microusd: number;
   total_tasks: number;
   terminal_tasks: number;
+  successful_tasks: number;
   pending_actions: number;
   publication_status: string | null;
   cleanup_pending: boolean;
@@ -1609,6 +1610,12 @@ export class Projection {
       ])
       .where("campaign_id", "=", row.campaign_id)
       .executeTakeFirstOrThrow();
+    const successCounts = await this.db
+      .selectFrom("tasks")
+      .select(({ fn }) => fn.countAll<number>().as("successful"))
+      .where("campaign_id", "=", row.campaign_id)
+      .where("terminal_outcome", "=", "complete")
+      .executeTakeFirstOrThrow();
     const actionCounts = await this.db
       .selectFrom("actions")
       .select(({ fn }) => fn.countAll<number>().as("pending"))
@@ -1649,6 +1656,7 @@ export class Projection {
     );
     const total = Number(taskCounts.total);
     const terminal = Number(taskCounts.terminal);
+    const successful = Number(successCounts.successful);
     const pending = Number(actionCounts.pending);
     const reserved = budgets.reduce(
       (sum, item) =>
@@ -1682,6 +1690,7 @@ export class Projection {
       observed_microusd: observed,
       total_tasks: total,
       terminal_tasks: terminal,
+      successful_tasks: successful,
       pending_actions: pending,
       publication_status: publication?.status ?? null,
       cleanup_pending: cleanupPending,
