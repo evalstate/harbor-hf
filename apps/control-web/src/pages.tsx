@@ -1089,7 +1089,7 @@ export function CampaignPage() {
               onClick={() => setCancelOpen(true)}
             >
               <PauseCircle size={16} />
-              Cancel campaign
+              Cancel run
             </Button>
           ) : undefined
         }
@@ -1100,11 +1100,11 @@ export function CampaignPage() {
             className="w-full max-w-lg border-rose-500/40"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="cancel-campaign-title"
-            aria-describedby="cancel-campaign-effect"
+            aria-labelledby="cancel-run-title"
+            aria-describedby="cancel-run-effect"
           >
-            <h2 id="cancel-campaign-title" className="text-lg font-semibold text-white">
-              Cancel campaign?
+            <h2 id="cancel-run-title" className="text-lg font-semibold text-white">
+              Cancel run?
             </h2>
             <p className="mt-2 text-sm text-slate-300">
               Target <span className="break-all font-mono text-xs">{campaignId}</span>{" "}
@@ -1124,7 +1124,7 @@ export function CampaignPage() {
                 <dd>{formatMoney(item.ceiling_microusd)}</dd>
               </div>
             </dl>
-            <p id="cancel-campaign-effect" className="mt-4 text-sm text-slate-300">
+            <p id="cancel-run-effect" className="mt-4 text-sm text-slate-300">
               This stops or observes active remote Jobs, prevents queued launches, and
               seals open tasks as cancelled. Evidence is retained, and publication still
               waits for endpoint cleanup.

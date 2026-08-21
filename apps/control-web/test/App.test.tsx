@@ -246,7 +246,7 @@ describe("control web", () => {
     expect(screen.getByText(/role grants permission/i)).toBeInTheDocument();
   });
 
-  it("requires a separate acknowledgement before campaign cancellation", async () => {
+  it("requires a separate acknowledgement before run cancellation", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -279,7 +279,7 @@ describe("control web", () => {
     renderApp("/campaigns/campaign-1");
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole("button", { name: /cancel campaign/i }));
+    await user.click(await screen.findByRole("button", { name: /cancel run/i }));
     const confirm = screen.getByRole("button", { name: /confirm cancellation/i });
     expect(confirm).toBeDisabled();
     await user.click(screen.getByRole("checkbox"));
@@ -639,6 +639,53 @@ describe("control web", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Complete").className).toContain("emerald");
     expect(screen.getByText("Benchmark timeout").className).toContain("amber");
+  });
+
+  it("shows cancelled outcomes in orange", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-cancelled"))
+          return json({
+            campaign_id: "campaign-cancelled",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 1,
+            terminal_tasks: 1,
+            successful_tasks: 0,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-cancelled/tasks"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-cancelled",
+                task_id: "cancelled-task",
+                input_digest: "sha256:cc",
+                terminal_outcome: "cancelled",
+                selected_attempt_id: "attempt-cancelled",
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-cancelled");
+    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+    expect(screen.getByText("Cancelled").className).toContain("orange");
+    expect(screen.getByText("Cancelled").className).not.toContain("amber");
   });
 
   it("keeps publication identity and Bucket outputs on the result detail, not the list", async () => {
