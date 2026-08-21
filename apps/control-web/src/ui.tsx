@@ -47,10 +47,7 @@ export function Hint({
   const id = useId();
   return (
     <span className="group relative inline-flex max-w-full items-center gap-1">
-      <span
-        className="cursor-help border-b border-dotted border-slate-500"
-        title={text}
-      >
+      <span className="cursor-help border-b border-dotted border-slate-500">
         {children}
       </span>
       {icon ? (
