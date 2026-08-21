@@ -1380,6 +1380,11 @@
           "minLength": 1,
           "maxLength": 160
         },
+        "active_hourly_cost_microusd": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000
+        },
         "timeout_seconds": {
           "type": "integer",
           "minimum": 1,
@@ -1875,6 +1880,11 @@
           "maximum": 16
         },
         "reservation_microusd": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000
+        },
+        "active_hourly_cost_microusd": {
           "type": "integer",
           "minimum": 0,
           "maximum": 1000000000000

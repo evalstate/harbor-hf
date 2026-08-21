@@ -268,6 +268,14 @@ const paginationQuerySchema = {
   },
 } as const;
 
+const jobsQuerySchema = {
+  type: "object",
+  properties: {
+    ...paginationQuerySchema.properties,
+    campaign_id: { type: "string", minLength: 1, maxLength: 160 },
+  },
+} as const;
+
 const resultQuerySchema = {
   type: "object",
   properties: {
@@ -1880,15 +1888,19 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     {
       schema: {
         tags: ["resources"],
-        querystring: paginationQuerySchema,
+        querystring: jobsQuerySchema,
         response: { 200: itemList(jobSchema) },
       },
     },
     async (request) => {
-      const query = request.query as { cursor?: string; limit?: number };
+      const query = request.query as {
+        cursor?: string;
+        limit?: number;
+        campaign_id?: string;
+      };
       const limit = query.limit ?? 50;
       const offset = cursorOffset(query.cursor);
-      const items = await runtime.projection.jobs(limit + 1, offset);
+      const items = await runtime.projection.jobs(limit + 1, offset, query.campaign_id);
       return offsetPage(
         items.map((item) => ({
           ...item,

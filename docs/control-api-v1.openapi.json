@@ -2425,6 +2425,16 @@
             "in": "query",
             "name": "limit",
             "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "in": "query",
+            "name": "campaign_id",
+            "required": false
           }
         ],
         "responses": {

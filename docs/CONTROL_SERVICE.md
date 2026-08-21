@@ -422,6 +422,12 @@ Campaign pages show:
 - publication and cleanup state;
 - the immutable action and event timeline.
 
+Observed campaign spend is the sum of recorded attempt receipts and the latest
+hardware cost on each Job or Sandbox, taking the later of that sum and any
+budget reconcile events. Job observe actions accrue locked hardware hours.
+Sandbox close actions do the same. Worker receipts add their own cost, typically
+inference spend. The total is not a Hugging Face invoice.
+
 A campaign is not complete while publication or required endpoint cleanup is
 unresolved. Publication failure does not reopen completed benchmark work.
 
@@ -433,8 +439,8 @@ The React application provides:
 | --- | --- |
 | `/` | Queue, active campaigns, failures, spend and endpoint safety. |
 | `/campaigns` | Searchable and filterable campaign list. |
-| `/campaigns/:campaignId` | Campaign progress, task states, cost, publication, cleanup, endpoint safety, and timeline. |
-| `/campaigns/:campaignId/tasks/:taskId` | Logical outcome and every physical attempt. |
+| `/campaigns/:campaignId` | Campaign progress, task states, HF Jobs, cost, publication, cleanup, endpoint safety, and timeline. |
+| `/campaigns/:campaignId/tasks/:taskId` | Logical outcome, every physical attempt, and the HF Jobs that ran for the campaign. |
 | `/jobs` | Current HF Job identity, Hub inspect links, latest observed state, ownership, timing and infrastructure failures. |
 | `/endpoints` | Endpoint ownership, requested state, observed state, active cost, and cleanup. |
 | `/results` | Normalized results, comparisons, publication evidence, and provenance. |

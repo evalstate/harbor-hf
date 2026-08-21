@@ -305,6 +305,33 @@ function parseRecord(bytes: Uint8Array, entry: ObjectEntry): HarborHFControlReco
   }
 }
 
+function jobIdentity(row: Selectable<ActionRow>): string {
+  if (row.resource_id) return row.resource_id;
+  const intent = JSON.parse(row.intent_body) as ActionIntent;
+  const payloadResourceId = intent.payload.resource_id;
+  if (typeof payloadResourceId === "string") return payloadResourceId;
+  const launchActionId = intent.payload.launch_action_id;
+  if (typeof launchActionId === "string") return launchActionId;
+  const sandboxCreateId = intent.payload.sandbox_create_action_id;
+  if (typeof sandboxCreateId === "string") return sandboxCreateId;
+  return row.action_id;
+}
+
+function receiptCostMicrousd(row: Selectable<ActionRow>): number {
+  if (!row.receipt_body) return 0;
+  const receipt = JSON.parse(row.receipt_body) as ActionReceipt;
+  return receipt.cost_microusd ?? 0;
+}
+
+const hardwareActionKinds = [
+  "job.launch",
+  "job.observe",
+  "job.cancel",
+  "sandbox.create",
+  "sandbox.observe",
+  "sandbox.close",
+] as const;
+
 export class Projection {
   private database: Database.Database;
   readonly db: Kysely<DatabaseSchema>;
@@ -1352,13 +1379,26 @@ export class Projection {
       ])
       .groupBy("campaign_id")
       .execute();
-    for (const row of attemptCosts) {
-      const state = budgetState.get(row.campaign_id);
-      if (!state)
+    const attemptByCampaign = new Map(
+      attemptCosts.map((row) => [row.campaign_id, Number(row.observed ?? 0)]),
+    );
+    for (const campaignId of attemptByCampaign.keys()) {
+      if (!budgetState.has(campaignId))
         throw new ProjectionIntegrityError(
-          `attempt references missing campaign: ${row.campaign_id}`,
+          `attempt references missing campaign: ${campaignId}`,
         );
-      state.observed = Math.max(state.observed, Number(row.observed ?? 0));
+    }
+    const hardwareByCampaign = await this.hardwareObservedByCampaign();
+    for (const campaignId of hardwareByCampaign.keys()) {
+      if (!budgetState.has(campaignId))
+        throw new ProjectionIntegrityError(
+          `hardware receipt references missing campaign: ${campaignId}`,
+        );
+    }
+    for (const [campaignId, state] of budgetState) {
+      const attempts = attemptByCampaign.get(campaignId) ?? 0;
+      const hardware = hardwareByCampaign.get(campaignId) ?? 0;
+      state.observed = Math.max(state.observed, attempts + hardware);
     }
     const overBudget = [...budgetState.entries()].find(
       ([, state]) => Math.max(state.reserved, state.observed) > state.ceiling,
@@ -1620,7 +1660,8 @@ export class Projection {
       0,
     );
     const observed = Math.max(
-      Number(attemptCost.observed ?? 0),
+      Number(attemptCost.observed ?? 0) +
+        (await this.hardwareObservedMicrousd(row.campaign_id)),
       budgets
         .filter((item) => item.event_kind === "reconcile")
         .reduce((sum, item) => Math.max(sum, item.amount_microusd), 0),
@@ -1814,18 +1855,81 @@ export class Projection {
     return Boolean(row);
   }
 
-  async jobs(limit = 100, offset = 0): Promise<Selectable<ActionRow>[]> {
+  private collapseHardwareRows(rows: Selectable<ActionRow>[]): Selectable<ActionRow>[] {
+    const latest = new Map<string, Selectable<ActionRow>>();
+    for (const row of rows) {
+      const key = `${row.campaign_id}:${jobIdentity(row)}`;
+      const existing = latest.get(key);
+      if (!existing) {
+        latest.set(key, row);
+        continue;
+      }
+      if (existing.receipt_body === null && row.receipt_body !== null)
+        latest.set(key, row);
+    }
+    return [...latest.values()];
+  }
+
+  private async hardwareObservedByCampaign(): Promise<Map<string, number>> {
     const rows = await this.db
       .selectFrom("actions")
       .selectAll()
-      .where("action_kind", "in", ["job.launch", "job.observe", "job.cancel"])
+      .where("action_kind", "in", [...hardwareActionKinds])
+      .orderBy("created_at", "desc")
+      .orderBy("action_id", "desc")
+      .execute();
+    const sums = new Map<string, number>();
+    for (const row of this.collapseHardwareRows(rows)) {
+      const current = sums.get(row.campaign_id) ?? 0;
+      sums.set(row.campaign_id, current + receiptCostMicrousd(row));
+    }
+    return sums;
+  }
+
+  private async hardwareObservedMicrousd(campaignId: string): Promise<number> {
+    const rows = await this.db
+      .selectFrom("actions")
+      .selectAll()
+      .where("campaign_id", "=", campaignId)
+      .where("action_kind", "in", [...hardwareActionKinds])
+      .orderBy("created_at", "desc")
+      .orderBy("action_id", "desc")
+      .execute();
+    return this.collapseHardwareRows(rows).reduce(
+      (sum, row) => sum + receiptCostMicrousd(row),
+      0,
+    );
+  }
+
+  /**
+   * Returns the latest row per HF Job. In-flight observe/cancel intents have no
+   * receipt `resource_id` yet, so identity comes from the intent payload. A
+   * pending poll does not replace the last receipt-backed observation.
+   */
+  async jobs(
+    limit = 100,
+    offset = 0,
+    campaignId?: string,
+  ): Promise<Selectable<ActionRow>[]> {
+    let query = this.db
+      .selectFrom("actions")
+      .selectAll()
+      .where("action_kind", "in", ["job.launch", "job.observe", "job.cancel"]);
+    if (campaignId) query = query.where("campaign_id", "=", campaignId);
+    const rows = await query
       .orderBy("created_at", "desc")
       .orderBy("action_id", "desc")
       .execute();
     const latest = new Map<string, Selectable<ActionRow>>();
     for (const row of rows) {
-      const key = row.resource_id ?? row.action_id;
-      if (!latest.has(key)) latest.set(key, row);
+      const key = jobIdentity(row);
+      const existing = latest.get(key);
+      if (!existing) {
+        latest.set(key, row);
+        continue;
+      }
+      if (existing.receipt_body === null && row.receipt_body !== null)
+        latest.set(key, row);
     }
     return [...latest.values()].slice(offset, offset + limit);
   }

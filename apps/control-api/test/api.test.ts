@@ -114,6 +114,7 @@ function sandboxDeploymentRecords(): Array<ProfileObject | ProfilePromotion> {
     job_image: `registry.example/worker@sha256:${"a".repeat(64)}`,
     job_command: ["python", "-m", "worker"] as [string, ...string[]],
     hardware: "cpu-basic",
+    active_hourly_cost_microusd: 10_000,
     timeout_seconds: 7_200,
     trusted_worker: true,
     inference_token: "forbidden" as const,
@@ -486,6 +487,21 @@ describe("control API", () => {
       resource_id: resourceId,
       inspect_url: `https://huggingface.co/jobs/test/${resourceId}`,
     });
+    const scoped = await app.inject({
+      method: "GET",
+      url: `/api/v1/jobs?campaign_id=${encodeURIComponent(campaignId)}`,
+    });
+    expect(scoped.statusCode).toBe(200);
+    expect(
+      (scoped.json().items as Array<{ campaign_id: string }>).every(
+        (item) => item.campaign_id === campaignId,
+      ),
+    ).toBe(true);
+    const empty = await app.inject({
+      method: "GET",
+      url: "/api/v1/jobs?campaign_id=campaign-missing",
+    });
+    expect(empty.json().items).toEqual([]);
     await app.close();
   });
 

@@ -1339,6 +1339,7 @@ export interface paths {
                 query?: {
                     cursor?: string;
                     limit?: number;
+                    campaign_id?: string;
                 };
                 header?: never;
                 path?: never;

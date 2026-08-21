@@ -1,4 +1,4 @@
-import type { SandboxPolicy } from "@harbor-hf/contracts";
+import { sha256, type SandboxPolicy } from "@harbor-hf/contracts";
 import { createTestControl, type TestControl } from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it } from "vitest";
 import { Projection, ProjectionIntegrityError } from "../src/projection.js";
@@ -315,5 +315,141 @@ describe("projection replay", () => {
       resource_id: resourceId,
     });
     expect(jobs[0]?.created_at).toBe("2026-08-21T10:04:40.000Z");
+    expect(await control.projection.jobs(100, 0, submitted.campaign_id)).toHaveLength(
+      1,
+    );
+    expect(await control.projection.jobs(100, 0, "campaign-missing")).toHaveLength(0);
+  });
+
+  it("does not list a pending observe as a second Job", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const submitted = await control.service.submit(input, "jobs-pending-observe-key", {
+      subject: "operator",
+      role: "operator",
+    });
+    const actor = { subject: "operator" as const, role: "operator" as const };
+    const resourceId = "job-pending-observe";
+    const launch = control.service.actionIntent(
+      submitted.campaign_id,
+      "job.launch",
+      "campaign-tasks",
+      0,
+      { task_ids: ["control-smoke-task"] },
+      actor,
+      "2026-08-21T11:00:00.000Z",
+    );
+    await control.service.writeAction(launch);
+    await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "RUNNING",
+      resource_id: resourceId,
+    });
+    const observed = control.service.actionIntent(
+      submitted.campaign_id,
+      "job.observe",
+      resourceId,
+      0,
+      {
+        resource_id: resourceId,
+        launch_action_id: launch.action_id,
+      },
+      actor,
+      "2026-08-21T11:00:10.000Z",
+    );
+    await control.service.writeAction(observed);
+    await control.service.receipt(observed, {
+      outcome: "completed",
+      observed_state: "RUNNING",
+      resource_id: resourceId,
+    });
+    const pending = control.service.actionIntent(
+      submitted.campaign_id,
+      "job.observe",
+      resourceId,
+      1,
+      {
+        resource_id: resourceId,
+        launch_action_id: launch.action_id,
+      },
+      actor,
+      "2026-08-21T11:00:20.000Z",
+    );
+    await control.service.writeAction(pending);
+
+    const jobs = await control.projection.jobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({
+      action_kind: "job.observe",
+      observed_state: "RUNNING",
+      resource_id: resourceId,
+      receipt_body: expect.any(String),
+    });
+  });
+
+  it("sums attempt receipts with Job hardware receipts", async () => {
+    const control = await createTestControl(1, 1, 1_000);
+    controls.push(control);
+    const submitted = await control.service.submit(
+      { ...input, ceiling_microusd: 1_000 },
+      "jobs-observed-sum-key",
+      {
+        subject: "operator",
+        role: "operator",
+      },
+    );
+    const actor = { subject: "operator" as const, role: "operator" as const };
+    const resourceId = "job-observed-sum";
+    const launch = control.service.actionIntent(
+      submitted.campaign_id,
+      "job.launch",
+      "campaign-tasks",
+      0,
+      { task_ids: ["control-smoke-task"] },
+      actor,
+      "2026-08-21T12:00:00.000Z",
+    );
+    await control.service.writeAction(launch);
+    await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "RUNNING",
+      resource_id: resourceId,
+    });
+    const observed = control.service.actionIntent(
+      submitted.campaign_id,
+      "job.observe",
+      resourceId,
+      0,
+      { resource_id: resourceId, launch_action_id: launch.action_id },
+      actor,
+      "2026-08-21T12:00:10.000Z",
+    );
+    await control.service.writeAction(observed);
+    await control.service.receipt(observed, {
+      outcome: "completed",
+      observed_state: "COMPLETED",
+      resource_id: resourceId,
+      cost_microusd: 40,
+    });
+    const evidenceBytes = new TextEncoder().encode("observed-sum-evidence");
+    const evidenceDigest = sha256(evidenceBytes);
+    const evidencePath = `evidence/test/${evidenceDigest.slice("sha256:".length)}`;
+    await control.store.create(evidencePath, evidenceBytes);
+    await control.service.attempt({
+      campaign_id: submitted.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-observed-sum",
+      action_id: launch.action_id,
+      outcome: "complete",
+      replacement_eligible: false,
+      evidence_digest: evidenceDigest,
+      evidence_path: evidencePath,
+      cost_microusd: 60,
+      metrics: {},
+      completed_at: "2026-08-21T12:00:20.000Z",
+    });
+    expect(await control.projection.campaign(submitted.campaign_id)).toMatchObject({
+      observed_microusd: 100,
+    });
   });
 });

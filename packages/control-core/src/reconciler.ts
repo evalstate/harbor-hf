@@ -108,6 +108,14 @@ function profileScalar<T extends string | number | boolean>(
   return value as T;
 }
 
+function optionalHourlyCost(
+  spec: Record<string, unknown> | DeploymentProfileSpec,
+): number | undefined {
+  if (!("active_hourly_cost_microusd" in spec)) return undefined;
+  const value = spec.active_hourly_cost_microusd;
+  return typeof value === "number" ? value : undefined;
+}
+
 function profileStrings(
   spec: Record<string, unknown>,
   key: string,
@@ -468,6 +476,7 @@ export class Reconciler {
       reservation,
       createdAt,
     );
+    const hourly = optionalHourlyCost(deployment);
     const intent = this.service.actionIntent(
       lock.campaign_id,
       "job.launch",
@@ -495,6 +504,7 @@ export class Reconciler {
         worker_revision: profileScalar<string>(deployment, "worker_revision", "string"),
         inference_token: "forbidden",
         campaign_lock_digest: sha256(canonicalJson(lock)),
+        ...(hourly !== undefined ? { active_hourly_cost_microusd: hourly } : {}),
       },
     );
     await this.service.writeAction(intent);
@@ -571,6 +581,7 @@ export class Reconciler {
     const sandboxAuthorized = Boolean(sandbox || deployment.sandbox_template);
     const sandboxTimeout =
       deployment.sandbox_template?.max_timeout_seconds ?? sandbox?.timeout_seconds;
+    const hourly = optionalHourlyCost(deployment);
     const intent = this.service.actionIntent(
       lock.campaign_id,
       "job.launch",
@@ -595,6 +606,7 @@ export class Reconciler {
         ),
         reservation_microusd: reservation,
         trusted_worker: deployment.trusted_worker,
+        ...(hourly !== undefined ? { active_hourly_cost_microusd: hourly } : {}),
         ...(deployment.worker_revision
           ? { worker_revision: deployment.worker_revision }
           : {}),
@@ -832,7 +844,7 @@ export class Reconciler {
         replacement_eligible: replacementEligible,
         evidence_digest: sha256(canonicalJson(receipt)),
         evidence_path: controlRecordPath(receipt),
-        cost_microusd: receipt.cost_microusd ?? 0,
+        cost_microusd: 0,
         metrics: {},
         completed_at: receipt.created_at,
       });

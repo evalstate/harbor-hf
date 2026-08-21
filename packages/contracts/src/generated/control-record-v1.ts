@@ -67,6 +67,7 @@ job_image: string
  */
 job_command: [string, ...(string)[]]
 hardware: string
+active_hourly_cost_microusd?: number
 timeout_seconds: number
 trusted_worker: boolean
 inference_token?: ("forbidden" | "required")
@@ -610,6 +611,7 @@ timeout_seconds?: number
 success_without_worker_receipt?: boolean
 max_infrastructure_attempts?: number
 reservation_microusd?: number
+active_hourly_cost_microusd?: number
 trusted_worker?: boolean
 inference_token?: ("forbidden" | "required")
 inference_max_requests?: number

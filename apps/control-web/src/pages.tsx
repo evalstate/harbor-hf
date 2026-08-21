@@ -66,6 +66,85 @@ type ProfileRow = ProfileList["items"][number];
 type ResultRow = ResultList["items"][number];
 type AuditRow = AuditResponse["items"][number];
 
+function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
+  const campaignColumn: ColumnDef<JobRow> = {
+    accessorKey: "campaign_id",
+    header: "Campaign",
+    cell: ({ getValue }) => (
+      <Link
+        className="font-mono text-xs text-cyan-300"
+        to={`/campaigns/${String(getValue())}`}
+      >
+        {shortId(String(getValue()))}
+      </Link>
+    ),
+  };
+  return [
+    {
+      accessorKey: "resource_id",
+      header: "HF Job",
+      cell: ({ row }) => {
+        const resourceId = row.original.resource_id;
+        const inspectUrl = row.original.inspect_url;
+        if (!resourceId || !inspectUrl)
+          return <span className="font-mono text-xs">Pending</span>;
+        return (
+          <a
+            className="inline-flex items-center gap-1 font-mono text-xs text-cyan-300 hover:underline"
+            href={inspectUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {shortId(resourceId)}
+            <ExternalLink size={12} aria-hidden="true" />
+            <span className="sr-only">Open Hugging Face Job</span>
+          </a>
+        );
+      },
+    },
+    ...(includeCampaign ? [campaignColumn] : []),
+    {
+      accessorKey: "action_kind",
+      header: "Action",
+      cell: ({ getValue }) => humanize(String(getValue())),
+    },
+    {
+      accessorKey: "observed_state",
+      header: "Observed",
+      cell: ({ getValue }) => (
+        <Badge status={String(getValue() ?? "pending").toLowerCase()}>
+          {humanize(String(getValue() ?? "pending"))}
+        </Badge>
+      ),
+    },
+    {
+      accessorKey: "created_at",
+      header: "Recorded",
+      cell: ({ getValue }) => formatDate(String(getValue())),
+    },
+  ];
+}
+
+function CampaignJobs({ campaignId }: { campaignId: string }) {
+  const query = useJobs(undefined, campaignId);
+  return (
+    <section className="mt-8">
+      <h2 className="text-lg font-semibold text-white">Jobs</h2>
+      <p className="mb-4 mt-1 text-sm text-slate-400">
+        HF Jobs launched for this campaign, with Hub inspect links and latest observed
+        state.
+      </p>
+      <QueryContent query={query}>
+        <DataTable
+          columns={jobColumns(false)}
+          data={query.data?.items ?? []}
+          empty="No Jobs have been launched"
+        />
+      </QueryContent>
+    </section>
+  );
+}
+
 function useCursorNavigation() {
   const [searchParams, setSearchParams] = useSearchParams();
   const cursor = searchParams.get("cursor") ?? undefined;
@@ -862,7 +941,7 @@ export function CampaignPage() {
         <Stat
           label="Observed cost"
           value={formatMoney(item.observed_microusd)}
-          note={`${formatMoney(item.reserved_microusd)} reserved`}
+          note={`All recorded campaign sources. ${formatMoney(item.reserved_microusd)} reserved`}
           icon={CircleDollarSign}
         />
         <Stat
@@ -886,6 +965,7 @@ export function CampaignPage() {
         />
         <CursorPager navigation={navigation} nextCursor={tasks.data?.next_cursor} />
       </QueryContent>
+      <CampaignJobs campaignId={campaignId} />
     </QueryContent>
   );
 }
@@ -970,6 +1050,7 @@ export function TaskPage() {
           </Card>
         ))}
       </div>
+      <CampaignJobs campaignId={campaignId} />
     </QueryContent>
   );
 }
@@ -977,61 +1058,6 @@ export function TaskPage() {
 export function JobsPage() {
   const navigation = useCursorNavigation();
   const query = useJobs(navigation.cursor);
-  const columns: ColumnDef<JobRow>[] = [
-    {
-      accessorKey: "resource_id",
-      header: "HF Job",
-      cell: ({ row }) => {
-        const resourceId = row.original.resource_id;
-        const inspectUrl = row.original.inspect_url;
-        if (!resourceId || !inspectUrl)
-          return <span className="font-mono text-xs">Pending</span>;
-        return (
-          <a
-            className="inline-flex items-center gap-1 font-mono text-xs text-cyan-300 hover:underline"
-            href={inspectUrl}
-            rel="noreferrer"
-            target="_blank"
-          >
-            {shortId(resourceId)}
-            <ExternalLink size={12} aria-hidden="true" />
-            <span className="sr-only">Open Hugging Face Job</span>
-          </a>
-        );
-      },
-    },
-    {
-      accessorKey: "campaign_id",
-      header: "Campaign",
-      cell: ({ getValue }) => (
-        <Link
-          className="font-mono text-xs text-cyan-300"
-          to={`/campaigns/${String(getValue())}`}
-        >
-          {shortId(String(getValue()))}
-        </Link>
-      ),
-    },
-    {
-      accessorKey: "action_kind",
-      header: "Action",
-      cell: ({ getValue }) => humanize(String(getValue())),
-    },
-    {
-      accessorKey: "observed_state",
-      header: "Observed",
-      cell: ({ getValue }) => (
-        <Badge status={String(getValue() ?? "pending").toLowerCase()}>
-          {humanize(String(getValue() ?? "pending"))}
-        </Badge>
-      ),
-    },
-    {
-      accessorKey: "created_at",
-      header: "Recorded",
-      cell: ({ getValue }) => formatDate(String(getValue())),
-    },
-  ];
   return (
     <>
       <PageHeader
@@ -1039,7 +1065,7 @@ export function JobsPage() {
         description="Current HF Job identity, ownership, and latest observed infrastructure state."
       />
       <QueryContent query={query}>
-        <DataTable columns={columns} data={query.data?.items ?? []} />
+        <DataTable columns={jobColumns(true)} data={query.data?.items ?? []} />
         <CursorPager navigation={navigation} nextCursor={query.data?.next_cursor} />
       </QueryContent>
     </>

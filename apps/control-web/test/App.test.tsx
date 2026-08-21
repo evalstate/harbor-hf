@@ -196,6 +196,8 @@ describe("control web", () => {
           });
         if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
           return json({ items: [], next_cursor: null });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
         throw new Error(`unexpected request: ${path}`);
       }),
     );
@@ -207,6 +209,86 @@ describe("control web", () => {
     expect(confirm).toBeDisabled();
     await user.click(screen.getByRole("checkbox"));
     expect(confirm).toBeEnabled();
+  });
+
+  it("lists campaign Jobs with Hub inspect links", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-1"))
+          return json({
+            campaign_id: "campaign-1",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 1,
+            terminal_tasks: 1,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-1/tasks/control-smoke-task"))
+          return json({
+            task: {
+              campaign_id: "campaign-1",
+              task_id: "control-smoke-task",
+              input_digest: "sha256:aa",
+              terminal_outcome: "complete",
+              selected_attempt_id: "attempt-1",
+            },
+            attempts: [
+              {
+                attempt_id: "attempt-1",
+                action_id: "action-job-1",
+                campaign_id: "campaign-1",
+                task_id: "control-smoke-task",
+                outcome: "complete",
+                replacement_eligible: false,
+                cost_microusd: 0,
+                metrics: { reward: 1 },
+                created_at: "2026-08-18T00:00:00.000Z",
+              },
+            ],
+          });
+        if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
+          return json({ items: [], next_cursor: null });
+        if (path.includes("/api/v1/jobs?campaign_id=campaign-1"))
+          return json({
+            items: [
+              {
+                action_id: "action-job-1",
+                campaign_id: "campaign-1",
+                action_kind: "job.observe",
+                generation: 1,
+                target: "693994e21a39f67af5a41ad0",
+                outcome: "completed",
+                observed_state: "COMPLETED",
+                resource_id: "693994e21a39f67af5a41ad0",
+                inspect_url:
+                  "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+                created_at: "2026-08-18T00:00:00.000Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-1/tasks/control-smoke-task");
+    const link = await screen.findByRole("link", {
+      name: /693994e21a39f67af5a41ad0/i,
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+    );
+    expect(screen.getByRole("heading", { name: "Jobs" })).toBeInTheDocument();
   });
 
   it("links Jobs to the Hub inspect page", async () => {

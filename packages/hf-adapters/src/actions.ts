@@ -15,6 +15,7 @@ import {
   type SpaceHardwareFlavor,
 } from "@huggingface/hub";
 import { HuggingFaceSandboxGateway } from "./sandbox.js";
+import { jobHardwareCostMicrousd } from "./job-cost.js";
 
 interface AdapterConfig {
   namespace: string;
@@ -104,6 +105,14 @@ function jobStateIsTerminal(state: string): boolean {
   return ["STOPPED", "COMPLETED", "CANCELLED", "CANCELED", "ERROR"].includes(
     state.toUpperCase(),
   );
+}
+
+function payloadHourlyCost(intent: ActionIntent): number {
+  const value = intent.payload.active_hourly_cost_microusd;
+  if (value === undefined) return 0;
+  if (typeof value !== "number")
+    throw new Error("action payload active_hourly_cost_microusd must be a number");
+  return value;
 }
 
 function endpointStatus(raw: unknown): {
@@ -361,10 +370,13 @@ export class HuggingFaceActions implements ExternalActionPort {
       throw new Error("observed Job action label does not match the launch intent");
     if (job.labels?.harbor_hf_worker_role !== workerRole(intent))
       throw new Error("observed Job worker role does not match the launch intent");
+    const hourly = payloadHourlyCost(intent);
     return {
       outcome: "completed",
       observed_state: job.status.stage,
       resource_id: job.id,
+      active_hourly_cost_microusd: hourly,
+      cost_microusd: jobHardwareCostMicrousd(job, hourly),
     };
   }
 
@@ -385,10 +397,13 @@ export class HuggingFaceActions implements ExternalActionPort {
     }
     if (job.labels?.harbor_hf_action_id !== intent.payload.launch_action_id)
       throw new Error("cancelled Job action label does not match the launch intent");
+    const hourly = payloadHourlyCost(intent);
     return {
       outcome: "completed",
       observed_state: job.status.stage,
       resource_id: job.id,
+      active_hourly_cost_microusd: hourly,
+      cost_microusd: jobHardwareCostMicrousd(job, hourly),
     };
   }
 

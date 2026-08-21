@@ -2118,6 +2118,10 @@ export class ControlService {
         max_infrastructure_attempts: policy.max_infrastructure_attempts,
         reservation_microusd: policy.reservation_microusd,
         trusted_worker: deployment.trusted_worker,
+        ...(deployment.route === "hf_job" &&
+        typeof deployment.active_hourly_cost_microusd === "number"
+          ? { active_hourly_cost_microusd: deployment.active_hourly_cost_microusd }
+          : {}),
         ...(deployment.worker_revision
           ? { worker_revision: deployment.worker_revision }
           : {}),

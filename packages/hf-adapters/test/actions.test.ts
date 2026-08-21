@@ -389,6 +389,51 @@ describe("HuggingFaceActions", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("records locked hardware cost when observing a finished Job", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            type: "job",
+            id: "job-costed",
+            createdAt: "2026-08-21T12:00:00Z",
+            startedAt: "2026-08-21T12:00:00Z",
+            finishedAt: "2026-08-21T13:00:00Z",
+            flavor: "cpu-basic",
+            status: { stage: "COMPLETED", failureCount: 0 },
+            labels: {
+              harbor_hf_action_id: base.action_id,
+              harbor_hf_worker_role: "execution",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+    });
+    await expect(
+      adapter.execute({
+        ...base,
+        action_kind: "job.observe",
+        target: "job-costed",
+        payload: {
+          resource_id: "job-costed",
+          launch_action_id: base.action_id,
+          active_hourly_cost_microusd: 10_000,
+        },
+      }),
+    ).resolves.toMatchObject({
+      outcome: "completed",
+      observed_state: "COMPLETED",
+      resource_id: "job-costed",
+      active_hourly_cost_microusd: 10_000,
+      cost_microusd: 10_000,
+    });
+  });
+
   it("observes replicas when a pause response omits their state", async () => {
     let call = 0;
     const fetchMock = vi.fn(async () => {
