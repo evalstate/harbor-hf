@@ -302,4 +302,31 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "https://router.huggingface.co/v1",
     );
   });
+
+  it("pins gpt-oss-20b Chat Completions harnesses without Harbor name", async () => {
+    const model = record((await profile("model", "gpt-oss-20b")).spec);
+    const expected = [
+      ["qwen-code", "harbor_hf_agents.qwen_code.agent:QwenCodeAgent", "0.21.15"],
+      ["mini-swe-agent", "harbor_hf_agents.mini_swe.agent:MiniSweAgent", "2.4.6"],
+      ["kimi-code", "harbor_hf_agents.kimi_code.agent:KimiCodeAgent", "0.38.0"],
+      ["openhands", "harbor_hf_agents.openhands.agent:OpenHandsAgent", "1.11.0"],
+      ["pi", "harbor_hf_agents.pi.agent:PiAgent", "0.84.2"],
+      [
+        "hermes",
+        "harbor_hf_agents.hermes.agent:HermesAgent",
+        "b6bcb3e791c673e63974029bbab40cc9326803ff",
+      ],
+      ["openclaw", "harbor_hf_agents.openclaw.agent:OpenClawAgent", "2026.7.1-2"],
+    ] as const;
+    for (const [name, importPath, revision] of expected) {
+      const harness = record((await profile("harness", name)).spec);
+      const harborAgent = record(harness.harbor_agent);
+      expect(harness.agent).toBe(name);
+      expect(harness.revision).toBe(revision);
+      expect(harness.reasoning_effort).toBe("off");
+      expect(harborAgent.import_path).toBe(importPath);
+      expect(harborAgent.model_name).toBe(model.harbor_model_name);
+      expect(harborAgent).not.toHaveProperty("name");
+    }
+  });
 });

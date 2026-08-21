@@ -26,7 +26,7 @@ The CLI uses the active Hugging Face login only to authenticate HTTPS requests t
 
 ## Start a run
 
-The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. OpenCode, DeepSeek Harness (`dsh`), and Pi all call the locked sandbox inference route. They do not read a Job-level API key. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
+The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. Dashboard harnesses that speak Chat Completions (OpenCode, Qwen Code, mini-swe-agent, Pi, Kimi Code, Hermes, OpenHands, OpenClaw, and DeepSeek Harness) call the locked sandbox inference route. They do not read a Job-level API key. Codex and Claude Code stay off that route because they need a native API the router path cannot preserve. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
 
 The CLI submits the same lock through promoted profile aliases:
 

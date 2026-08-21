@@ -17,7 +17,15 @@ current package has separate modules for:
 - OpenClaw with the genuine Codex runtime through Responses;
 - Pi through Chat Completions;
 - DeepSeek Harness through Chat Completions;
-- OpenCode through Chat Completions.
+- OpenCode through Chat Completions;
+- Qwen Code through Chat Completions;
+- mini-swe-agent through Chat Completions;
+- Kimi Code through Chat Completions;
+- OpenHands through Chat Completions.
+
+Harbor Codex and Claude Code keep their native APIs. The locked
+`gpt-oss-20b` Together route is Chat Completions only, so those two
+harnesses are rejected on that route.
 
 Each module owns installation, configuration, invocation, session collection,
 and ATIF-v1.7 conversion. One agent's runtime files or trajectory converter

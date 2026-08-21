@@ -72,7 +72,7 @@ describe("launch helpers", () => {
       profileLabel("benchmark", "control-smoke", {
         task_ids: ["control-smoke-task"],
       }),
-    ).toBe("Control-smoke · 1 task");
+    ).toBe("Control Smoke · 1 task");
   });
 
   it("treats a providers deployment as providers after the API redacts the router URL", () => {
