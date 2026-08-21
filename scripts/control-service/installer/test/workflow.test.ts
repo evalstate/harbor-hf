@@ -661,7 +661,6 @@ describe("installer workflows", () => {
         {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
-          confirmSpace: "example/control",
         },
         setupResult.dependencies,
       ),
@@ -698,28 +697,12 @@ describe("installer workflows", () => {
         {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
-          confirmSpace: "example/control",
         },
         setupResult.dependencies,
       ),
     ).rejects.toThrow("HARBOR_HF_INSTALL_VERIFY_BEARER is required");
     expect(setupResult.hf.calls).not.toContain("setVariables");
     expect(setupResult.hf.calls).not.toContain("pause");
-  });
-
-  it("rejects mismatched activation confirmation before provider calls", async () => {
-    const setupResult = await setup();
-    setupResult.hf.calls.length = 0;
-    await expect(
-      activateInstall(
-        {
-          planPath: setupResult.planPath,
-          confirmSpace: "example/not-control",
-        },
-        setupResult.dependencies,
-      ),
-    ).rejects.toThrow("activation confirmation does not match Space");
-    expect(setupResult.hf.calls).toEqual([]);
   });
 
   it("does not activate enabled with an existing campaign projection", async () => {
@@ -738,7 +721,6 @@ describe("installer workflows", () => {
         {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
-          confirmSpace: "example/control",
         },
         setupResult.dependencies,
       ),
@@ -764,7 +746,6 @@ describe("installer workflows", () => {
         {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
-          confirmSpace: "example/control",
         },
         setupResult.dependencies,
       ),
@@ -790,7 +771,6 @@ describe("installer workflows", () => {
         {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
-          confirmSpace: "example/control",
         },
         setupResult.dependencies,
       ),
@@ -816,7 +796,6 @@ describe("installer workflows", () => {
       disableInstall(
         {
           planPath: setupResult.planPath,
-          confirmSpace: "example/control",
         },
         setupResult.dependencies,
       ),
@@ -838,7 +817,6 @@ describe("installer workflows", () => {
         {
           planPath: setupResult.planPath,
           bootstrapReceipt: bootstrapResult.receipt,
-          confirmSpace: "example/control",
         },
         setupResult.dependencies,
       ),

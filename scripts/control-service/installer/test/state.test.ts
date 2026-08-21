@@ -219,8 +219,8 @@ describe("private installer state", () => {
       ["cli-provision.ts", []],
       ["cli-configure.ts", []],
       ["cli-verify.ts", []],
-      ["cli-activate.ts", ["--confirm-space", "example/control"]],
-      ["cli-disable.ts", ["--confirm-space", "example/control"]],
+      ["cli-activate.ts", []],
+      ["cli-disable.ts", []],
     ] as const) {
       const state = resolve(repository, `installer-state-${command}`);
       const result = spawnSync(

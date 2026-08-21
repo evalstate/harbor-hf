@@ -4,7 +4,6 @@ import {
   formatConfigureOutput,
   formatPlanOutput,
   formatProvisionOutput,
-  parseConfirmationOptions,
   parseConfigureOptions,
   parseSavedPlanOptions,
 } from "../cli.js";
@@ -75,7 +74,7 @@ describe("installer CLI contract", () => {
       space: "example/control",
       stateDirectory: "/state-placeholder",
     });
-    for (const obsolete of ["--plan", "--confirm"]) {
+    for (const obsolete of ["--plan", "--confirm", "--confirm-space"]) {
       expect(() => parseSavedPlanOptions([obsolete, "<obsolete-value>"])).toThrow(
         "invalid command arguments",
       );
@@ -103,30 +102,6 @@ describe("installer CLI contract", () => {
     ).toThrow("invalid command arguments");
     expect(() =>
       parseSavedPlanOptions(["--space", "example/control", "--replace-credentials"]),
-    ).toThrow("invalid command arguments");
-  });
-
-  it("parses exact activation and disable confirmation", () => {
-    expect(
-      parseConfirmationOptions([
-        "--space",
-        "example/control",
-        "--confirm-space",
-        "example/control",
-      ]),
-    ).toEqual({
-      space: "example/control",
-      confirmSpace: "example/control",
-    });
-    expect(() =>
-      parseConfirmationOptions([
-        "--space",
-        "example/control",
-        "--to",
-        "disabled",
-        "--confirm-space",
-        "example/control",
-      ]),
     ).toThrow("invalid command arguments");
   });
 

@@ -202,7 +202,9 @@ npm run install:verify -- --space '<namespace>/<control-space>'
 
 Verify is non-mutating. It checks the installed resource contract, expected
 variables and secret names, runtime health, and disabled write mode.
-`HARBOR_HF_INSTALL_VERIFY_BEARER` makes the command authenticate
+`HARBOR_HF_INSTALL_VERIFY_BEARER` is the installer-only process-variable name
+for the same purpose-scoped operator API bearer used by the control CLI. It is
+not either Space service credential. The installer uses it to authenticate
 `/api/v1/system` and verify the runtime's planned source identity and resource
 contract; require `authenticated_system: "passed"` before activation.
 Standalone verify reports the provider revision as platform-observed but does
@@ -217,14 +219,13 @@ again, to upload and attest the exact current plan.
 ### 5. Activate after operator inspection
 
 Activation uses the same explicit operator bearer used for authenticated
-verification. It requires exact target confirmation, the saved upload
+verification. It requires the target-bound saved plan, the saved upload
 attestation, an empty campaign projection, and unchanged inspected bindings:
 
 ```bash
 export HARBOR_HF_INSTALL_VERIFY_BEARER="$HARBOR_HF_CONTROL_BEARER_TOKEN"
 npm run install:activate -- \
-  --space '<namespace>/<control-space>' \
-  --confirm-space '<namespace>/<control-space>'
+  --space '<namespace>/<control-space>'
 ```
 
 Activation pauses the Space, writes the complete enabled configuration,
@@ -238,8 +239,7 @@ path does not depend on a healthy control API:
 
 ```bash
 npm run install:disable -- \
-  --space '<namespace>/<control-space>' \
-  --confirm-space '<namespace>/<control-space>'
+  --space '<namespace>/<control-space>'
 ```
 
 ### Agent stop conditions

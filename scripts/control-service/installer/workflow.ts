@@ -1124,15 +1124,11 @@ export async function activateInstall(
   input: {
     planPath: string;
     bootstrapReceipt?: BootstrapReceipt;
-    confirmSpace: string;
   },
   dependencies: InstallerDependencies,
 ): Promise<ActivationResult> {
   const loaded = await readPrivatePlan(input.planPath);
   const { plan } = loaded;
-  if (input.confirmSpace !== plan.targets.space_id) {
-    throw new InstallerInputError("activation confirmation does not match Space");
-  }
   const version = await dependencies.hf.version();
   if (version !== plan.hf_cli_version) throw new Error("hf CLI version changed");
   const principal = await dependencies.identity.resolve();
@@ -1233,13 +1229,10 @@ export async function activateInstall(
 }
 
 export async function disableInstall(
-  input: { planPath: string; confirmSpace: string },
+  input: { planPath: string },
   dependencies: InstallerDependencies,
 ): Promise<ActivationResult> {
   const { plan } = await readPrivatePlan(input.planPath);
-  if (input.confirmSpace !== plan.targets.space_id) {
-    throw new InstallerInputError("disable confirmation does not match Space");
-  }
   const version = await dependencies.hf.version();
   if (version !== plan.hf_cli_version) throw new Error("hf CLI version changed");
   const principal = await dependencies.identity.resolve();

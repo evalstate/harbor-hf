@@ -2,7 +2,7 @@ import {
   cliMain,
   defaultDependencies,
   formatActivationOutput,
-  parseConfirmationOptions,
+  parseSavedPlanOptions,
 } from "./cli.js";
 import { locateGitRepositoryRoot } from "./source.js";
 import {
@@ -15,10 +15,10 @@ import {
 import { activateInstall } from "./workflow.js";
 
 const usage =
-  "Usage: npm run install:activate -- --space <namespace>/<space> --confirm-space <namespace>/<space> [--state-dir <dir>]\n";
+  "Usage: npm run install:activate -- --space <namespace>/<space> [--state-dir <dir>]\n";
 
 await cliMain(async () => {
-  const options = parseConfirmationOptions(process.argv.slice(2));
+  const options = parseSavedPlanOptions(process.argv.slice(2));
   if (options === "help") {
     process.stdout.write(usage);
     return;
@@ -35,7 +35,6 @@ await cliMain(async () => {
       {
         planPath,
         ...(receipt ? { bootstrapReceipt: receipt } : {}),
-        confirmSpace: options.confirmSpace,
       },
       dependencies,
     );
