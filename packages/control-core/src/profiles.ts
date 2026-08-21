@@ -254,8 +254,29 @@ export class ProfileResolver {
     this.promotedProfiles = indexProfiles(profiles, (item) => item.alias);
   }
 
+  /**
+   * Prefer the deployed profile when an approved alias still points at an older
+   * digest of the same checked-in name. Keep promotions that introduce a new
+   * alias or remap a name to a different profile.
+   */
+  private resolveAlias(key: string): LoadedProfile | undefined {
+    const builtIn = this.builtInProfiles.get(key);
+    const promoted = this.promotedProfiles.get(key);
+    if (builtIn && promoted && promoted.profile.name === builtIn.profile.name)
+      return builtIn;
+    return promoted ?? builtIn;
+  }
+
   private availableProfiles(): Map<string, LoadedProfile> {
-    return new Map([...this.builtInProfiles, ...this.promotedProfiles]);
+    const output = new Map<string, LoadedProfile>();
+    for (const key of new Set([
+      ...this.builtInProfiles.keys(),
+      ...this.promotedProfiles.keys(),
+    ])) {
+      const profile = this.resolveAlias(key);
+      if (profile) output.set(key, profile);
+    }
+    return output;
   }
 
   aliases(): Array<{
@@ -271,8 +292,7 @@ export class ProfileResolver {
   }
 
   get(kind: ProfileObject["profile_kind"], name: string): LoadedProfile {
-    const key = profileKey(kind, name);
-    const profile = this.promotedProfiles.get(key) ?? this.builtInProfiles.get(key);
+    const profile = this.resolveAlias(profileKey(kind, name));
     if (!profile) throw new ProfileResolutionError(`unknown ${kind} profile: ${name}`);
     return profile;
   }

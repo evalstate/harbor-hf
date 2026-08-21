@@ -198,10 +198,12 @@ canonical JSON encoder, including ECMAScript number formatting.
 
 Startup replays durable profile objects and promotions before writes are
 allowed. The resolver overlays checked-in profiles with the latest approved
-promotion for each kind and alias. Candidate and recommended records remain
-visible but cannot authorize a campaign. A campaign lock retains the selected
-alias, immutable profile digest, and complete spec even when that alias later
-moves. Canonical migration preserves profile objects and promotion records.
+promotion for each kind and alias. A promotion of a checked-in name does not
+hide a newer deployed digest of that same profile. Candidate and recommended
+records remain visible but cannot authorize a campaign. A campaign lock retains
+the selected alias, immutable profile digest, and complete spec even when that
+alias later moves. Canonical migration preserves profile objects and promotion
+records.
 
 ## HTTP API
 

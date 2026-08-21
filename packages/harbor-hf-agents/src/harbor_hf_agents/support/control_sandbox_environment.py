@@ -456,7 +456,11 @@ class ControlSandboxEnvironment(BaseEnvironment):
                 timeout_sec=600,
             )
             if result.return_code != 0:
-                raise RuntimeError("control Sandbox directory upload failed")
+                detail = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    "control Sandbox directory upload failed"
+                    + (f": {detail}" if detail else "")
+                )
 
     @override
     async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
