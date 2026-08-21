@@ -1,26 +1,25 @@
 FROM node:22.22.0-bookworm@sha256:2e3d655fd1e3ffaa6b5f23ee9f3905a0fd9e8c0a65df94c8ae6e4d18a0f48870 AS build
 
-# Omit Playwright/Vitest/Biome. Use a fresh npm cache so a poisoned Space
-# builder cache cannot crash npm with "Exit handler never called".
-ENV NODE_ENV=production \
-    HOME=/tmp \
-    npm_config_cache=/tmp/npm-cache \
-    npm_config_audit=false \
-    npm_config_fund=false \
-    npm_config_update_notifier=false \
+# Space builders time out against npm.registries.huggingface.tech. npm then
+# aborts with "Exit handler never called". Fetch only from the public registry.
+ENV NODE_ENV=development \
+    NODE_OPTIONS=--dns-result-order=ipv4first \
+    npm_config_registry=https://registry.npmjs.org/ \
+    npm_config_fetch_retries=5 \
+    npm_config_fetch_retry_mintimeout=20000 \
+    npm_config_fetch_retry_maxtimeout=120000 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
 
-COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
+COPY package.json package-lock.json tsconfig.json tsconfig.base.json .npmrc ./
 COPY apps/control-api/package.json apps/control-api/package.json
 COPY apps/control-web/package.json apps/control-web/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/control-core/package.json packages/control-core/package.json
 COPY packages/hf-adapters/package.json packages/hf-adapters/package.json
 COPY packages/test-fixtures/package.json packages/test-fixtures/package.json
-RUN mkdir -p /tmp/npm-cache \
-    && npm ci --omit=dev --no-audit --no-fund \
-    || (echo '--- npm log ---' && cat /tmp/npm-cache/_logs/* && exit 1)
+RUN sed -i 's#https://npm.registries.huggingface.tech#https://registry.npmjs.org#g' package-lock.json \
+    && npm ci
 
 COPY apps/control-api apps/control-api
 COPY apps/control-web apps/control-web
