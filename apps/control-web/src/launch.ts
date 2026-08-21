@@ -103,6 +103,7 @@ export function profileLabel(
   if (kind === "harness") {
     const agent = typeof spec.agent === "string" ? spec.agent : alias;
     if (agent === "opencode") return "OpenCode";
+    if (agent === "dsh") return "DeepSeek Harness";
     if (agent === "pi") return "Pi";
     if (agent === "control-smoke") return "Control smoke";
     return humanize(agent);

@@ -235,6 +235,46 @@ describe("Terminal-Bench 2.1 profiles", () => {
     }
   });
 
+  it("pins gpt-oss-20b and DeepSeek Harness for provider runs", async () => {
+    const model = record((await profile("model", "gpt-oss-20b")).spec);
+    const harness = record((await profile("harness", "dsh")).spec);
+    const deployment = record(
+      (await profile("deployment", "tb21-gpt-oss-20b-dsh-providers")).spec,
+    );
+    const harborAgent = record(harness.harbor_agent);
+
+    expect(harness.agent).toBe("dsh");
+    expect(harness.revision).toBe("0.1.0-rc.7");
+    expect(harness.reasoning_effort).toBe("off");
+    expect(harborAgent.import_path).toBe("harbor_hf_agents.dsh.agent:DshAgent");
+    expect(harborAgent.model_name).toBe(model.harbor_model_name);
+    expect(deployment.models).toEqual(["gpt-oss-20b"]);
+    expect(deployment.harnesses).toEqual(["dsh"]);
+    expect(deployment.inference_provider).toBe("together");
+  });
+
+  it("pins DeepSeek V4 Flash to DeepSeek Harness for provider runs", async () => {
+    const model = record(
+      (await profile("model", "deepseek-v4-flash-0731-together")).spec,
+    );
+    const harness = record(
+      (await profile("harness", "dsh-high-deepseek-v4-flash-0731-together")).spec,
+    );
+    const deployment = record(
+      (await profile("deployment", "tb21-deepseek-v4-flash-dsh-providers")).spec,
+    );
+    const harborAgent = record(harness.harbor_agent);
+    const kwargs = record(harborAgent.kwargs);
+
+    expect(harness.agent).toBe("dsh");
+    expect(harness.reasoning_effort).toBe("high");
+    expect(harborAgent.import_path).toBe("harbor_hf_agents.dsh.agent:DshAgent");
+    expect(harborAgent.model_name).toBe(model.harbor_model_name);
+    expect(kwargs.thinking_format).toBe("deepseek");
+    expect(deployment.models).toEqual(["deepseek-v4-flash-0731-together"]);
+    expect(deployment.harnesses).toEqual(["dsh-high-deepseek-v4-flash-0731-together"]);
+  });
+
   it("pins gpt-oss-20b and OpenCode for provider runs", async () => {
     const model = record((await profile("model", "gpt-oss-20b")).spec);
     const harness = record((await profile("harness", "opencode")).spec);

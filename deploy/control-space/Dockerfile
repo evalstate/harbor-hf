@@ -3,7 +3,7 @@ FROM node:22.22.0-bookworm@sha256:2e3d655fd1e3ffaa6b5f23ee9f3905a0fd9e8c0a65df94
 ENV NODE_ENV=development
 WORKDIR /app
 
-COPY package.json package-lock.json tsconfig.json tsconfig.base.json biome.json vitest.config.ts ./
+COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY apps/control-api/package.json apps/control-api/package.json
 COPY apps/control-web/package.json apps/control-web/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -18,10 +18,9 @@ COPY packages packages
 COPY profiles profiles
 COPY scripts/control-service/control-smoke-worker.cjs scripts/control-service/control-smoke-worker.cjs
 COPY scripts/control-service/sandbox-smoke-worker.cjs scripts/control-service/sandbox-smoke-worker.cjs
-COPY docs docs
-RUN npm run generate \
-    && npm run typecheck \
-    && npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=30000 \
+# Tests and schema generation run in CI. The image compiles the committed
+# sources so a Space rebuild is not blocked on the Vitest suite.
+RUN npm run typecheck \
     && npm run build -w @harbor-hf/control-web \
     && npm prune --omit=dev --workspaces
 

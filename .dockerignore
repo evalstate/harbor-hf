@@ -13,3 +13,14 @@
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+src
+tests
+docs
+.github
+packages/harbor-hf-agents
+**/*.md
+!deploy/control-space/README.md
+apps/control-api/test
+apps/control-web/test
+packages/*/test
+packages/*/tests

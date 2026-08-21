@@ -15,6 +15,10 @@ describe("launch helpers", () => {
     );
   });
 
+  it("labels DeepSeek Harness from the dsh agent name", () => {
+    expect(profileLabel("harness", "dsh", { agent: "dsh" })).toBe("DeepSeek Harness");
+  });
+
   it("selects OpenCode by agent and reasoning without a silent substitute", () => {
     expect(
       selectHarnessAlias(
