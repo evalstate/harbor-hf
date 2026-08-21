@@ -329,4 +329,27 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(harborAgent).not.toHaveProperty("name");
     }
   });
+
+  it("pins gpt-oss-20b provider deployments to the Chat Completions worker zip", async () => {
+    const pin = "a5d0d37465c6424618e7e78675dbd0dd4d4dd519";
+    for (const harness of [
+      "qwen-code",
+      "mini-swe-agent",
+      "kimi-code",
+      "openhands",
+      "pi",
+      "hermes",
+      "openclaw",
+    ]) {
+      const deployment = record(
+        (await profile("deployment", `tb21-gpt-oss-20b-${harness}-providers`)).spec,
+      );
+      expect(deployment.models).toEqual(["gpt-oss-20b"]);
+      expect(deployment.harnesses).toEqual([harness]);
+      expect(deployment.worker_revision).toBe(pin);
+      expect(deployment.inference_provider).toBe("together");
+      const jobCommand = (deployment.job_command as string[]).join("\n");
+      expect(jobCommand).toContain(pin);
+    }
+  });
 });
