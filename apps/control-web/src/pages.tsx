@@ -816,22 +816,24 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
               </dl>
             )}
           </Card>
-          <div className="flex flex-wrap items-start gap-3 md:col-span-2 xl:col-span-3">
+          <div className="md:col-span-2 xl:col-span-3">
             <label className="flex items-start gap-3">
               <input
-                className="mt-1 h-4 w-4 accent-cyan-400"
+                className="mt-1 h-4 w-4 shrink-0 accent-cyan-400"
                 type="checkbox"
                 disabled={!writesAllowed}
                 {...form.register("confirmed")}
               />
-              <span className="text-sm text-slate-300">
+              <span className="min-w-0 text-sm text-slate-300">
                 I confirm the benchmark, model, runtime, harness, reasoning, task count,
                 and cost ceiling. After submit those values are locked on the run.
+                <span className="mt-1.5 block text-slate-400">
+                  <Hint text={hints.launch.confirmed} icon>
+                    Why is this required?
+                  </Hint>
+                </span>
               </span>
             </label>
-            <Hint text={hints.launch.confirmed} icon>
-              Why this is required
-            </Hint>
           </div>
           {form.formState.errors.confirmed ? (
             <p className="text-sm text-rose-300 md:col-span-2 xl:col-span-3">
