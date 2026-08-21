@@ -97,7 +97,7 @@ A valid task never runs again. Publication recovery never runs a task.
 ## Cancellation
 
 ```bash
-uv run harbor-hf campaign cancel <campaign-id> --yes
+uv run harbor-hf campaign cancel <run-id> --yes
 ```
 
 Cancellation seals open logical tasks, suppresses queued launches that no longer have open tasks, preserves existing evidence, and continues observing already-created remote resources until cleanup is known.

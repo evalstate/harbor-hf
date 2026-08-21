@@ -84,7 +84,7 @@ harbor-hf campaign retry-infrastructure <campaign-id> \
 Cancellation also preserves existing evidence:
 
 ```bash
-harbor-hf campaign cancel <campaign-id> --yes
+harbor-hf campaign cancel <run-id> --yes
 ```
 
 Publication is independent of execution. A publication retry rebuilds deterministic result objects from sealed task receipts and does not rerun model work.
