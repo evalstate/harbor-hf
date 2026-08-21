@@ -21,8 +21,14 @@ import type {
 import { type HfAdapter, HfCommandFailure } from "../hf.js";
 import type { HttpAdapter } from "../http.js";
 import type { IdentityAdapter } from "../identity.js";
-import { expectedVariables, type Principal, type RemoteState } from "../model.js";
+import {
+  expectedVariables,
+  type Principal,
+  type RemoteState,
+  type SpaceState,
+} from "../model.js";
 import type { SourceAdapter } from "../source.js";
+import type { BootstrapReceipt } from "../state.js";
 import {
   activateInstall,
   applyInstall,
@@ -866,17 +872,91 @@ describe("installer workflows", () => {
     };
     setupResult.hf.preserveNoAppFileOnVariables = true;
 
-    await expect(
-      applyInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
-    ).resolves.toMatchObject({
+    const result = await applyInstall(
+      { planPath: setupResult.planPath },
+      setupResult.dependencies,
+    );
+    expect(result).toMatchObject({
       status: "credentials_required",
       source_uploaded: false,
       secrets_configured: false,
     });
+    if (result.status !== "credentials_required") {
+      throw new Error("expected credentials-required result");
+    }
     expect(setupResult.hf.calls).toContain("createBucket");
     expect(setupResult.hf.calls).not.toContain("pause");
     expect(setupResult.hf.calls).not.toContain("uploadMirror");
     expect(setupResult.hf.calls).not.toContain("setSecrets");
+    await expect(
+      provisionInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: result.receipt,
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toMatchObject({
+      status: "credentials_required",
+      source_uploaded: false,
+    });
+  });
+
+  it("rejects resources-only success after configuration has started", async () => {
+    const cases: Array<{
+      name: string;
+      mutate: (space: SpaceState, receipt: BootstrapReceipt) => void;
+    }> = [
+      {
+        name: "running runtime",
+        mutate: (space) => {
+          space.runtimeStage = "RUNNING";
+        },
+      },
+      {
+        name: "uploaded source",
+        mutate: (space) => {
+          space.runtimeStage = "PAUSED";
+          space.sha = UPLOAD_SHA;
+        },
+      },
+      {
+        name: "configured secret",
+        mutate: (space) => {
+          space.secretNames = ["HF_TOKEN"];
+        },
+      },
+      {
+        name: "upload receipt",
+        mutate: (space, receipt) => {
+          space.runtimeStage = "NO_APP_FILE";
+          space.sha = OLD_REVISION;
+          receipt.uploaded_sha = UPLOAD_SHA;
+        },
+      },
+    ];
+
+    for (const scenario of cases) {
+      const setupResult = await setup();
+      const bootstrapResult = await bootstrap(setupResult);
+      if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+      scenario.mutate(setupResult.hf.state.space, bootstrapResult.receipt);
+      setupResult.hf.calls.length = 0;
+
+      await expect(
+        provisionInstall(
+          {
+            planPath: setupResult.planPath,
+            bootstrapReceipt: bootstrapResult.receipt,
+          },
+          setupResult.dependencies,
+        ),
+        scenario.name,
+      ).rejects.toThrow("configuration has started");
+      expect(setupResult.hf.calls, scenario.name).not.toContain("pause");
+      expect(setupResult.hf.calls, scenario.name).not.toContain("uploadMirror");
+      expect(setupResult.hf.calls, scenario.name).not.toContain("setSecrets");
+    }
   });
 
   it("rebinds changed source only before bootstrap Bucket proof exists", async () => {

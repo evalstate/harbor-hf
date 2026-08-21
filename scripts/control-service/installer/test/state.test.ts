@@ -4,8 +4,8 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readFile,
   readdir,
+  readFile,
   rm,
   stat,
   symlink,
@@ -305,6 +305,78 @@ describe("private installer state", () => {
       "/bin/true",
     ]);
     expect(lockAfterRelease.status).toBe(0);
+  });
+
+  it("does not pass installer credentials to the flock subprocess", async () => {
+    const directory = await temporaryDirectory();
+    const root = resolve(directory, "state");
+    const toolDirectory = resolve(directory, "tools");
+    const capturePath = resolve(directory, "flock-environment.txt");
+    const flockPath = resolve(toolDirectory, "flock");
+    await mkdir(toolDirectory);
+    await writeFile(
+      flockPath,
+      `#!/bin/sh\n/usr/bin/env > '${capturePath}'\nexec /usr/bin/flock "$@"\n`,
+      { mode: 0o700 },
+    );
+    const previous = {
+      path: process.env.PATH,
+      control: process.env.HARBOR_HF_INSTALL_CONTROL_SECRET,
+      inference: process.env.HARBOR_HF_INSTALL_INFERENCE_SECRET,
+      bearer: process.env.HARBOR_HF_INSTALL_VERIFY_BEARER,
+    };
+    process.env.PATH = `${toolDirectory}:/usr/bin:/bin`;
+    process.env.HARBOR_HF_INSTALL_CONTROL_SECRET = "control-secret-placeholder";
+    process.env.HARBOR_HF_INSTALL_INFERENCE_SECRET = "inference-secret-placeholder";
+    process.env.HARBOR_HF_INSTALL_VERIFY_BEARER = "verify-bearer-placeholder";
+    try {
+      await withInstallerStateLock("example/control", root, async () => undefined);
+    } finally {
+      for (const [name, value] of [
+        ["PATH", previous.path],
+        ["HARBOR_HF_INSTALL_CONTROL_SECRET", previous.control],
+        ["HARBOR_HF_INSTALL_INFERENCE_SECRET", previous.inference],
+        ["HARBOR_HF_INSTALL_VERIFY_BEARER", previous.bearer],
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+
+    const captured = await readFile(capturePath, "utf8");
+    expect(captured).not.toContain("HARBOR_HF_INSTALL_CONTROL_SECRET");
+    expect(captured).not.toContain("HARBOR_HF_INSTALL_INFERENCE_SECRET");
+    expect(captured).not.toContain("HARBOR_HF_INSTALL_VERIFY_BEARER");
+    expect(captured).not.toContain("control-secret-placeholder");
+    expect(captured).not.toContain("inference-secret-placeholder");
+    expect(captured).not.toContain("verify-bearer-placeholder");
+  });
+
+  it("prevents verify from observing a concurrent installer operation", async () => {
+    const { root } = await savedState();
+    await withInstallerStateLock("example/control", root, async () => {
+      const result = spawnSync(
+        resolve(process.cwd(), "node_modules/.bin/tsx"),
+        [
+          resolve(process.cwd(), "scripts/control-service/installer/cli-verify.ts"),
+          "--space",
+          "example/control",
+          "--state-dir",
+          root,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HARBOR_HF_INSTALL_VERIFY_BEARER: "verify-bearer-placeholder",
+          },
+        },
+      );
+      expect(result.status).toBe(1);
+      expect(`${result.stdout}${result.stderr}`).toContain(
+        "another installer operation is active",
+      );
+    });
   });
 
   it("reclaims an owner-only lock after its process is gone", async () => {

@@ -1874,6 +1874,16 @@ export async function applyInstall(
       );
     }
     assertFreshContinuationSafe(plan, observed);
+    if (
+      !isCredentialBootstrapStopped(observed.space.runtimeStage) ||
+      observed.space.secretNames.length > 0 ||
+      input.bootstrapReceipt.uploaded_sha !== undefined ||
+      (observed.space.runtimeStage !== "NO_APP_FILE" && observed.space.sha !== null)
+    ) {
+      throw new InstallerInputError(
+        "provisioning is already complete or configuration has started",
+      );
+    }
     return {
       status: "credentials_required",
       production_ready: false,

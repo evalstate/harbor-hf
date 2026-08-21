@@ -89,9 +89,10 @@ local state directory. Keep that state across phases and recovery attempts.
 When using `--state-dir`, pass the same value to every later command. Do not
 copy, delete, replace, or quarantine installer state during an active
 installation unless a reviewed recovery procedure explicitly requires it.
-Installer commands serialize operations per target. A valid lock whose process
-ended or whose host rebooted is released automatically by the operating
-system; a live, wrong-owner, or insecure lock remains a stop condition.
+Installer commands, including non-mutating verification, serialize operations
+per target. A valid lock whose process ended or whose host rebooted is released
+automatically by the operating system; a live, wrong-owner, or insecure lock
+remains a stop condition.
 
 ### 1. Plan
 

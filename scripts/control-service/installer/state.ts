@@ -1,5 +1,5 @@
-import { O_CREAT, O_NOFOLLOW, O_RDONLY, O_RDWR } from "node:constants";
 import { spawn } from "node:child_process";
+import { O_CREAT, O_NOFOLLOW, O_RDONLY, O_RDWR } from "node:constants";
 import { createHash, randomUUID } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
@@ -18,6 +18,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { canonicalJson } from "./canonical.js";
+import { sanitizedChildEnvironment } from "./environment.js";
 import {
   type InstallPhase,
   type InstallPlan,
@@ -78,6 +79,7 @@ async function acquireAdvisoryLock(handle: FileHandle): Promise<void> {
   await new Promise<void>((resolvePromise, rejectPromise) => {
     // The parent retains the same Linux open file description after flock exits.
     const locker = spawn("flock", ["--exclusive", "--nonblock", "3"], {
+      env: sanitizedChildEnvironment(),
       stdio: ["ignore", "ignore", "ignore", handle.fd],
     });
     const timeout = setTimeout(() => {

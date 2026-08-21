@@ -1,5 +1,9 @@
 import { cliMain, defaultDependencies, parseSavedPlanOptions } from "./cli.js";
-import { currentInstallPlanPath, installerStateRoot } from "./state.js";
+import {
+  currentInstallPlanPath,
+  installerStateRoot,
+  withInstallerStateLock,
+} from "./state.js";
 import { verifyInstall } from "./workflow.js";
 
 const usage =
@@ -11,10 +15,10 @@ await cliMain(async () => {
     process.stdout.write(usage);
     return;
   }
-  const planPath = await currentInstallPlanPath(
-    options.space,
-    installerStateRoot(options.stateDirectory),
-  );
-  const result = await verifyInstall(planPath, defaultDependencies());
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  const stateRoot = installerStateRoot(options.stateDirectory);
+  await withInstallerStateLock(options.space, stateRoot, async () => {
+    const planPath = await currentInstallPlanPath(options.space, stateRoot);
+    const result = await verifyInstall(planPath, defaultDependencies());
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  });
 });
