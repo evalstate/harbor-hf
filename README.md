@@ -53,6 +53,8 @@ harbor-hf campaign submit \
 
 Repeating that command with the same actor and key adopts the existing campaign. It does not create a second logical run.
 
+Harbor `harbor_job` fields on a benchmark profile are forwarded into the preparation lock. Diagnostic canary and replacement profiles set `agent_timeout_multiplier` to 4 so the agent gets one hour on the 900-second Terminal-Bench tasks. Official five-trial profiles keep Harbor's published timeouts. A sealed `benchmark_timeout` cannot be retried; submit a new campaign with a new idempotency key.
+
 ## Monitor work and results
 
 ```bash

@@ -131,10 +131,16 @@ describe("Terminal-Bench 2.1 profiles", () => {
     expect(new Set(diagnostic.source_task_ids as string[]).size).toBe(89);
     expect(new Set(diagnostic.trial_indices as number[])).toEqual(new Set([1]));
 
+    const canaryJob = record(canary.harbor_job);
     const replacementJob = record(replacement.harbor_job);
     const diagnosticJob = record(diagnostic.harbor_job);
+    const officialJob = record(official.harbor_job);
     expect(replacementJob.n_attempts).toBe(1);
     expect(replacementJob.n_concurrent_trials).toBe(1);
+    expect(canaryJob.agent_timeout_multiplier).toBe(4);
+    expect(replacementJob.agent_timeout_multiplier).toBe(4);
+    expect(officialJob.agent_timeout_multiplier).toBeUndefined();
+    expect(diagnosticJob.agent_timeout_multiplier).toBeUndefined();
     expect(diagnosticJob.n_attempts).toBe(1);
     expect(diagnosticJob.n_concurrent_trials).toBe(8);
     expect(replacement.revision).toBe(official.revision);
