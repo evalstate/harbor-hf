@@ -20,6 +20,7 @@ Terminal-Bench 2.1 USD 300 campaign-ceiling amendment approved at: 2026-08-18T17
 Canonical-Bucket amendment approved at: 2026-08-20T13:53:14Z
 Canonical-Space replacement amendment approved at: 2026-08-20T14:01:49Z
 Terminal-Bench 2.1 single-trial diagnostic amendment approved at: 2026-08-20T19:21:55Z
+Production-writes amendment approved at: 2026-08-21T10:31:00Z
 
 ### Scope
 
@@ -38,6 +39,8 @@ Terminal-Bench 2.1 single-trial diagnostic amendment approved at: 2026-08-20T19:
 - Migrate the remaining active ShellBench result catalog, verify parity, replace the legacy results viewer, and perform the hard cutover without deleting legacy resources.
 - Create one private canonical `<artifact-bucket>` in the selected namespace because no existing canonical Bucket is available, then deploy the exact reviewed control-service revision to the existing canonical `<control-space>`.
 - Create one private canonical replacement `<control-space>` in the selected namespace because the previous Space no longer exists, then deploy the exact reviewed control-service revision with writes disabled.
+- Enable production writes on the hosted control Space so operators can submit any promoted-profile campaign, not only the built-in control-smoke canary.
+- Restart the failed no-inference control-smoke as an infrastructure replacement after protected public ingress.
 
 ### Limits
 
@@ -60,12 +63,12 @@ Terminal-Bench 2.1 single-trial diagnostic amendment approved at: 2026-08-20T19:
 - Keep `HF_TOKEN` in the control Space. Never pass it to a worker or Sandbox. The control Space may derive and use a per-Sandbox credential only inside its trusted process while handling an authorized lifecycle operation.
 - Keep the first Terminal-Bench canary below USD 5. Treat the full campaign as substantial paid compute: measure throughput and cost first, preserve durable partial evidence, prove pause and resume, and obtain explicit approval for the exact trial count, concurrency, hardware, and hard cost ceiling before launch.
 - For the approved Terminal-Bench 2.1 campaign, use one bounded representative canary and then continue without another conversational prompt only when the hosted control plane admits the measured worst-case cost for 89 tasks and five trials under the existing USD 300 total project limit. Count setup, canaries, retries, recovery, and cleanup. Allow only infrastructure replacements; never rerun a terminal semantic outcome.
+- Production writes admit any promoted-profile campaign through the existing control path. They do not raise the spend ceiling, add persistent resources, or authorize rerunning a terminal semantic outcome.
 
 ### Remaining gates
 
 No project-scope amendment remains pending. Operational gates still apply:
 
-- Keep production writes disabled and use free development hardware until local security tests and bounded hosted canaries pass.
 - Do not retire the legacy results viewer or stores until catalog parity is verified. No deletion is authorized.
 - Keep each substantial paid campaign behind its measured launch review and exact enforced cost ceiling.
 
@@ -91,3 +94,7 @@ No project-scope amendment remains pending. Operational gates still apply:
 - At 2026-08-20T13:53:14Z, approved creating one private canonical `<artifact-bucket>` in the selected namespace and connecting the existing canonical `<control-space>` to it. No additional persistent resource or paid campaign was approved.
 - At 2026-08-20T14:01:49Z, approved creating one private canonical replacement `<control-space>` in the selected namespace because the previous Space no longer exists, then deploying the reviewed control service with writes disabled. No additional persistent resource or paid campaign was approved.
 - At 2026-08-20T19:21:55Z, replaced the current five-trial campaign request with a single-trial diagnostic run of all 89 Terminal-Bench 2.1 tasks. The exact benchmark, model, revisions, Pi version, high reasoning, provider route, hardware class, authorization boundaries, and USD 300 hard ceiling remain unchanged. The result must be labeled diagnostic and must not be used as an official five-trial result.
+
+### 2026-08-21
+
+- At 2026-08-21T10:31:00Z, approved enabling production writes on the hosted control Space and launching campaigns beyond the built-in control-smoke canary. This does not authorize a new persistent resource, credential, or bypass of the measured substantial paid-compute gate. Existing cost, inventory, credential, and semantic-outcome limits remain.
