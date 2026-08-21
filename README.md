@@ -196,17 +196,19 @@ merely to bypass a drift or safety error.
 ### 4. Verify while disabled
 
 ```bash
-export HARBOR_HF_INSTALL_VERIFY_BEARER="$HARBOR_HF_CONTROL_BEARER_TOKEN"
+read -rsp 'Control bearer token: ' HARBOR_HF_CONTROL_BEARER_TOKEN
+export HARBOR_HF_CONTROL_BEARER_TOKEN
+printf '\n'
 npm run install:verify -- --space '<namespace>/<control-space>'
 ```
 
 Verify is non-mutating. It checks the installed resource contract, expected
 variables and secret names, runtime health, and disabled write mode.
-`HARBOR_HF_INSTALL_VERIFY_BEARER` is the installer-only process-variable name
-for the same purpose-scoped operator API bearer used by the control CLI. It is
-not either Space service credential. The installer uses it to authenticate
-`/api/v1/system` and verify the runtime's planned source identity and resource
-contract; require `authenticated_system: "passed"` before activation.
+`HARBOR_HF_CONTROL_BEARER_TOKEN` is the same purpose-scoped operator API bearer
+used by the control CLI, not either Space service credential. The installer
+uses it to authenticate `/api/v1/system` and verify the runtime's planned
+source identity and resource contract; require
+`authenticated_system: "passed"` before activation.
 Standalone verify reports the provider revision as platform-observed but does
 not attest that it equals the original upload SHA. Activation adds that
 stronger check against the SHA preserved by configure. Treat any failed check as a
@@ -223,7 +225,6 @@ verification. It requires the target-bound saved plan, the saved upload
 attestation, an empty campaign projection, and unchanged inspected bindings:
 
 ```bash
-export HARBOR_HF_INSTALL_VERIFY_BEARER="$HARBOR_HF_CONTROL_BEARER_TOKEN"
 npm run install:activate -- \
   --space '<namespace>/<control-space>'
 ```

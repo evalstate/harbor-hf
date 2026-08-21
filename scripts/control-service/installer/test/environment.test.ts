@@ -6,14 +6,14 @@ describe("installer child environment", () => {
     const previous = {
       control: process.env.HARBOR_HF_INSTALL_CONTROL_SECRET,
       inference: process.env.HARBOR_HF_INSTALL_INFERENCE_SECRET,
-      verify: process.env.HARBOR_HF_INSTALL_VERIFY_BEARER,
+      bearer: process.env.HARBOR_HF_CONTROL_BEARER_TOKEN,
       hfToken: process.env.HF_TOKEN,
       hfDebug: process.env.HF_DEBUG,
       unrelated: process.env.UNRELATED_CLOUD_SECRET,
     };
     process.env.HARBOR_HF_INSTALL_CONTROL_SECRET = "control-placeholder";
     process.env.HARBOR_HF_INSTALL_INFERENCE_SECRET = "inference-placeholder";
-    process.env.HARBOR_HF_INSTALL_VERIFY_BEARER = "verify-placeholder";
+    process.env.HARBOR_HF_CONTROL_BEARER_TOKEN = "bearer-placeholder";
     process.env.HF_TOKEN = "ambient-placeholder";
     process.env.HF_DEBUG = "1";
     process.env.UNRELATED_CLOUD_SECRET = "cloud-placeholder";
@@ -21,7 +21,7 @@ describe("installer child environment", () => {
       const environment = sanitizedChildEnvironment();
       expect(environment.HARBOR_HF_INSTALL_CONTROL_SECRET).toBeUndefined();
       expect(environment.HARBOR_HF_INSTALL_INFERENCE_SECRET).toBeUndefined();
-      expect(environment.HARBOR_HF_INSTALL_VERIFY_BEARER).toBeUndefined();
+      expect(environment.HARBOR_HF_CONTROL_BEARER_TOKEN).toBeUndefined();
       expect(environment.HF_TOKEN).toBeUndefined();
       expect(environment.HF_DEBUG).toBe("1");
       expect(environment.UNRELATED_CLOUD_SECRET).toBeUndefined();
@@ -29,7 +29,7 @@ describe("installer child environment", () => {
       for (const [name, value] of [
         ["HARBOR_HF_INSTALL_CONTROL_SECRET", previous.control],
         ["HARBOR_HF_INSTALL_INFERENCE_SECRET", previous.inference],
-        ["HARBOR_HF_INSTALL_VERIFY_BEARER", previous.verify],
+        ["HARBOR_HF_CONTROL_BEARER_TOKEN", previous.bearer],
         ["HF_TOKEN", previous.hfToken],
         ["HF_DEBUG", previous.hfDebug],
         ["UNRELATED_CLOUD_SECRET", previous.unrelated],

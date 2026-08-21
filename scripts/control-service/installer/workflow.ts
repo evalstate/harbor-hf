@@ -990,10 +990,10 @@ async function verifyPlan(
   }
 
   const bearer = (dependencies.environment ?? process.env)
-    .HARBOR_HF_INSTALL_VERIFY_BEARER;
+    .HARBOR_HF_CONTROL_BEARER_TOKEN;
   if (options.requireAuthenticated && !bearer) {
     throw new InstallerInputError(
-      "HARBOR_HF_INSTALL_VERIFY_BEARER is required for activation",
+      "HARBOR_HF_CONTROL_BEARER_TOKEN is required for activation",
     );
   }
   let authenticatedSystem: VerificationResult["authenticated_system"] = "skipped";
@@ -1150,9 +1150,9 @@ export async function activateInstall(
       "variables-disabled.env",
       variablesForWriteMode(plan, currentSpace.origin, "disabled"),
     );
-    if (!(dependencies.environment ?? process.env).HARBOR_HF_INSTALL_VERIFY_BEARER) {
+    if (!(dependencies.environment ?? process.env).HARBOR_HF_CONTROL_BEARER_TOKEN) {
       throw new InstallerInputError(
-        "HARBOR_HF_INSTALL_VERIFY_BEARER is required for activation",
+        "HARBOR_HF_CONTROL_BEARER_TOKEN is required for activation",
       );
     }
     if (!input.bootstrapReceipt?.uploaded_sha) {

@@ -437,12 +437,12 @@ describe("private installer state", () => {
       path: process.env.PATH,
       control: process.env.HARBOR_HF_INSTALL_CONTROL_SECRET,
       inference: process.env.HARBOR_HF_INSTALL_INFERENCE_SECRET,
-      bearer: process.env.HARBOR_HF_INSTALL_VERIFY_BEARER,
+      bearer: process.env.HARBOR_HF_CONTROL_BEARER_TOKEN,
     };
     process.env.PATH = `${toolDirectory}:/usr/bin:/bin`;
     process.env.HARBOR_HF_INSTALL_CONTROL_SECRET = "control-secret-placeholder";
     process.env.HARBOR_HF_INSTALL_INFERENCE_SECRET = "inference-secret-placeholder";
-    process.env.HARBOR_HF_INSTALL_VERIFY_BEARER = "verify-bearer-placeholder";
+    process.env.HARBOR_HF_CONTROL_BEARER_TOKEN = "control-bearer-placeholder";
     try {
       await withInstallerStateLock("example/control", root, async () => undefined);
     } finally {
@@ -450,7 +450,7 @@ describe("private installer state", () => {
         ["PATH", previous.path],
         ["HARBOR_HF_INSTALL_CONTROL_SECRET", previous.control],
         ["HARBOR_HF_INSTALL_INFERENCE_SECRET", previous.inference],
-        ["HARBOR_HF_INSTALL_VERIFY_BEARER", previous.bearer],
+        ["HARBOR_HF_CONTROL_BEARER_TOKEN", previous.bearer],
       ] as const) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
@@ -460,10 +460,10 @@ describe("private installer state", () => {
     const captured = await readFile(capturePath, "utf8");
     expect(captured).not.toContain("HARBOR_HF_INSTALL_CONTROL_SECRET");
     expect(captured).not.toContain("HARBOR_HF_INSTALL_INFERENCE_SECRET");
-    expect(captured).not.toContain("HARBOR_HF_INSTALL_VERIFY_BEARER");
+    expect(captured).not.toContain("HARBOR_HF_CONTROL_BEARER_TOKEN");
     expect(captured).not.toContain("control-secret-placeholder");
     expect(captured).not.toContain("inference-secret-placeholder");
-    expect(captured).not.toContain("verify-bearer-placeholder");
+    expect(captured).not.toContain("control-bearer-placeholder");
   });
 
   it("prevents verify from observing a concurrent installer operation", async () => {
@@ -485,7 +485,7 @@ describe("private installer state", () => {
           encoding: "utf8",
           env: {
             ...process.env,
-            HARBOR_HF_INSTALL_VERIFY_BEARER: "verify-bearer-placeholder",
+            HARBOR_HF_CONTROL_BEARER_TOKEN: "control-bearer-placeholder",
           },
         },
       );

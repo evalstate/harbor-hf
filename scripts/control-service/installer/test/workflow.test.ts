@@ -653,7 +653,7 @@ describe("installer workflows", () => {
     setupResult.http.readyRequestCount = 0;
     setupResult.dependencies.environment = {
       ...setupResult.dependencies.environment,
-      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "operator-bearer-placeholder",
     };
 
     await expect(
@@ -700,7 +700,7 @@ describe("installer workflows", () => {
         },
         setupResult.dependencies,
       ),
-    ).rejects.toThrow("HARBOR_HF_INSTALL_VERIFY_BEARER is required");
+    ).rejects.toThrow("HARBOR_HF_CONTROL_BEARER_TOKEN is required");
     expect(setupResult.hf.calls).not.toContain("setVariables");
     expect(setupResult.hf.calls).not.toContain("pause");
   });
@@ -713,7 +713,7 @@ describe("installer workflows", () => {
     setupResult.http.readyRequestCount = 0;
     setupResult.http.campaignItems = [{ campaign_id: "existing-campaign" }];
     setupResult.dependencies.environment = {
-      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "operator-bearer-placeholder",
     };
 
     await expect(
@@ -738,7 +738,7 @@ describe("installer workflows", () => {
     setupResult.http.systemIntegrityError = "projection mismatch";
     setupResult.http.readyRequestCount = 0;
     setupResult.dependencies.environment = {
-      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "operator-bearer-placeholder",
     };
 
     await expect(
@@ -763,7 +763,7 @@ describe("installer workflows", () => {
     setupResult.http.failReadyOnRequest = 2;
     setupResult.dependencies.environment = {
       ...setupResult.dependencies.environment,
-      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "operator-bearer-placeholder",
     };
 
     await expect(
@@ -810,7 +810,7 @@ describe("installer workflows", () => {
 
     setupResult.http.readyRequestCount = 0;
     setupResult.dependencies.environment = {
-      HARBOR_HF_INSTALL_VERIFY_BEARER: "operator-bearer-placeholder",
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "operator-bearer-placeholder",
     };
     await expect(
       activateInstall(
@@ -2068,7 +2068,7 @@ describe("installer workflows", () => {
     const setupResult = await setup(REVISION);
     alignInstalledStateWithPlan(setupResult);
     setupResult.dependencies.environment = {
-      HARBOR_HF_INSTALL_VERIFY_BEARER: "verify-placeholder",
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "verify-placeholder",
     };
     const result = await verifyInstall(setupResult.planPath, setupResult.dependencies);
     expect(result.authenticated_system).toBe("passed");
@@ -2089,7 +2089,7 @@ describe("installer workflows", () => {
     const authenticated = await setup(REVISION);
     alignInstalledStateWithPlan(authenticated);
     authenticated.dependencies.environment = {
-      HARBOR_HF_INSTALL_VERIFY_BEARER: "verify-placeholder",
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "verify-placeholder",
     };
     authenticated.http.systemIntegrityError = "integrity-placeholder";
     await expect(
