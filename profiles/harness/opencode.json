@@ -13,12 +13,7 @@
     "agent": "opencode",
     "revision": "1.18.20",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier",
-      "provider-usage"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier", "provider-usage"],
     "harbor_agent": {
       "name": "opencode",
       "model_name": "openai/openai/gpt-oss-20b:together",
