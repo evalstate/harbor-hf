@@ -1815,15 +1815,19 @@ export class Projection {
   }
 
   async jobs(limit = 100, offset = 0): Promise<Selectable<ActionRow>[]> {
-    return this.db
+    const rows = await this.db
       .selectFrom("actions")
       .selectAll()
       .where("action_kind", "in", ["job.launch", "job.observe", "job.cancel"])
       .orderBy("created_at", "desc")
       .orderBy("action_id", "desc")
-      .limit(limit)
-      .offset(offset)
       .execute();
+    const latest = new Map<string, Selectable<ActionRow>>();
+    for (const row of rows) {
+      const key = row.resource_id ?? row.action_id;
+      if (!latest.has(key)) latest.set(key, row);
+    }
+    return [...latest.values()].slice(offset, offset + limit);
   }
 
   async endpoints(limit = 100, offset = 0): Promise<Selectable<EndpointRow>[]> {

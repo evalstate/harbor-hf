@@ -411,6 +411,84 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("returns the latest observed state for each Job", async () => {
+    const { runtime, app } = await setup();
+    const campaign = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "job-latest-state-key" },
+      payload: input,
+    });
+    expect(campaign.statusCode).toBe(202);
+    const campaignId = campaign.json().campaign_id as string;
+    const actor = { subject: "operator" as const, role: "operator" as const };
+    const resourceId = "job-latest-state";
+    const payload = {
+      task_ids: ["control-smoke-task"],
+      max_infrastructure_attempts: 1,
+      success_without_worker_receipt: true,
+      resource_id: resourceId,
+    };
+    for (const record of [
+      {
+        kind: "job.launch" as const,
+        generation: 0,
+        createdAt: "2026-08-21T10:04:10.000Z",
+        observedState: "SCHEDULING",
+      },
+      {
+        kind: "job.observe" as const,
+        generation: 0,
+        createdAt: "2026-08-21T10:04:20.000Z",
+        observedState: "SCHEDULING",
+      },
+      {
+        kind: "job.observe" as const,
+        generation: 1,
+        createdAt: "2026-08-21T10:04:30.000Z",
+        observedState: "RUNNING",
+      },
+      {
+        kind: "job.observe" as const,
+        generation: 2,
+        createdAt: "2026-08-21T10:04:40.000Z",
+        observedState: "ERROR",
+      },
+    ]) {
+      const intent = runtime.service.actionIntent(
+        campaignId,
+        record.kind,
+        resourceId,
+        record.generation,
+        payload,
+        actor,
+        record.createdAt,
+      );
+      await runtime.service.writeAction(intent);
+      await runtime.service.receipt(intent, {
+        outcome: record.kind === "job.launch" ? "created" : "completed",
+        observed_state: record.observedState,
+        resource_id: resourceId,
+      });
+    }
+    const jobs = await app.inject({ method: "GET", url: "/api/v1/jobs" });
+    expect(jobs.statusCode).toBe(200);
+    const items = jobs.json().items as Array<{
+      action_kind: string;
+      observed_state: string | null;
+      resource_id: string | null;
+    }>;
+    const matching = items.filter((item) => item.resource_id === resourceId);
+    expect(matching).toHaveLength(1);
+    expect(matching[0]).toMatchObject({
+      action_kind: "job.observe",
+      observed_state: "ERROR",
+      resource_id: resourceId,
+      inspect_url: `https://huggingface.co/jobs/test/${resourceId}`,
+    });
+    await app.close();
+  });
+
   it("limits worker capabilities to their campaign action routes", async () => {
     const { runtime, app } = await setup();
     const submission = await runtime.service.submit(

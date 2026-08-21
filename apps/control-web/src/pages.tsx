@@ -1036,7 +1036,7 @@ export function JobsPage() {
     <>
       <PageHeader
         title="Jobs"
-        description="HF Job identity, ownership and infrastructure state tied to deterministic actions."
+        description="Current HF Job identity, ownership, and latest observed infrastructure state."
       />
       <QueryContent query={query}>
         <DataTable columns={columns} data={query.data?.items ?? []} />

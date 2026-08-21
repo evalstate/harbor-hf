@@ -221,10 +221,44 @@ describe("control smoke worker", () => {
       expect(result).toEqual({
         code: 1,
         stdout: "",
-        stderr: "control-smoke-failed\n",
+        stderr:
+          "control-smoke-failed: control smoke credentials are forbidden in workers\n",
       });
     },
   );
+
+  it("writes the control request failure onto stderr", async () => {
+    const server = createServer((_request, response) => {
+      response.statusCode = 404;
+      response.setHeader("content-type", "text/html");
+      response.end("<html>not found</html>");
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server did not bind a TCP port");
+    try {
+      const profile = JSON.parse(
+        await readFile(resolve("profiles/deployment/hf-cpu-smoke.json"), "utf8"),
+      ) as { spec: { job_command: string[] } };
+      const result = await childResult(profile.spec.job_command, {
+        HARBOR_HF_CAMPAIGN_ID: "campaign-control-smoke",
+        HARBOR_HF_ACTION_ID: "action-control-smoke",
+        HARBOR_HF_TASK_IDS_JSON: JSON.stringify(["control-smoke-task"]),
+        HARBOR_HF_CONTROL_URL: `http://127.0.0.1:${address.port}`,
+        HARBOR_HF_WORKER_CAPABILITY: "test-worker-capability",
+      });
+      expect(result).toEqual({
+        code: 1,
+        stdout: "",
+        stderr: "control-smoke-failed: control request failed with status 404\n",
+      });
+    } finally {
+      server.close();
+      await once(server, "close");
+    }
+  });
 
   it("requires a worker receipt for control smoke success", async () => {
     const profile = JSON.parse(

@@ -3,7 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { affectedQueryKeys, keys, useLiveUpdates } from "../src/queries";
+import {
+  affectedQueryKeys,
+  JOBS_REFRESH_INTERVAL_MS,
+  keys,
+  useJobs,
+  useLiveUpdates,
+} from "../src/queries";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -155,5 +161,32 @@ describe("live query updates", () => {
     expect(invalidated).toContainEqual(keys.audit);
     expect(invalidated).not.toContainEqual(keys.session);
     expect(invalidated).not.toContainEqual(keys.profiles);
+  });
+
+  it("refetches Jobs on a short interval so observed state stays current", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ items: [], next_cursor: null }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 60_000 } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    renderHook(() => useJobs(), { wrapper });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(JOBS_REFRESH_INTERVAL_MS);
+    });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
   });
 });

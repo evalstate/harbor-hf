@@ -202,7 +202,9 @@ async function main() {
   process.stdout.write("control-smoke-ok\n");
 }
 
-main().catch(() => {
-  process.stderr.write("control-smoke-failed\n");
+main().catch((error) => {
+  const message =
+    error instanceof Error ? error.message.replaceAll(/\s+/g, " ") : "unknown error";
+  process.stderr.write(`control-smoke-failed: ${message}\n`);
   process.exitCode = 1;
 });

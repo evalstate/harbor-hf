@@ -241,4 +241,79 @@ describe("projection replay", () => {
     expect(corrupt.system().ready).toBe(false);
     await corrupt.close();
   });
+
+  it("lists only the latest observed state for each Job", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const submitted = await control.service.submit(input, "jobs-latest-state-key", {
+      subject: "operator",
+      role: "operator",
+    });
+    const actor = { subject: "operator" as const, role: "operator" as const };
+    const resourceId = "job-latest-state";
+    const payload = {
+      task_ids: ["control-smoke-task"],
+      max_infrastructure_attempts: 1,
+      success_without_worker_receipt: true,
+      resource_id: resourceId,
+    };
+    const records: Array<{
+      kind: "job.launch" | "job.observe";
+      generation: number;
+      createdAt: string;
+      observedState: string;
+    }> = [
+      {
+        kind: "job.launch",
+        generation: 0,
+        createdAt: "2026-08-21T10:04:10.000Z",
+        observedState: "SCHEDULING",
+      },
+      {
+        kind: "job.observe",
+        generation: 0,
+        createdAt: "2026-08-21T10:04:20.000Z",
+        observedState: "SCHEDULING",
+      },
+      {
+        kind: "job.observe",
+        generation: 1,
+        createdAt: "2026-08-21T10:04:30.000Z",
+        observedState: "RUNNING",
+      },
+      {
+        kind: "job.observe",
+        generation: 2,
+        createdAt: "2026-08-21T10:04:40.000Z",
+        observedState: "ERROR",
+      },
+    ];
+    for (const record of records) {
+      const intent = control.service.actionIntent(
+        submitted.campaign_id,
+        record.kind,
+        resourceId,
+        record.generation,
+        payload,
+        actor,
+        record.createdAt,
+      );
+      await control.service.writeAction(intent);
+      await control.service.receipt(intent, {
+        outcome: record.kind === "job.launch" ? "created" : "completed",
+        observed_state: record.observedState,
+        resource_id: resourceId,
+      });
+    }
+
+    const jobs = await control.projection.jobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({
+      campaign_id: submitted.campaign_id,
+      action_kind: "job.observe",
+      observed_state: "ERROR",
+      resource_id: resourceId,
+    });
+    expect(jobs[0]?.created_at).toBe("2026-08-21T10:04:40.000Z");
+  });
 });
