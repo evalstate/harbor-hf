@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  access,
   chmod,
   lstat,
   mkdir,
@@ -23,6 +24,7 @@ import {
 } from "../model.js";
 import {
   activateInstallState,
+  assertInstallerStateOutsideRepository,
   carryBootstrapReceipt,
   currentInstallPlanPath,
   discardInstallState,
@@ -41,6 +43,28 @@ async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(resolve(tmpdir(), "installer-state-test-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+async function initializeGitRepository(repository: string): Promise<void> {
+  await writeFile(resolve(repository, "placeholder.txt"), "placeholder\n");
+  for (const args of [
+    ["init"],
+    ["add", "placeholder.txt"],
+    ["commit", "-m", "test: initialize placeholder repository"],
+  ]) {
+    const result = spawnSync("git", args, {
+      cwd: repository,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_EMAIL: "author-placeholder.invalid",
+        GIT_AUTHOR_NAME: "Placeholder Author",
+        GIT_COMMITTER_EMAIL: "committer-placeholder.invalid",
+        GIT_COMMITTER_NAME: "Placeholder Committer",
+      },
+    });
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+  }
 }
 
 afterEach(async () => {
@@ -127,6 +151,96 @@ describe("private installer state", () => {
     expect(() =>
       installerStateRoot(undefined, { XDG_STATE_HOME: "relative" }, "/home"),
     ).toThrow("absolute");
+  });
+
+  it("validates physical state locations without creating them", async () => {
+    const directory = await temporaryDirectory();
+    const repository = resolve(directory, "repository");
+    const external = resolve(directory, "external");
+    await Promise.all([mkdir(repository), mkdir(external)]);
+
+    const internalState = resolve(repository, "missing", "state");
+    await expect(
+      assertInstallerStateOutsideRepository(internalState, repository),
+    ).rejects.toThrow("outside the source checkout");
+    await expect(access(internalState)).rejects.toThrow();
+
+    const linkedAncestor = resolve(directory, "linked-repository");
+    await symlink(repository, linkedAncestor);
+    const linkedState = resolve(linkedAncestor, "missing", "state");
+    await expect(
+      assertInstallerStateOutsideRepository(linkedState, repository),
+    ).rejects.toThrow("outside the source checkout");
+    await expect(access(resolve(repository, "missing"))).rejects.toThrow();
+
+    const missingExternalState = resolve(external, "missing", "state");
+    await expect(
+      assertInstallerStateOutsideRepository(missingExternalState, repository),
+    ).resolves.toBe(missingExternalState);
+    await expect(access(missingExternalState)).rejects.toThrow();
+    await expect(
+      assertInstallerStateOutsideRepository(external, repository),
+    ).resolves.toBe(external);
+    const safeStateLink = resolve(directory, "safe-state-link");
+    await symlink(external, safeStateLink);
+    await expect(
+      assertInstallerStateOutsideRepository(safeStateLink, repository),
+    ).resolves.toBe(external);
+
+    const danglingAncestor = resolve(directory, "dangling");
+    await symlink(resolve(repository, "not-created"), danglingAncestor);
+    await expect(
+      assertInstallerStateOutsideRepository(
+        resolve(danglingAncestor, "state"),
+        repository,
+      ),
+    ).rejects.toThrow();
+    await expect(access(resolve(repository, "not-created"))).rejects.toThrow();
+
+    const unsafeShared = resolve(directory, "unsafe-shared");
+    const replaceableAncestor = resolve(unsafeShared, "replaceable");
+    await mkdir(unsafeShared, { mode: 0o777 });
+    await chmod(unsafeShared, 0o777);
+    await mkdir(replaceableAncestor);
+    await expect(
+      assertInstallerStateOutsideRepository(
+        resolve(replaceableAncestor, "state"),
+        repository,
+      ),
+    ).rejects.toThrow("unsafe shared-writable");
+  });
+
+  it("rejects checkout-contained CLI state before creating it", async () => {
+    const repository = await temporaryDirectory();
+    await initializeGitRepository(repository);
+
+    for (const [command, additionalArguments] of [
+      ["cli-plan.ts", []],
+      ["cli-provision.ts", []],
+      ["cli-configure.ts", []],
+      ["cli-verify.ts", []],
+      ["cli-activate.ts", ["--confirm-space", "example/control"]],
+      ["cli-disable.ts", ["--confirm-space", "example/control"]],
+    ] as const) {
+      const state = resolve(repository, `installer-state-${command}`);
+      const result = spawnSync(
+        resolve(process.cwd(), "node_modules/.bin/tsx"),
+        [
+          resolve(process.cwd(), "scripts/control-service/installer", command),
+          "--space",
+          "example/control",
+          "--state-dir",
+          state,
+          ...additionalArguments,
+        ],
+        { cwd: repository, encoding: "utf8" },
+      );
+      expect(result.status).toBe(1);
+      expect(`${result.stdout}${result.stderr}`).toContain(
+        "installer state must be outside the source checkout",
+      );
+      await expect(access(state)).rejects.toThrow();
+    }
   });
 
   it("stores and resolves a target-bound owner-only current plan", async () => {
@@ -354,6 +468,8 @@ describe("private installer state", () => {
 
   it("prevents verify from observing a concurrent installer operation", async () => {
     const { root } = await savedState();
+    const repository = await temporaryDirectory();
+    await initializeGitRepository(repository);
     await withInstallerStateLock("example/control", root, async () => {
       const result = spawnSync(
         resolve(process.cwd(), "node_modules/.bin/tsx"),
@@ -365,6 +481,7 @@ describe("private installer state", () => {
           root,
         ],
         {
+          cwd: repository,
           encoding: "utf8",
           env: {
             ...process.env,

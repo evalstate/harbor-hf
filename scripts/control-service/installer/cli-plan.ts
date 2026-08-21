@@ -1,6 +1,7 @@
 import { cliMain, defaultDependencies, formatPlanOutput, parseOptions } from "./cli.js";
 import {
   activateInstallState,
+  assertInstallerStateOutsideRepository,
   discardInstallState,
   findCurrentInstallPlanPath,
   installerStateRoot,
@@ -24,7 +25,13 @@ await cliMain(async () => {
     return;
   }
   const space = options.space as string;
-  const stateRoot = installerStateRoot(options["state-dir"]);
+  const requestedStateRoot = installerStateRoot(options["state-dir"]);
+  const dependencies = defaultDependencies();
+  const source = await dependencies.source.inspect();
+  const stateRoot = await assertInstallerStateOutsideRepository(
+    requestedStateRoot,
+    source.repositoryRoot,
+  );
   await withInstallerStateLock(space, stateRoot, async () => {
     const previousPlanPath = await findCurrentInstallPlanPath(space, stateRoot);
     const prepared = await prepareInstallState(space, stateRoot);
@@ -37,7 +44,7 @@ await cliMain(async () => {
           bundleDirectory: prepared.bundleDirectory,
           planPath: prepared.planPath,
         },
-        defaultDependencies(),
+        dependencies,
       );
       const observedPhase =
         result.plan.observed_preconditions.space?.variables.HARBOR_HF_INSTALL_PHASE;

@@ -4,7 +4,9 @@ import {
   formatActivationOutput,
   parseConfirmationOptions,
 } from "./cli.js";
+import { locateGitRepositoryRoot } from "./source.js";
 import {
+  assertInstallerStateOutsideRepository,
   currentInstallPlanPath,
   installerStateRoot,
   readBootstrapReceipt,
@@ -21,7 +23,11 @@ await cliMain(async () => {
     process.stdout.write(usage);
     return;
   }
-  const stateRoot = installerStateRoot(options.stateDirectory);
+  const stateRoot = await assertInstallerStateOutsideRepository(
+    installerStateRoot(options.stateDirectory),
+    await locateGitRepositoryRoot(),
+  );
+  const dependencies = defaultDependencies();
   await withInstallerStateLock(options.space, stateRoot, async () => {
     const planPath = await currentInstallPlanPath(options.space, stateRoot);
     const receipt = await readBootstrapReceipt(planPath);
@@ -31,7 +37,7 @@ await cliMain(async () => {
         ...(receipt ? { bootstrapReceipt: receipt } : {}),
         confirmSpace: options.confirmSpace,
       },
-      defaultDependencies(),
+      dependencies,
     );
     process.stdout.write(formatActivationOutput(options.space, result));
   });

@@ -11,12 +11,13 @@ import {
   mkdtemp,
   open,
   readdir,
+  realpath,
   rename,
   rm,
   stat,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { canonicalJson } from "./canonical.js";
 import { sanitizedChildEnvironment } from "./environment.js";
 import {
@@ -201,6 +202,106 @@ export function installerStateRoot(
   }
   if (!isAbsolute(home)) throw new Error("user home directory must be absolute");
   return resolve(home, ".local", "state", "harbor-hf", "install");
+}
+
+function isInside(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return (
+    path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+  );
+}
+
+interface PhysicalLocation {
+  existingAncestor: string;
+  location: string;
+}
+
+async function physicalLocationWithoutCreating(
+  path: string,
+): Promise<PhysicalLocation> {
+  let current = resolve(path);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      await lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      missing.unshift(basename(current));
+      current = parent;
+      continue;
+    }
+    const existingAncestor = await realpath(current);
+    return {
+      existingAncestor,
+      location: resolve(existingAncestor, ...missing),
+    };
+  }
+}
+
+async function assertTrustedStateAncestor(existingAncestor: string): Promise<void> {
+  const uid = currentUid();
+  if (uid === undefined) {
+    throw new Error("installer state validation requires a Unix user identity");
+  }
+  const pathComponents: string[] = [];
+  let root = existingAncestor;
+  while (true) {
+    const parent = dirname(root);
+    if (parent === root) break;
+    pathComponents.unshift(basename(root));
+    root = parent;
+  }
+
+  let current = root;
+  let currentInfo = await lstat(current);
+  for (const component of pathComponents) {
+    if (!currentInfo.isDirectory() || currentInfo.isSymbolicLink()) {
+      throw new Error("installer state ancestor changed during validation");
+    }
+    const parentInfo = currentInfo;
+    if (parentInfo.uid !== uid && parentInfo.uid !== 0) {
+      throw new Error(
+        "installer state ancestor is beneath a directory with an untrusted owner",
+      );
+    }
+    const child = resolve(current, component);
+    const childInfo = await lstat(child);
+    if (!childInfo.isDirectory() || childInfo.isSymbolicLink()) {
+      throw new Error("installer state ancestor changed during validation");
+    }
+    if ((parentInfo.mode & 0o022) !== 0) {
+      const sticky = (parentInfo.mode & 0o1000) !== 0;
+      if (!sticky || childInfo.uid !== uid) {
+        throw new Error(
+          "installer state ancestor is beneath an unsafe shared-writable directory",
+        );
+      }
+    }
+    current = child;
+    currentInfo = childInfo;
+  }
+  if (currentInfo.uid !== uid || (currentInfo.mode & 0o022) !== 0) {
+    throw new Error(
+      "installer state ancestor must be current-user-owned and not shared-writable",
+    );
+  }
+}
+
+export async function assertInstallerStateOutsideRepository(
+  stateRoot: string,
+  repositoryRoot: string,
+): Promise<string> {
+  const [state, repositoryLocation] = await Promise.all([
+    physicalLocationWithoutCreating(stateRoot),
+    realpath(repositoryRoot),
+  ]);
+  if (isInside(repositoryLocation, state.location)) {
+    throw new Error("installer state must be outside the source checkout");
+  }
+  await assertTrustedStateAncestor(state.existingAncestor);
+  return state.location;
 }
 
 function targetDirectory(stateRoot: string, spaceId: string): string {

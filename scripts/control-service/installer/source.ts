@@ -83,19 +83,25 @@ export interface SourceAdapter {
   bundle(directory: string): Promise<void>;
 }
 
+export async function locateGitRepositoryRoot(
+  initialCwd: string = process.cwd(),
+): Promise<string> {
+  return resolve(
+    await runText({
+      command: "git",
+      args: ["rev-parse", "--show-toplevel"],
+      cwd: initialCwd,
+      timeoutMs: 10_000,
+      maxBytes: 16 * 1024,
+    }),
+  );
+}
+
 export class GitSourceAdapter implements SourceAdapter {
   constructor(private readonly initialCwd: string = process.cwd()) {}
 
   async inspect(): Promise<{ repositoryRoot: string; revision: string }> {
-    const repositoryRoot = resolve(
-      await runText({
-        command: "git",
-        args: ["rev-parse", "--show-toplevel"],
-        cwd: this.initialCwd,
-        timeoutMs: 10_000,
-        maxBytes: 16 * 1024,
-      }),
-    );
+    const repositoryRoot = await locateGitRepositoryRoot(this.initialCwd);
     const status = await runText({
       command: "git",
       args: ["status", "--porcelain=v1", "--untracked-files=all"],

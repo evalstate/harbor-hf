@@ -4,7 +4,9 @@ import {
   formatConfigureOutput,
   parseConfigureOptions,
 } from "./cli.js";
+import { locateGitRepositoryRoot } from "./source.js";
 import {
+  assertInstallerStateOutsideRepository,
   currentInstallPlanPath,
   installerStateRoot,
   readBootstrapReceipt,
@@ -22,7 +24,11 @@ await cliMain(async () => {
     process.stdout.write(usage);
     return;
   }
-  const stateRoot = installerStateRoot(options.stateDirectory);
+  const stateRoot = await assertInstallerStateOutsideRepository(
+    installerStateRoot(options.stateDirectory),
+    await locateGitRepositoryRoot(),
+  );
+  const dependencies = defaultDependencies();
   await withInstallerStateLock(options.space, stateRoot, async () => {
     const planPath = await currentInstallPlanPath(options.space, stateRoot);
     const bootstrapReceipt = await readBootstrapReceipt(planPath);
@@ -34,7 +40,7 @@ await cliMain(async () => {
         persistBootstrapReceipt: async (receipt) =>
           await writeBootstrapReceipt(planPath, receipt),
       },
-      defaultDependencies(),
+      dependencies,
     );
     process.stdout.write(formatConfigureOutput(options.space, result));
   });

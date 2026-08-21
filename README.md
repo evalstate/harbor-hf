@@ -90,7 +90,15 @@ When using `--state-dir`, pass the same value to every later command. Do not
 copy, delete, replace, or quarantine installer state during an active
 installation unless a reviewed recovery procedure explicitly requires it.
 Installer commands, including non-mutating verification, serialize operations
-per target. A valid lock whose process ended or whose host rebooted is released
+per target. Before an installer command creates the state root or target lock,
+it verifies that the root's physical location is outside the source checkout
+and uses that resolved location for the operation. Nonexistent paths beneath
+symlinked ancestors that resolve into the checkout are rejected. The nearest
+existing state ancestor must be current-user-owned and not shared-writable;
+each governing parent must be owned by the current Unix user or UID 0. A
+trusted sticky parent protects a current-user-owned child. Processes running
+under the same UID remain inside the installer's trust boundary. A valid lock
+whose process ended or whose host rebooted is released
 automatically by the operating system; a live, wrong-owner, or insecure lock
 remains a stop condition.
 
@@ -157,7 +165,9 @@ Phase two:
 Write probes are retained as small capability attestations. Their paths and
 contents contain no credential-derived or operator-specific data. A fresh path
 is required for every credential acceptance so an existing object can never
-let a read-only replacement credential pass.
+let a read-only replacement credential pass. Probe HTTP exchanges use
+inactivity deadlines that reset whenever response progress is observed.
+Response streams are byte-bounded before Blob materialization.
 
 The control credential must have no global permissions, gated-repository
 access, or additional scoped grants. Its only grants are
