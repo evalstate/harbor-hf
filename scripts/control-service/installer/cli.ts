@@ -3,6 +3,7 @@ import { HuggingFaceControlTokenScope } from "./control-token-scope.js";
 import { HfCli } from "./hf.js";
 import { BoundedHttpAdapter } from "./http.js";
 import { StableIdentityAdapter } from "./identity.js";
+import { HuggingFaceInferenceTokenScope } from "./inference-token-scope.js";
 import type { InstallPlan } from "./model.js";
 import { BoundedJsonProcess } from "./process.js";
 import { TtyInstallerSecretInput } from "./secret-input.js";
@@ -20,6 +21,7 @@ export function defaultDependencies(): InstallerDependencies {
     hf,
     bucketWriteProbe: new HuggingFaceBucketWriteProbe(),
     controlTokenScope: new HuggingFaceControlTokenScope(http),
+    inferenceTokenScope: new HuggingFaceInferenceTokenScope(http),
     http,
     identity: new StableIdentityAdapter(hf, http),
     secretInput: new TtyInstallerSecretInput(),

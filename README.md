@@ -146,8 +146,8 @@ Phase two:
    `HARBOR_HF_INSTALL_CONTROL_SECRET` and
    `HARBOR_HF_INSTALL_INFERENCE_SECRET` process variables or, when absent,
    hidden terminal prompts;
-4. attests the proposed control credential's exact fine-grained scope, creates
-   a fresh non-secret object under
+4. attests both proposed service credentials' exact fine-grained scopes,
+   creates a fresh non-secret object under
    `installer/write-probes/schema=v1/`, and reads back its exact bytes;
 5. writes the paired Space secrets without recording their values;
 6. sets the complete installed configuration with writes disabled;
@@ -168,6 +168,12 @@ broad personal token, a token for another target, and a token with missing or
 additional permissions are rejected before either Space secret is written.
 Scope attestation reads only the bounded `whoami-v2` response; it never
 enumerates durable control records.
+
+The inference credential must likewise have no global permissions,
+gated-repository access, or Hub resource grants. Its only permissions are
+`inference.endpoints.infer.write` and `inference.serverless.write`. The
+installer rejects broad, missing, or additionally scoped inference credentials
+before probing the Bucket or persisting either Space secret.
 
 On success it reports `Installation verified`, `Write mode: disabled`, and
 `Production ready: no`. A safely interrupted phase can normally be resumed by

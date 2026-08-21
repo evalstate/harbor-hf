@@ -8,6 +8,7 @@ import type { ControlTokenScopeAdapter } from "./control-token-scope.js";
 import { type HfAdapter, HfCommandFailure } from "./hf.js";
 import type { HttpAdapter } from "./http.js";
 import type { IdentityAdapter } from "./identity.js";
+import type { InferenceTokenScopeAdapter } from "./inference-token-scope.js";
 import {
   assertManifestEqual,
   buildBundleManifest,
@@ -35,6 +36,7 @@ export interface InstallerDependencies {
   source: SourceAdapter;
   bucketWriteProbe?: BucketWriteProbeAdapter;
   controlTokenScope?: ControlTokenScopeAdapter;
+  inferenceTokenScope?: InferenceTokenScopeAdapter;
   environment?: NodeJS.ProcessEnv;
   secretInput?: InstallerSecretInput;
 }
@@ -826,6 +828,26 @@ async function assertControlCredentialCanUseBucket(
   } catch {
     throw new InstallerInputError(
       "control credential does not have the exact approved control scope",
+    );
+  }
+}
+
+async function assertInferenceCredentialScope(
+  secrets: Record<string, string>,
+  dependencies: InstallerDependencies,
+): Promise<void> {
+  const inferenceCredential = secrets.HF_INFERENCE_TOKEN;
+  if (!inferenceCredential) {
+    throw new InstallerInputError("inference credential is missing");
+  }
+  try {
+    if (!dependencies.inferenceTokenScope) throw new Error();
+    await dependencies.inferenceTokenScope.attest({
+      accessToken: inferenceCredential,
+    });
+  } catch {
+    throw new InstallerInputError(
+      "inference credential does not have the exact approved inference-only scope",
     );
   }
 }
@@ -1638,6 +1660,7 @@ async function completeInstall(
           SECRET_NAMES,
           dependencies.secretInput,
         );
+        await assertInferenceCredentialScope(secrets, dependencies);
         await assertControlCredentialCanUseBucket(plan, secrets, dependencies);
         const secretsFile = await writePrivateEnvironmentFile(
           tempDirectory,
@@ -1680,6 +1703,7 @@ async function completeInstall(
           SECRET_NAMES,
           dependencies.secretInput,
         );
+        await assertInferenceCredentialScope(secrets, dependencies);
         await assertControlCredentialCanUseBucket(plan, secrets, dependencies);
         const secretsFile = await writePrivateEnvironmentFile(
           tempDirectory,

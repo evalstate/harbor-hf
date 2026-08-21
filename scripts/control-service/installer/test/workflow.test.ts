@@ -21,6 +21,10 @@ import type {
 import { type HfAdapter, HfCommandFailure } from "../hf.js";
 import type { HttpAdapter } from "../http.js";
 import type { IdentityAdapter } from "../identity.js";
+import type {
+  InferenceTokenScopeAdapter,
+  InferenceTokenScopeInput,
+} from "../inference-token-scope.js";
 import {
   expectedVariables,
   type Principal,
@@ -388,6 +392,16 @@ class FakeControlTokenScope implements ControlTokenScopeAdapter {
   }
 }
 
+class FakeInferenceTokenScope implements InferenceTokenScopeAdapter {
+  fail = false;
+  calls: InferenceTokenScopeInput[] = [];
+
+  async attest(input: InferenceTokenScopeInput): Promise<void> {
+    this.calls.push({ ...input });
+    if (this.fail) throw new Error("forbidden inference scope");
+  }
+}
+
 async function setup(existingRevision?: string) {
   const directory = await temporaryDirectory();
   const repository = resolve(directory, "repository");
@@ -398,6 +412,7 @@ async function setup(existingRevision?: string) {
   const identity = new FakeIdentity();
   const bucketWriteProbe = new FakeBucketWriteProbe();
   const controlTokenScope = new FakeControlTokenScope();
+  const inferenceTokenScope = new FakeInferenceTokenScope();
   const http = new FakeHttp(() => {
     const writeMode = hf.state.space?.variables.HARBOR_HF_WRITE_MODE;
     return writeMode === "enabled" || writeMode === "enabled" ? writeMode : "disabled";
@@ -412,6 +427,7 @@ async function setup(existingRevision?: string) {
     http,
     bucketWriteProbe,
     controlTokenScope,
+    inferenceTokenScope,
     environment: {
       HARBOR_HF_INSTALL_CONTROL_SECRET: "control-placeholder",
       HARBOR_HF_INSTALL_INFERENCE_SECRET: "inference-placeholder",
@@ -435,6 +451,7 @@ async function setup(existingRevision?: string) {
     http,
     bucketWriteProbe,
     controlTokenScope,
+    inferenceTokenScope,
     dependencies,
     planned,
   };
@@ -1412,6 +1429,24 @@ describe("installer workflows", () => {
     expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
   });
 
+  it("rejects an inference credential before any secret is persisted", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    setupResult.inferenceTokenScope.fail = true;
+
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "inference credential does not have the exact approved inference-only scope",
+    );
+    expect(setupResult.inferenceTokenScope.calls).toEqual([
+      { accessToken: "inference-placeholder" },
+    ]);
+    expect(setupResult.controlTokenScope.calls).toHaveLength(0);
+    expect(setupResult.bucketWriteProbe.calls).toHaveLength(0);
+    expect(setupResult.hf.calls).not.toContain("setSecrets");
+    expect(setupResult.hf.state.space?.secretNames).toEqual([]);
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+  });
+
   it("rejects a control credential that cannot create a fresh Bucket object", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
@@ -1459,6 +1494,10 @@ describe("installer workflows", () => {
       bucketId: "example/control-artifacts",
       accessToken: "replacement-control",
     });
+    expect(setupResult.inferenceTokenScope.calls).toHaveLength(2);
+    expect(setupResult.inferenceTokenScope.calls[1]).toEqual({
+      accessToken: "replacement-inference",
+    });
     expect(setupResult.bucketWriteProbe.calls).toHaveLength(2);
     expect(setupResult.bucketWriteProbe.calls[0]?.path).not.toBe(
       setupResult.bucketWriteProbe.calls[1]?.path,
@@ -1469,6 +1508,47 @@ describe("installer workflows", () => {
         /^installer\/write-probes\/schema=v1\/[a-f0-9]{64}\/[a-f0-9]{32}$/,
       ),
     });
+  });
+
+  it("rejects replacement inference scope before rewriting installed secrets", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    await expect(complete(setupResult, bootstrapResult.receipt)).resolves.toMatchObject(
+      { status: "installed" },
+    );
+    setupResult.dependencies.environment = {
+      HARBOR_HF_INSTALL_CONTROL_SECRET: "replacement-control",
+      HARBOR_HF_INSTALL_INFERENCE_SECRET: "replacement-inference",
+    };
+    setupResult.inferenceTokenScope.fail = true;
+    setupResult.inferenceTokenScope.calls.length = 0;
+    setupResult.controlTokenScope.calls.length = 0;
+    setupResult.bucketWriteProbe.calls.length = 0;
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      applyInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: bootstrapResult.receipt,
+          replaceCredentials: true,
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow(
+      "inference credential does not have the exact approved inference-only scope",
+    );
+    expect(setupResult.inferenceTokenScope.calls).toEqual([
+      { accessToken: "replacement-inference" },
+    ]);
+    expect(setupResult.controlTokenScope.calls).toHaveLength(0);
+    expect(setupResult.bucketWriteProbe.calls).toHaveLength(0);
+    expect(setupResult.hf.calls).not.toContain("setSecrets");
+    expect(setupResult.hf.state.space?.secretNames).toEqual([
+      "HF_INFERENCE_TOKEN",
+      "HF_TOKEN",
+    ]);
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
   });
 
   it("returns failed verification to source-staged credential recovery", async () => {
