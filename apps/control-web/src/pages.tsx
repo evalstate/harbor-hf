@@ -6,6 +6,7 @@ import {
   ArrowRight,
   CircleDollarSign,
   Clock3,
+  ExternalLink,
   Gauge,
   PauseCircle,
   PlayCircle,
@@ -980,11 +981,24 @@ export function JobsPage() {
     {
       accessorKey: "resource_id",
       header: "HF Job",
-      cell: ({ getValue }) => (
-        <span className="font-mono text-xs">
-          {getValue() ? shortId(String(getValue())) : "Pending"}
-        </span>
-      ),
+      cell: ({ row }) => {
+        const resourceId = row.original.resource_id;
+        const inspectUrl = row.original.inspect_url;
+        if (!resourceId || !inspectUrl)
+          return <span className="font-mono text-xs">Pending</span>;
+        return (
+          <a
+            className="inline-flex items-center gap-1 font-mono text-xs text-cyan-300 hover:underline"
+            href={inspectUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {shortId(resourceId)}
+            <ExternalLink size={12} aria-hidden="true" />
+            <span className="sr-only">Open Hugging Face Job</span>
+          </a>
+        );
+      },
     },
     {
       accessorKey: "campaign_id",

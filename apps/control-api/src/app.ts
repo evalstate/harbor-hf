@@ -49,7 +49,6 @@ import {
   actionDispositionCorrectionResultSchema,
   actionDispositionCorrectionSchema,
   actionDispositionViewSchema,
-  actionSchema,
   attemptAcceptedSchema,
   auditSchema,
   campaignListSchema,
@@ -58,6 +57,7 @@ import {
   evidenceAcceptedSchema,
   evidenceUploadSchema,
   itemList,
+  jobSchema,
   profileSchema,
   publicationSchema,
   sessionSchema,
@@ -89,6 +89,10 @@ const embeddedCookiePolicy = {
   sameSite: "none",
   secure: true,
 } as const;
+
+function hubJobInspectUrl(namespace: string, jobId: string): string {
+  return `https://huggingface.co/jobs/${encodeURIComponent(namespace)}/${encodeURIComponent(jobId)}`;
+}
 
 function actor(request: FastifyRequest): AuthenticatedActor {
   if (!request.actor) throw new Error("authenticated actor is missing");
@@ -1877,7 +1881,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       schema: {
         tags: ["resources"],
         querystring: paginationQuerySchema,
-        response: { 200: itemList(actionSchema) },
+        response: { 200: itemList(jobSchema) },
       },
     },
     async (request) => {
@@ -1885,7 +1889,17 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       const limit = query.limit ?? 50;
       const offset = cursorOffset(query.cursor);
       const items = await runtime.projection.jobs(limit + 1, offset);
-      return offsetPage(items, offset, limit);
+      return offsetPage(
+        items.map((item) => ({
+          ...item,
+          inspect_url:
+            item.resource_id === null
+              ? null
+              : hubJobInspectUrl(runtime.config.namespace, item.resource_id),
+        })),
+        offset,
+        limit,
+      );
     },
   );
   app.get(

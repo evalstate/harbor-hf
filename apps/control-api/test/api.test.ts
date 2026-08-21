@@ -384,6 +384,33 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("exposes Hub inspect URLs for Jobs", async () => {
+    const { runtime, app } = await setup();
+    const campaign = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "job-inspect-campaign-key" },
+      payload: input,
+    });
+    expect(campaign.statusCode).toBe(202);
+    await runtime.reconciler.tick();
+    const jobs = await app.inject({ method: "GET", url: "/api/v1/jobs" });
+    expect(jobs.statusCode).toBe(200);
+    const items = jobs.json().items as Array<{
+      resource_id: string | null;
+      inspect_url: string | null;
+    }>;
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(item.inspect_url).toBe(
+        item.resource_id === null
+          ? null
+          : `https://huggingface.co/jobs/test/${encodeURIComponent(item.resource_id)}`,
+      );
+    }
+    await app.close();
+  });
+
   it("limits worker capabilities to their campaign action routes", async () => {
     const { runtime, app } = await setup();
     const submission = await runtime.service.submit(

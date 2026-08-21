@@ -260,6 +260,16 @@ export const actionSchema = {
   },
 } as const;
 
+export const jobSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [...actionSchema.required, "inspect_url"],
+  properties: {
+    ...actionSchema.properties,
+    inspect_url: nullableString,
+  },
+} as const;
+
 export const endpointSchema = {
   type: "object",
   additionalProperties: false,

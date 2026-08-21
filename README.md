@@ -64,7 +64,7 @@ harbor-hf results
 harbor-hf audit
 ```
 
-The same information is available in the Space's web console. The browser uses same-origin API requests and never receives the Bucket credential.
+The same information is available in the Space's web console. The Jobs page links each observed HF Job ID to its Hub inspect page. The browser uses same-origin API requests and never receives the Bucket credential.
 
 ## Repair infrastructure failures
 

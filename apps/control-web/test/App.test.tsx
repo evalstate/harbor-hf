@@ -209,6 +209,47 @@ describe("control web", () => {
     expect(confirm).toBeEnabled();
   });
 
+  it("links Jobs to the Hub inspect page", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/jobs"))
+          return json({
+            items: [
+              {
+                action_id: "action-job-1",
+                campaign_id: "campaign-job-1",
+                action_kind: "job.launch",
+                generation: 1,
+                target: "task-1",
+                outcome: "created",
+                observed_state: "RUNNING",
+                resource_id: "693994e21a39f67af5a41ad0",
+                inspect_url:
+                  "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+                created_at: "2026-08-18T00:00:00.000Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/jobs");
+    const link = await screen.findByRole("link", {
+      name: /693994e21a39f67af5a41ad0/i,
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+    );
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
   it("shows campaign request errors instead of a false not-found state", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(

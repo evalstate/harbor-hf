@@ -2454,7 +2454,8 @@
                           "outcome",
                           "observed_state",
                           "resource_id",
-                          "created_at"
+                          "created_at",
+                          "inspect_url"
                         ],
                         "properties": {
                           "action_id": {
@@ -2505,6 +2506,16 @@
                           "created_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "inspect_url": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         }
                       }

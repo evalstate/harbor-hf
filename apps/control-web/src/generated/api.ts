@@ -1364,6 +1364,7 @@ export interface paths {
                                 resource_id: string | null;
                                 /** Format: date-time */
                                 created_at: string;
+                                inspect_url: string | null;
                             }[];
                             next_cursor: string | null;
                         };
