@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -223,10 +224,9 @@ def test_harbor_run_config_uses_adhoc_progress_source(
     path = worker._job_config(config, config.tasks[0], tmp_path)
     written = json.loads(path.read_text())
     task_config = written["tasks"][0]
-    source = task_config["source"] if "source" in task_config else None
 
+    assert task_config["source"] != "example-dataset"
     assert written["datasets"] == []
-    assert source in {None, "adhoc"}
 
 
 def _scheduler_config(
@@ -327,6 +327,17 @@ def test_stops_refilling_after_task_failure(
             False,
             ("agent", False),
         ),
+        (
+            {
+                "exception_info": {
+                    "exception_type": "IndexError",
+                    "exception_traceback": "Job._update_metric_display",
+                }
+            },
+            "",
+            False,
+            ("complete", False),
+        ),
         (None, "Sandbox API failed", False, ("infrastructure", True)),
         (None, "IndexError: list index out of range", False, ("infrastructure", True)),
         (
@@ -396,3 +407,14 @@ def test_streams_command_output_and_kills_a_hung_process(
     assert timed_out is True
     assert "hello-from-worker" in output
     assert "hello-from-worker" in capsys.readouterr().out
+
+
+def test_streams_command_output_with_injected_env() -> None:
+    output, timed_out = worker._run_logged_command(
+        [sys.executable, "-c", "import os; print(os.environ['HHF_PATCH'], flush=True)"],
+        5,
+        {**os.environ, "HHF_PATCH": "applied"},
+    )
+
+    assert timed_out is False
+    assert "applied" in output

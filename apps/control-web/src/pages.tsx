@@ -79,6 +79,7 @@ import {
   Card,
   Empty,
   Hint,
+  OutcomeBadge,
   Progress,
   QueryContent,
   statusTextClass,
@@ -1100,9 +1101,7 @@ export function CampaignPage() {
       accessorKey: "terminal_outcome",
       header: () => <Hint text={hints.campaign.outcome}>Outcome</Hint>,
       cell: ({ getValue }) => (
-        <Badge status={String(getValue() ?? "pending")}>
-          {humanize(String(getValue() ?? "pending"))}
-        </Badge>
+        <OutcomeBadge outcome={String(getValue() ?? "pending")} />
       ),
     },
     {
@@ -1279,9 +1278,7 @@ export function TaskPage() {
               <Hint text={hints.campaign.outcome}>Outcome</Hint>
             </dt>
             <dd className="mt-1">
-              <Badge status={detail.data.task.terminal_outcome ?? "pending"}>
-                {humanize(detail.data.task.terminal_outcome ?? "pending")}
-              </Badge>
+              <OutcomeBadge outcome={detail.data.task.terminal_outcome} />
             </dd>
           </div>
           <div>
@@ -1312,7 +1309,7 @@ export function TaskPage() {
                 </p>
                 <p className="mt-1 font-mono text-sm">{attempt.attempt_id}</p>
               </div>
-              <Badge status={attempt.outcome}>{humanize(attempt.outcome)}</Badge>
+              <OutcomeBadge outcome={attempt.outcome} />
             </div>
             <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-3">
               <div>

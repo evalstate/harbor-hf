@@ -4,6 +4,8 @@ import {
   formatPercent,
   formatPercentInterval,
   formatTokens,
+  logicalOutcomeHint,
+  logicalOutcomeLabel,
   runNameClass,
 } from "../src/lib";
 
@@ -49,5 +51,20 @@ describe("result formatting", () => {
     expect(runNameClass).toContain("min-w-0");
     expect(runNameClass).not.toContain("min-w-[20rem]");
     expect(runNameClass).not.toContain("min-w-[22rem]");
+  });
+});
+
+describe("logical outcome labels", () => {
+  it("names policy and agent failures in words", () => {
+    expect(logicalOutcomeLabel("policy")).toBe("Provider rejected the request");
+    expect(logicalOutcomeHint("policy")).toContain("authentication");
+    expect(logicalOutcomeLabel("agent")).toBe("Agent ended without a score");
+    expect(logicalOutcomeHint("agent")).toContain("no valid final response");
+    expect(logicalOutcomeLabel("complete")).toBe("Scored success");
+    expect(logicalOutcomeLabel(null)).toBe("Not sealed yet");
+  });
+
+  it("rejects an unknown outcome instead of showing the raw token", () => {
+    expect(() => logicalOutcomeLabel("mystery")).toThrow("unknown logical outcome");
   });
 });

@@ -88,6 +88,14 @@ persistent secrets or inference access. Harbor resolves the job. The worker
 submits one `prepared.trial` record per logical task and then one `prepared.job`
 record through a short-lived capability.
 
+Execution workers pin Harbor 0.21.0. That release crashes in
+`Job._update_metric_display` with `IndexError` after a direct task writes
+`result.json` when the progress metric list is empty. The worker applies a
+sitecustomize patch that seeds task sources and skips empty progress display.
+Delete `packages/harbor-hf-agents/src/harbor_hf_agents/support/harbor_0210_empty_metrics.py`
+when the pinned Harbor version includes
+[PR 2681](https://github.com/harbor-framework/harbor/pull/2681).
+
 The prepared records contain the exact Harbor trial locks and the data needed
 for admission, including source and task digests, resolved image digests,
 resources, phase time limits, agent settings, and Harbor version. The final
@@ -415,7 +423,7 @@ Campaign pages show:
 
 - total logical tasks and sealed outcomes;
 - active tasks and infrastructure replacements;
-- terminal invalid, policy, cancellation, verifier and benchmark failures;
+- terminal invalid, provider-rejected, agent, cancellation, verifier and benchmark failures;
 - physical attempt counts;
 - reserved, observed and reconciled cost plus the approved ceiling;
 - requested and observed endpoint state;
@@ -451,10 +459,13 @@ The interface supports keyboard navigation, narrow viewports, light and dark
 color schemes, visible focus, and reduced motion. Labels use hover explanations
 for campaign launch fields, spend, Jobs, Endpoints, results, and other operator
 controls. Tables virtualize only when a measured row count requires it. Every
-status also has text and an icon; color is never the only signal. Complete
+status also has text and an icon; color is never the only signal. Scored-success
 outcomes are green, sealed timeouts and cancellations are yellow, and failures
-are red. A finished campaign with sealed non-success tasks is labeled Completed
-with failures, not Completed.
+are red. Outcome badges spell out the sealed result: scored success, provider
+rejected the request, agent ended without a score, and the other catalogued
+outcomes. Raw tokens such as `policy` and `agent` are not shown. Hover the
+badge for the sealed-versus-retryable distinction. A finished campaign with
+sealed non-success tasks is labeled Completed with failures, not Completed.
 
 ## Authentication and authorization
 

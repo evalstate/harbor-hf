@@ -704,8 +704,8 @@ describe("control web", () => {
     expect(
       screen.getByText("Published. 1 sealed task did not succeed."),
     ).toBeInTheDocument();
-    expect(screen.getByText("Complete").className).toContain("emerald");
-    expect(screen.getByText("Benchmark timeout").className).toContain("amber");
+    expect(screen.getByText("Scored success").className).toContain("emerald");
+    expect(screen.getByText("Timed out").className).toContain("amber");
   });
 
   it("shows cancelled outcomes in orange", async () => {
@@ -762,6 +762,62 @@ describe("control web", () => {
         .getAllByText("Cancelled")
         .some((element) => element.className.includes("orange")),
     ).toBe(true);
+  });
+
+  it("labels provider and agent failures in words", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-failed"))
+          return json({
+            campaign_id: "campaign-failed",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 2,
+            terminal_tasks: 2,
+            successful_tasks: 0,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-failed/tasks"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-failed",
+                task_id: "policy-task",
+                input_digest: "sha256:aa",
+                terminal_outcome: "policy",
+                selected_attempt_id: "attempt-policy",
+              },
+              {
+                campaign_id: "campaign-failed",
+                task_id: "agent-task",
+                input_digest: "sha256:bb",
+                terminal_outcome: "agent",
+                selected_attempt_id: "attempt-agent",
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-failed");
+    expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
+    expect(screen.getByText("Provider rejected the request")).toBeInTheDocument();
+    expect(screen.getByText("Agent ended without a score")).toBeInTheDocument();
+    expect(screen.queryByText(/^Policy$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Agent$/)).not.toBeInTheDocument();
   });
 
   it("keeps publication identity and Bucket outputs on the result detail, not the list", async () => {

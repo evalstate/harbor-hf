@@ -8,7 +8,7 @@ import {
 } from "react";
 import { ApiError } from "./api";
 import { BADGE_TONE_CLASS, badgeTone } from "./badge-tone";
-import { cn } from "./lib";
+import { cn, logicalOutcomeHint, logicalOutcomeLabel } from "./lib";
 
 const buttonVariants = cva(
   "inline-flex min-h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 disabled:pointer-events-none disabled:opacity-50",
@@ -99,6 +99,15 @@ export function Badge({ status, children }: { status?: string; children: ReactNo
     >
       {children}
     </span>
+  );
+}
+
+export function OutcomeBadge({ outcome }: { outcome?: string | null }) {
+  const value = outcome ?? "pending";
+  return (
+    <Hint text={logicalOutcomeHint(value)}>
+      <Badge status={value}>{logicalOutcomeLabel(value)}</Badge>
+    </Hint>
   );
 }
 

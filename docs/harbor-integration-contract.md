@@ -9,7 +9,14 @@ the isolated legacy reader.
 
 Harbor owns the job config, task resolution, custom-agent loading, environment
 config, trial execution, locks, results, verifier rewards, exceptions, timing,
-token usage, and trial artifact inventory. Upstream Harbor remains unchanged.
+token usage, and trial artifact inventory. Upstream Harbor remains unchanged
+except for a time-boxed Harbor 0.21.0 sitecustomize patch in the execution
+worker. That patch applies
+[PR 2681](https://github.com/harbor-framework/harbor/pull/2681) so
+`Job._update_metric_display` does not raise `IndexError` on an empty metric
+list. Delete
+`packages/harbor-hf-agents/src/harbor_hf_agents/support/harbor_0210_empty_metrics.py`
+when the pinned Harbor version includes that pull request.
 
 `harbor-hf` owns campaign and physical execution identity, Hugging Face
 infrastructure, immutable request storage, endpoint cleanup, infrastructure

@@ -24,6 +24,7 @@ from harbor.models.job.config import JobConfig
 from harbor.models.job.lock import TrialLock
 
 from harbor_hf_agents.support.control_sandbox_environment import _ControlClient, _digest
+from harbor_hf_agents.support.harbor_0210_empty_metrics import harbor_cli_env
 from harbor_hf_agents.support.provider_outcome import (
     ProviderPolicyError,
     TerminalProviderError,
@@ -214,11 +215,10 @@ def _locked_config(lock: dict[str, Any]) -> WorkerConfig:
 def _task_source(task: LockedTask) -> dict[str, Any]:
     """Build the Harbor run task without a dataset source label.
 
-    Harbor 0.21.0 seeds live progress metrics only for ``adhoc`` and configured
-    datasets. A direct locked task that still carries a dataset ``source``
-    finishes the trial, then crashes in ``Job._update_metric_display`` with
-    ``IndexError``. Omit the label so the controller treats the task as
-    ``adhoc``.
+    Harbor 0.21.0 still reloads ``source`` from the task itself, so omitting it
+    here is not enough. The Harbor CLI subprocess also applies
+    ``harbor_0210_empty_metrics``. Delete that module when Harbor ships
+    https://github.com/harbor-framework/harbor/pull/2681.
     """
     source = task.trial_lock.task
     if source.type == "package":
@@ -315,6 +315,8 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
     )
     if name in {"AgentTimeoutError", "VerifierTimeoutError"}:
         return "benchmark_timeout", False
+    if name == "IndexError" and "_update_metric_display" in f"{detail} {stderr}":
+        return "complete", False
     if name == TransientProviderError.__name__:
         return "infrastructure", True
     if name == ProviderPolicyError.__name__:
@@ -513,7 +515,11 @@ def _log(event: dict[str, object]) -> None:
     print(json.dumps(event, sort_keys=True), flush=True)
 
 
-def _run_logged_command(command: list[str], timeout_seconds: int) -> tuple[str, bool]:
+def _run_logged_command(
+    command: list[str],
+    timeout_seconds: int,
+    env: dict[str, str] | None = None,
+) -> tuple[str, bool]:
     """Copy command output to this Job's logs and kill the process group on timeout."""
     process = subprocess.Popen(
         command,
@@ -521,6 +527,7 @@ def _run_logged_command(command: list[str], timeout_seconds: int) -> tuple[str, 
         stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,
+        env=env,
     )
     chunks: list[str] = []
 
@@ -559,6 +566,7 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
     output, timed_out = _run_logged_command(
         ["harbor", "run", "--config", str(path), "--yes"],
         task.timeout_seconds + 600,
+        harbor_cli_env(root),
     )
     result_path = _result_path(root, task)
     if not result_path:
