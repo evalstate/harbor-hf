@@ -3,9 +3,12 @@ FROM node:22.22.0-bookworm@sha256:2e3d655fd1e3ffaa6b5f23ee9f3905a0fd9e8c0a65df94
 # Production omit skips Playwright, Vitest, and Biome. Those packages have
 # crashed Space image builds with npm's "Exit handler never called".
 ENV NODE_ENV=production \
+    HOME=/tmp \
     npm_config_audit=false \
     npm_config_fund=false \
     npm_config_update_notifier=false \
+    npm_config_cache=/tmp/npm-cache \
+    npm_config_userconfig=/tmp/npmrc \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
 
@@ -16,7 +19,11 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/control-core/package.json packages/control-core/package.json
 COPY packages/hf-adapters/package.json packages/hf-adapters/package.json
 COPY packages/test-fixtures/package.json packages/test-fixtures/package.json
-RUN npm ci --omit=dev --no-audit --no-fund --maxsockets=1
+# Keep the npm log in the Space build output when the installer aborts.
+RUN npm ci --omit=dev --no-audit --no-fund --maxsockets=1 --foreground-scripts \
+    || (for log in /tmp/npm-cache/_logs/*-debug-0.log /root/.npm/_logs/*-debug-0.log; do \
+          if [ -f "$log" ]; then echo "--- $log ---"; cat "$log"; fi; \
+        done; exit 1)
 
 COPY apps/control-api apps/control-api
 COPY apps/control-web apps/control-web
