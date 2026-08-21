@@ -103,6 +103,10 @@ test("explains launch policy when hovering the campaign form", async ({ page }) 
   await page.route("**/api/v1/events", (route) => route.abort());
   await page.goto("/campaigns");
   await page.getByRole("button", { name: "Launch" }).click();
+  const create = page.getByRole("button", { name: "Create immutable campaign" });
+  await expect(create).toBeDisabled();
+  await page.getByRole("checkbox").check();
+  await expect(create).toBeEnabled();
   await page.getByText("Launch policy", { exact: true }).hover();
   await expect(page.getByText("Admission and repair rules")).toBeVisible();
 });

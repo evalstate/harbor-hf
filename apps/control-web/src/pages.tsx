@@ -761,7 +761,10 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
             </p>
           ) : null}
           <div className="md:col-span-2 xl:col-span-3">
-            <Button disabled={!writesAllowed || mutation.isPending} type="submit">
+            <Button
+              disabled={!writesAllowed || !values.confirmed || mutation.isPending}
+              type="submit"
+            >
               <PlayCircle size={16} />
               {mutation.isPending ? "Submitting" : "Create immutable campaign"}
             </Button>
