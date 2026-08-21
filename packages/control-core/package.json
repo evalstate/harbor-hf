@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@harbor-hf/contracts": "0.1.0",
+    "better-sqlite3": "13.0.3",
     "hyparquet-writer": "0.16.6"
   },
   "scripts": {

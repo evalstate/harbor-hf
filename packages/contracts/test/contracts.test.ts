@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
-  canonicalJson,
   ContractValidationError,
+  canonicalJson,
   controlRecordPath,
   deterministicId,
   sandboxActionResultPath,
   sha256,
   validateCampaignSubmission,
   validateControlRecord,
+  validateLeaderboardSnapshot,
   validatePreparedJobSubmission,
   validateResultCatalog,
   validateWorkerEvidenceManifest,
@@ -486,6 +487,25 @@ describe("canonical contracts", () => {
         entries: [{ ...catalog.entries[0], extra: 1 }],
       }),
     ).toThrow(ContractValidationError);
+  });
+
+  it("validates leaderboard snapshot receipts", () => {
+    const snapshot = {
+      schema_version: "v1",
+      kind: "leaderboard.snapshot",
+      record_id: "leaderboard-snapshot-test",
+      created_at: "2026-08-16T00:00:00Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      sqlite_key:
+        "results/schema=v1/leaderboard/snapshots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/leaderboard.sqlite",
+      sqlite_digest: `sha256:${"a".repeat(64)}`,
+      source_digest: `sha256:${"b".repeat(64)}`,
+      entry_count: 1,
+    };
+    expect(validateLeaderboardSnapshot(snapshot)).toEqual(snapshot);
+    expect(() => validateLeaderboardSnapshot({ ...snapshot, extra: 1 })).toThrow(
+      ContractValidationError,
+    );
   });
 
   it("derives stable Bucket paths", () => {

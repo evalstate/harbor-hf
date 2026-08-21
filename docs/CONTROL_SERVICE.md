@@ -439,6 +439,27 @@ inference spend. The total is not a Hugging Face invoice.
 A campaign is not complete while publication or required endpoint cleanup is
 unresolved. Publication failure does not reopen completed benchmark work.
 
+## Leaderboard snapshot
+
+The private result catalog remains candidate material. The rows shown on the
+leaderboard are a derived SQLite object under
+`results/schema=v1/leaderboard/` in the canonical Bucket.
+
+The configuration digest hashes benchmark identity, model identity, harness
+identity, trial count, reasoning effort, inference provider, and Harbor version
+from the campaign lock. Worker revision, Job IDs, and cost are excluded.
+
+Only catalogs with `publication_role=final`, quality `clean`, run outcome
+`complete`, and `scored_task_count` equal to `task_count` enter that snapshot.
+Diagnostic, cancelled, mixed, and policy-failed catalogs stay private.
+
+Each SQLite file is content-addressed. The snapshot receipt is written after
+the database bytes. Rank is computed at read time. The latest published
+eligible row wins for a configuration digest.
+
+Anonymous HTTP access to the snapshot is a separate grant. This object lives in
+the existing Bucket and does not add a second store.
+
 ## Web routes
 
 The React application provides:
