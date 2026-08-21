@@ -139,13 +139,14 @@ Phase two:
 1. revalidates the saved plan, HF CLI version, installer identity, Space,
    Bucket, variables, hardware, and bootstrap receipt;
 2. uploads the exact planned release and records the provider-observed upload
-   SHA in the owner-only receipt;
+   SHA in the owner-only receipt, or reuses that attestation only when a retry
+   observes the same Space SHA;
 3. reads both service credential values from the installer-only
    `HARBOR_HF_INSTALL_CONTROL_SECRET` and
    `HARBOR_HF_INSTALL_INFERENCE_SECRET` process variables or, when absent,
    hidden terminal prompts;
-4. proves the proposed control credential can read the exact artifact Bucket,
-   creates a fresh non-secret object under
+4. attests the proposed control credential's exact fine-grained scope, creates
+   a fresh non-secret object under
    `installer/write-probes/schema=v1/`, and reads back its exact bytes;
 5. writes the paired Space secrets without recording their values;
 6. sets the complete installed configuration with writes disabled;
@@ -157,11 +158,23 @@ contents contain no credential-derived or operator-specific data. A fresh path
 is required for every credential acceptance so an existing object can never
 let a read-only replacement credential pass.
 
+The control credential must have no global permissions, gated-repository
+access, or additional scoped grants. Its only grants are
+`repo.content.read` and `repo.write` on the exact artifact Bucket plus
+`job.write` and `inference.endpoints.write` on the exact user or organization
+namespace. The Job permission also covers Sandbox lifecycle operations. A
+broad personal token, a token for another target, and a token with missing or
+additional permissions are rejected before either Space secret is written.
+Scope attestation reads only the bounded `whoami-v2` response; it never
+enumerates durable control records.
+
 On success it reports `Installation verified`, `Write mode: disabled`, and
 `Production ready: no`. A safely interrupted phase can normally be resumed by
-rerunning configure with the same private state. Do not regenerate
-the plan, replace credentials with `--replace-credentials`, or make manual
-provider changes merely to bypass a drift or safety error.
+rerunning configure with the same private state. Once the receipt contains an
+upload SHA, configure stops before mutation if the observed Space source
+differs and never overwrites that drift. Do not regenerate the plan, replace
+credentials with `--replace-credentials`, or make manual provider changes
+merely to bypass a drift or safety error.
 
 ### 4. Verify while disabled
 

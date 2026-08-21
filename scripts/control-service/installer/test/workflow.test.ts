@@ -10,11 +10,15 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type HfAdapter, HfCommandFailure } from "../hf.js";
 import type {
   BucketWriteProbeAdapter,
   BucketWriteProbeInput,
 } from "../bucket-write-probe.js";
+import type {
+  ControlTokenScopeAdapter,
+  ControlTokenScopeInput,
+} from "../control-token-scope.js";
+import { type HfAdapter, HfCommandFailure } from "../hf.js";
 import type { HttpAdapter } from "../http.js";
 import type { IdentityAdapter } from "../identity.js";
 import { expectedVariables, type Principal, type RemoteState } from "../model.js";
@@ -97,7 +101,6 @@ class FakeHttp implements HttpAdapter {
   readonly requests: { path: string; bearer?: string }[] = [];
   readyStatus = "ready";
   systemIntegrityError: string | null = null;
-  controlCredentialStatus = 200;
   readyRequestCount = 0;
   failReadyOnRequest: number | null = null;
   campaignItems: unknown[] = [];
@@ -153,14 +156,6 @@ class FakeHttp implements HttpAdapter {
           items: this.campaignItems,
           next_cursor: null,
         },
-      };
-    }
-    if (
-      url.pathname === "/api/buckets/example/control-artifacts/tree/control/schema=v1"
-    ) {
-      return {
-        status: this.controlCredentialStatus,
-        body: this.controlCredentialStatus === 200 ? [] : { error: "missing" },
       };
     }
     return { status: 404, body: { status: "missing" } };
@@ -377,6 +372,16 @@ class FakeBucketWriteProbe implements BucketWriteProbeAdapter {
   }
 }
 
+class FakeControlTokenScope implements ControlTokenScopeAdapter {
+  fail = false;
+  calls: ControlTokenScopeInput[] = [];
+
+  async attest(input: ControlTokenScopeInput): Promise<void> {
+    this.calls.push({ ...input });
+    if (this.fail) throw new Error("forbidden scope");
+  }
+}
+
 async function setup(existingRevision?: string) {
   const directory = await temporaryDirectory();
   const repository = resolve(directory, "repository");
@@ -386,6 +391,7 @@ async function setup(existingRevision?: string) {
   const source = new FakeSource(repository);
   const identity = new FakeIdentity();
   const bucketWriteProbe = new FakeBucketWriteProbe();
+  const controlTokenScope = new FakeControlTokenScope();
   const http = new FakeHttp(() => {
     const writeMode = hf.state.space?.variables.HARBOR_HF_WRITE_MODE;
     return writeMode === "enabled" || writeMode === "enabled" ? writeMode : "disabled";
@@ -399,6 +405,7 @@ async function setup(existingRevision?: string) {
     identity,
     http,
     bucketWriteProbe,
+    controlTokenScope,
     environment: {
       HARBOR_HF_INSTALL_CONTROL_SECRET: "control-placeholder",
       HARBOR_HF_INSTALL_INFERENCE_SECRET: "inference-placeholder",
@@ -421,6 +428,7 @@ async function setup(existingRevision?: string) {
     identity,
     http,
     bucketWriteProbe,
+    controlTokenScope,
     dependencies,
     planned,
   };
@@ -1310,14 +1318,15 @@ describe("installer workflows", () => {
     );
   });
 
-  it("rejects a control credential that cannot read the artifact Bucket", async () => {
+  it("rejects a control credential without the exact approved scope", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
-    setupResult.http.controlCredentialStatus = 404;
+    setupResult.controlTokenScope.fail = true;
 
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
-      "control credential needs read and write access to example/control-artifacts",
+      "control credential does not have the exact approved control scope",
     );
+    expect(setupResult.bucketWriteProbe.calls).toHaveLength(0);
     expect(setupResult.hf.calls).not.toContain("setSecrets");
     expect(setupResult.hf.state.space?.secretNames).toEqual([]);
     expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
@@ -1329,8 +1338,9 @@ describe("installer workflows", () => {
     setupResult.bucketWriteProbe.fail = true;
 
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
-      "control credential needs read and write access to example/control-artifacts",
+      "control credential does not have the exact approved control scope",
     );
+    expect(setupResult.controlTokenScope.calls).toHaveLength(1);
     expect(setupResult.bucketWriteProbe.calls).toHaveLength(1);
     expect(setupResult.hf.calls).not.toContain("setSecrets");
     expect(setupResult.hf.state.space?.secretNames).toEqual([]);
@@ -1363,9 +1373,11 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls.filter((call) => call === "setSecrets")).toHaveLength(
       2,
     );
-    expect(setupResult.http.requests).toContainEqual({
-      path: "/api/buckets/example/control-artifacts/tree/control/schema=v1",
-      bearer: "replacement-control",
+    expect(setupResult.controlTokenScope.calls).toHaveLength(2);
+    expect(setupResult.controlTokenScope.calls[1]).toEqual({
+      namespace: "example",
+      bucketId: "example/control-artifacts",
+      accessToken: "replacement-control",
     });
     expect(setupResult.bucketWriteProbe.calls).toHaveLength(2);
     expect(setupResult.bucketWriteProbe.calls[0]?.path).not.toBe(
@@ -1390,14 +1402,40 @@ describe("installer workflows", () => {
     expect(setupResult.hf.state.space?.variables.HARBOR_HF_INSTALL_PHASE).toBe(
       "source_staged",
     );
+    const uploadsBeforeRetry = setupResult.hf.calls.filter(
+      (call) => call === "uploadMirror",
+    ).length;
 
     setupResult.http.readyStatus = "ready";
     await expect(complete(setupResult, bootstrapResult.receipt)).resolves.toMatchObject(
       { status: "installed" },
     );
+    expect(setupResult.hf.calls.filter((call) => call === "uploadMirror")).toHaveLength(
+      uploadsBeforeRetry,
+    );
     expect(setupResult.hf.calls.filter((call) => call === "setSecrets")).toHaveLength(
       1,
     );
+  });
+
+  it("stops before mutation when resumed source differs from its receipt", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    setupResult.http.readyStatus = "rebuilding";
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "after remote mutation began",
+    );
+    expect(bootstrapResult.receipt.uploaded_sha).toBe(UPLOAD_SHA);
+    if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+    setupResult.hf.state.space.sha = "d".repeat(40);
+    setupResult.hf.calls.length = 0;
+
+    await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+      "Space source differs from the recorded upload",
+    );
+    expect(setupResult.hf.calls).not.toContain("uploadMirror");
+    expect(setupResult.hf.calls).not.toContain("pause");
+    expect(bootstrapResult.receipt.uploaded_sha).toBe(UPLOAD_SHA);
   });
 
   it("reasserts an existing installation without replacing secrets", async () => {

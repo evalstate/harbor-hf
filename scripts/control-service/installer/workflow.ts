@@ -2,8 +2,9 @@ import { randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
-import { canonicalJson } from "./canonical.js";
 import type { BucketWriteProbeAdapter } from "./bucket-write-probe.js";
+import { canonicalJson } from "./canonical.js";
+import type { ControlTokenScopeAdapter } from "./control-token-scope.js";
 import { type HfAdapter, HfCommandFailure } from "./hf.js";
 import type { HttpAdapter } from "./http.js";
 import type { IdentityAdapter } from "./identity.js";
@@ -33,6 +34,7 @@ export interface InstallerDependencies {
   http: HttpAdapter;
   source: SourceAdapter;
   bucketWriteProbe?: BucketWriteProbeAdapter;
+  controlTokenScope?: ControlTokenScopeAdapter;
   environment?: NodeJS.ProcessEnv;
   secretInput?: InstallerSecretInput;
 }
@@ -807,19 +809,13 @@ async function assertControlCredentialCanUseBucket(
   if (!controlCredential) {
     throw new InstallerInputError("control credential is missing");
   }
-  const url = new URL(
-    `/api/buckets/${plan.targets.bucket_id}/tree/control/schema=v1`,
-    "https://huggingface.co",
-  );
-  url.searchParams.set("recursive", "true");
-  url.searchParams.set("expand", "false");
   try {
-    const response = await dependencies.http.getJson(url, {
-      bearer: controlCredential,
-      timeoutMs: 30_000,
-      maxBytes: 256 * 1024,
+    if (!dependencies.controlTokenScope) throw new Error();
+    await dependencies.controlTokenScope.attest({
+      namespace: plan.targets.namespace,
+      bucketId: plan.targets.bucket_id,
+      accessToken: controlCredential,
     });
-    if (response.status !== 200 || !Array.isArray(response.body)) throw new Error();
     if (!dependencies.bucketWriteProbe) throw new Error();
     await dependencies.bucketWriteProbe.createAndVerify({
       bucketId: plan.targets.bucket_id,
@@ -829,7 +825,7 @@ async function assertControlCredentialCanUseBucket(
     });
   } catch {
     throw new InstallerInputError(
-      `control credential needs read and write access to ${plan.targets.bucket_id}`,
+      "control credential does not have the exact approved control scope",
     );
   }
 }
@@ -1520,6 +1516,11 @@ async function completeInstall(
   persistReceipt?: (receipt: BootstrapReceipt) => Promise<void>,
 ): Promise<InstalledResult> {
   if (!observed.space) throw new Error("completion Space is missing");
+  if (receipt?.uploaded_sha && observed.space.sha !== receipt.uploaded_sha) {
+    throw new Error(
+      "Space source differs from the recorded upload; manual recovery is required",
+    );
+  }
   const environment = dependencies.environment ?? process.env;
   const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-install-"));
   let remoteMutationStarted = false;
@@ -1563,26 +1564,40 @@ async function completeInstall(
       );
     }
 
-    sourceUploadAttempted = true;
-    const uploadSha = await dependencies.hf.uploadMirror(
-      plan.targets.space_id,
-      stagedBundle,
-      plan.source.revision,
-    );
-    current = await observePlan(plan, dependencies);
-    phase = assertCompletionState(plan, current, freshContinuation, variableTransition);
-    if (!current.space || current.space.sha !== uploadSha) {
-      throw new Error("Space upload revision does not match");
+    let uploadSha = receipt?.uploaded_sha;
+    if (!uploadSha) {
+      sourceUploadAttempted = true;
+      uploadSha = await dependencies.hf.uploadMirror(
+        plan.targets.space_id,
+        stagedBundle,
+        plan.source.revision,
+      );
+      current = await observePlan(plan, dependencies);
+      phase = assertCompletionState(
+        plan,
+        current,
+        freshContinuation,
+        variableTransition,
+      );
+      if (!current.space || current.space.sha !== uploadSha) {
+        throw new Error("Space upload revision does not match");
+      }
+      await dependencies.hf.pause(plan.targets.space_id);
+      current = await observePlan(plan, dependencies);
+      phase = assertCompletionState(
+        plan,
+        current,
+        freshContinuation,
+        variableTransition,
+      );
+      if (current.space?.runtimeStage !== "PAUSED" || current.space.sha !== uploadSha) {
+        throw new Error("Space is not safely paused after release upload");
+      }
+      if (receipt) {
+        await persistReceipt?.({ ...receipt, uploaded_sha: uploadSha });
+      }
     }
-    await dependencies.hf.pause(plan.targets.space_id);
-    current = await observePlan(plan, dependencies);
-    phase = assertCompletionState(plan, current, freshContinuation, variableTransition);
-    if (current.space?.runtimeStage !== "PAUSED" || current.space.sha !== uploadSha) {
-      throw new Error("Space is not safely paused after release upload");
-    }
-    if (receipt) {
-      await persistReceipt?.({ ...receipt, uploaded_sha: uploadSha });
-    }
+    if (!current.space) throw new Error("configured Space metadata is unavailable");
 
     let variablesFile: string;
     if (freshContinuation && phase !== "installed") {
