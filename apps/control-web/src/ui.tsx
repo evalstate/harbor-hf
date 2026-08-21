@@ -93,7 +93,7 @@ export function Badge({ status, children }: { status?: string; children: ReactNo
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+        "inline-flex max-w-full items-center rounded-full border px-2 py-0.5 text-xs font-medium",
         BADGE_TONE_CLASS[badgeTone(status)],
       )}
     >
@@ -106,8 +106,8 @@ export function Progress({ value, label }: { value: number; label: string }) {
   const bounded = Math.max(0, Math.min(100, value));
   return (
     <div className="space-y-1">
-      <div className="flex justify-between text-xs text-slate-400">
-        <span>{label}</span>
+      <div className="flex justify-between gap-2 text-xs text-slate-400">
+        <span className="min-w-0 truncate">{label}</span>
         <span>{Math.round(bounded)}%</span>
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-slate-800">

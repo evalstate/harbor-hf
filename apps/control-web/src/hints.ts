@@ -30,7 +30,7 @@ export const hints = {
     unsafeEndpoints:
       "Endpoints that are not verified paused with zero ready replicas. A campaign cannot complete while any remain.",
     spendChart:
-      "Observed cost per recent campaign, in USD. Reserved budget and the hard ceiling are tracked separately.",
+      "Observed cost per recent run, in USD, from oldest to newest. Reserved budget and the hard ceiling are tracked separately.",
     writeMode:
       "Whether this Space accepts operator mutations. Your OAuth role is checked separately from this switch.",
     sourceRevision: "Exact Harbor-HF git revision running in this Space.",

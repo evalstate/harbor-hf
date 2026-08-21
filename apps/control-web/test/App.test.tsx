@@ -229,6 +229,55 @@ describe("control web", () => {
     expect(screen.getByText(/safe-request-id/)).toBeInTheDocument();
   });
 
+  it("labels both axes on the overview spend chart", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system("enabled"));
+        if (path.includes("/endpoints")) return json({ items: [], next_cursor: null });
+        if (path.includes("/campaigns"))
+          return json({
+            items: [
+              {
+                campaign_id: "run-newer",
+                status: "completed",
+                terminal_tasks: 2,
+                successful_tasks: 2,
+                total_tasks: 2,
+                observed_microusd: 50_000,
+                ceiling_microusd: 1_000_000,
+                created_at: "2026-08-21T21:00:00.000Z",
+              },
+              {
+                campaign_id: "run-older",
+                status: "completed",
+                terminal_tasks: 1,
+                successful_tasks: 1,
+                total_tasks: 1,
+                observed_microusd: 10_000,
+                ceiling_microusd: 1_000_000,
+                created_at: "2026-08-21T20:00:00.000Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/");
+    expect(
+      await screen.findByRole("img", {
+        name: /observed run spend in usd, from oldest run to newest/i,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Observed spend (USD)")).toBeInTheDocument();
+    expect(screen.getByText("Runs, oldest to newest")).toBeInTheDocument();
+    expect(screen.getByText(formatMoney(50_000))).toBeInTheDocument();
+  });
+
   it("disables mutation controls when deployment writes are disabled", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
@@ -591,6 +640,10 @@ describe("control web", () => {
       }),
     );
     renderApp("/runs");
+    const table = await screen.findByRole("table");
+    expect(table).toHaveClass("table-fixed");
+    expect(table.parentElement).toHaveClass("overflow-hidden");
+    expect(table.parentElement).not.toHaveClass("overflow-x-auto");
     expect(await screen.findByRole("link", { name: runName })).toHaveAttribute(
       "href",
       `/runs/${runName}`,
@@ -749,6 +802,9 @@ describe("control web", () => {
       }),
     );
     renderApp("/results");
+    const table = await screen.findByRole("table");
+    expect(table).toHaveClass("table-fixed");
+    expect(table.parentElement).not.toHaveClass("overflow-x-auto");
     expect(
       await screen.findByRole("columnheader", { name: /run/i }),
     ).toBeInTheDocument();

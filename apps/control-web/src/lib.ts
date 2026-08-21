@@ -1,4 +1,4 @@
-import { clsx, type ClassValue } from "clsx";
+import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]): string {
@@ -59,8 +59,7 @@ export function shortId(value: string): string {
   return value.length > 24 ? `${value.slice(0, 14)}…${value.slice(-7)}` : value;
 }
 
-export const runNameClass =
-  "block min-w-[20rem] max-w-[40rem] break-all font-mono text-xs";
+export const runNameClass = "block min-w-0 break-all font-mono text-xs";
 
 export function humanize(value: string): string {
   return value
