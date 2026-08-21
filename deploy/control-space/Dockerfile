@@ -9,6 +9,10 @@ ENV NODE_ENV=production \
     npm_config_update_notifier=false \
     npm_config_cache=/tmp/npm-cache \
     npm_config_userconfig=/tmp/npmrc \
+    npm_config_fetch_retries=20 \
+    npm_config_fetch_retry_mintimeout=20000 \
+    npm_config_fetch_retry_maxtimeout=120000 \
+    npm_config_fetch_timeout=300000 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
 
@@ -19,8 +23,8 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/control-core/package.json packages/control-core/package.json
 COPY packages/hf-adapters/package.json packages/hf-adapters/package.json
 COPY packages/test-fixtures/package.json packages/test-fixtures/package.json
-# Keep the npm log in the Space build output when the installer aborts.
-RUN npm ci --omit=dev --no-audit --no-fund --maxsockets=1 --foreground-scripts \
+# npm can abort with "Exit handler never called" after registry timeouts.
+RUN npm ci --omit=dev --no-audit --no-fund \
     || (for log in /tmp/npm-cache/_logs/*-debug-0.log /root/.npm/_logs/*-debug-0.log; do \
           if [ -f "$log" ]; then echo "--- $log ---"; cat "$log"; fi; \
         done; exit 1)
