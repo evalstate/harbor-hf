@@ -54,62 +54,57 @@ function system(writeMode: "disabled" | "canary" | "enabled" = "canary") {
 
 function launchProfiles() {
   const createdAt = "2026-08-16T00:00:00.000Z";
-  const smoke = {
+  const approved = (alias: string, kind: string, spec: Record<string, unknown>) => ({
     source: "built-in",
     promotion_state: "approved",
-    alias: "control-smoke",
-    approved_aliases: ["control-smoke"],
+    alias,
+    approved_aliases: [alias],
     created_at: createdAt,
-  };
+    profile_id: `sha256:${kind}-${alias}`,
+    profile_kind: kind,
+    name: alias,
+    spec,
+  });
   return {
     items: [
-      {
-        ...smoke,
-        profile_id: "sha256:benchmark",
-        profile_kind: "benchmark",
-        name: "control-smoke",
-        spec: { task_ids: ["task-001"] },
-      },
-      {
-        ...smoke,
-        profile_id: "sha256:model",
-        profile_kind: "model",
-        name: "control-smoke",
-        spec: { revision: "sha256:model" },
-      },
-      {
-        ...smoke,
-        profile_id: "sha256:harness",
-        profile_kind: "harness",
-        name: "control-smoke",
-        spec: { agent: "control-smoke" },
-      },
-      {
-        source: "built-in",
-        promotion_state: "approved",
-        alias: "hf-cpu-smoke",
-        approved_aliases: ["hf-cpu-smoke"],
-        created_at: createdAt,
-        profile_id: "sha256:deployment",
-        profile_kind: "deployment",
-        name: "hf-cpu-smoke",
-        spec: {
-          models: ["control-smoke"],
-          harnesses: ["control-smoke"],
-          hardware: "cpu-basic",
+      approved("terminal-bench-2-1-diagnostic-1", "benchmark", {
+        benchmark: "terminal-bench-2-1",
+        task_ids: ["task-a", "task-b"],
+        trial_indices: [1, 1],
+      }),
+      approved("gpt-oss-20b", "model", {
+        model_id: "openai/gpt-oss-20b",
+        revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+      }),
+      approved("opencode", "harness", {
+        agent: "opencode",
+        reasoning_effort: "off",
+      }),
+      approved("tb21-gpt-oss-20b-opencode-providers", "deployment", {
+        models: ["gpt-oss-20b"],
+        harnesses: ["opencode"],
+        sandbox_template: {
+          inference_upstream: "https://router.huggingface.co/v1",
         },
-      },
-      {
-        ...smoke,
-        profile_id: "sha256:policy",
-        profile_kind: "launch_policy",
-        name: "control-smoke",
-        spec: {
-          max_infrastructure_attempts: 1,
-          reservation_microusd: 0,
-          publication_role: "diagnostic",
-        },
-      },
+      }),
+      approved("tb21-diagnostic-1", "launch_policy", {
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 5_100_000,
+        publication_role: "diagnostic",
+      }),
+      approved("control-smoke", "benchmark", { task_ids: ["task-001"] }),
+      approved("control-smoke", "model", { revision: "sha256:model" }),
+      approved("control-smoke", "harness", { agent: "control-smoke" }),
+      approved("hf-cpu-smoke", "deployment", {
+        models: ["control-smoke"],
+        harnesses: ["control-smoke"],
+        hardware: "cpu-basic",
+      }),
+      approved("control-smoke", "launch_policy", {
+        max_infrastructure_attempts: 1,
+        reservation_microusd: 0,
+        publication_role: "diagnostic",
+      }),
     ],
     next_cursor: null,
   };
@@ -247,7 +242,7 @@ describe("control web", () => {
       }),
     );
     renderApp("/campaigns");
-    expect(await screen.findByRole("button", { name: "Launch" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Start a run" })).toBeDisabled();
     expect(screen.getByText(/role grants permission/i)).toBeInTheDocument();
   });
 
@@ -441,7 +436,7 @@ describe("control web", () => {
     );
     renderApp("/campaigns/campaign-error");
     expect(await screen.findByText("Forbidden")).toBeInTheDocument();
-    expect(screen.queryByText("Campaign not found")).not.toBeInTheDocument();
+    expect(screen.queryByText("Run not found")).not.toBeInTheDocument();
   });
 
   it("keeps collection cursors in the URL and loads later pages", async () => {
@@ -530,22 +525,24 @@ describe("control web", () => {
     expect(successBadge?.className).toContain("emerald");
   });
 
-  it("explains launch policy on hover", async () => {
+  it("explains the cost ceiling on hover", async () => {
     stubLaunchPage();
-    renderApp("/campaigns");
+    renderApp("/runs");
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Launch" }));
+    await user.click(await screen.findByRole("button", { name: "Start a run" }));
     expect(
-      screen.getByText(/admission and repair rules/i, { hidden: true }),
+      screen.getByText(/defaults to twice the estimated reservation/i, {
+        hidden: true,
+      }),
     ).toBeInTheDocument();
   });
 
-  it("requires confirmation before creating an immutable campaign", async () => {
+  it("requires confirmation before starting a run", async () => {
     stubLaunchPage();
     renderApp("/campaigns");
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Launch" }));
-    const create = screen.getByRole("button", { name: "Create immutable campaign" });
+    await user.click(await screen.findByRole("button", { name: "Start a run" }));
+    const create = screen.getByRole("button", { name: "Start run" });
     expect(create).toBeDisabled();
     await user.click(screen.getByRole("checkbox"));
     expect(create).toBeEnabled();

@@ -24,9 +24,11 @@ harbor-hf status
 
 The CLI uses the active Hugging Face login only to authenticate HTTPS requests to the control API. It does not access the Bucket directly.
 
-## Launch a campaign
+## Start a run
 
-A campaign selects promoted benchmark, model, harness, deployment, and launch-policy profiles. The control service resolves those aliases into an immutable campaign lock before creating physical work.
+The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto the run.
+
+The CLI submits the same lock through promoted profile aliases:
 
 ```bash
 harbor-hf campaign submit \

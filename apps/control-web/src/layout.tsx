@@ -13,17 +13,17 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { NavLink } from "react-router-dom";
 import type { DisplayActor } from "./control-state";
+import { hints } from "./hints";
 import { cn, formatDate, humanize } from "./lib";
 import type { LiveState } from "./queries";
 import { Badge, Button, ErrorNotice, Hint } from "./ui";
-import { hints } from "./hints";
 
 const navigation = [
   ["/", "Overview", Gauge, hints.nav.overview],
-  ["/campaigns", "Campaigns", ClipboardList, hints.nav.campaigns],
+  ["/runs", "Runs", ClipboardList, hints.nav.campaigns],
   ["/jobs", "Jobs", ServerCog, hints.nav.jobs],
   ["/endpoints", "Endpoints", Network, hints.nav.endpoints],
   ["/results", "Results", BarChart3, hints.nav.results],

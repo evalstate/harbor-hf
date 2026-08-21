@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Route, Routes, useLocation } from "react-router-dom";
-import { ApiError, signOut, type SessionResponse } from "./api";
+import { ApiError, type SessionResponse, signOut } from "./api";
 import { ControlStateProvider, type DisplayActor } from "./control-state";
 import { Layout } from "./layout";
 import {
@@ -59,6 +59,9 @@ function AuthenticatedApp({
         {system.data ? (
           <Routes>
             <Route path="/" element={<OverviewPage />} />
+            <Route path="/runs" element={<CampaignsPage />} />
+            <Route path="/runs/:campaignId" element={<CampaignPage />} />
+            <Route path="/runs/:campaignId/tasks/:taskId" element={<TaskPage />} />
             <Route path="/campaigns" element={<CampaignsPage />} />
             <Route path="/campaigns/:campaignId" element={<CampaignPage />} />
             <Route path="/campaigns/:campaignId/tasks/:taskId" element={<TaskPage />} />

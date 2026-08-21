@@ -1,16 +1,16 @@
 export const hints = {
   nav: {
     overview:
-      "Queue, active campaigns, recorded spend, and Endpoint cleanup risk from the control projection.",
+      "Queue, active runs, recorded spend, and Endpoint cleanup risk from the control projection.",
     campaigns:
-      "Create and inspect campaigns. Logical tasks stay sealed; only infrastructure failures can be replaced.",
+      "Start and inspect runs. Logical tasks stay sealed; only infrastructure failures can be replaced.",
     jobs: "Hugging Face Jobs launched by control, with Hub inspect links, latest observed stage, and recorded hardware cost.",
     endpoints:
-      "Inference Endpoints owned by campaigns. Completion requires a verified pause with zero ready replicas.",
+      "Inference Endpoints owned by runs. Completion requires a verified pause with zero ready replicas.",
     results:
-      "Published catalog scores after campaigns finish. Pass rate, 95% CIs, token cost, and a Hub link to the Bucket prefix for generated outputs. This is not the live campaign queue.",
+      "Published catalog scores after runs finish. Pass rate, 95% CIs, token cost, and a Hub link to the Bucket prefix for generated outputs. This is not the live run queue.",
     profiles:
-      "Immutable benchmark, model, harness, deployment, and launch-policy records. Campaigns lock aliases at submit time.",
+      "Immutable benchmark, model, harness, deployment, and launch-policy records. Runs lock aliases at submit time.",
     audit:
       "Append-only intents, receipts, actors, and integrity-relevant state changes.",
   },
@@ -18,13 +18,13 @@ export const hints = {
     liveUpdates:
       "The browser refreshes from the control API and event stream. This is a read view, not the durable Bucket.",
     writeMode:
-      "Deployment safety switch. Disabled or canary still checks your role. Enabled is required for new campaigns.",
+      "Deployment safety switch. Disabled or canary still checks your role. Enabled is required for new runs.",
   },
   overview: {
     active:
-      "Campaigns that are not completed. Completed is green only when every sealed task scored complete. Completed with failures still counts as completed for this filter.",
+      "Runs that are not completed. Completed is green only when every sealed task scored complete. Completed with failures still counts as completed for this filter.",
     policyStops:
-      "Campaigns in failed or manual-intervention state. The reconciler stopped and an operator must inspect the audit trail.",
+      "Runs in failed or manual-intervention state. The reconciler stopped and an operator must inspect the audit trail.",
     observedSpend:
       "Sum of recorded attempt receipts plus the latest Job and Sandbox hardware cost on each projected campaign.",
     unsafeEndpoints:
@@ -43,17 +43,19 @@ export const hints = {
     benchmark:
       "Which Harbor job to run. This selects the task set and source. Harbor resolves the exact lock in a preparation Job when the deployment requires it.",
     model:
-      "Locked model identity and revision the worker must call. The same benchmark with a different model is a different campaign.",
+      "Locked model identity and revision the worker must call. The same benchmark with a different model is a different run.",
     harness:
       "Agent wrapper around the model: prompts, tools, and runtime settings. Code for a new harness belongs in a Harbor plugin, not here.",
+    reasoning:
+      "Reasoning effort locked onto the harness for this run. None means the agent does not request extra thinking.",
     deployment:
-      "Hugging Face runtime: Job image, hardware, timeouts, whether Harbor preparation is required, and whether the inference token may be passed.",
+      "Where the model is served: Hugging Face Inference Providers, or a dedicated Inference Endpoint.",
     launch_policy:
-      "Admission and repair rules: money reserved per Job, how many infrastructure retries are allowed, preparation budget, and whether results are diagnostic, component, or final. It does not pick the benchmark, model, or hardware.",
+      "Admission and repair rules selected from the benchmark. You do not pick this separately.",
     ceiling:
-      "Hard spend stop for this campaign, entered in USD. Control refuses new reservations once reserved plus observed cost would exceed it.",
+      "Hard spend stop for this run, entered in USD. Defaults to twice the estimated reservation until you edit it. Control refuses new reservations once reserved plus observed cost would exceed it.",
     confirmed:
-      "Required acknowledgement that the resolved profiles, task count, estimated reservation, and ceiling are the campaign you intend to lock. After submit, that lock does not change.",
+      "Required acknowledgement that the resolved profiles, task count, estimated reservation, and ceiling are the run you intend to lock. After submit, that lock does not change.",
     logicalTasks:
       "Distinct tasks in the selected benchmark profile. One Hugging Face Job may cover several tasks.",
     modelRevision:
@@ -64,7 +66,7 @@ export const hints = {
       "max_infrastructure_attempts from the launch policy. Extra attempts are only for infrastructure failures, never to rerun a scored outcome.",
     estimatedReservation:
       "Launch-policy reservation times the expected execution Jobs, plus preparation Jobs when the deployment requires them. The hard ceiling must cover this amount.",
-    hardCeiling: "The campaign spend cap you entered. Stored as integer microusd.",
+    hardCeiling: "The run spend cap you entered. Stored as integer microusd.",
     publicationRole:
       "How published results are classified: diagnostic (smoke), component (partial), or final (leaderboard-grade).",
     perJobReservation:

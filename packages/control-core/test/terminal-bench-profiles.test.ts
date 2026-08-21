@@ -234,4 +234,30 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(spec.publication_role).toBe("diagnostic");
     }
   });
+
+  it("pins gpt-oss-20b and OpenCode for provider runs", async () => {
+    const model = record((await profile("model", "gpt-oss-20b")).spec);
+    const harness = record((await profile("harness", "opencode")).spec);
+    const deployment = record(
+      (await profile("deployment", "tb21-gpt-oss-20b-opencode-providers")).spec,
+    );
+    const harborAgent = record(harness.harbor_agent);
+
+    expect(model.model_id).toBe("openai/gpt-oss-20b");
+    expect(model.revision).toBe("6cee5e81ee83917806bbde320786a8fb61efebee");
+    expect(model.harbor_model_name).toBe("openai/openai/gpt-oss-20b:together");
+    expect(harness.agent).toBe("opencode");
+    expect(harness.revision).toBe("1.18.20");
+    expect(harness.reasoning_effort).toBe("off");
+    expect(harborAgent.name).toBe("opencode");
+    expect(harborAgent.model_name).toBe(model.harbor_model_name);
+    expect(deployment.models).toEqual(["gpt-oss-20b"]);
+    expect(deployment.harnesses).toEqual(["opencode"]);
+    expect(deployment.inference_provider).toBe("together");
+    expect(deployment.input_price_microusd_per_million_tokens).toBe(50_000);
+    expect(deployment.output_price_microusd_per_million_tokens).toBe(200_000);
+    expect(record(deployment.sandbox_template).inference_upstream).toBe(
+      "https://router.huggingface.co/v1",
+    );
+  });
 });

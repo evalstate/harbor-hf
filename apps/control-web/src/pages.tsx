@@ -15,7 +15,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { z } from "zod";
@@ -36,6 +36,16 @@ import {
 import { DataTable } from "./components/data-table";
 import { useControlState } from "./control-state";
 import { hints } from "./hints";
+import {
+  doubleReservationMicrousd,
+  harnessAgent,
+  LAUNCH_DEFAULTS,
+  launchPolicyForBenchmark,
+  profileLabel,
+  REASONING_OPTIONS,
+  selectDeploymentAlias,
+  selectHarnessAlias,
+} from "./launch";
 import { PageHeader } from "./layout";
 import {
   cn,
@@ -112,11 +122,11 @@ function campaignStatusNote(campaign: CampaignRow): string {
 function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   const campaignColumn: ColumnDef<JobRow> = {
     accessorKey: "campaign_id",
-    header: () => <Hint text={hints.jobs.campaign}>Campaign</Hint>,
+    header: () => <Hint text={hints.jobs.campaign}>Run</Hint>,
     cell: ({ getValue }) => (
       <Link
         className="font-mono text-xs text-cyan-300"
-        to={`/campaigns/${String(getValue())}`}
+        to={`/runs/${String(getValue())}`}
       >
         {shortId(String(getValue()))}
       </Link>
@@ -267,10 +277,10 @@ function CursorPager({
 const launchSchema = z.object({
   benchmark: z.string().min(2),
   model: z.string().min(2),
-  harness: z.string().min(2),
-  deployment: z.string().min(2).optional(),
-  launch_policy: z.string().min(2),
-  ceiling_microusd: z.number().int().nonnegative(),
+  harnessAgent: z.string().min(2),
+  reasoning: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
+  deploymentKind: z.enum(["providers", "endpoints"]),
+  ceiling_usd: z.number().nonnegative(),
   confirmed: z
     .boolean()
     .refine((value) => value, "Confirm the resolved target and cost ceiling"),
@@ -297,9 +307,9 @@ function SpendChart({ data }: { data: Array<{ name: string; spend: number }> }) 
       className="h-full w-full"
       viewBox={`0 0 ${width} ${height}`}
       role="img"
-      aria-label="Observed campaign spend trend"
+      aria-label="Observed run spend trend"
     >
-      <title>Observed campaign spend trend</title>
+      <title>Observed run spend trend</title>
       <defs>
         <linearGradient id="spend-gradient" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.45" />
@@ -402,11 +412,11 @@ export function OverviewPage() {
         <QueryContent query={system}>
           <PageHeader
             title="Overview"
-            description="Campaign progress, spend, publication and endpoint safety from the immutable control record."
+            description="Run progress, spend, publication and endpoint safety from the immutable control record."
           />
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <Stat
-              label="Active campaigns"
+              label="Active runs"
               value={String(active)}
               note={`${items.length} total`}
               icon={PlayCircle}
@@ -437,7 +447,7 @@ export function OverviewPage() {
           <div className="mt-6 grid gap-6 xl:grid-cols-[1.4fr_1fr]">
             <Card>
               <h2 className="font-semibold">
-                <Hint text={hints.overview.spendChart}>Recent campaign spend</Hint>
+                <Hint text={hints.overview.spendChart}>Recent run spend</Hint>
               </h2>
               <p className="mt-1 text-xs text-slate-500">
                 Observed cost in USD; reserved ceilings remain separate.
@@ -447,7 +457,7 @@ export function OverviewPage() {
                   <SpendChart data={chart} />
                 ) : (
                   <div className="grid h-full place-items-center text-sm text-slate-500">
-                    No campaign spend yet
+                    No run spend yet
                   </div>
                 )}
               </div>
@@ -520,15 +530,16 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
   const client = useQueryClient();
   const profiles = useProfiles();
   const { writesAllowed, writeMode } = useControlState();
+  const ceilingEdited = useRef(false);
   const form = useForm<z.infer<typeof launchSchema>>({
     resolver: zodResolver(launchSchema),
     defaultValues: {
-      benchmark: "control-smoke",
-      model: "control-smoke",
-      harness: "control-smoke",
-      deployment: "hf-cpu-smoke",
-      launch_policy: "control-smoke",
-      ceiling_microusd: 0,
+      benchmark: LAUNCH_DEFAULTS.benchmark,
+      model: LAUNCH_DEFAULTS.model,
+      harnessAgent: LAUNCH_DEFAULTS.harnessAgent,
+      reasoning: LAUNCH_DEFAULTS.reasoning,
+      deploymentKind: LAUNCH_DEFAULTS.deploymentKind,
+      ceiling_usd: 0,
       confirmed: false,
     },
   });
@@ -537,69 +548,98 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
     profile.approved_aliases.map((approved_alias) => ({
       ...profile,
       approved_alias,
+      spec: profile.spec as Record<string, unknown>,
     })),
   );
-  const options = (kind: string) =>
-    approved.filter((profile) => {
-      if (profile.profile_kind !== kind) return false;
-      if (kind !== "deployment") return true;
-      const spec = profile.spec as Record<string, unknown>;
-      return (
-        Array.isArray(spec.models) &&
-        spec.models.includes(values.model) &&
-        Array.isArray(spec.harnesses) &&
-        spec.harnesses.includes(values.harness)
-      );
-    });
-  const selectedAlias = (kind: string): string | undefined => {
-    if (kind === "benchmark") return values.benchmark;
-    if (kind === "model") return values.model;
-    if (kind === "harness") return values.harness;
-    if (kind === "deployment") return values.deployment;
-    if (kind === "launch_policy") return values.launch_policy;
-    return undefined;
-  };
-  const selected = approved.filter(
-    (profile) => profile.approved_alias === selectedAlias(profile.profile_kind),
-  );
-  const selectedByKind = (kind: string) =>
-    selected.find((profile) => profile.profile_kind === kind);
-  const benchmarkSpec = selectedByKind("benchmark")?.spec as
-    | Record<string, unknown>
+  const ofKind = (kind: string) =>
+    approved.filter((profile) => profile.profile_kind === kind);
+  const uniqueAgents = [
+    ...new Set(ofKind("harness").map((profile) => harnessAgent(profile.spec))),
+  ];
+  let resolved:
+    | {
+        harness: string;
+        deployment: string;
+        launch_policy: string;
+      }
     | undefined;
-  const modelSpec = selectedByKind("model")?.spec as
-    | Record<string, unknown>
-    | undefined;
-  const deploymentSpec = selectedByKind("deployment")?.spec as
-    | Record<string, unknown>
-    | undefined;
-  const policySpec = selectedByKind("launch_policy")?.spec as
-    | Record<string, unknown>
-    | undefined;
+  let resolvedError: string | undefined;
+  try {
+    resolved = {
+      harness: selectHarnessAlias(
+        ofKind("harness").map((profile) => ({
+          alias: profile.approved_alias,
+          spec: profile.spec,
+        })),
+        values.harnessAgent,
+        values.reasoning,
+      ),
+      deployment: "",
+      launch_policy: launchPolicyForBenchmark(values.benchmark),
+    };
+    resolved.deployment = selectDeploymentAlias(
+      ofKind("deployment").map((profile) => ({
+        alias: profile.approved_alias,
+        spec: profile.spec,
+      })),
+      values.deploymentKind,
+      values.model,
+      resolved.harness,
+    );
+  } catch (error) {
+    resolvedError = error instanceof Error ? error.message : String(error);
+  }
+  const selected = approved.filter((profile) => {
+    if (!resolved) return false;
+    if (profile.profile_kind === "benchmark")
+      return profile.approved_alias === values.benchmark;
+    if (profile.profile_kind === "model")
+      return profile.approved_alias === values.model;
+    if (profile.profile_kind === "harness")
+      return profile.approved_alias === resolved.harness;
+    if (profile.profile_kind === "deployment")
+      return profile.approved_alias === resolved.deployment;
+    if (profile.profile_kind === "launch_policy")
+      return profile.approved_alias === resolved.launch_policy;
+    return false;
+  });
+  const specOf = (kind: string) =>
+    selected.find((profile) => profile.profile_kind === kind)?.spec;
+  const benchmarkSpec = specOf("benchmark");
+  const modelSpec = specOf("model");
+  const deploymentSpec = specOf("deployment");
+  const policySpec = specOf("launch_policy");
   const taskCount = Array.isArray(benchmarkSpec?.task_ids)
     ? benchmarkSpec.task_ids.length
     : 0;
-  const attemptLimit = Number(policySpec?.max_infrastructure_attempts ?? 0);
   const estimatedMicrousd = estimateLaunchReservationMicrousd(
     taskCount,
     deploymentSpec,
     policySpec,
   );
+  useEffect(() => {
+    if (ceilingEdited.current) return;
+    form.setValue(
+      "ceiling_usd",
+      doubleReservationMicrousd(estimatedMicrousd) / 1_000_000,
+    );
+  }, [estimatedMicrousd, form]);
   const mutation = useMutation({
     mutationFn: (input: CampaignSubmission) => submitCampaign(input),
     onSuccess: async (result) => {
       await client.invalidateQueries({ queryKey: keys.campaigns });
-      navigate(`/campaigns/${result.campaign_id}`);
+      navigate(`/runs/${result.campaign_id}`);
     },
   });
   return (
     <Card className="mb-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="font-semibold">Launch campaign</h2>
+          <h2 className="font-semibold">Start a run</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Hover a field name for what it locks. Select approved aliases and review
-            their immutable resolution before any paid action.
+            Choose the benchmark, model, runtime, harness, and reasoning. The hard
+            ceiling follows twice the estimated reservation until you edit it. Submit
+            locks those choices onto the run.
           </p>
         </div>
         <Button variant="ghost" onClick={onClose}>
@@ -615,128 +655,166 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
       <QueryContent query={profiles}>
         <form
           className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3"
-          onSubmit={form.handleSubmit((value) =>
-            mutation.mutate(value as CampaignSubmission),
-          )}
+          onSubmit={form.handleSubmit((value) => {
+            if (!resolved) return;
+            mutation.mutate({
+              benchmark: value.benchmark,
+              model: value.model,
+              harness: resolved.harness,
+              deployment: resolved.deployment,
+              launch_policy: resolved.launch_policy,
+              ceiling_microusd: Math.round(value.ceiling_usd * 1_000_000),
+              confirmed: value.confirmed,
+            });
+          })}
         >
-          {(
-            ["benchmark", "model", "harness", "deployment", "launch_policy"] as const
-          ).map((field) => (
-            <div className="space-y-1.5 text-sm" key={field}>
-              <Hint text={hints.launch[field]} icon>
-                {humanize(field)}
-              </Hint>
-              <select
-                className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
-                disabled={!writesAllowed}
-                aria-label={humanize(field)}
-                {...form.register(field)}
-              >
-                {options(field).map((profile) => (
-                  <option key={profile.profile_id} value={profile.approved_alias ?? ""}>
-                    {profile.approved_alias}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ))}
+          <div className="space-y-1.5 text-sm">
+            <Hint text={hints.launch.benchmark} icon>
+              Benchmark
+            </Hint>
+            <select
+              className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
+              disabled={!writesAllowed}
+              aria-label="Benchmark"
+              {...form.register("benchmark")}
+            >
+              {ofKind("benchmark").map((profile) => (
+                <option key={profile.profile_id} value={profile.approved_alias}>
+                  {profileLabel("benchmark", profile.approved_alias, profile.spec)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1.5 text-sm">
+            <Hint text={hints.launch.model} icon>
+              Model
+            </Hint>
+            <select
+              className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
+              disabled={!writesAllowed}
+              aria-label="Model"
+              {...form.register("model")}
+            >
+              {ofKind("model").map((profile) => (
+                <option key={profile.profile_id} value={profile.approved_alias}>
+                  {profileLabel("model", profile.approved_alias, profile.spec)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1.5 text-sm">
+            <Hint text={hints.launch.deployment} icon>
+              Runtime
+            </Hint>
+            <select
+              className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
+              disabled={!writesAllowed}
+              aria-label="Runtime"
+              {...form.register("deploymentKind")}
+            >
+              <option value="providers">Inference Providers</option>
+              <option value="endpoints">Inference Endpoints</option>
+            </select>
+          </div>
+          <div className="space-y-1.5 text-sm">
+            <Hint text={hints.launch.harness} icon>
+              Harness
+            </Hint>
+            <select
+              className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
+              disabled={!writesAllowed}
+              aria-label="Harness"
+              {...form.register("harnessAgent")}
+            >
+              {uniqueAgents.map((agent) => (
+                <option key={agent} value={agent}>
+                  {profileLabel("harness", agent, { agent })}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1.5 text-sm">
+            <Hint text={hints.launch.reasoning} icon>
+              Reasoning
+            </Hint>
+            <select
+              className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
+              disabled={!writesAllowed}
+              aria-label="Reasoning"
+              {...form.register("reasoning")}
+            >
+              {REASONING_OPTIONS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="space-y-1.5 text-sm">
             <Hint text={hints.launch.ceiling} icon>
-              Hard cost ceiling, USD
+              Cost ceiling, USD
             </Hint>
             <input
               className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
               type="number"
               min="0"
-              step="0.000001"
+              step="0.01"
               disabled={!writesAllowed}
-              aria-label="Hard cost ceiling, USD"
-              {...form.register("ceiling_microusd", {
-                setValueAs: (value) => Math.round(Number(value) * 1_000_000),
+              aria-label="Cost ceiling, USD"
+              {...form.register("ceiling_usd", {
+                setValueAs: (value) => Number(value),
+                onChange: () => {
+                  ceilingEdited.current = true;
+                },
               })}
             />
           </div>
           <Card className="md:col-span-2 xl:col-span-3">
-            <h3 className="font-medium">Resolved launch</h3>
-            <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-              <div>
-                <dt className="text-slate-500">
-                  <Hint text={hints.launch.logicalTasks}>Logical tasks</Hint>
-                </dt>
-                <dd>{taskCount}</dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">
-                  <Hint text={hints.launch.modelRevision}>Model revision</Hint>
-                </dt>
-                <dd className="break-all font-mono text-xs">
-                  {String(modelSpec?.revision ?? "Unavailable")}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">
-                  <Hint text={hints.launch.hardware}>Hardware</Hint>
-                </dt>
-                <dd>{String(deploymentSpec?.hardware ?? "Unavailable")}</dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">
-                  <Hint text={hints.launch.attemptLimit}>Attempt limit</Hint>
-                </dt>
-                <dd>{attemptLimit || "Unavailable"}</dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">
-                  <Hint text={hints.launch.estimatedReservation}>
-                    Estimated reservation
-                  </Hint>
-                </dt>
-                <dd>{formatMoney(estimatedMicrousd)}</dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">
-                  <Hint text={hints.launch.hardCeiling}>Hard ceiling</Hint>
-                </dt>
-                <dd>
-                  {formatMoney(values.ceiling_microusd || 0)}{" "}
-                  <span className="text-xs text-slate-500">
-                    ({values.ceiling_microusd || 0} microusd)
-                  </span>
-                </dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">
-                  <Hint text={hints.launch.publicationRole}>Publication role</Hint>
-                </dt>
-                <dd>
-                  {humanize(String(policySpec?.publication_role ?? "Unavailable"))}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">
-                  <Hint text={hints.launch.perJobReservation}>Per-Job reservation</Hint>
-                </dt>
-                <dd>{formatMoney(Number(policySpec?.reservation_microusd ?? 0))}</dd>
-              </div>
-            </dl>
-            <div className="mt-4 grid gap-3 lg:grid-cols-2">
-              {selected.map((profile) => (
-                <details
-                  className="rounded-md border border-slate-800 p-3"
-                  key={`${profile.profile_kind}:${profile.profile_id}`}
-                >
-                  <summary className="cursor-pointer text-sm font-medium">
-                    {humanize(profile.profile_kind)}: {profile.approved_alias}
-                  </summary>
-                  <p className="mt-2 break-all font-mono text-xs text-slate-500">
-                    {profile.profile_id}
-                  </p>
-                  <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-400">
-                    {JSON.stringify(profile.spec, null, 2)}
-                  </pre>
-                </details>
-              ))}
-            </div>
+            <h3 className="font-medium">What this run will lock</h3>
+            {resolvedError ? (
+              <p className="mt-3 text-sm text-rose-300">{resolvedError}</p>
+            ) : (
+              <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                <div>
+                  <dt className="text-slate-500">
+                    <Hint text={hints.launch.logicalTasks}>Tasks</Hint>
+                  </dt>
+                  <dd>{taskCount}</dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">
+                    <Hint text={hints.launch.modelRevision}>Model revision</Hint>
+                  </dt>
+                  <dd className="break-all font-mono text-xs">
+                    {String(modelSpec?.revision ?? "Unavailable")}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">
+                    <Hint text={hints.launch.estimatedReservation}>
+                      Estimated reservation
+                    </Hint>
+                  </dt>
+                  <dd>{formatMoney(estimatedMicrousd)}</dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">
+                    <Hint text={hints.launch.hardCeiling}>Hard ceiling</Hint>
+                  </dt>
+                  <dd>
+                    {formatMoney(Math.round((values.ceiling_usd || 0) * 1_000_000))}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Locked harness</dt>
+                  <dd className="font-mono text-xs">{resolved?.harness}</dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Locked deployment</dt>
+                  <dd className="font-mono text-xs">{resolved?.deployment}</dd>
+                </div>
+              </dl>
+            )}
           </Card>
           <div className="flex flex-wrap items-start gap-3 md:col-span-2 xl:col-span-3">
             <label className="flex items-start gap-3">
@@ -747,8 +825,8 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
                 {...form.register("confirmed")}
               />
               <span className="text-sm text-slate-300">
-                I confirm the resolved profiles, logical task count, estimated
-                reservation, and hard cost ceiling.
+                I confirm the benchmark, model, runtime, harness, reasoning, task count,
+                and cost ceiling. After submit those values are locked on the run.
               </span>
             </label>
             <Hint text={hints.launch.confirmed} icon>
@@ -767,11 +845,13 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
           ) : null}
           <div className="md:col-span-2 xl:col-span-3">
             <Button
-              disabled={!writesAllowed || !values.confirmed || mutation.isPending}
+              disabled={
+                !writesAllowed || !values.confirmed || !resolved || mutation.isPending
+              }
               type="submit"
             >
               <PlayCircle size={16} />
-              {mutation.isPending ? "Submitting" : "Create immutable campaign"}
+              {mutation.isPending ? "Submitting" : "Start run"}
             </Button>
           </div>
         </form>
@@ -794,11 +874,11 @@ export function CampaignsPage() {
     () => [
       {
         accessorKey: "campaign_id",
-        header: () => <Hint text={hints.campaign.identity}>Campaign</Hint>,
+        header: () => <Hint text={hints.campaign.identity}>Run</Hint>,
         cell: ({ row }) => (
           <Link
             className="font-mono text-xs text-cyan-300 hover:underline"
-            to={`/campaigns/${row.original.campaign_id}`}
+            to={`/runs/${row.original.campaign_id}`}
           >
             {shortId(row.original.campaign_id)}
           </Link>
@@ -850,25 +930,25 @@ export function CampaignsPage() {
   return (
     <>
       <PageHeader
-        title="Campaigns"
-        description="Logical tasks remain separate from physical attempts and infrastructure repairs."
+        title="Runs"
+        description="Each run locks a benchmark, model, harness, reasoning, runtime, and cost ceiling. Logical tasks stay sealed; only infrastructure failures can be replaced."
         action={
           <Button
             disabled={!writesAllowed}
             title={
               writesAllowed
-                ? "Launch a campaign"
+                ? "Start a run"
                 : `Launch is unavailable while write mode is ${writeMode}`
             }
             onClick={() => setLaunching((value) => !value)}
           >
             <Plus size={16} />
-            Launch
+            Start a run
           </Button>
         }
       />
       {launching ? <LaunchPanel onClose={() => setLaunching(false)} /> : null}
-      <nav className="mb-4 flex gap-2" aria-label="Filter campaigns">
+      <nav className="mb-4 flex gap-2" aria-label="Filter runs">
         {["all", "active", "publishing", "completed"].map((status) => (
           <Button
             key={status}
@@ -880,11 +960,7 @@ export function CampaignsPage() {
         ))}
       </nav>
       <QueryContent query={query}>
-        <DataTable
-          columns={columns}
-          data={items}
-          empty="No campaigns match this filter"
-        />
+        <DataTable columns={columns} data={items} empty="No runs match this filter" />
         <CursorPager navigation={navigation} nextCursor={query.data?.next_cursor} />
       </QueryContent>
     </>
@@ -920,7 +996,7 @@ export function CampaignPage() {
   if (!campaign.data)
     return (
       <QueryContent query={campaign}>
-        <Empty>Campaign not found</Empty>
+        <Empty>Run not found</Empty>
       </QueryContent>
     );
   const item = campaign.data;
@@ -931,7 +1007,7 @@ export function CampaignPage() {
       cell: ({ row }) => (
         <Link
           className="font-mono text-xs text-cyan-300 hover:underline"
-          to={`/campaigns/${campaignId}/tasks/${row.original.task_id}`}
+          to={`/runs/${campaignId}/tasks/${row.original.task_id}`}
         >
           {shortId(row.original.task_id)}
         </Link>
@@ -969,7 +1045,7 @@ export function CampaignPage() {
     <QueryContent query={campaign}>
       <PageHeader
         title={shortId(campaignId)}
-        description="Campaign lock, logical outcomes, cost and publication state."
+        description="Run lock, logical outcomes, cost and publication state."
         action={
           item.status !== "completed" ? (
             <Button
@@ -977,7 +1053,7 @@ export function CampaignPage() {
               disabled={!writesAllowed || cancel.isPending}
               title={
                 writesAllowed
-                  ? "Cancel this campaign"
+                  ? "Cancel this run"
                   : `Cancellation is unavailable while write mode is ${writeMode}`
               }
               onClick={() => setCancelOpen(true)}
@@ -1232,7 +1308,7 @@ export function EndpointsPage() {
       cell: ({ getValue }) => (
         <Link
           className="font-mono text-xs text-cyan-300"
-          to={`/campaigns/${String(getValue())}`}
+          to={`/runs/${String(getValue())}`}
         >
           {shortId(String(getValue()))}
         </Link>
@@ -1599,7 +1675,7 @@ export function ResultPage() {
       cell: ({ row }) => (
         <Link
           className="font-mono text-xs text-cyan-300 hover:underline"
-          to={`/campaigns/${item.campaign_id}/tasks/${row.original.task_id}`}
+          to={`/runs/${item.campaign_id}/tasks/${row.original.task_id}`}
         >
           {row.original.task_id}
         </Link>
@@ -1741,7 +1817,7 @@ export function ResultPage() {
             <dd className="mt-1">
               <Link
                 className="break-all font-mono text-xs text-cyan-300 hover:underline"
-                to={`/campaigns/${item.campaign_id}`}
+                to={`/runs/${item.campaign_id}`}
               >
                 {item.campaign_id}
               </Link>

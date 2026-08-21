@@ -1,0 +1,30 @@
+{
+  "schema_version": "v1",
+  "kind": "profile.object",
+  "record_id": "profile-8058707e992092f3d91aaa89",
+  "created_at": "2026-08-21T13:30:00.000Z",
+  "actor": {
+    "subject": "harbor-hf-source",
+    "role": "service"
+  },
+  "profile_kind": "harness",
+  "name": "opencode",
+  "spec": {
+    "agent": "opencode",
+    "revision": "1.18.20",
+    "reasoning_effort": "off",
+    "required_evidence": [
+      "workspace",
+      "trajectory",
+      "verifier",
+      "provider-usage"
+    ],
+    "harbor_agent": {
+      "name": "opencode",
+      "model_name": "openai/openai/gpt-oss-20b:together",
+      "kwargs": {
+        "version": "1.18.20"
+      }
+    }
+  }
+}

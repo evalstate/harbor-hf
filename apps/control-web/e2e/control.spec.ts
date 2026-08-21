@@ -60,8 +60,8 @@ test("disables campaign launch and keeps account details compact", async ({ page
     route.fulfill({ json: { items: [], next_cursor: null } }),
   );
   await page.route("**/api/v1/events", (route) => route.abort());
-  await page.goto("/campaigns");
-  await expect(page.getByRole("button", { name: "Launch" })).toBeDisabled();
+  await page.goto("/runs");
+  await expect(page.getByRole("button", { name: "Start a run" })).toBeDisabled();
   const details = page.getByRole("button", { name: "Account and session details" });
   const guidance = page.getByText(/role grants permission/i);
   await expect(guidance).toBeHidden();
@@ -70,7 +70,7 @@ test("disables campaign launch and keeps account details compact", async ({ page
   await expect(page.getByText(/session expires/i)).toBeVisible();
 });
 
-test("explains launch policy when hovering the campaign form", async ({ page }) => {
+test("requires confirmation before starting a run", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),
   );
@@ -85,14 +85,68 @@ test("explains launch policy when hovering the campaign form", async ({ page }) 
       json: {
         items: [
           {
-            profile_id: "sha256:policy",
-            profile_kind: "launch_policy",
-            name: "control-smoke",
+            profile_id: "sha256:benchmark",
+            profile_kind: "benchmark",
+            name: "terminal-bench-2-1-diagnostic-1",
             source: "built-in",
             promotion_state: "approved",
-            alias: "control-smoke",
-            approved_aliases: ["control-smoke"],
-            spec: { publication_role: "diagnostic" },
+            alias: "terminal-bench-2-1-diagnostic-1",
+            approved_aliases: ["terminal-bench-2-1-diagnostic-1"],
+            spec: {
+              benchmark: "terminal-bench-2-1",
+              task_ids: ["task-a"],
+              trial_indices: [1],
+            },
+            created_at: "2026-08-16T00:00:00.000Z",
+          },
+          {
+            profile_id: "sha256:model",
+            profile_kind: "model",
+            name: "gpt-oss-20b",
+            source: "built-in",
+            promotion_state: "approved",
+            alias: "gpt-oss-20b",
+            approved_aliases: ["gpt-oss-20b"],
+            spec: { model_id: "openai/gpt-oss-20b", revision: "abc" },
+            created_at: "2026-08-16T00:00:00.000Z",
+          },
+          {
+            profile_id: "sha256:harness",
+            profile_kind: "harness",
+            name: "opencode",
+            source: "built-in",
+            promotion_state: "approved",
+            alias: "opencode",
+            approved_aliases: ["opencode"],
+            spec: { agent: "opencode", reasoning_effort: "off" },
+            created_at: "2026-08-16T00:00:00.000Z",
+          },
+          {
+            profile_id: "sha256:deployment",
+            profile_kind: "deployment",
+            name: "tb21-gpt-oss-20b-opencode-providers",
+            source: "built-in",
+            promotion_state: "approved",
+            alias: "tb21-gpt-oss-20b-opencode-providers",
+            approved_aliases: ["tb21-gpt-oss-20b-opencode-providers"],
+            spec: {
+              models: ["gpt-oss-20b"],
+              harnesses: ["opencode"],
+              sandbox_template: {
+                inference_upstream: "https://router.huggingface.co/v1",
+              },
+            },
+            created_at: "2026-08-16T00:00:00.000Z",
+          },
+          {
+            profile_id: "sha256:policy",
+            profile_kind: "launch_policy",
+            name: "tb21-diagnostic-1",
+            source: "built-in",
+            promotion_state: "approved",
+            alias: "tb21-diagnostic-1",
+            approved_aliases: ["tb21-diagnostic-1"],
+            spec: { reservation_microusd: 1000, publication_role: "diagnostic" },
             created_at: "2026-08-16T00:00:00.000Z",
           },
         ],
@@ -101,14 +155,16 @@ test("explains launch policy when hovering the campaign form", async ({ page }) 
     }),
   );
   await page.route("**/api/v1/events", (route) => route.abort());
-  await page.goto("/campaigns");
-  await page.getByRole("button", { name: "Launch" }).click();
-  const create = page.getByRole("button", { name: "Create immutable campaign" });
+  await page.goto("/runs");
+  await page.getByRole("button", { name: "Start a run" }).click();
+  const create = page.getByRole("button", { name: "Start run" });
   await expect(create).toBeDisabled();
   await page.getByRole("checkbox").check();
   await expect(create).toBeEnabled();
-  await page.getByText("Launch policy", { exact: true }).hover();
-  await expect(page.getByText("Admission and repair rules")).toBeVisible();
+  await page.getByText("Cost ceiling, USD", { exact: true }).hover();
+  await expect(
+    page.getByText(/defaults to twice the estimated reservation/i),
+  ).toBeVisible();
 });
 
 test("shows campaign failures as errors rather than missing data", async ({ page }) => {
@@ -135,5 +191,5 @@ test("shows campaign failures as errors rather than missing data", async ({ page
   await page.goto("/campaigns/campaign-error");
   await expect(page.getByText("Forbidden")).toBeVisible();
   await expect(page.getByText(/browser-request-id/)).toBeVisible();
-  await expect(page.getByText("Campaign not found")).toHaveCount(0);
+  await expect(page.getByText("Run not found")).toHaveCount(0);
 });
