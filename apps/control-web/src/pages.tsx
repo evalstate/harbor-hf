@@ -77,13 +77,21 @@ type ProfileRow = ProfileList["items"][number];
 type ResultRow = ResultList["items"][number];
 type AuditRow = AuditResponse["items"][number];
 
-function campaignResultStatus(campaign: CampaignRow): string {
-  if (
+function campaignHasSealedFailures(campaign: CampaignRow): boolean {
+  return (
     campaign.status === "completed" &&
     campaign.successful_tasks !== campaign.total_tasks
-  )
-    return "warning";
-  return campaign.status;
+  );
+}
+
+function campaignResultStatus(campaign: CampaignRow): string {
+  return campaignHasSealedFailures(campaign) ? "warning" : campaign.status;
+}
+
+function campaignStatusLabel(campaign: CampaignRow): string {
+  return campaignHasSealedFailures(campaign)
+    ? "Completed with failures"
+    : humanize(campaign.status);
 }
 
 function campaignStatusNote(campaign: CampaignRow): string {
@@ -791,9 +799,9 @@ export function CampaignsPage() {
       {
         accessorKey: "status",
         header: () => <Hint text={hints.campaign.status}>State</Hint>,
-        cell: ({ getValue, row }) => (
+        cell: ({ row }) => (
           <Badge status={campaignResultStatus(row.original)}>
-            {humanize(String(getValue()))}
+            {campaignStatusLabel(row.original)}
           </Badge>
         ),
       },
@@ -1034,7 +1042,7 @@ export function CampaignPage() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Stat
           label="Status"
-          value={humanize(item.status)}
+          value={campaignStatusLabel(item)}
           note={campaignStatusNote(item)}
           icon={RefreshCw}
           hint={hints.campaign.status}

@@ -22,7 +22,7 @@ export const hints = {
   },
   overview: {
     active:
-      "Campaigns that are not completed. Completed means every logical task is sealed, publication succeeded, and Endpoint cleanup is verified. It does not mean every task scored complete.",
+      "Campaigns that are not completed. Completed is green only when every sealed task scored complete. Completed with failures still counts as completed for this filter.",
     policyStops:
       "Campaigns in failed or manual-intervention state. The reconciler stopped and an operator must inspect the audit trail.",
     observedSpend:
@@ -74,7 +74,7 @@ export const hints = {
     identity:
       "Immutable campaign id. Open it to see the lock, logical tasks, Jobs, and recorded spend.",
     status:
-      "Campaign lifecycle: queued, active, publishing, or completed. Completed means every logical task is sealed, publication finished, and Endpoint cleanup is verified. It does not mean every task scored complete.",
+      "Campaign lifecycle: queued, active, publishing, or completed. Completed is green only when every sealed task scored complete. Completed with failures means the campaign finished, but at least one sealed task did not succeed.",
     logicalTasks:
       "Terminal logical outcomes over the locked task count. Pending actions are in-flight Jobs, Sandboxes, or other control work.",
     observedCost:

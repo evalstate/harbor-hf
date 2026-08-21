@@ -406,6 +406,52 @@ describe("control web", () => {
     expect(requests.some((path) => path.includes("cursor=cursor-one"))).toBe(true);
   });
 
+  it("labels finished campaigns with sealed failures separately from complete success", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/campaigns"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-success",
+                status: "completed",
+                terminal_tasks: 1,
+                successful_tasks: 1,
+                total_tasks: 1,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T00:00:00Z",
+              },
+              {
+                campaign_id: "campaign-timeout",
+                status: "completed",
+                terminal_tasks: 2,
+                successful_tasks: 1,
+                total_tasks: 2,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T01:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns");
+    expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
+    expect(screen.getByText("Completed with failures").className).toContain("amber");
+    const successBadge = screen
+      .getAllByText("Completed", { exact: true })
+      .find((element) => element.tagName === "SPAN");
+    expect(successBadge?.className).toContain("emerald");
+  });
+
   it("explains launch policy on hover", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
@@ -544,7 +590,7 @@ describe("control web", () => {
       }),
     );
     renderApp("/campaigns/campaign-mixed");
-    expect(await screen.findByText("Completed")).toBeInTheDocument();
+    expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
     expect(
       screen.getByText("Published. 1 sealed task did not succeed."),
     ).toBeInTheDocument();

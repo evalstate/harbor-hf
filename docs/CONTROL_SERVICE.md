@@ -453,7 +453,8 @@ for campaign launch fields, spend, Jobs, Endpoints, results, and other operator
 controls. Tables virtualize only when a measured row count requires it. Every
 status also has text and an icon; color is never the only signal. Complete
 outcomes are green, sealed timeouts and cancellations are yellow, and failures
-are red.
+are red. A finished campaign with sealed non-success tasks is labeled Completed
+with failures, not Completed.
 
 ## Authentication and authorization
 
