@@ -18,16 +18,17 @@ import { NavLink } from "react-router-dom";
 import type { DisplayActor } from "./control-state";
 import { cn, formatDate, humanize } from "./lib";
 import type { LiveState } from "./queries";
-import { Badge, Button, ErrorNotice } from "./ui";
+import { Badge, Button, ErrorNotice, Hint } from "./ui";
+import { hints } from "./hints";
 
 const navigation = [
-  ["/", "Overview", Gauge],
-  ["/campaigns", "Campaigns", ClipboardList],
-  ["/jobs", "Jobs", ServerCog],
-  ["/endpoints", "Endpoints", Network],
-  ["/results", "Results", BarChart3],
-  ["/profiles", "Profiles", Boxes],
-  ["/audit", "Audit", FileClock],
+  ["/", "Overview", Gauge, hints.nav.overview],
+  ["/campaigns", "Campaigns", ClipboardList, hints.nav.campaigns],
+  ["/jobs", "Jobs", ServerCog, hints.nav.jobs],
+  ["/endpoints", "Endpoints", Network, hints.nav.endpoints],
+  ["/results", "Results", BarChart3, hints.nav.results],
+  ["/profiles", "Profiles", Boxes, hints.nav.profiles],
+  ["/audit", "Audit", FileClock, hints.nav.audit],
 ] as const;
 
 export function Layout({
@@ -94,7 +95,7 @@ export function Layout({
           </Button>
         </div>
         <nav className="mt-8 space-y-1" aria-label="Primary">
-          {navigation.map(([href, label, Icon]) => (
+          {navigation.map(([href, label, Icon, hint]) => (
             <NavLink
               key={href}
               end={href === "/"}
@@ -110,7 +111,7 @@ export function Layout({
               }
             >
               <Icon size={18} />
-              {label}
+              <Hint text={hint}>{label}</Hint>
             </NavLink>
           ))}
         </nav>
@@ -118,7 +119,7 @@ export function Layout({
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-2 text-xs text-slate-400">
               <Activity size={14} />
-              Live updates
+              <Hint text={hints.chrome.liveUpdates}>Live updates</Hint>
             </span>
             <Badge status={live.status === "connected" ? "ready" : "pending"}>
               {humanize(live.status)}
@@ -132,7 +133,7 @@ export function Layout({
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-2 text-xs text-slate-400">
               <ShieldCheck size={14} />
-              Write mode
+              <Hint text={hints.chrome.writeMode}>Write mode</Hint>
             </span>
             <Badge status={writeMode === "enabled" ? "ready" : "pending"}>
               {humanize(writeMode)}

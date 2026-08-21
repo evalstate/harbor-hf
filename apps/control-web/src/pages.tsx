@@ -56,7 +56,8 @@ import {
   useTask,
   useTasks,
 } from "./queries";
-import { Badge, Button, Card, Empty, Progress, QueryContent } from "./ui";
+import { Badge, Button, Card, Empty, Hint, Progress, QueryContent } from "./ui";
+import { hints } from "./hints";
 
 type CampaignRow = CampaignList["items"][number];
 type TaskRow = TaskList["items"][number];
@@ -69,7 +70,7 @@ type AuditRow = AuditResponse["items"][number];
 function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   const campaignColumn: ColumnDef<JobRow> = {
     accessorKey: "campaign_id",
-    header: "Campaign",
+    header: () => <Hint text={hints.jobs.campaign}>Campaign</Hint>,
     cell: ({ getValue }) => (
       <Link
         className="font-mono text-xs text-cyan-300"
@@ -82,7 +83,7 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   return [
     {
       accessorKey: "resource_id",
-      header: "HF Job",
+      header: () => <Hint text={hints.jobs.hfJob}>HF Job</Hint>,
       cell: ({ row }) => {
         const resourceId = row.original.resource_id;
         const inspectUrl = row.original.inspect_url;
@@ -105,12 +106,12 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
     ...(includeCampaign ? [campaignColumn] : []),
     {
       accessorKey: "action_kind",
-      header: "Action",
+      header: () => <Hint text={hints.jobs.action}>Action</Hint>,
       cell: ({ getValue }) => humanize(String(getValue())),
     },
     {
       accessorKey: "observed_state",
-      header: "Observed",
+      header: () => <Hint text={hints.jobs.observed}>Observed</Hint>,
       cell: ({ getValue }) => (
         <Badge status={String(getValue() ?? "pending").toLowerCase()}>
           {humanize(String(getValue() ?? "pending"))}
@@ -119,7 +120,7 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
     },
     {
       accessorKey: "created_at",
-      header: "Recorded",
+      header: () => <Hint text={hints.jobs.recorded}>Recorded</Hint>,
       cell: ({ getValue }) => formatDate(String(getValue())),
     },
   ];
@@ -129,7 +130,9 @@ function CampaignJobs({ campaignId }: { campaignId: string }) {
   const query = useJobs(undefined, campaignId);
   return (
     <section className="mt-8">
-      <h2 className="text-lg font-semibold text-white">Jobs</h2>
+      <h2 className="text-lg font-semibold text-white">
+        <Hint text={hints.campaign.jobs}>Jobs</Hint>
+      </h2>
       <p className="mb-4 mt-1 text-sm text-slate-400">
         HF Jobs launched for this campaign, with Hub inspect links and latest observed
         state.
@@ -289,18 +292,20 @@ function Stat({
   value,
   note,
   icon: Icon,
+  hint,
 }: {
   label: string;
   value: string;
   note: string;
   icon: typeof Clock3;
+  hint?: string;
 }) {
   return (
     <Card>
       <div className="flex items-start justify-between">
         <div>
           <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
-            {label}
+            {hint ? <Hint text={hint}>{label}</Hint> : label}
           </p>
           <p className="mt-2 text-2xl font-semibold text-white">{value}</p>
           <p className="mt-1 text-xs text-slate-500">{note}</p>
@@ -350,29 +355,35 @@ export function OverviewPage() {
               value={String(active)}
               note={`${items.length} total`}
               icon={PlayCircle}
+              hint={hints.overview.active}
             />
             <Stat
               label="Policy stops"
               value={String(failures)}
               note="Requires operator review"
               icon={AlertTriangle}
+              hint={hints.overview.policyStops}
             />
             <Stat
               label="Observed spend"
               value={formatMoney(spend)}
               note="Across projected campaigns"
               icon={CircleDollarSign}
+              hint={hints.overview.observedSpend}
             />
             <Stat
               label="Unsafe endpoints"
               value={String(unsafe)}
               note={unsafe ? "Cleanup required" : "All observed endpoints safe"}
               icon={ShieldCheck}
+              hint={hints.overview.unsafeEndpoints}
             />
           </div>
           <div className="mt-6 grid gap-6 xl:grid-cols-[1.4fr_1fr]">
             <Card>
-              <h2 className="font-semibold">Recent campaign spend</h2>
+              <h2 className="font-semibold">
+                <Hint text={hints.overview.spendChart}>Recent campaign spend</Hint>
+              </h2>
               <p className="mt-1 text-xs text-slate-500">
                 Observed cost in USD; reserved ceilings remain separate.
               </p>
@@ -396,7 +407,9 @@ export function OverviewPage() {
               <dl className="mt-5 space-y-4 text-sm">
                 <div>
                   <div className="flex justify-between gap-4">
-                    <dt className="text-slate-500">Write mode</dt>
+                    <dt className="text-slate-500">
+                      <Hint text={hints.overview.writeMode}>Write mode</Hint>
+                    </dt>
                     <dd>{humanize(String(system.data?.write_mode ?? "unknown"))}</dd>
                   </div>
                   <p className="mt-1 text-xs leading-5 text-slate-500">
@@ -405,18 +418,28 @@ export function OverviewPage() {
                   </p>
                 </div>
                 <div>
-                  <dt className="text-slate-500">Source revision</dt>
+                  <dt className="text-slate-500">
+                    <Hint text={hints.overview.sourceRevision}>Source revision</Hint>
+                  </dt>
                   <dd className="mt-1 break-all font-mono text-xs select-all">
                     {String(system.data?.source_revision ?? "unknown")}
                   </dd>
                 </div>
                 <div className="flex justify-between gap-4">
-                  <dt className="text-slate-500">Projected objects</dt>
+                  <dt className="text-slate-500">
+                    <Hint text={hints.overview.projectedObjects}>
+                      Projected objects
+                    </Hint>
+                  </dt>
                   <dd>{String(system.data?.projection?.object_count ?? 0)}</dd>
                 </div>
                 <div>
                   <div className="flex justify-between gap-4">
-                    <dt className="text-slate-500">Projection freshness</dt>
+                    <dt className="text-slate-500">
+                      <Hint text={hints.overview.projectionFreshness}>
+                        Projection freshness
+                      </Hint>
+                    </dt>
                     <dd>
                       {system.data?.projection?.last_sync_at
                         ? formatDate(system.data.projection.last_sync_at)
@@ -520,8 +543,8 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
         <div>
           <h2 className="font-semibold">Launch campaign</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Select approved aliases and review their immutable resolution before any
-            paid action.
+            Hover a field name for what it locks. Select approved aliases and review
+            their immutable resolution before any paid action.
           </p>
         </div>
         <Button variant="ghost" onClick={onClose}>
@@ -544,11 +567,14 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
           {(
             ["benchmark", "model", "harness", "deployment", "launch_policy"] as const
           ).map((field) => (
-            <label className="space-y-1.5 text-sm" key={field}>
-              <span className="text-slate-400">{humanize(field)}</span>
+            <div className="space-y-1.5 text-sm" key={field}>
+              <Hint text={hints.launch[field]} icon>
+                {humanize(field)}
+              </Hint>
               <select
                 className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
                 disabled={!writesAllowed}
+                aria-label={humanize(field)}
                 {...form.register(field)}
               >
                 {options(field).map((profile) => (
@@ -557,54 +583,85 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
                   </option>
                 ))}
               </select>
-            </label>
+            </div>
           ))}
-          <label className="space-y-1.5 text-sm">
-            <span className="text-slate-400">Hard cost ceiling, USD</span>
+          <div className="space-y-1.5 text-sm">
+            <Hint text={hints.launch.ceiling} icon>
+              Hard cost ceiling, USD
+            </Hint>
             <input
               className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
               type="number"
               min="0"
               step="0.000001"
               disabled={!writesAllowed}
+              aria-label="Hard cost ceiling, USD"
               {...form.register("ceiling_microusd", {
                 setValueAs: (value) => Math.round(Number(value) * 1_000_000),
               })}
             />
-          </label>
+          </div>
           <Card className="md:col-span-2 xl:col-span-3">
             <h3 className="font-medium">Resolved launch</h3>
             <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
               <div>
-                <dt className="text-slate-500">Logical tasks</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.launch.logicalTasks}>Logical tasks</Hint>
+                </dt>
                 <dd>{taskCount}</dd>
               </div>
               <div>
-                <dt className="text-slate-500">Model revision</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.launch.modelRevision}>Model revision</Hint>
+                </dt>
                 <dd className="break-all font-mono text-xs">
                   {String(modelSpec?.revision ?? "Unavailable")}
                 </dd>
               </div>
               <div>
-                <dt className="text-slate-500">Hardware</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.launch.hardware}>Hardware</Hint>
+                </dt>
                 <dd>{String(deploymentSpec?.hardware ?? "Unavailable")}</dd>
               </div>
               <div>
-                <dt className="text-slate-500">Attempt limit</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.launch.attemptLimit}>Attempt limit</Hint>
+                </dt>
                 <dd>{attemptLimit || "Unavailable"}</dd>
               </div>
               <div>
-                <dt className="text-slate-500">Estimated reservation</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.launch.estimatedReservation}>
+                    Estimated reservation
+                  </Hint>
+                </dt>
                 <dd>{formatMoney(estimatedMicrousd)}</dd>
               </div>
               <div>
-                <dt className="text-slate-500">Hard ceiling</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.launch.hardCeiling}>Hard ceiling</Hint>
+                </dt>
                 <dd>
                   {formatMoney(values.ceiling_microusd || 0)}{" "}
                   <span className="text-xs text-slate-500">
                     ({values.ceiling_microusd || 0} microusd)
                   </span>
                 </dd>
+              </div>
+              <div>
+                <dt className="text-slate-500">
+                  <Hint text={hints.launch.publicationRole}>Publication role</Hint>
+                </dt>
+                <dd>
+                  {humanize(String(policySpec?.publication_role ?? "Unavailable"))}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-slate-500">
+                  <Hint text={hints.launch.perJobReservation}>Per-Job reservation</Hint>
+                </dt>
+                <dd>{formatMoney(Number(policySpec?.reservation_microusd ?? 0))}</dd>
               </div>
             </dl>
             <div className="mt-4 grid gap-3 lg:grid-cols-2">
@@ -626,18 +683,23 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
               ))}
             </div>
           </Card>
-          <label className="flex items-start gap-3 md:col-span-2 xl:col-span-3">
-            <input
-              className="mt-1 h-4 w-4 accent-cyan-400"
-              type="checkbox"
-              disabled={!writesAllowed}
-              {...form.register("confirmed")}
-            />
-            <span className="text-sm text-slate-300">
-              I confirm the resolved profiles, logical task count, estimated
-              reservation, and hard cost ceiling.
-            </span>
-          </label>
+          <div className="flex flex-wrap items-start gap-3 md:col-span-2 xl:col-span-3">
+            <label className="flex items-start gap-3">
+              <input
+                className="mt-1 h-4 w-4 accent-cyan-400"
+                type="checkbox"
+                disabled={!writesAllowed}
+                {...form.register("confirmed")}
+              />
+              <span className="text-sm text-slate-300">
+                I confirm the resolved profiles, logical task count, estimated
+                reservation, and hard cost ceiling.
+              </span>
+            </label>
+            <Hint text={hints.launch.confirmed} icon>
+              Why this is required
+            </Hint>
+          </div>
           {form.formState.errors.confirmed ? (
             <p className="text-sm text-rose-300 md:col-span-2 xl:col-span-3">
               {form.formState.errors.confirmed.message}
@@ -674,7 +736,7 @@ export function CampaignsPage() {
     () => [
       {
         accessorKey: "campaign_id",
-        header: "Campaign",
+        header: () => <Hint text={hints.campaign.identity}>Campaign</Hint>,
         cell: ({ row }) => (
           <Link
             className="font-mono text-xs text-cyan-300 hover:underline"
@@ -686,14 +748,14 @@ export function CampaignsPage() {
       },
       {
         accessorKey: "status",
-        header: "State",
+        header: () => <Hint text={hints.campaign.status}>State</Hint>,
         cell: ({ getValue }) => (
           <Badge status={String(getValue())}>{humanize(String(getValue()))}</Badge>
         ),
       },
       {
         id: "progress",
-        header: "Logical progress",
+        header: () => <Hint text={hints.campaign.logicalTasks}>Logical progress</Hint>,
         cell: ({ row }) => (
           <div className="min-w-40">
             <Progress
@@ -709,17 +771,17 @@ export function CampaignsPage() {
       },
       {
         accessorKey: "observed_microusd",
-        header: "Observed",
+        header: () => <Hint text={hints.campaign.observedCost}>Observed</Hint>,
         cell: ({ getValue }) => formatMoney(Number(getValue())),
       },
       {
         accessorKey: "ceiling_microusd",
-        header: "Ceiling",
+        header: () => <Hint text={hints.launch.hardCeiling}>Ceiling</Hint>,
         cell: ({ getValue }) => formatMoney(Number(getValue())),
       },
       {
         accessorKey: "created_at",
-        header: "Created",
+        header: () => <Hint text={hints.audit.time}>Created</Hint>,
         cell: ({ getValue }) => formatDate(String(getValue())),
       },
     ],
@@ -805,7 +867,7 @@ export function CampaignPage() {
   const columns: ColumnDef<TaskRow>[] = [
     {
       accessorKey: "task_id",
-      header: "Task",
+      header: () => <Hint text={hints.campaign.logicalTasks}>Task</Hint>,
       cell: ({ row }) => (
         <Link
           className="font-mono text-xs text-cyan-300 hover:underline"
@@ -817,7 +879,7 @@ export function CampaignPage() {
     },
     {
       accessorKey: "terminal_outcome",
-      header: "Outcome",
+      header: () => <Hint text={hints.campaign.outcome}>Outcome</Hint>,
       cell: ({ getValue }) => (
         <Badge status={String(getValue() ?? "pending")}>
           {humanize(String(getValue() ?? "pending"))}
@@ -826,7 +888,7 @@ export function CampaignPage() {
     },
     {
       accessorKey: "selected_attempt_id",
-      header: "Selected attempt",
+      header: () => <Hint text={hints.campaign.selectedAttempt}>Selected attempt</Hint>,
       cell: ({ getValue }) => (
         <span className="font-mono text-xs">
           {getValue() ? shortId(String(getValue())) : "—"}
@@ -835,7 +897,7 @@ export function CampaignPage() {
     },
     {
       accessorKey: "input_digest",
-      header: "Input",
+      header: () => <Hint text={hints.campaign.inputDigest}>Input</Hint>,
       cell: ({ getValue }) => (
         <span className="font-mono text-xs text-slate-500">
           {shortId(String(getValue()))}
@@ -931,24 +993,28 @@ export function CampaignPage() {
           value={humanize(item.status)}
           note={item.publication_status ?? "Not published"}
           icon={RefreshCw}
+          hint={hints.campaign.status}
         />
         <Stat
           label="Logical tasks"
           value={`${item.terminal_tasks}/${item.total_tasks}`}
           note={`${item.pending_actions} pending actions`}
           icon={Clock3}
+          hint={hints.campaign.logicalTasks}
         />
         <Stat
           label="Observed cost"
           value={formatMoney(item.observed_microusd)}
           note={`All recorded campaign sources. ${formatMoney(item.reserved_microusd)} reserved`}
           icon={CircleDollarSign}
+          hint={hints.campaign.observedCost}
         />
         <Stat
           label="Endpoint cleanup"
           value={item.cleanup_pending ? "Pending" : "Clear"}
           note="Required before completion"
           icon={ShieldCheck}
+          hint={hints.campaign.endpointCleanup}
         />
       </div>
       <Card className="my-6">
@@ -988,7 +1054,9 @@ export function TaskPage() {
       <Card>
         <dl className="grid gap-4 text-sm sm:grid-cols-2">
           <div>
-            <dt className="text-slate-500">Outcome</dt>
+            <dt className="text-slate-500">
+              <Hint text={hints.campaign.outcome}>Outcome</Hint>
+            </dt>
             <dd className="mt-1">
               <Badge status={detail.data.task.terminal_outcome ?? "pending"}>
                 {humanize(detail.data.task.terminal_outcome ?? "pending")}
@@ -996,13 +1064,17 @@ export function TaskPage() {
             </dd>
           </div>
           <div>
-            <dt className="text-slate-500">Selected attempt</dt>
+            <dt className="text-slate-500">
+              <Hint text={hints.campaign.selectedAttempt}>Selected attempt</Hint>
+            </dt>
             <dd className="mt-1 font-mono text-xs">
               {detail.data.task.selected_attempt_id ?? "—"}
             </dd>
           </div>
           <div className="sm:col-span-2">
-            <dt className="text-slate-500">Input digest</dt>
+            <dt className="text-slate-500">
+              <Hint text={hints.campaign.inputDigest}>Input digest</Hint>
+            </dt>
             <dd className="mt-1 break-all font-mono text-xs">
               {detail.data.task.input_digest}
             </dd>
@@ -1023,19 +1095,29 @@ export function TaskPage() {
             </div>
             <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-3">
               <div>
-                <dt className="text-slate-500">Replacement eligible</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.campaign.replacementEligible}>
+                    Replacement eligible
+                  </Hint>
+                </dt>
                 <dd>{attempt.replacement_eligible ? "Yes" : "No"}</dd>
               </div>
               <div>
-                <dt className="text-slate-500">Cost</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.campaign.attemptCost}>Cost</Hint>
+                </dt>
                 <dd>{formatMoney(attempt.cost_microusd)}</dd>
               </div>
               <div>
-                <dt className="text-slate-500">Recorded</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.campaign.attemptRecorded}>Recorded</Hint>
+                </dt>
                 <dd>{formatDate(attempt.created_at)}</dd>
               </div>
               <div className="sm:col-span-3">
-                <dt className="text-slate-500">Metrics</dt>
+                <dt className="text-slate-500">
+                  <Hint text={hints.campaign.attemptMetrics}>Metrics</Hint>
+                </dt>
                 <dd className="mt-1 flex flex-wrap gap-2">
                   {Object.entries(attempt.metrics).length ? (
                     Object.entries(attempt.metrics).map(([name, value]) => (
@@ -1078,14 +1160,14 @@ export function EndpointsPage() {
   const columns: ColumnDef<EndpointRow>[] = [
     {
       accessorKey: "endpoint_id",
-      header: "Endpoint",
+      header: () => <Hint text={hints.endpoints.endpoint}>Endpoint</Hint>,
       cell: ({ getValue }) => (
         <span className="font-mono text-xs">{shortId(String(getValue()))}</span>
       ),
     },
     {
       accessorKey: "campaign_id",
-      header: "Campaign",
+      header: () => <Hint text={hints.endpoints.campaign}>Campaign</Hint>,
       cell: ({ getValue }) => (
         <Link
           className="font-mono text-xs text-cyan-300"
@@ -1097,22 +1179,25 @@ export function EndpointsPage() {
     },
     {
       accessorKey: "desired_state",
-      header: "Desired",
+      header: () => <Hint text={hints.endpoints.desired}>Desired</Hint>,
       cell: ({ getValue }) => humanize(String(getValue())),
     },
     {
       accessorKey: "observed_state",
-      header: "Observed",
+      header: () => <Hint text={hints.endpoints.observed}>Observed</Hint>,
       cell: ({ getValue }) => (
         <Badge status={String(getValue()).toLowerCase()}>
           {humanize(String(getValue()))}
         </Badge>
       ),
     },
-    { accessorKey: "ready_replicas", header: "Ready replicas" },
+    {
+      accessorKey: "ready_replicas",
+      header: () => <Hint text={hints.endpoints.readyReplicas}>Ready replicas</Hint>,
+    },
     {
       accessorKey: "cleanup_verified",
-      header: "Cleanup",
+      header: () => <Hint text={hints.endpoints.cleanup}>Cleanup</Hint>,
       cell: ({ getValue }) =>
         Number(getValue()) ? (
           <Badge status="ready">Verified</Badge>
@@ -1122,7 +1207,7 @@ export function EndpointsPage() {
     },
     {
       accessorKey: "active_hourly_cost_microusd",
-      header: "Active hourly cost",
+      header: () => <Hint text={hints.endpoints.hourly}>Active hourly cost</Hint>,
       cell: ({ getValue }) => formatMoney(Number(getValue())),
     },
   ];
@@ -1163,7 +1248,7 @@ export function ResultsPage() {
   const columns: ColumnDef<ResultRow>[] = [
     {
       accessorKey: "publication_id",
-      header: "Publication",
+      header: () => <Hint text={hints.results.publication}>Publication</Hint>,
       cell: ({ row }) => (
         <Link
           className="font-mono text-xs text-cyan-300 hover:underline"
@@ -1175,7 +1260,9 @@ export function ResultsPage() {
     },
     {
       accessorKey: "model",
-      header: "Model and benchmark",
+      header: () => (
+        <Hint text={hints.results.modelBenchmark}>Model and benchmark</Hint>
+      ),
       cell: ({ row }) => (
         <div>
           <div className="max-w-52 truncate font-medium">
@@ -1189,12 +1276,12 @@ export function ResultsPage() {
     },
     {
       accessorKey: "agent",
-      header: "Agent",
+      header: () => <Hint text={hints.results.agent}>Agent</Hint>,
       cell: ({ row }) => String(row.original.agent ?? row.original.harness ?? "—"),
     },
     {
       id: "score",
-      header: "Primary metric",
+      header: () => <Hint text={hints.results.primaryMetric}>Primary metric</Hint>,
       cell: ({ row }) => {
         const metric = row.original.primary_metric;
         return metric ? `${metric.value.toFixed(4)} ${metric.unit}` : "—";
@@ -1202,7 +1289,7 @@ export function ResultsPage() {
     },
     {
       id: "tasks",
-      header: "Scored tasks",
+      header: () => <Hint text={hints.results.scoredTasks}>Scored tasks</Hint>,
       cell: ({ row }) =>
         row.original.task_count === null || row.original.task_count === undefined
           ? "—"
@@ -1210,14 +1297,14 @@ export function ResultsPage() {
     },
     {
       accessorKey: "status",
-      header: "State",
+      header: () => <Hint text={hints.results.state}>State</Hint>,
       cell: ({ getValue }) => (
         <Badge status={String(getValue())}>{humanize(String(getValue()))}</Badge>
       ),
     },
     {
       accessorKey: "published_at",
-      header: "Published",
+      header: () => <Hint text={hints.results.published}>Published</Hint>,
       cell: ({ getValue }) => formatDate(String(getValue())),
     },
   ];
@@ -1261,7 +1348,9 @@ export function ResultsPage() {
       >
         {(["search", "model", "benchmark", "agent"] as const).map((name) => (
           <label className="space-y-1 text-sm" key={name}>
-            <span className="text-slate-400">{humanize(name)}</span>
+            <span className="text-slate-400">
+              <Hint text={hints.results[name]}>{humanize(name)}</Hint>
+            </span>
             <input
               className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2"
               name={name}
@@ -1271,7 +1360,9 @@ export function ResultsPage() {
           </label>
         ))}
         <label className="space-y-1 text-sm">
-          <span className="text-slate-400">Status</span>
+          <span className="text-slate-400">
+            <Hint text={hints.results.status}>Status</Hint>
+          </span>
           <select
             className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2"
             name="result_status"
@@ -1284,7 +1375,9 @@ export function ResultsPage() {
           </select>
         </label>
         <label className="space-y-1 text-sm">
-          <span className="text-slate-400">From date</span>
+          <span className="text-slate-400">
+            <Hint text={hints.results.fromDate}>From date</Hint>
+          </span>
           <input
             className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2"
             name="published_after"
@@ -1293,7 +1386,9 @@ export function ResultsPage() {
           />
         </label>
         <label className="space-y-1 text-sm">
-          <span className="text-slate-400">Through date</span>
+          <span className="text-slate-400">
+            <Hint text={hints.results.throughDate}>Through date</Hint>
+          </span>
           <input
             className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2"
             name="published_before"
@@ -1303,7 +1398,9 @@ export function ResultsPage() {
         </label>
         <div className="grid grid-cols-2 gap-2">
           <label className="space-y-1 text-sm">
-            <span className="text-slate-400">Sort</span>
+            <span className="text-slate-400">
+              <Hint text={hints.results.sort}>Sort</Hint>
+            </span>
             <select
               className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2"
               name="sort"
@@ -1317,7 +1414,9 @@ export function ResultsPage() {
             </select>
           </label>
           <label className="space-y-1 text-sm">
-            <span className="text-slate-400">Order</span>
+            <span className="text-slate-400">
+              <Hint text={hints.results.order}>Order</Hint>
+            </span>
             <select
               className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2"
               name="order"
@@ -1347,10 +1446,20 @@ export function ResultsPage() {
   );
 }
 
-function ResultField({ label, value }: { label: string; value: unknown }) {
+function ResultField({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: unknown;
+  hint?: string;
+}) {
   return (
     <div>
-      <dt className="text-slate-500">{label}</dt>
+      <dt className="text-slate-500">
+        {hint ? <Hint text={hint}>{label}</Hint> : label}
+      </dt>
       <dd className="mt-1 break-all">
         {value === null || value === undefined || value === "" ? "—" : String(value)}
       </dd>
@@ -1380,6 +1489,7 @@ export function ResultPage() {
           value={humanize(item.status)}
           note={item.quality ? humanize(item.quality) : "No quality label"}
           icon={RefreshCw}
+          hint={hints.results.state}
         />
         <Stat
           label="Primary metric"
@@ -1390,18 +1500,21 @@ export function ResultPage() {
               : "No score"
           }
           icon={Gauge}
+          hint={hints.results.primaryMetric}
         />
         <Stat
           label="Scored tasks"
           value={`${item.scored_task_count ?? 0}/${item.task_count ?? 0}`}
           note={`${item.strict_pass_count ?? 0} strict passes`}
           icon={ShieldCheck}
+          hint={hints.results.scoredTasks}
         />
         <Stat
           label="Published"
           value={formatDate(item.published_at)}
           note={item.publication_role ? humanize(item.publication_role) : "No role"}
           icon={Clock3}
+          hint={hints.results.published}
         />
       </div>
       <Card className="mt-6">
@@ -1454,7 +1567,7 @@ export function ProfilesPage() {
   const columns: ColumnDef<ProfileRow>[] = [
     {
       accessorKey: "name",
-      header: "Name",
+      header: () => <Hint text={hints.profiles.name}>Name</Hint>,
       cell: ({ row }) => (
         <div>
           <div className="font-medium">{row.original.name}</div>
@@ -1466,17 +1579,17 @@ export function ProfilesPage() {
     },
     {
       accessorKey: "profile_kind",
-      header: "Kind",
+      header: () => <Hint text={hints.profiles.kind}>Kind</Hint>,
       cell: ({ getValue }) => humanize(String(getValue())),
     },
     {
       accessorKey: "source",
-      header: "Source",
+      header: () => <Hint text={hints.profiles.source}>Source</Hint>,
       cell: ({ getValue }) => <Badge>{humanize(String(getValue()))}</Badge>,
     },
     {
       accessorKey: "promotion_state",
-      header: "Approval",
+      header: () => <Hint text={hints.profiles.approval}>Approval</Hint>,
       cell: ({ getValue }) => (
         <Badge status={String(getValue() ?? "built-in")}>
           {humanize(String(getValue() ?? "built-in"))}
@@ -1485,7 +1598,7 @@ export function ProfilesPage() {
     },
     {
       accessorKey: "approved_aliases",
-      header: "Approved aliases",
+      header: () => <Hint text={hints.profiles.aliases}>Approved aliases</Hint>,
       cell: ({ row }) => row.original.approved_aliases.join(", ") || "—",
     },
   ];
@@ -1509,17 +1622,17 @@ export function AuditPage() {
   const columns: ColumnDef<AuditRow>[] = [
     {
       accessorKey: "occurred_at",
-      header: "Time",
+      header: () => <Hint text={hints.audit.time}>Time</Hint>,
       cell: ({ getValue }) => formatDate(String(getValue())),
     },
     {
       accessorKey: "type",
-      header: "Record",
+      header: () => <Hint text={hints.audit.record}>Record</Hint>,
       cell: ({ getValue }) => <Badge>{humanize(String(getValue()))}</Badge>,
     },
     {
       id: "record_id",
-      header: "Identity",
+      header: () => <Hint text={hints.audit.identity}>Identity</Hint>,
       cell: ({ row }) => (
         <span className="font-mono text-xs">
           {shortId(String(row.original.data.record_id ?? row.original.id))}
@@ -1528,7 +1641,7 @@ export function AuditPage() {
     },
     {
       id: "digest",
-      header: "Digest",
+      header: () => <Hint text={hints.audit.digest}>Digest</Hint>,
       cell: ({ row }) => (
         <span className="font-mono text-xs text-slate-500">
           {shortId(String(row.original.data.digest ?? "—"))}

@@ -398,4 +398,93 @@ describe("control web", () => {
     expect(await screen.findByText("campaign-second")).toBeInTheDocument();
     expect(requests.some((path) => path.includes("cursor=cursor-one"))).toBe(true);
   });
+
+  it("explains launch policy on hover", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/campaigns")) return json({ items: [], next_cursor: null });
+        if (path.includes("/profiles"))
+          return json({
+            items: [
+              {
+                profile_id: "sha256:benchmark",
+                profile_kind: "benchmark",
+                name: "control-smoke",
+                source: "built-in",
+                promotion_state: "approved",
+                alias: "control-smoke",
+                approved_aliases: ["control-smoke"],
+                spec: { task_ids: ["task-001"] },
+                created_at: "2026-08-16T00:00:00.000Z",
+              },
+              {
+                profile_id: "sha256:model",
+                profile_kind: "model",
+                name: "control-smoke",
+                source: "built-in",
+                promotion_state: "approved",
+                alias: "control-smoke",
+                approved_aliases: ["control-smoke"],
+                spec: { revision: "sha256:model" },
+                created_at: "2026-08-16T00:00:00.000Z",
+              },
+              {
+                profile_id: "sha256:harness",
+                profile_kind: "harness",
+                name: "control-smoke",
+                source: "built-in",
+                promotion_state: "approved",
+                alias: "control-smoke",
+                approved_aliases: ["control-smoke"],
+                spec: { agent: "control-smoke" },
+                created_at: "2026-08-16T00:00:00.000Z",
+              },
+              {
+                profile_id: "sha256:deployment",
+                profile_kind: "deployment",
+                name: "hf-cpu-smoke",
+                source: "built-in",
+                promotion_state: "approved",
+                alias: "hf-cpu-smoke",
+                approved_aliases: ["hf-cpu-smoke"],
+                spec: {
+                  models: ["control-smoke"],
+                  harnesses: ["control-smoke"],
+                  hardware: "cpu-basic",
+                },
+                created_at: "2026-08-16T00:00:00.000Z",
+              },
+              {
+                profile_id: "sha256:policy",
+                profile_kind: "launch_policy",
+                name: "control-smoke",
+                source: "built-in",
+                promotion_state: "approved",
+                alias: "control-smoke",
+                approved_aliases: ["control-smoke"],
+                spec: {
+                  max_infrastructure_attempts: 1,
+                  reservation_microusd: 0,
+                  publication_role: "diagnostic",
+                },
+                created_at: "2026-08-16T00:00:00.000Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Launch" }));
+    expect(
+      screen.getByText(/admission and repair rules/i, { hidden: true }),
+    ).toBeInTheDocument();
+  });
 });

@@ -64,7 +64,7 @@ harbor-hf results
 harbor-hf audit
 ```
 
-The same information is available in the Space's web console. The Jobs page shows the latest observed state for each HF Job and links the Job ID to its Hub inspect page. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
+The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. The Jobs page shows the latest observed state for each HF Job and links the Job ID to its Hub inspect page. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
 
 ## Repair infrastructure failures
 

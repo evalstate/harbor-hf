@@ -448,9 +448,10 @@ The React application provides:
 | `/audit` | Recorded receipts, effective dispositions, actors, integrity failures, and policy stops. |
 
 The interface supports keyboard navigation, narrow viewports, light and dark
-color schemes, visible focus, and reduced motion. Tables virtualize only when a
-measured row count requires it. Every status also has text and an icon; color is
-never the only signal.
+color schemes, visible focus, and reduced motion. Labels use hover explanations
+for campaign launch fields, spend, Jobs, Endpoints, results, and other operator
+controls. Tables virtualize only when a measured row count requires it. Every
+status also has text and an icon; color is never the only signal.
 
 ## Authentication and authorization
 

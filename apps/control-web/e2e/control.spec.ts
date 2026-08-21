@@ -70,6 +70,43 @@ test("disables campaign launch and keeps account details compact", async ({ page
   await expect(page.getByText(/session expires/i)).toBeVisible();
 });
 
+test("explains launch policy when hovering the campaign form", async ({ page }) => {
+  await page.route("**/api/v1/auth/session", (route) =>
+    route.fulfill({ json: session }),
+  );
+  await page.route("**/api/v1/system", (route) =>
+    route.fulfill({ json: system("enabled") }),
+  );
+  await page.route("**/api/v1/campaigns", (route) =>
+    route.fulfill({ json: { items: [], next_cursor: null } }),
+  );
+  await page.route("**/api/v1/profiles**", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            profile_id: "sha256:policy",
+            profile_kind: "launch_policy",
+            name: "control-smoke",
+            source: "built-in",
+            promotion_state: "approved",
+            alias: "control-smoke",
+            approved_aliases: ["control-smoke"],
+            spec: { publication_role: "diagnostic" },
+            created_at: "2026-08-16T00:00:00.000Z",
+          },
+        ],
+        next_cursor: null,
+      },
+    }),
+  );
+  await page.route("**/api/v1/events", (route) => route.abort());
+  await page.goto("/campaigns");
+  await page.getByRole("button", { name: "Launch" }).click();
+  await page.getByText("Launch policy", { exact: true }).hover();
+  await expect(page.getByText("Admission and repair rules")).toBeVisible();
+});
+
 test("shows campaign failures as errors rather than missing data", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),
