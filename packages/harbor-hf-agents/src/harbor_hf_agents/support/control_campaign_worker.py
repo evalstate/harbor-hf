@@ -212,12 +212,19 @@ def _locked_config(lock: dict[str, Any]) -> WorkerConfig:
 
 
 def _task_source(task: LockedTask) -> dict[str, Any]:
+    """Build the Harbor run task without a dataset source label.
+
+    Harbor 0.21.0 seeds live progress metrics only for ``adhoc`` and configured
+    datasets. A direct locked task that still carries a dataset ``source``
+    finishes the trial, then crashes in ``Job._update_metric_display`` with
+    ``IndexError``. Omit the label so the controller treats the task as
+    ``adhoc``.
+    """
     source = task.trial_lock.task
     if source.type == "package":
         return {
             "name": source.name,
             "ref": source.digest,
-            **({"source": source.source} if source.source else {}),
         }
     if source.type == "git":
         if not source.git_url or not source.git_commit_id or source.path is None:
@@ -229,7 +236,6 @@ def _task_source(task: LockedTask) -> dict[str, Any]:
             "path": path.as_posix(),
             "git_url": source.git_url,
             "git_commit_id": source.git_commit_id,
-            **({"source": source.source} if source.source else {}),
         }
     raise RuntimeError("prepared local Harbor tasks are not portable")
 
