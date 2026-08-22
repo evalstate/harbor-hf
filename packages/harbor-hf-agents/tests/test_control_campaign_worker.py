@@ -409,6 +409,34 @@ def test_streams_command_output_and_kills_a_hung_process(
     assert "hello-from-worker" in capsys.readouterr().out
 
 
+def test_logs_harbor_exception_without_traceback(capsys) -> None:
+    worker._log_harbor_exception(
+        worker.LockedTask(
+            task_id="task-a-trial-1",
+            source_task_id="task-a",
+            trial_index=1,
+            input_digest=DIGEST,
+            image="example",
+            timeout_seconds=60,
+            trial_lock=worker.TrialLock.model_validate(_trial_lock()),
+        ),
+        {
+            "exception_info": {
+                "exception_type": "NonZeroAgentExitCodeError",
+                "exception_message": "agent exited 1: unknown provider",
+                "exception_traceback": "secret-trace",
+            }
+        },
+    )
+    output = capsys.readouterr().out
+    logged = json.loads(output)
+    assert logged["status"] == "harbor_exception"
+    assert logged["task_id"] == "task-a-trial-1"
+    assert logged["exception_type"] == "NonZeroAgentExitCodeError"
+    assert logged["exception_message"] == "agent exited 1: unknown provider"
+    assert "secret-trace" not in output
+
+
 def test_streams_command_output_with_injected_env() -> None:
     output, timed_out = worker._run_logged_command(
         [sys.executable, "-c", "import os; print(os.environ['HHF_PATCH'], flush=True)"],

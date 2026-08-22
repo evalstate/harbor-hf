@@ -515,6 +515,22 @@ def _log(event: dict[str, object]) -> None:
     print(json.dumps(event, sort_keys=True), flush=True)
 
 
+def _log_harbor_exception(task: LockedTask, result: dict[str, Any]) -> None:
+    """Copy Harbor's exception into Job logs without the traceback."""
+    exception = result.get("exception_info")
+    if not isinstance(exception, dict):
+        return
+    message = str(exception.get("exception_message") or "")
+    _log(
+        {
+            "status": "harbor_exception",
+            "task_id": task.task_id,
+            "exception_type": exception.get("exception_type"),
+            "exception_message": message[:2000],
+        }
+    )
+
+
 def _run_logged_command(
     command: list[str],
     timeout_seconds: int,
@@ -578,6 +594,7 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
     if observed_lock != task.trial_lock:
         raise RuntimeError("executed Harbor trial lock differs from preparation")
     result = json.loads(result_path.read_text())
+    _log_harbor_exception(task, result)
     capability = _required("HARBOR_HF_WORKER_CAPABILITY").encode()
     if result_path:
         for trial_file in result_path.parent.rglob("*"):
