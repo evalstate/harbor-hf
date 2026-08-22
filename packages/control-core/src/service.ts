@@ -2839,13 +2839,41 @@ export class ControlService {
     ).length;
   }
 
+  private launchStillRunning(
+    launch: {
+      action_id: string;
+      receipt_body: string | null;
+      observed_state: string | null;
+    },
+    actions: ReadonlyArray<{
+      action_id: string;
+      action_kind: string;
+      intent_body: string;
+      receipt_body: string | null;
+      observed_state: string | null;
+    }>,
+  ): boolean {
+    if (launch.receipt_body === null) return true;
+    if (jobStateIsTerminal(launch.observed_state)) return false;
+    return !actions.some((action) => {
+      if (action.action_kind !== "job.observe" || action.receipt_body === null)
+        return false;
+      const intent = JSON.parse(action.intent_body) as ActionIntent;
+      return (
+        intent.payload.launch_action_id === launch.action_id &&
+        jobStateIsTerminal(action.observed_state)
+      );
+    });
+  }
+
   private async laterExecutionLaunchExists(
     campaignId: string,
     taskId: string,
     sourceActionId: string,
   ): Promise<boolean> {
     const detail = await this.projection.task(campaignId, taskId);
-    for (const action of await this.projection.campaignActions(campaignId)) {
+    const actions = await this.projection.campaignActions(campaignId);
+    for (const action of actions) {
       if (action.action_kind !== "job.launch" || action.action_id === sourceActionId)
         continue;
       if (action.observed_state?.startsWith("suppressed-")) continue;
@@ -2856,9 +2884,7 @@ export class ControlService {
         !intent.payload.task_ids.includes(taskId)
       )
         continue;
-      const inFlight =
-        action.receipt_body === null || !jobStateIsTerminal(action.observed_state);
-      if (inFlight) return true;
+      if (this.launchStillRunning(action, actions)) return true;
       const selected = detail?.task.selected_attempt_id;
       if (
         selected &&

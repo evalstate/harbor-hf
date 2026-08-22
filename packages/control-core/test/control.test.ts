@@ -4171,11 +4171,32 @@ describe("control service", () => {
     );
     await control.service.writeAction(failedLaunch);
     const failedReceipt = await control.service.receipt(failedLaunch, {
-      outcome: "completed",
-      observed_state: "COMPLETED",
+      outcome: "created",
+      observed_state: "RUNNING",
       resource_id: "unselected-policy-job",
     });
     await control.service.markAdvanced(failedLaunch, failedReceipt);
+    const failedObserve = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      "unselected-policy-job",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        launch_action_id: failedLaunch.action_id,
+        success_without_worker_receipt: false,
+      },
+    );
+    await control.service.writeAction(failedObserve);
+    await control.service.markAdvanced(
+      failedObserve,
+      await control.service.receipt(failedObserve, {
+        outcome: "completed",
+        observed_state: "COMPLETED",
+        resource_id: "unselected-policy-job",
+      }),
+    );
     await control.service.attempt({
       campaign_id: result.campaign_id,
       task_id: "task-001",
