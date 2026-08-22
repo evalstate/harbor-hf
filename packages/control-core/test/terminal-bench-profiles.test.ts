@@ -327,6 +327,9 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(harborAgent.import_path).toBe(importPath);
       expect(harborAgent.model_name).toBe(model.harbor_model_name);
       expect(harborAgent).not.toHaveProperty("name");
+      if (name === "hermes" || name === "openhands") {
+        expect(harborAgent.override_setup_timeout_sec).toBe(1800);
+      }
     }
   });
 
