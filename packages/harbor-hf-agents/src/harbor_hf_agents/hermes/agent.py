@@ -176,14 +176,14 @@ class HermesAgent(IsolatedProviderAgent):
             environment,
             command=(
                 "set -euo pipefail; "
+                'export PATH="/opt/harbor-hf-node/bin:$PATH"; '
                 "apt-get update && apt-get install -y --no-install-recommends "
                 "curl git libatomic1 passwd ripgrep tar util-linux xz-utils && "
                 "mkdir -p /opt/harbor-hf-node && "
                 "curl -fsSL "
                 "https://nodejs.org/dist/v26.7.0/node-v26.7.0-linux-x64.tar.xz "
                 "| tar -xJ -C /opt/harbor-hf-node --strip-components=1 && "
-                "/opt/harbor-hf-node/bin/node --version && "
-                "/opt/harbor-hf-node/bin/npm --version"
+                "node --version && npm --version"
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )

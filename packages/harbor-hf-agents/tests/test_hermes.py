@@ -308,7 +308,8 @@ class TestHermesInstall:
             "curl git libatomic1 passwd ripgrep tar util-linux xz-utils" in root_command
         )
         assert "node-v26.7.0-linux-x64.tar.xz" in root_command
-        assert "/opt/harbor-hf-node/bin/node --version" in root_command
+        assert 'PATH="/opt/harbor-hf-node/bin:$PATH"' in root_command
+        assert "node --version && npm --version" in root_command
         command = agent.exec_as_agent.await_args.kwargs["command"]
         assert f"hermes-agent/{revision}/scripts/install.sh" in command
         assert f"--commit {revision}" in command
