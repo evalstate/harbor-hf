@@ -335,6 +335,76 @@ describe("control web", () => {
     expect(confirm).toBeEnabled();
   });
 
+  it("shows a replacement Job on the existing run instead of a new row", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-1"))
+          return json({
+            campaign_id: "campaign-1",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed-invalid",
+            publication_status: "published",
+            total_tasks: 89,
+            terminal_tasks: 89,
+            successful_tasks: 13,
+            pending_actions: 7,
+            observed_microusd: 632_853,
+            reserved_microusd: 5_607_849,
+            ceiling_microusd: 10_600_000,
+            cleanup_pending: false,
+            admissible_tasks: 13,
+            exhausted_tasks: 0,
+            invalid_selected_tasks: 89,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
+          return json({ items: [], next_cursor: null });
+        if (path.includes("/api/v1/jobs"))
+          return json({
+            items: [
+              {
+                action_id: "action-job-retry",
+                campaign_id: "campaign-1",
+                action_kind: "job.observe",
+                generation: 1,
+                target: "job-retry",
+                outcome: "completed",
+                observed_state: "RUNNING",
+                resource_id: "job-retry",
+                inspect_url: "https://huggingface.co/jobs/test/job-retry",
+                created_at: "2026-08-22T22:37:55.000Z",
+                cost_microusd: 0,
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/capacity"))
+          return json({
+            campaign_active: 1,
+            campaign_limit: 8,
+            namespace_active: 1,
+            namespace_limit: 8,
+            provider_reserved: 0,
+            provider_limit: 0,
+            queued: 0,
+            cleanup_held: 0,
+            limiting_factor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-1");
+    expect(await screen.findByText("Replacement in progress")).toBeInTheDocument();
+    expect(
+      screen.getByText(/A replacement Job is running on this run/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Jobs" })).toBeInTheDocument();
+  });
+
   it("lists campaign Jobs with Hub inspect links", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(

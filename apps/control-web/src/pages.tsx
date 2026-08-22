@@ -108,13 +108,19 @@ function campaignHasSealedFailures(campaign: CampaignRow): boolean {
   );
 }
 
+function campaignIsRecovering(campaign: CampaignRow): boolean {
+  return campaign.pending_actions > 0;
+}
+
 function campaignResultStatus(campaign: CampaignRow): string {
+  if (campaignIsRecovering(campaign)) return "active";
   if (campaign.status === "failed") return "error";
   if (campaign.status === "completed-invalid") return "warning";
   return campaignHasSealedFailures(campaign) ? "warning" : campaign.status;
 }
 
 function campaignStatusLabel(campaign: CampaignRow): string {
+  if (campaignIsRecovering(campaign)) return "Replacement in progress";
   if (campaign.status === "completed-invalid") return "Completed with invalid results";
   if (campaign.status === "failed") return "Failed safely";
   return campaignHasSealedFailures(campaign)
@@ -126,6 +132,10 @@ function campaignStatusNote(campaign: CampaignRow): string {
   const publication = campaign.publication_status
     ? humanize(campaign.publication_status)
     : "Not published";
+  if (campaignIsRecovering(campaign)) {
+    const pending = campaign.pending_actions;
+    return `${pending} pending ${pending === 1 ? "action" : "actions"} on this run. This is not a new run.`;
+  }
   if (campaign.status === "cancelled") {
     const cancelled = campaign.total_tasks - campaign.successful_tasks;
     return `${publication}. ${cancelled} sealed ${cancelled === 1 ? "task" : "tasks"} cancelled.`;
@@ -1312,6 +1322,14 @@ export function CampaignPage() {
           hint={hints.campaign.endpointCleanup}
         />
       </div>
+      {campaignIsRecovering(item) ? (
+        <Card className="my-6 border-cyan-500/40 bg-cyan-950/20">
+          <p className="text-sm text-cyan-100">
+            A replacement Job is running on this run. It appears in Jobs below. The run
+            list does not add a second row.
+          </p>
+        </Card>
+      ) : null}
       {item.invalid_selected_tasks > 0 || item.exhausted_tasks > 0 ? (
         <Card className="my-6 border-amber-800 bg-amber-950/30">
           <p className="text-sm text-amber-200">
@@ -1321,6 +1339,7 @@ export function CampaignPage() {
           </p>
         </Card>
       ) : null}
+      <CampaignJobs campaignId={campaignId} />
       <Card className="my-6">
         <Progress
           label="Terminal logical outcomes"
@@ -1384,7 +1403,6 @@ export function CampaignPage() {
         />
         <CursorPager navigation={navigation} nextCursor={tasks.data?.next_cursor} />
       </QueryContent>
-      <CampaignJobs campaignId={campaignId} />
     </QueryContent>
   );
 }
