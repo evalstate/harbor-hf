@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
 const WORKER_REVISION = "e9b18497bbc2840f13525f62693917dfad8a5b30";
+const DEEPSEEK_WORKER_REVISION = "3a6af70769288614b58fc10ca764c528305bf496";
 const BRIDGE_REVISION = "c5ffef26652129bc3354be5b3bc9c9ba8110629b";
 const BRIDGE_DIGESTS = [
   "a67e6442b5a9be11591699aaf8a861c021ac1e49c10bcd09992ab562098ea2eb",
@@ -170,7 +171,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       [replacement, 1, 1, 1],
       [diagnostic, 89, 8, 16],
     ] as const) {
-      expect(spec.worker_revision).toBe(WORKER_REVISION);
+      expect(spec.worker_revision).toBe(DEEPSEEK_WORKER_REVISION);
       expect(spec.harbor_version).toBe("0.22.0");
       expect(spec.worker_max_tasks_per_job).toBe(capacity);
       expect(spec.worker_concurrency).toBe(concurrency);
@@ -180,7 +181,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       const sandbox = record(spec.sandbox_template);
       const bootstrapCommand = (sandbox.root_bootstrap_command as string[]).join("\n");
       for (const command of [preparationCommand, jobCommand]) {
-        expect(command).toContain(WORKER_REVISION);
+        expect(command).toContain(DEEPSEEK_WORKER_REVISION);
         expect(command).not.toContain(BRIDGE_REVISION);
       }
       expect(bootstrapCommand).toContain(BRIDGE_REVISION);
@@ -205,8 +206,8 @@ describe("Terminal-Bench 2.1 profiles", () => {
     const replacement = record(replacementProfile.spec);
     const diagnostic = record(diagnosticProfile.spec);
 
-    expect(replacementProfile.record_id).toBe("profile-ff9e906d69e089a009d00fe8");
-    expect(diagnosticProfile.record_id).toBe("profile-ede7617f34276455bde5e8b5");
+    expect(replacementProfile.record_id).toBe("profile-9b1754162d643cd43f0c6eb1");
+    expect(diagnosticProfile.record_id).toBe("profile-49541f39549599a0a12777f5");
     const immutableIds = new Map(
       (await loadBuiltInProfiles("profiles")).map((item) => [
         item.profile.name,
@@ -214,10 +215,10 @@ describe("Terminal-Bench 2.1 profiles", () => {
       ]),
     );
     expect(immutableIds.get("tb21-replacement")).toBe(
-      "sha256:485dc1ad6c00550478db1b2cba6f0fcacc579e49244fd9cc1cdddf56014abcea",
+      "sha256:beb8167aec481e08ce6cbabfc0e93d32f14fba8b4fb8ff0302999708b245f3f4",
     );
     expect(immutableIds.get("tb21-diagnostic-1")).toBe(
-      "sha256:60fdb06aa333652caf69506586d724e4f2b766c427f70f0f38c718b44d59604a",
+      "sha256:2b51928ce4349f64a7bc22aee7a83e7859a93b80fd2adbfc55e78af2c8aae59b",
     );
     expect(replacement).toEqual({
       ...canary,
@@ -237,6 +238,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(spec.max_campaign_ceiling_microusd).toBe(maximum);
       expect(spec.success_without_worker_receipt).toBe(false);
       expect(spec.publication_role).toBe("diagnostic");
+      expect(spec.required_positive_metrics).toEqual(["input_tokens", "output_tokens"]);
     }
   });
 

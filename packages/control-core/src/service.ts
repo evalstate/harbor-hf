@@ -22,9 +22,11 @@ import type {
   PreparedJobSubmissionV1,
   PreparedTrial,
   PublicationReceipt,
+  PublicationSupersession,
   ResolvedProfile,
   SandboxAdmissionGrant,
   SandboxCapacityRelease,
+  TaskExhaustion,
   TerminalSelection,
 } from "@harbor-hf/contracts";
 import {
@@ -39,6 +41,10 @@ import {
   validatePreparedJobSubmission,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
+import {
+  attemptAdmissibility,
+  requiredPositiveMetrics,
+} from "./attempt-admissibility.js";
 import { historicalDispositionResourceMatches } from "./disposition-policy.js";
 import { EventBus, eventCursor } from "./events.js";
 import {
@@ -302,6 +308,30 @@ function validatePreparedEnvironment(
       Object.keys(environment.env as Record<string, unknown>).length > 0)
   )
     throw new PolicyError("prepared Harbor environment does not match control policy");
+}
+
+export interface JobBudgetReservation {
+  category: string;
+  generation: number;
+  created_at: string;
+  amount_microusd: number;
+}
+
+export function executionTaskBatches(
+  taskIds: readonly string[],
+  maximumTasks: number,
+): string[][] {
+  if (!Number.isInteger(maximumTasks) || maximumTasks <= 0)
+    throw new PolicyError("execution Job capacity must be a positive integer");
+  const batches: string[][] = [];
+  for (let offset = 0; offset < taskIds.length; offset += maximumTasks)
+    batches.push(taskIds.slice(offset, offset + maximumTasks));
+  return batches;
+}
+
+export function executionReservationCategory(taskIds: readonly string[]): string {
+  const batchKey = sha256(canonicalJson(taskIds)).slice(7, 23);
+  return `execution-${batchKey}`;
 }
 
 export class ControlService {
@@ -1251,6 +1281,7 @@ export class ControlService {
         idempotency_key_digest: keyDigest,
         profiles: refs as CampaignRequest["profiles"],
         ceiling_microusd: input.ceiling_microusd,
+        start_paused: input.start_paused ?? false,
       } satisfies CampaignRequest);
     const lock: CampaignLock =
       existingLock ??
@@ -1265,6 +1296,7 @@ export class ControlService {
         tasks: tasks as CampaignLock["tasks"],
         ceiling_microusd: input.ceiling_microusd,
         source_revision: this.resolver.sourceRevision(),
+        start_paused: input.start_paused ?? false,
       } satisfies CampaignLock);
     const budget: BudgetEvent = {
       schema_version: "v1",
@@ -1290,6 +1322,20 @@ export class ControlService {
     await this.append(request);
     await this.append(budget);
     await this.append(intent);
+    if (input.start_paused) {
+      const pausedAt = new Date(Date.parse(timestamp) + 1).toISOString();
+      await this.writeAction(
+        this.actionIntent(
+          campaignId,
+          "campaign.pause",
+          "campaign",
+          0,
+          { reason: "campaign submitted in paused state" },
+          recordActor,
+          pausedAt,
+        ),
+      );
+    }
     return {
       campaign_id: campaignId,
       action_id: actionId,
@@ -1340,7 +1386,8 @@ export class ControlService {
       selected.harness === input.harness &&
       deploymentMatches &&
       selected.launch_policy === input.launch_policy &&
-      request.ceiling_microusd === input.ceiling_microusd;
+      request.ceiling_microusd === input.ceiling_microusd &&
+      (request.start_paused ?? false) === (input.start_paused ?? false);
     if (!matches)
       throw new IdempotencyConflictError(
         "idempotency key already belongs to a different campaign request",
@@ -1364,7 +1411,8 @@ export class ControlService {
       selected.harness === input.harness &&
       deploymentMatches &&
       selected.launch_policy === input.launch_policy &&
-      lock.ceiling_microusd === input.ceiling_microusd;
+      lock.ceiling_microusd === input.ceiling_microusd &&
+      (lock.start_paused ?? false) === (input.start_paused ?? false);
     if (!matches)
       throw new IdempotencyConflictError(
         "idempotency key already belongs to a different campaign request",
@@ -2116,6 +2164,11 @@ export class ControlService {
     attempt: AttemptReceipt,
     reason: string,
   ): Promise<TerminalSelection> {
+    const lock = await this.projection.campaignLock(attempt.campaign_id);
+    if (!lock) throw new PolicyError("terminal selection has no campaign lock");
+    const validity = attemptAdmissibility(attempt, requiredPositiveMetrics(lock));
+    if (!validity.admissible && attempt.outcome !== "cancelled")
+      throw new PolicyError(`attempt is not selectable: ${validity.reason}`);
     const record: TerminalSelection = {
       schema_version: "v1",
       kind: "terminal.selection",
@@ -2137,8 +2190,231 @@ export class ControlService {
     return record;
   }
 
+  async exhaustTask(
+    attempt: AttemptReceipt,
+    reason: string,
+    attemptCount: number,
+  ): Promise<TaskExhaustion> {
+    const record: TaskExhaustion = {
+      schema_version: "v1",
+      kind: "task.exhaustion",
+      record_id: deterministicId(
+        "task-exhaustion",
+        attempt.campaign_id,
+        attempt.task_id,
+        attempt.attempt_id,
+      ),
+      created_at: this.clock.now().toISOString(),
+      actor: serviceActor(),
+      campaign_id: attempt.campaign_id,
+      task_id: attempt.task_id,
+      last_attempt_id: attempt.attempt_id,
+      attempt_count: attemptCount,
+      reason,
+    };
+    await this.append(record);
+    return record;
+  }
+
   async writePublication(record: PublicationReceipt): Promise<void> {
     await this.append(record);
+  }
+
+  async writePublicationSupersession(
+    campaignId: string,
+    publicationId: string,
+    supersededCampaignId: string,
+    supersededPublicationId: string,
+    reason: string,
+  ): Promise<PublicationSupersession> {
+    const existing = await this.projection.publicationSupersession(
+      supersededPublicationId,
+    );
+    if (existing) {
+      const record = JSON.parse(existing.body) as PublicationSupersession;
+      if (
+        record.campaign_id !== campaignId ||
+        record.publication_id !== publicationId ||
+        record.superseded_campaign_id !== supersededCampaignId ||
+        record.reason !== reason
+      )
+        throw new IdempotencyConflictError(
+          "publication supersession conflicts with durable state",
+        );
+      return record;
+    }
+    const publication = await this.projection.publication(publicationId);
+    if (publication?.campaign_id !== campaignId)
+      throw new PolicyError("replacement publication does not exist");
+    const record: PublicationSupersession = {
+      schema_version: "v1",
+      kind: "publication.supersession",
+      record_id: deterministicId(
+        "publication-supersession",
+        supersededPublicationId,
+        publicationId,
+      ),
+      created_at: publication.created_at,
+      actor: serviceActor(),
+      campaign_id: campaignId,
+      publication_id: publicationId,
+      superseded_campaign_id: supersededCampaignId,
+      superseded_publication_id: supersededPublicationId,
+      reason,
+    };
+    await this.append(record);
+    return record;
+  }
+
+  async reserveJobActions(
+    campaignId: string,
+    reservations: readonly JobBudgetReservation[],
+  ): Promise<boolean> {
+    const operation = this.budgetQueue.then(() =>
+      this.reserveJobActionsSerialized(campaignId, reservations),
+    );
+    this.budgetQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async reserveJobActionsSerialized(
+    campaignId: string,
+    reservations: readonly JobBudgetReservation[],
+  ): Promise<boolean> {
+    const pending: Array<JobBudgetReservation & { recordId: string }> = [];
+    for (const reservation of reservations) {
+      if (reservation.amount_microusd <= 0) continue;
+      const recordId = deterministicId(
+        "budget",
+        campaignId,
+        reservation.category,
+        String(reservation.generation),
+      );
+      const existing = await this.projection.budget(recordId);
+      if (existing) {
+        if (
+          existing.campaign_id !== campaignId ||
+          existing.event_kind !== "reserve" ||
+          existing.amount_microusd !== reservation.amount_microusd
+        )
+          throw new IdempotencyConflictError(
+            "Job budget reservation conflicts with durable state",
+          );
+        continue;
+      }
+      pending.push({ ...reservation, recordId });
+    }
+    if (pending.length === 0) return true;
+
+    const campaign = await this.projection.campaign(campaignId);
+    if (!campaign) throw new PolicyError("campaign does not exist");
+    const additionalMicrousd = pending.reduce(
+      (sum, reservation) => sum + reservation.amount_microusd,
+      0,
+    );
+    const committedMicrousd = Math.max(
+      campaign.reserved_microusd,
+      campaign.observed_microusd,
+    );
+    if (committedMicrousd + additionalMicrousd > campaign.ceiling_microusd)
+      return false;
+
+    const observedOverage = Math.max(
+      0,
+      campaign.observed_microusd - campaign.reserved_microusd,
+    );
+    if (observedOverage > 0) {
+      await this.append({
+        schema_version: "v1",
+        kind: "budget.event",
+        record_id: deterministicId(
+          "budget",
+          campaignId,
+          "job-observed-overage",
+          pending.map((reservation) => reservation.recordId).join(","),
+        ),
+        created_at: pending[0]?.created_at ?? this.clock.now().toISOString(),
+        actor: serviceActor(),
+        campaign_id: campaignId,
+        event_kind: "reserve",
+        amount_microusd: observedOverage,
+      });
+    }
+    for (const reservation of pending) {
+      await this.append({
+        schema_version: "v1",
+        kind: "budget.event",
+        record_id: reservation.recordId,
+        created_at: reservation.created_at,
+        actor: serviceActor(),
+        campaign_id: campaignId,
+        event_kind: "reserve",
+        amount_microusd: reservation.amount_microusd,
+      });
+    }
+    return true;
+  }
+
+  async releaseJobActions(
+    campaignId: string,
+    reservations: readonly JobBudgetReservation[],
+  ): Promise<void> {
+    const operation = this.budgetQueue.then(async () => {
+      for (const reservation of reservations) {
+        if (reservation.amount_microusd <= 0) continue;
+        const reserveId = deterministicId(
+          "budget",
+          campaignId,
+          reservation.category,
+          String(reservation.generation),
+        );
+        const existingReserve = await this.projection.budget(reserveId);
+        if (!existingReserve) continue;
+        if (
+          existingReserve.campaign_id !== campaignId ||
+          existingReserve.event_kind !== "reserve" ||
+          existingReserve.amount_microusd !== reservation.amount_microusd
+        )
+          throw new IdempotencyConflictError(
+            "Job budget release does not match its reservation",
+          );
+        const releaseId = deterministicId(
+          "budget",
+          campaignId,
+          "job-release",
+          reserveId,
+        );
+        const existingRelease = await this.projection.budget(releaseId);
+        if (existingRelease) {
+          if (
+            existingRelease.event_kind !== "release" ||
+            existingRelease.amount_microusd !== reservation.amount_microusd
+          )
+            throw new IdempotencyConflictError(
+              "Job budget release conflicts with durable state",
+            );
+          continue;
+        }
+        await this.append({
+          schema_version: "v1",
+          kind: "budget.event",
+          record_id: releaseId,
+          created_at: reservation.created_at,
+          actor: serviceActor(),
+          campaign_id: campaignId,
+          event_kind: "release",
+          amount_microusd: reservation.amount_microusd,
+        });
+      }
+    });
+    this.budgetQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await operation;
   }
 
   async reserveReplacement(
@@ -2415,6 +2691,57 @@ export class ControlService {
     if (!lock) throw new PolicyError("campaign lock does not exist");
     const generation =
       Number.parseInt(sha256(idempotencyKey).slice(-8), 16) % 1_000_001;
+    if (
+      input.action === "pause" ||
+      input.action === "resume" ||
+      (input.action === "supersede" && input.publication_id)
+    ) {
+      const actionKind =
+        input.action === "pause"
+          ? "campaign.pause"
+          : input.action === "resume"
+            ? "campaign.resume"
+            : "publication.supersede";
+      const actionTarget =
+        input.action === "supersede" ? (input.publication_id as string) : "campaign";
+      const expectedActionId = deterministicId(
+        "action",
+        campaignId,
+        actionKind,
+        actionTarget,
+        String(generation),
+      );
+      const existing = await this.projection.action(expectedActionId);
+      if (existing) {
+        const recorded = JSON.parse(existing.intent_body) as ActionIntent;
+        const expectedPayload: ActionIntent["payload"] =
+          input.action === "pause"
+            ? { reason: input.reason ?? null }
+            : input.action === "resume"
+              ? {
+                  reason: input.reason ?? null,
+                  ...(input.task_limit ? { task_limit: input.task_limit } : {}),
+                }
+              : {
+                  publication_id: actionTarget,
+                  reason: input.reason ?? null,
+                };
+        if (
+          recorded.action_kind !== actionKind ||
+          recorded.target !== actionTarget ||
+          canonicalJson(recorded.payload) !== canonicalJson(expectedPayload)
+        )
+          throw new IdempotencyConflictError(
+            `idempotency key belongs to a different ${input.action} action`,
+          );
+        return {
+          campaign_id: campaignId,
+          action_id: expectedActionId,
+          status_url: `/api/v1/campaigns/${campaignId}`,
+          adopted: true,
+        };
+      }
+    }
     if (input.action === "retry_infrastructure" && input.task_id) {
       const expectedActionId = deterministicId(
         "action",
@@ -2458,9 +2785,62 @@ export class ControlService {
         await this.settleClosedSandboxAmbiguities(campaignId, taskId, actor);
       kind = "campaign.cancel";
       payload = { task_id: input.task_id ?? null, reason: input.reason ?? null };
+    } else if (input.action === "pause") {
+      if (campaign.status === "completed" || campaign.status === "failed")
+        throw new PolicyError("terminal campaign cannot be paused");
+      kind = "campaign.pause";
+      payload = { reason: input.reason ?? null };
+    } else if (input.action === "resume") {
+      if (!campaign.paused) throw new PolicyError("campaign is not paused");
+      if (campaign.pending_actions > 0)
+        throw new PolicyError("campaign cannot resume while actions are pending");
+      const deployment = profileSpec<DeploymentProfileSpec>(
+        lock.profiles,
+        "deployment",
+      );
+      if (deployment.route !== "hf_job")
+        throw new PolicyError("imported campaigns cannot resume execution Jobs");
+      if (preparationRequired(deployment)) {
+        const prepared = await this.preparedJob(campaignId);
+        if (!prepared) throw new PolicyError("campaign preparation is incomplete");
+      }
+      const unresolvedTasks = (await this.projection.tasks(campaignId)).filter(
+        (task) => !task.terminal_outcome,
+      );
+      const unresolvedTaskIds = (
+        input.task_limit ? unresolvedTasks.slice(0, input.task_limit) : unresolvedTasks
+      ).map((task) => task.task_id);
+      if (unresolvedTaskIds.length === 0)
+        throw new PolicyError("campaign has no unresolved tasks to resume");
+      const maximumTasks =
+        deployment.worker_max_tasks_per_job ?? unresolvedTaskIds.length;
+      const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
+      const reservationCreatedAt = this.clock.now().toISOString();
+      const reserved = await this.reserveJobActions(
+        campaignId,
+        executionTaskBatches(unresolvedTaskIds, maximumTasks).map((taskIds) => ({
+          category: executionReservationCategory(taskIds),
+          generation,
+          created_at: reservationCreatedAt,
+          amount_microusd: policy.reservation_microusd,
+        })),
+      );
+      if (!reserved)
+        throw new PolicyError("resumed execution would exceed the campaign ceiling");
+      kind = "campaign.resume";
+      payload = {
+        reason: input.reason ?? null,
+        ...(input.task_limit ? { task_limit: input.task_limit } : {}),
+      };
     } else if (input.action === "publish") {
-      if (campaign.terminal_tasks !== campaign.total_tasks)
-        throw new PolicyError("campaign cannot publish before every task is terminal");
+      if (
+        campaign.terminal_tasks !== campaign.total_tasks ||
+        campaign.admissible_tasks !== campaign.total_tasks ||
+        campaign.exhausted_tasks > 0
+      )
+        throw new PolicyError(
+          "campaign cannot publish before every task has an admissible selection",
+        );
       if (campaign.pending_actions > 0 || campaign.cleanup_pending)
         throw new PolicyError(
           "campaign cannot publish while actions or endpoint cleanup are pending",
@@ -2470,6 +2850,25 @@ export class ControlService {
       kind = "publication.publish";
       target = "results";
       payload = {};
+    } else if (input.action === "supersede") {
+      if (!input.publication_id)
+        throw new PolicyError("supersession requires the old publication ID");
+      const current = await this.projection.campaignPublication(campaignId);
+      if (current?.status !== "published")
+        throw new PolicyError("replacement campaign is not published");
+      const previous = await this.projection.publication(input.publication_id);
+      if (previous?.status !== "published")
+        throw new PolicyError("superseded publication does not exist");
+      if (await this.projection.publicationSupersession(input.publication_id))
+        throw new PolicyError("publication is already superseded");
+      if (previous.campaign_id === campaignId)
+        throw new PolicyError("publication cannot supersede itself");
+      kind = "publication.supersede";
+      target = input.publication_id;
+      payload = {
+        publication_id: input.publication_id,
+        reason: input.reason ?? null,
+      };
     } else if (input.action === "pause_endpoint") {
       const endpoints = (await this.projection.endpoints()).filter(
         (endpoint) => endpoint.campaign_id === campaignId && !endpoint.cleanup_verified,
@@ -2552,6 +2951,7 @@ export class ControlService {
         timeout_seconds: deployment.timeout_seconds,
         success_without_worker_receipt: policy.success_without_worker_receipt,
         max_infrastructure_attempts: policy.max_infrastructure_attempts,
+        required_positive_metrics: policy.required_positive_metrics ?? [],
         reservation_microusd: policy.reservation_microusd,
         trusted_worker: deployment.trusted_worker,
         ...(deployment.route === "hf_job" &&
@@ -2589,6 +2989,21 @@ export class ControlService {
       ))
     )
       throw new PolicyError("replacement Job would exceed the campaign ceiling");
+    let actionTimestamp = this.clock.now().toISOString();
+    if (kind === "campaign.pause" || kind === "campaign.resume") {
+      const latestLifecycle = (await this.projection.campaignActions(campaignId)).find(
+        (action) =>
+          action.action_kind === "campaign.pause" ||
+          action.action_kind === "campaign.resume",
+      );
+      if (
+        latestLifecycle &&
+        Date.parse(latestLifecycle.created_at) >= Date.parse(actionTimestamp)
+      )
+        actionTimestamp = new Date(
+          Date.parse(latestLifecycle.created_at) + 1,
+        ).toISOString();
+    }
     const intent = this.actionIntent(
       campaignId,
       kind,
@@ -2596,6 +3011,7 @@ export class ControlService {
       generation,
       payload,
       actor,
+      actionTimestamp,
     );
     const adopted = Boolean(await this.projection.action(intent.action_id));
     await this.writeAction(intent);
