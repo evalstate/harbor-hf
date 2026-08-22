@@ -3950,7 +3950,7 @@ describe("control service", () => {
   });
 
   it("retries every eligible infrastructure task when no task is specified", async () => {
-    const control = await createTestControl(1, 2, 150_000);
+    const control = await createTestControl(2, 2, 150_000);
     controls.push(control);
     const result = await control.service.submit(
       { ...submission, ceiling_microusd: 180_000_000 },
@@ -3963,7 +3963,7 @@ describe("control service", () => {
       "task-001",
       0,
       {
-        task_ids: ["task-001"],
+        task_ids: ["task-001", "task-002"],
         max_infrastructure_attempts: 2,
         reservation_microusd: 150_000,
       },
@@ -3973,18 +3973,20 @@ describe("control service", () => {
       control,
       "batch-infrastructure-retry-evidence",
     );
-    await control.service.attempt({
-      campaign_id: result.campaign_id,
-      task_id: "task-001",
-      attempt_id: "attempt-batch-infrastructure",
-      action_id: launch.action_id,
-      outcome: "infrastructure",
-      replacement_eligible: true,
-      ...evidence,
-      cost_microusd: 0,
-      metrics: {},
-      completed_at: "2026-08-16T00:00:01.000Z",
-    });
+    for (const [index, taskId] of ["task-001", "task-002"].entries()) {
+      await control.service.attempt({
+        campaign_id: result.campaign_id,
+        task_id: taskId,
+        attempt_id: `attempt-batch-infrastructure-${index + 1}`,
+        action_id: launch.action_id,
+        outcome: "infrastructure",
+        replacement_eligible: true,
+        ...evidence,
+        cost_microusd: 0,
+        metrics: {},
+        completed_at: "2026-08-16T00:00:01.000Z",
+      });
+    }
 
     const retry = await control.service.campaignAction(
       result.campaign_id,
@@ -3997,9 +3999,15 @@ describe("control service", () => {
       "batch-infrastructure-retry-key",
       operator,
     );
-    expect(await control.projection.action(retry.action_id)).toMatchObject({
-      action_kind: "job.launch",
+    const retryRow = await control.projection.action(retry.action_id);
+    expect(retryRow).toMatchObject({ action_kind: "job.launch" });
+    expect(JSON.parse(retryRow?.intent_body ?? "{}")).toMatchObject({
+      payload: { task_ids: ["task-001", "task-002"] },
     });
+    const launches = (
+      await control.projection.campaignActions(result.campaign_id)
+    ).filter((action) => action.action_kind === "job.launch");
+    expect(launches).toHaveLength(2);
     expect(
       await control.service.campaignAction(
         result.campaign_id,

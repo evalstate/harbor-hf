@@ -2801,33 +2801,53 @@ export class ControlService {
     return queued;
   }
 
+  private async laterExecutionLaunchExists(
+    campaignId: string,
+    taskId: string,
+    sourceActionId: string,
+  ): Promise<boolean> {
+    for (const action of await this.projection.campaignActions(campaignId)) {
+      if (action.action_kind !== "job.launch" || action.action_id === sourceActionId)
+        continue;
+      const intent = JSON.parse(action.intent_body) as ActionIntent;
+      if (intent.payload.worker_role === "preparation") continue;
+      if (
+        Array.isArray(intent.payload.task_ids) &&
+        intent.payload.task_ids.includes(taskId)
+      )
+        return true;
+    }
+    return false;
+  }
+
   private async queueEligibleInfrastructureRetries(
     campaignId: string,
     lock: CampaignLock,
     input: CampaignActionV1,
-    idempotencyKey: string,
     generation: number,
     actor: Actor,
   ): Promise<SubmissionResult> {
+    const expectedActionId = deterministicId(
+      "action",
+      campaignId,
+      "job.launch",
+      "eligible",
+      String(generation),
+    );
+    const existing = await this.projection.action(expectedActionId);
+    if (existing)
+      return {
+        campaign_id: campaignId,
+        action_id: expectedActionId,
+        status_url: `/api/v1/campaigns/${campaignId}`,
+        adopted: true,
+      };
     const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
-    const launched: SubmissionResult[] = [];
+    const deployment = this.resolvedProfile<DeploymentProfileSpec>(lock, "deployment");
+    if (deployment.route !== "hf_job")
+      throw new PolicyError("imported deployment profiles cannot launch retries");
+    const eligibleTaskIds: string[] = [];
     for (const task of await this.projection.tasks(campaignId)) {
-      const expectedActionId = deterministicId(
-        "action",
-        campaignId,
-        "job.launch",
-        task.task_id,
-        String(generation),
-      );
-      if (await this.projection.action(expectedActionId)) {
-        launched.push({
-          campaign_id: campaignId,
-          action_id: expectedActionId,
-          status_url: `/api/v1/campaigns/${campaignId}`,
-          adopted: true,
-        });
-        continue;
-      }
       const detail = await this.projection.task(campaignId, task.task_id);
       if (!detail) continue;
       const priorAttempt = detail.attempts.at(-1);
@@ -2841,8 +2861,9 @@ export class ControlService {
         task.task_id,
       );
       if (
+        !priorAttempt ||
         !infrastructureSealReplaceable(detail.task.terminal_outcome) ||
-        priorAttempt?.outcome !== "infrastructure" ||
+        priorAttempt.outcome !== "infrastructure" ||
         priorAttempt.replacement_eligible !== 1 ||
         detail.attempts.length >= policy.max_infrastructure_attempts ||
         settlement.unresolved > 0 ||
@@ -2850,21 +2871,98 @@ export class ControlService {
         (await this.projection.retryActionForAttempt(
           campaignId,
           priorAttempt.attempt_id,
+        )) ||
+        (await this.laterExecutionLaunchExists(
+          campaignId,
+          task.task_id,
+          priorAttempt.action_id,
         ))
       )
         continue;
-      launched.push(
-        await this.campaignActionValidated(
-          campaignId,
-          { ...input, task_id: task.task_id },
-          idempotencyKey,
-          actor,
-        ),
-      );
+      eligibleTaskIds.push(task.task_id);
     }
-    const first = launched[0];
-    if (!first) throw new PolicyError("no eligible infrastructure failures");
-    return first;
+    if (eligibleTaskIds.length === 0)
+      throw new PolicyError("no eligible infrastructure failures");
+    const prepared = preparationRequired(deployment)
+      ? await this.preparedJob(campaignId)
+      : null;
+    if (preparationRequired(deployment) && !prepared)
+      throw new PolicyError("campaign preparation is incomplete");
+    const maximumTasks = deployment.worker_max_tasks_per_job ?? eligibleTaskIds.length;
+    const batches = executionTaskBatches(eligibleTaskIds, maximumTasks);
+    const createdAt = this.clock.now().toISOString();
+    if (
+      !(await this.reserveJobActions(
+        campaignId,
+        batches.map((taskIds) => ({
+          category: executionReservationCategory(taskIds),
+          generation,
+          created_at: createdAt,
+          amount_microusd: policy.reservation_microusd,
+        })),
+      ))
+    )
+      throw new PolicyError("replacement Job would exceed the campaign ceiling");
+    const sandboxAuthorized = Boolean(
+      deployment.sandbox || deployment.sandbox_template,
+    );
+    const sandboxTimeout =
+      deployment.sandbox_template?.max_timeout_seconds ??
+      deployment.sandbox?.timeout_seconds;
+    let firstActionId: string | null = null;
+    for (const [index, taskIds] of batches.entries()) {
+      const intent = this.actionIntent(
+        campaignId,
+        "job.launch",
+        index === 0 ? "eligible" : `eligible-${index}`,
+        generation,
+        {
+          worker_role: "execution",
+          task_ids: taskIds,
+          job_image: deployment.job_image,
+          job_command: deployment.job_command,
+          hardware: deployment.hardware,
+          timeout_seconds: deployment.timeout_seconds,
+          success_without_worker_receipt: policy.success_without_worker_receipt,
+          max_infrastructure_attempts: policy.max_infrastructure_attempts,
+          required_positive_metrics: policy.required_positive_metrics ?? [],
+          reservation_microusd: policy.reservation_microusd,
+          trusted_worker: deployment.trusted_worker,
+          ...(deployment.route === "hf_job" &&
+          typeof deployment.active_hourly_cost_microusd === "number"
+            ? { active_hourly_cost_microusd: deployment.active_hourly_cost_microusd }
+            : {}),
+          ...(deployment.worker_revision
+            ? { worker_revision: deployment.worker_revision }
+            : {}),
+          inference_token: deployment.inference_token ?? "forbidden",
+          ...(deployment.inference_token === "required"
+            ? {
+                inference_max_requests: deployment.inference_max_requests,
+                inference_max_concurrency: deployment.inference_max_concurrency,
+                inference_timeout_seconds: deployment.inference_timeout_seconds,
+                inference_max_output_tokens: deployment.inference_max_output_tokens,
+              }
+            : {}),
+          campaign_lock_digest: sha256(canonicalJson(lock)),
+          ...(prepared ? { prepared_job_digest: sha256(canonicalJson(prepared)) } : {}),
+          ...(deployment.sandbox ? { sandbox: deployment.sandbox } : {}),
+          ...(sandboxAuthorized ? { sandbox_authorized: true } : {}),
+          ...(sandboxTimeout ? { sandbox_timeout_seconds: sandboxTimeout } : {}),
+          reason: input.reason ?? null,
+        },
+        actor,
+      );
+      await this.writeAction(intent);
+      firstActionId ??= intent.action_id;
+    }
+    if (!firstActionId) throw new PolicyError("no eligible infrastructure failures");
+    return {
+      campaign_id: campaignId,
+      action_id: firstActionId,
+      status_url: `/api/v1/campaigns/${campaignId}`,
+      adopted: false,
+    };
   }
 
   async campaignAction(
@@ -3096,7 +3194,6 @@ export class ControlService {
           campaignId,
           lock,
           input,
-          idempotencyKey,
           generation,
           actor,
         );
@@ -3116,7 +3213,14 @@ export class ControlService {
         campaignId,
         priorAttempt.attempt_id,
       );
-      if (existingRetry)
+      if (
+        existingRetry ||
+        (await this.laterExecutionLaunchExists(
+          campaignId,
+          input.task_id,
+          priorAttempt.action_id,
+        ))
+      )
         throw new PolicyError("infrastructure retry is already recorded");
       const deployment = this.resolvedProfile<DeploymentProfileSpec>(
         lock,
