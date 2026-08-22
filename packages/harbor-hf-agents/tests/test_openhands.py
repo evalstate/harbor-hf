@@ -87,6 +87,10 @@ async def test_install_creates_isolated_agent_user(temp_dir) -> None:
     first = mock_env.exec.call_args_list[0]
     assert "passwd util-linux" in first.kwargs["command"]
     assert any(
+        "chown harbor-agent:harbor-agent /opt/openhands-venv" in call.kwargs["command"]
+        for call in mock_env.exec.call_args_list
+    )
+    assert any(
         "openhands-ai==1.11.0" in call.kwargs["command"]
         for call in mock_env.exec.call_args_list
     )

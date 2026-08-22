@@ -9,7 +9,7 @@ from harbor.agents.installed.openhands import OpenHands
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
+from harbor_hf_agents.support.isolated_user import AGENT_USER, IsolatedProviderAgent
 from harbor_hf_agents.support.sandbox_inference_route import (
     use_sandbox_inference_route,
 )
@@ -86,7 +86,42 @@ class OpenHandsAgent(IsolatedProviderAgent, OpenHands):
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
-        await super().install(environment)
+        await self.ensure_system_dependencies(
+            environment, ("curl", "git", "build_tools", "tmux")
+        )
+        # Harbor's installer chowns /opt/openhands-venv to environment.default_user
+        # (root here). The isolated agent user then cannot write the venv.
+        await self.exec_as_root(
+            environment,
+            command=(
+                f"mkdir -p /opt/openhands-venv && "
+                f"chown {AGENT_USER}:{AGENT_USER} /opt/openhands-venv"
+            ),
+        )
+        if self._git_version:
+            install_cmd = (
+                "uv pip install "
+                f"git+https://github.com/All-Hands-AI/OpenHands.git@{self._git_version}"
+            )
+        elif self._version:
+            install_cmd = f"uv pip install openhands-ai=={self._version}"
+        else:
+            install_cmd = "uv pip install openhands-ai"
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "set -euo pipefail; "
+                "curl -LsSf https://astral.sh/uv/install.sh | sh && "
+                'if [ -f "$HOME/.local/bin/env" ]; then '
+                'source "$HOME/.local/bin/env"; fi && '
+                f"uv python install {self._python_version} && "
+                f"uv venv /opt/openhands-venv --python {self._python_version} && "
+                "source /opt/openhands-venv/bin/activate && "
+                "export SKIP_VSCODE_BUILD=true && "
+                f"{install_cmd} && "
+                "/opt/openhands-venv/bin/python -m openhands.core.main --version"
+            ),
+        )
 
     @override
     async def run(

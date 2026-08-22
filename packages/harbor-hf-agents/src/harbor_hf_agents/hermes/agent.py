@@ -210,9 +210,11 @@ class HermesAgent(IsolatedProviderAgent):
         if custom_base_url is not None:
             if custom_api_key is None:
                 raise ValueError("custom Hermes endpoint requires a local API key")
+            # Hermes honors OPENAI_BASE_URL only for openai-api. The older
+            # `custom` CLI slug is no longer a first-class --provider value.
             value["model"] = {
                 "default": model,
-                "provider": "custom",
+                "provider": "openai-api",
                 "base_url": custom_base_url,
                 "api_key": custom_api_key,
             }
@@ -570,7 +572,7 @@ class HermesAgent(IsolatedProviderAgent):
                 allowed_model=model,
             )
 
-        hermes_provider_flag: str | None = "custom" if bridged else None
+        hermes_provider_flag: str | None = "openai-api" if bridged else None
         use_native = bridged
         if not bridged and provider in _NATIVE_PROVIDERS:
             native_flag, key_names = _NATIVE_PROVIDERS[provider]
@@ -622,7 +624,7 @@ class HermesAgent(IsolatedProviderAgent):
             )
 
         if bridged:
-            hermes_provider_flag = "custom"
+            hermes_provider_flag = "openai-api"
             cli_model = model
             config_yaml = self._build_config_yaml(
                 cli_model,
@@ -637,8 +639,10 @@ class HermesAgent(IsolatedProviderAgent):
         await self.exec_as_agent(
             environment,
             command=(
-                "set -euo pipefail; mkdir -p /tmp/hermes /logs/agent; umask 077; "
-                f"printf %s {shlex.quote(config_yaml)} > /tmp/hermes/config.yaml"
+                "set -euo pipefail; umask 077; "
+                'mkdir -p /tmp/hermes "$HOME/.hermes" /logs/agent; '
+                f"printf %s {shlex.quote(config_yaml)} > /tmp/hermes/config.yaml; "
+                'cp /tmp/hermes/config.yaml "$HOME/.hermes/config.yaml"'
             ),
             env=env,
             timeout_sec=10,
@@ -657,7 +661,7 @@ class HermesAgent(IsolatedProviderAgent):
 
         cli_parts = [
             'export PATH="$HOME/.local/bin:$PATH"',
-            "hermes --yolo chat",
+            "hermes --yolo --cli chat",
             '-q "$HARBOR_INSTRUCTION"',
             "-Q",
             f"--model {shlex.quote(cli_model)}",
