@@ -2810,6 +2810,7 @@ export class ControlService {
     for (const action of await this.projection.campaignActions(campaignId)) {
       if (action.action_kind !== "job.launch" || action.action_id === sourceActionId)
         continue;
+      if (action.observed_state?.startsWith("suppressed-")) continue;
       const intent = JSON.parse(action.intent_body) as ActionIntent;
       if (intent.payload.worker_role === "preparation") continue;
       if (

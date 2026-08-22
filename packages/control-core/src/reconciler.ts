@@ -23,6 +23,7 @@ import type { Projection } from "./projection.js";
 import {
   executionReservationCategory,
   executionTaskBatches,
+  infrastructureSealReplaceable,
   PolicyError,
   type ControlService,
   type JobBudgetReservation,
@@ -1507,7 +1508,11 @@ export class Reconciler {
     if (taskIds.length === 0) return false;
     for (const taskId of taskIds) {
       const task = await this.projection.task(intent.campaign_id, taskId);
-      if (!task?.task.terminal_outcome) return false;
+      if (
+        !task?.task.terminal_outcome ||
+        infrastructureSealReplaceable(task.task.terminal_outcome)
+      )
+        return false;
     }
     return true;
   }

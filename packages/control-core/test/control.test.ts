@@ -4023,6 +4023,104 @@ describe("control service", () => {
     ).toMatchObject({ action_id: retry.action_id, adopted: true });
   });
 
+  it("dispatches an infrastructure retry after tasks are already sealed", async () => {
+    const control = await createTestControl(1, 2, 0);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "sealed-retry-dispatch-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(launch);
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "ERROR",
+      resource_id: "sealed-retry-dispatch-job",
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+    const observe = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      "sealed-retry-dispatch-job",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        launch_action_id: launch.action_id,
+        success_without_worker_receipt: false,
+      },
+    );
+    await control.service.writeAction(observe);
+    const observeReceipt = await control.service.receipt(observe, {
+      outcome: "completed",
+      observed_state: "ERROR",
+      resource_id: "sealed-retry-dispatch-job",
+    });
+    await control.service.markAdvanced(observe, observeReceipt);
+    const evidence = await putEvidenceReference(
+      control,
+      "sealed-retry-dispatch-evidence",
+    );
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-sealed-retry-dispatch",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    const launches: string[][] = [];
+    const noop = new NoopActions();
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      {
+        execute: async (intent): Promise<ExternalActionResult> => {
+          if (intent.action_kind === "job.launch")
+            launches.push([...(intent.payload.task_ids ?? [])]);
+          return noop.execute(intent);
+        },
+      },
+      new ResultPublisher(control.store, control.projection, control.service),
+      {
+        interval_ms: 100,
+        observation_interval_ms: 0,
+        batch_size: 16,
+        dispatch_adoption_delay_ms: 0,
+      },
+    );
+    await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry sealed infrastructure",
+        confirmed: true,
+      },
+      "sealed-retry-dispatch-key",
+      operator,
+    );
+    await settle(reconciler, 4);
+    expect(launches.length).toBeGreaterThan(0);
+    expect(launches.every((taskIds) => taskIds.join() === "task-001")).toBe(true);
+  });
+
   it("releases a terminal Job reservation before retrying infrastructure", async () => {
     const control = await createTestControl(1, 2, 150_000);
     controls.push(control);
