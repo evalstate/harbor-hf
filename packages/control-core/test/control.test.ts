@@ -4023,6 +4023,102 @@ describe("control service", () => {
     ).toMatchObject({ action_id: retry.action_id, adopted: true });
   });
 
+  it("releases a terminal Job reservation before retrying infrastructure", async () => {
+    const control = await createTestControl(1, 2, 150_000);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 150_000 },
+      "terminal-reservation-retry-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 150_000,
+      },
+    );
+    await control.service.append({
+      schema_version: "v1",
+      kind: "budget.event",
+      record_id: deterministicId(
+        "budget",
+        result.campaign_id,
+        executionReservationCategory(["task-001"]),
+        "0",
+      ),
+      created_at: "2026-08-16T00:00:00.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      event_kind: "reserve",
+      amount_microusd: 150_000,
+    });
+    await control.service.writeAction(launch);
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "ERROR",
+      resource_id: "terminal-reservation-job",
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+    const observe = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      "terminal-reservation-job",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        launch_action_id: launch.action_id,
+      },
+    );
+    await control.service.writeAction(observe);
+    const observeReceipt = await control.service.receipt(observe, {
+      outcome: "failed",
+      observed_state: "ERROR",
+      resource_id: "terminal-reservation-job",
+    });
+    await control.service.markAdvanced(observe, observeReceipt);
+    const evidence = await putEvidenceReference(
+      control,
+      "terminal-reservation-retry-evidence",
+    );
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-terminal-reservation",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      reserved_microusd: 150_000,
+    });
+
+    await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry after terminal Job reservation",
+        confirmed: true,
+      },
+      "terminal-reservation-retry-key",
+      operator,
+    );
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      reserved_microusd: 150_000,
+    });
+  });
+
   it("includes observed overage when admitting a replacement", async () => {
     const control = await createTestControl(1, 2, 50);
     controls.push(control);

@@ -2292,6 +2292,7 @@ export class ControlService {
     campaignId: string,
     reservations: readonly JobBudgetReservation[],
   ): Promise<boolean> {
+    await this.reconcileTerminalJobReservations(campaignId);
     const operation = this.budgetQueue.then(() =>
       this.reserveJobActionsSerialized(campaignId, reservations),
     );
@@ -2498,7 +2499,6 @@ export class ControlService {
         const receipt = JSON.parse(action.receipt_body) as ActionReceipt;
         const launchActionId = intent.payload.launch_action_id;
         if (
-          receipt.outcome !== "failed" &&
           typeof launchActionId === "string" &&
           jobStateIsTerminal(receipt.observed_state)
         )
@@ -2564,6 +2564,7 @@ export class ControlService {
     priorAttemptCompletedAt: string,
     amountMicrousd: number,
   ): Promise<boolean> {
+    await this.reconcileTerminalJobReservations(campaignId);
     const operation = this.budgetQueue.then(() =>
       this.reserveReplacementSerialized(
         campaignId,
