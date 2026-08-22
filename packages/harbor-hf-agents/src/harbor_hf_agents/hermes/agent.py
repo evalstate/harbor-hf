@@ -168,8 +168,9 @@ class HermesAgent(IsolatedProviderAgent):
         Hermes requires Node >= 26. Task images ship an older apt Node, so the
         installer downloads Node 26 and then exits 127 when ``tar xf`` cannot
         extract ``.tar.xz``. Preinstall that Node as root and install
-        ``libatomic1`` so the official binary can start. Keep optional
-        browser ``npm`` failures from aborting once ``hermes version`` works.
+        ``libatomic1`` so the official binary can start. install.sh links
+        ``hermes`` after a mandatory browser ``npm install``. Link the venv
+        launcher ourselves if that npm step fails.
         """
         installer_url, revision_flag = self._installation_spec(self._version)
         await self.exec_as_root(
@@ -195,10 +196,21 @@ class HermesAgent(IsolatedProviderAgent):
                 'export PATH="/opt/harbor-hf-node/bin:$HOME/.local/bin:'
                 '$HERMES_HOME/bin:$PATH"; '
                 'mkdir -p "$HERMES_HOME" "$HERMES_HOME/sessions" '
-                '"$HERMES_HOME/skills" "$HERMES_HOME/memories"; '
+                '"$HERMES_HOME/skills" "$HERMES_HOME/memories" '
+                '"$HOME/.local/bin"; '
                 f"curl -fsSL {shlex.quote(installer_url)} | "
                 "bash -s -- --skip-setup --skip-browser --skip-computer-use "
-                f"--hermes-home /tmp/hermes{revision_flag} || true; "
+                "--hermes-home /tmp/hermes --dir /tmp/hermes/hermes-agent "
+                f"{revision_flag} || true; "
+                "if ! command -v hermes >/dev/null; then "
+                "test -x /tmp/hermes/hermes-agent/venv/bin/python; "
+                "test -f /tmp/hermes/hermes-agent/hermes; "
+                "printf '%s\\n' '#!/bin/bash' "
+                "'exec /tmp/hermes/hermes-agent/venv/bin/python "
+                '/tmp/hermes/hermes-agent/hermes "$@"\' '
+                '> "$HOME/.local/bin/hermes"; '
+                'chmod +x "$HOME/.local/bin/hermes"; '
+                "fi; "
                 "command -v hermes >/dev/null; "
                 "hermes version"
             ),

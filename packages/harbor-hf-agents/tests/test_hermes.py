@@ -316,6 +316,8 @@ class TestHermesInstall:
         assert "--skip-browser" in command
         assert "--skip-computer-use" in command
         assert "--hermes-home /tmp/hermes" in command
+        assert "--dir /tmp/hermes/hermes-agent" in command
+        assert "$HOME/.local/bin/hermes" in command
         assert "|| true" in command
         assert "--branch" not in command
 
