@@ -5,17 +5,14 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.models.agent.context import AgentContext
 
-from harbor_hf_agents.mini_swe import agent as mini_swe_agent
 from harbor_hf_agents.mini_swe.agent import MiniSweAgent
+
+_ROUTE = "harbor_hf_agents.support.sandbox_chat_completions.use_sandbox_inference_route"
 
 
 @pytest.fixture(autouse=True)
 def no_sandbox_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        mini_swe_agent,
-        "use_sandbox_inference_route",
-        AsyncMock(return_value=False),
-    )
+    monkeypatch.setattr(_ROUTE, AsyncMock(return_value=False))
 
 
 def _run_call(exec_calls: list) -> object:
@@ -39,7 +36,7 @@ async def test_sandbox_route_injects_loopback_env(
         env["MSWEA_API_KEY"] = "harbor-local-inference-bridge"
         return True
 
-    monkeypatch.setattr(mini_swe_agent, "use_sandbox_inference_route", use_route)
+    monkeypatch.setattr(_ROUTE, use_route)
     monkeypatch.delenv("MSWEA_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     agent = MiniSweAgent(
