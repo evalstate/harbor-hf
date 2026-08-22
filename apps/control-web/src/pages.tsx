@@ -62,6 +62,7 @@ import {
 } from "./lib";
 import {
   keys,
+  useAllProfiles,
   useAudit,
   useCampaign,
   useCampaigns,
@@ -615,7 +616,7 @@ export function OverviewPage() {
 function LaunchPanel({ onClose }: { onClose(): void }) {
   const navigate = useNavigate();
   const client = useQueryClient();
-  const profiles = useProfiles();
+  const profiles = useAllProfiles();
   const { writesAllowed, writeMode } = useControlState();
   const ceilingEdited = useRef(false);
   const form = useForm<z.infer<typeof launchSchema>>({

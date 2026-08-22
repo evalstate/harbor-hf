@@ -5,8 +5,10 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   affectedQueryKeys,
+  collectPagedItems,
   JOBS_REFRESH_INTERVAL_MS,
   keys,
+  useAllProfiles,
   useJobs,
   useLiveUpdates,
 } from "../src/queries";
@@ -232,5 +234,87 @@ describe("live query updates", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
       "/api/v1/jobs?campaign_id=campaign-1",
     );
+  });
+});
+
+describe("paged profile collection", () => {
+  it("follows profile cursors until models and later harnesses appear", async () => {
+    const pages = [
+      {
+        items: [{ name: "tb21-old-deployment" }, { name: "hermes" }],
+        next_cursor: "page-2",
+      },
+      {
+        items: [{ name: "opencode" }, { name: "gpt-oss-20b" }],
+        next_cursor: null,
+      },
+    ];
+
+    const items = await collectPagedItems(async (cursor) => {
+      if (!cursor) return pages[0];
+      if (cursor === "page-2") return pages[1];
+      throw new Error(`unexpected cursor ${cursor}`);
+    });
+
+    expect(items.map((item) => item.name)).toEqual([
+      "tb21-old-deployment",
+      "hermes",
+      "opencode",
+      "gpt-oss-20b",
+    ]);
+  });
+
+  it("loads every profile page for the launch form", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const page = url.includes("cursor=page-2")
+        ? {
+            items: [
+              {
+                profile_id: "model-1",
+                profile_kind: "model",
+                name: "gpt-oss-20b",
+                approved_aliases: ["gpt-oss-20b"],
+              },
+              {
+                profile_id: "harness-2",
+                profile_kind: "harness",
+                name: "opencode",
+                approved_aliases: ["opencode"],
+              },
+            ],
+            next_cursor: null,
+          }
+        : {
+            items: [
+              {
+                profile_id: "deploy-1",
+                profile_kind: "deployment",
+                name: "tb21-old",
+                approved_aliases: ["tb21-old"],
+              },
+            ],
+            next_cursor: "page-2",
+          };
+      return new Response(JSON.stringify(page), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const hook = renderHook(() => useAllProfiles(), { wrapper });
+    await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));
+    expect(hook.result.current.data?.items.map((item) => item.name)).toEqual([
+      "tb21-old",
+      "gpt-oss-20b",
+      "opencode",
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

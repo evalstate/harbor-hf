@@ -179,10 +179,39 @@ export const useEndpoints = (cursor?: string) =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
+export async function collectPagedItems<T>(
+  loadPage: (cursor?: string) => Promise<{ items: T[]; next_cursor: string | null }>,
+  maxPages = 20,
+): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await loadPage(cursor);
+    items.push(...result.items);
+    if (!result.next_cursor) return items;
+    cursor = result.next_cursor;
+  }
+  throw new Error("paged list exceeded the page limit");
+}
+
 export const useProfiles = (cursor?: string) =>
   useQuery({
     queryKey: [...keys.profiles, cursor ?? null],
     queryFn: () => request<ProfileList>(collectionUrl("/api/v1/profiles", cursor, 100)),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+  });
+
+/** Load every profile page. Launch needs models and harnesses that sort after deployments. */
+export const useAllProfiles = () =>
+  useQuery({
+    queryKey: [...keys.profiles, "all"],
+    queryFn: async () => ({
+      items: await collectPagedItems((cursor) =>
+        request<ProfileList>(collectionUrl("/api/v1/profiles", cursor, 100)),
+      ),
+      next_cursor: null,
+    }),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
