@@ -148,7 +148,7 @@ class HermesAgent(IsolatedProviderAgent):
 
     @override
     def get_version_command(self) -> str | None:
-        return 'export PATH="$HOME/.local/bin:$PATH"; hermes version'
+        return 'export PATH="$HOME/.local/bin:$PATH"; hermes --version'
 
     @staticmethod
     def _installation_spec(version: str | None) -> tuple[str, str]:
@@ -212,7 +212,7 @@ class HermesAgent(IsolatedProviderAgent):
                 'chmod +x "$HOME/.local/bin/hermes"; '
                 "fi; "
                 "command -v hermes >/dev/null; "
-                "hermes version"
+                "hermes --version"
             ),
         )
 

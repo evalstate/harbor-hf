@@ -319,6 +319,7 @@ class TestHermesInstall:
         assert "--dir /tmp/hermes/hermes-agent" in command
         assert "$HOME/.local/bin/hermes" in command
         assert "|| true" in command
+        assert "hermes --version" in command
         assert "--branch" not in command
 
     @pytest.mark.asyncio
