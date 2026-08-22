@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   doubleReservationMicrousd,
+  labeledHarness,
   launchPolicyForBenchmark,
   preferredAlias,
   profileLabel,
@@ -49,6 +50,17 @@ describe("launch helpers", () => {
 
   it("doubles the estimated reservation for the default ceiling", () => {
     expect(doubleReservationMicrousd(5_200_000)).toBe(10_400_000);
+  });
+
+  it("labels DeepSeek Harness instead of the dsh alias", () => {
+    expect(profileLabel("harness", "dsh", { agent: "dsh" })).toBe("DeepSeek Harness");
+    expect(
+      profileLabel("harness", "dsh-high-deepseek-v4-flash-0731-together", {
+        agent: "dsh",
+      }),
+    ).toBe("DeepSeek Harness");
+    expect(labeledHarness("dsh")).toBe("DeepSeek Harness");
+    expect(labeledHarness(null)).toBe("—");
   });
 
   it("labels Terminal-Bench 2.1 by source tasks and trials, not logical attempts", () => {

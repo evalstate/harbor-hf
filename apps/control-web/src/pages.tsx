@@ -40,6 +40,7 @@ import {
   doubleReservationMicrousd,
   harnessAgent,
   LAUNCH_DEFAULTS,
+  labeledHarness,
   launchPolicyForBenchmark,
   profileLabel,
   REASONING_OPTIONS,
@@ -893,7 +894,7 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
                 </div>
                 <div>
                   <dt className="text-slate-500">Locked harness</dt>
-                  <dd className="font-mono text-xs">{resolved?.harness}</dd>
+                  <dd>{labeledHarness(values.harnessAgent)}</dd>
                 </div>
                 <div>
                   <dt className="text-slate-500">Locked deployment</dt>
@@ -1545,7 +1546,7 @@ export function ResultsPage() {
     {
       accessorKey: "agent",
       header: () => <Hint text={hints.results.agent}>Agent</Hint>,
-      cell: ({ row }) => String(row.original.agent ?? row.original.harness ?? "—"),
+      cell: ({ row }) => labeledHarness(row.original.agent ?? row.original.harness),
     },
     {
       id: "score",
@@ -1923,7 +1924,10 @@ export function ResultPage() {
         <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-3">
           <ResultField label="Model" value={item.model} />
           <ResultField label="Benchmark" value={item.benchmark} />
-          <ResultField label="Agent" value={item.agent ?? item.harness} />
+          <ResultField
+            label="Agent"
+            value={labeledHarness(item.agent ?? item.harness)}
+          />
           <ResultField label="Outcome" value={item.run_outcome} />
           <ResultField label="Quality" value={item.quality} />
           <ResultField label="Status" value={item.status} />
@@ -1994,7 +1998,15 @@ export function ProfilesPage() {
       header: () => <Hint text={hints.profiles.name}>Name</Hint>,
       cell: ({ row }) => (
         <div>
-          <div className="font-medium">{row.original.name}</div>
+          <div className="font-medium">
+            {row.original.profile_kind === "harness"
+              ? labeledHarness(
+                  typeof row.original.spec.agent === "string"
+                    ? row.original.spec.agent
+                    : row.original.name,
+                )
+              : row.original.name}
+          </div>
           <div className="font-mono text-xs text-slate-500">
             {shortId(row.original.profile_id)}
           </div>
