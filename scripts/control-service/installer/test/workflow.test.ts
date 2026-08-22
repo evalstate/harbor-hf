@@ -384,11 +384,13 @@ class FakeBucketWriteProbe implements BucketWriteProbeAdapter {
 
 class FakeControlTokenScope implements ControlTokenScopeAdapter {
   fail = false;
+  warnings: string[] = [];
   calls: ControlTokenScopeInput[] = [];
 
-  async attest(input: ControlTokenScopeInput): Promise<void> {
+  async attest(input: ControlTokenScopeInput): Promise<{ warnings: string[] }> {
     this.calls.push({ ...input });
     if (this.fail) throw new Error("forbidden scope");
+    return { warnings: [...this.warnings] };
   }
 }
 
@@ -619,6 +621,8 @@ describe("installer workflows", () => {
     const result = await complete(setupResult, bootstrapResult.receipt);
     expect(result).toEqual({
       status: "installed",
+      control_credential_warnings: [],
+      control_credential_warnings_reported: false,
       verification: {
         production_ready: false,
         space_url: ORIGIN,
@@ -1365,6 +1369,13 @@ describe("installer workflows", () => {
   it("adopts complete credentials after a lost secret write response", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
+    const reportedWarnings: string[][] = [];
+    setupResult.controlTokenScope.warnings = [
+      "The control credential has global permissions: repo.write.",
+    ];
+    setupResult.dependencies.reportControlCredentialWarnings = (warnings) => {
+      reportedWarnings.push([...warnings]);
+    };
     setupResult.hf.failSetSecretsResponse = true;
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
       "after remote mutation began",
@@ -1377,6 +1388,9 @@ describe("installer workflows", () => {
       "HF_TOKEN",
     ]);
     expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+    expect(reportedWarnings).toEqual([
+      ["The control credential has global permissions: repo.write."],
+    ]);
 
     setupResult.hf.failSetSecretsResponse = false;
     setupResult.dependencies.environment = {};
@@ -1388,6 +1402,7 @@ describe("installer workflows", () => {
     await expect(complete(setupResult, bootstrapResult.receipt)).resolves.toMatchObject(
       { status: "installed" },
     );
+    expect(reportedWarnings).toHaveLength(1);
     expect(setupResult.hf.calls.filter((call) => call === "setSecrets")).toHaveLength(
       1,
     );
@@ -1399,7 +1414,7 @@ describe("installer workflows", () => {
     setupResult.controlTokenScope.fail = true;
 
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
-      "control credential does not have the exact approved control scope",
+      "control credential scope inspection failed",
     );
     expect(setupResult.bucketWriteProbe.calls).toHaveLength(0);
     expect(setupResult.hf.calls).not.toContain("setSecrets");
@@ -1431,13 +1446,33 @@ describe("installer workflows", () => {
     setupResult.bucketWriteProbe.fail = true;
 
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
-      "control credential does not have the exact approved control scope",
+      "control credential scope was accepted, but the fresh artifact Bucket write/read-back proof failed",
     );
     expect(setupResult.controlTokenScope.calls).toHaveLength(1);
     expect(setupResult.bucketWriteProbe.calls).toHaveLength(1);
     expect(setupResult.hf.calls).not.toContain("setSecrets");
     expect(setupResult.hf.state.space?.secretNames).toEqual([]);
     expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+  });
+
+  it("continues with prominent control credential warnings", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    setupResult.controlTokenScope.warnings = [
+      "The control credential has global permissions: repo.write.",
+    ];
+
+    await expect(complete(setupResult, bootstrapResult.receipt)).resolves.toMatchObject(
+      {
+        status: "installed",
+        control_credential_warnings: [
+          "The control credential has global permissions: repo.write.",
+        ],
+        control_credential_warnings_reported: false,
+      },
+    );
+    expect(setupResult.bucketWriteProbe.calls).toHaveLength(1);
+    expect(setupResult.hf.calls).toContain("setSecrets");
   });
 
   it("explicitly replaces complete credentials after preflight", async () => {

@@ -154,8 +154,9 @@ Phase two:
    `HARBOR_HF_INSTALL_CONTROL_SECRET` and
    `HARBOR_HF_INSTALL_INFERENCE_SECRET` process variables or, when absent,
    hidden terminal prompts;
-4. attests both proposed service credentials' exact fine-grained scopes,
-   creates a fresh non-secret object under
+4. attests both proposed service credentials' required fine-grained scopes,
+   reports additional control-credential grants as prominent warnings, creates
+   a fresh non-secret object under
    `installer/write-probes/schema=v1/`, and reads back its exact bytes;
 5. writes the paired Space secrets without recording their values;
 6. sets the complete installed configuration with writes disabled;
@@ -169,15 +170,24 @@ let a read-only replacement credential pass. Probe HTTP exchanges use
 inactivity deadlines that reset whenever response progress is observed.
 Response streams are byte-bounded before Blob materialization.
 
-The control credential must have no global permissions, gated-repository
-access, or additional scoped grants. Its only grants are
-`repo.content.read` and `repo.write` on the exact artifact Bucket plus
-`job.write` and `inference.endpoints.write` on the exact user or organization
-namespace. The Job permission also covers Sandbox lifecycle operations. A
-broad personal token, a token for another target, and a token with missing or
-additional permissions are rejected before either Space secret is written.
-Scope attestation reads only the bounded `whoami-v2` response; it never
-enumerates durable control records.
+The control credential must be fine-grained and owned by the exact user or
+organization namespace. Its required grants are `repo.content.read` and
+`repo.write` on the exact artifact Bucket plus `job.write`,
+`inference.endpoints.write` on the exact namespace. Hugging Face's token editor
+currently enables `inference.endpoints.infer.write` whenever Endpoint
+management is enabled, so the installer accepts that provider-coupled grant
+without treating it as overscoping. Harbor-HF never uses the control credential
+for inference and never passes it to a worker. The Job permission also covers
+Sandbox lifecycle operations.
+
+A token for another namespace, a non-fine-grained token, or a token missing a
+required permission is rejected before either Space secret is written. Global
+permissions, gated-repository access, unrelated resource scopes, and
+additional permissions produce a conspicuous `OVER-SCOPED` warning but do not
+stop installation after all required capabilities and the fresh Bucket
+write/read-back proof pass. Rotate to a narrower credential when the provider
+allows one. Scope attestation reads only the bounded `whoami-v2` response; it
+never enumerates durable control records.
 
 The inference credential must likewise have no global permissions,
 gated-repository access, or Hub resource grants. Its only permissions are
@@ -185,13 +195,14 @@ gated-repository access, or Hub resource grants. Its only permissions are
 installer rejects broad, missing, or additionally scoped inference credentials
 before probing the Bucket or persisting either Space secret.
 
-On success it reports `Installation verified`, `Write mode: disabled`, and
-`Production ready: no`. A safely interrupted phase can normally be resumed by
-rerunning configure with the same private state. Once the receipt contains an
-upload SHA, configure stops before mutation if the observed Space source
-differs and never overwrites that drift. Do not regenerate the plan, replace
-credentials with `--replace-credentials`, or make manual provider changes
-merely to bypass a drift or safety error.
+On success it reports any control-credential scope warnings first, followed by
+`Installation verified`, `Write mode: disabled`, and `Production ready: no`.
+A safely interrupted phase can normally be resumed by rerunning configure with
+the same private state. Once the receipt contains an upload SHA, configure
+stops before mutation if the observed Space source differs and never
+overwrites that drift. Do not regenerate the plan, replace credentials with
+`--replace-credentials`, or make manual provider changes merely to bypass a
+drift or safety error.
 
 ### 4. Verify while disabled
 
@@ -252,8 +263,8 @@ An automation agent must stop rather than improvise when:
 - an existing resource cannot be proven safe to adopt;
 - owner-only bootstrap state or its receipt is missing while continuing or
   adopting already-created bootstrap resources;
-- either credential scope or exact source-to-destination transfer lacks
-  approval;
+- either credential is not fine-grained, lacks a required capability, belongs
+  to the wrong namespace, or has an unapproved source-to-destination transfer;
 - authenticated system verification, anonymous health, or rollback
   verification fails;
 - a campaign or action request has an ambiguous outcome; inspect durable

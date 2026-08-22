@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { HuggingFaceControlTokenScope } from "../control-token-scope.js";
+import {
+  type ControlTokenScopeAttestation,
+  HuggingFaceControlTokenScope,
+} from "../control-token-scope.js";
 import type { HttpAdapter } from "../http.js";
 
 function scopeResponse(
@@ -32,7 +35,11 @@ const bucketScope = {
 
 const userScope = {
   entity: { type: "user", name: "example" },
-  permissions: ["job.write", "inference.endpoints.write"],
+  permissions: [
+    "job.write",
+    "inference.endpoints.write",
+    "inference.endpoints.infer.write",
+  ],
 };
 
 function adapter(body: unknown, status = 200) {
@@ -52,8 +59,8 @@ function adapter(body: unknown, status = 200) {
 async function attest(
   scope: HuggingFaceControlTokenScope,
   namespace = "example",
-): Promise<void> {
-  await scope.attest({
+): Promise<ControlTokenScopeAttestation> {
+  return await scope.attest({
     namespace,
     bucketId: "example/control-artifacts",
     accessToken: "control-token-placeholder",
@@ -61,10 +68,10 @@ async function attest(
 }
 
 describe("control credential scope attestation", () => {
-  it("accepts only the exact user namespace and Bucket permissions", async () => {
+  it("accepts the provider-coupled Endpoint permissions", async () => {
     const { scope, requests } = adapter(scopeResponse([userScope, bucketScope]));
 
-    await expect(attest(scope)).resolves.toBeUndefined();
+    await expect(attest(scope)).resolves.toEqual({ warnings: [] });
     expect(requests).toEqual([
       {
         path: "/api/whoami-v2",
@@ -73,16 +80,69 @@ describe("control credential scope attestation", () => {
     ]);
   });
 
-  it("accepts the exact organization namespace", async () => {
+  it("also accepts Endpoint management without the provider-coupled call grant", async () => {
+    const { scope } = adapter(
+      scopeResponse([
+        bucketScope,
+        {
+          ...userScope,
+          permissions: ["job.write", "inference.endpoints.write"],
+        },
+      ]),
+    );
+
+    await expect(attest(scope)).resolves.toEqual({ warnings: [] });
+  });
+
+  it("accepts the required organization namespace permissions", async () => {
     const organizationScope = {
       entity: { type: "org", name: "example-org" },
-      permissions: ["inference.endpoints.write", "job.write"],
+      permissions: [
+        "inference.endpoints.infer.write",
+        "inference.endpoints.write",
+        "job.write",
+      ],
     };
     const { scope } = adapter(
       scopeResponse([bucketScope, organizationScope], {}, { name: "service-owner" }),
     );
 
-    await expect(attest(scope, "example-org")).resolves.toBeUndefined();
+    await expect(attest(scope, "example-org")).resolves.toEqual({ warnings: [] });
+  });
+
+  it("warns about every additional fine-grained grant without rejecting", async () => {
+    const { scope } = adapter(
+      scopeResponse(
+        [
+          {
+            ...bucketScope,
+            permissions: [...bucketScope.permissions, "repo.discussions.write"],
+          },
+          {
+            ...userScope,
+            permissions: [...userScope.permissions, "inference.serverless.write"],
+          },
+          {
+            entity: { type: "space", name: "example/control" },
+            permissions: ["repo.content.read"],
+          },
+        ],
+        {
+          canReadGatedRepos: true,
+          global: ["repo.write"],
+        },
+      ),
+    );
+
+    await expect(attest(scope)).resolves.toEqual({
+      warnings: [
+        "The control credential can read gated repositories.",
+        "The control credential grants access to an unrelated scoped resource.",
+        "The control credential has additional permissions on the artifact Bucket: repo.discussions.write.",
+        "The control credential has additional permissions on the control namespace: inference.serverless.write.",
+        "The control credential has global permissions: repo.write.",
+      ],
+    });
   });
 
   it.each([
@@ -94,51 +154,22 @@ describe("control credential scope attestation", () => {
       },
     },
     {
-      name: "global permissions",
-      body: scopeResponse([bucketScope, userScope], { global: ["repo.write"] }),
-    },
-    {
-      name: "gated repository access",
-      body: scopeResponse([bucketScope, userScope], { canReadGatedRepos: true }),
-    },
-    {
-      name: "an extra Bucket",
-      body: scopeResponse([
-        bucketScope,
-        userScope,
-        {
-          entity: { type: "bucket", name: "example/other" },
-          permissions: ["repo.content.read"],
-        },
-      ]),
-    },
-    {
-      name: "an inference permission",
-      body: scopeResponse([
-        bucketScope,
-        {
-          ...userScope,
-          permissions: [...userScope.permissions, "inference.serverless.write"],
-        },
-      ]),
-    },
-    {
       name: "a missing Job permission",
       body: scopeResponse([
         bucketScope,
         {
           ...userScope,
-          permissions: ["inference.endpoints.write"],
+          permissions: ["inference.endpoints.infer.write", "inference.endpoints.write"],
         },
       ]),
     },
     {
-      name: "a missing Endpoint permission",
+      name: "a missing Endpoint-management permission",
       body: scopeResponse([
         bucketScope,
         {
           ...userScope,
-          permissions: ["job.write"],
+          permissions: ["inference.endpoints.infer.write", "job.write"],
         },
       ]),
     },
@@ -160,17 +191,6 @@ describe("control credential scope attestation", () => {
           permissions: ["repo.write"],
         },
         userScope,
-      ]),
-    },
-    {
-      name: "an additional Space grant",
-      body: scopeResponse([
-        bucketScope,
-        userScope,
-        {
-          entity: { type: "space", name: "example/control" },
-          permissions: ["repo.content.read"],
-        },
       ]),
     },
     {
@@ -202,7 +222,7 @@ describe("control credential scope attestation", () => {
   it("rejects provider failures without including the credential", async () => {
     const { scope } = adapter({ private: "provider detail" }, 401);
     await expect(attest(scope)).rejects.toThrow(
-      "control credential scope attestation failed",
+      "Hugging Face did not accept the control credential for scope inspection",
     );
   });
 });

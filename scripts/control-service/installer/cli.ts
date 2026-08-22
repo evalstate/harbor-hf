@@ -22,6 +22,9 @@ export function defaultDependencies(): InstallerDependencies {
     bucketWriteProbe: new HuggingFaceBucketWriteProbe(),
     controlTokenScope: new HuggingFaceControlTokenScope(http),
     inferenceTokenScope: new HuggingFaceInferenceTokenScope(http),
+    reportControlCredentialWarnings(warnings) {
+      process.stderr.write(formatControlCredentialWarnings(warnings));
+    },
     http,
     identity: new StableIdentityAdapter(hf, http),
     secretInput: new TtyInstallerSecretInput(),
@@ -144,7 +147,15 @@ export function formatConfigureOutput(
   result: Extract<ApplyInstallResult, { status: "installed" }>,
 ): string {
   const verification = result.verification;
+  const warnings =
+    result.control_credential_warnings.length === 0 ||
+    result.control_credential_warnings_reported
+      ? []
+      : formatControlCredentialWarnings(result.control_credential_warnings)
+          .trimEnd()
+          .split("\n");
   return [
+    ...warnings,
     "Installation verified.",
     `Space: ${spaceId}`,
     `URL: ${verification.space_url}`,
@@ -155,6 +166,21 @@ export function formatConfigureOutput(
     "Production ready: no",
     "",
     "Review access and credential scopes before activation.",
+    "",
+  ].join("\n");
+}
+
+export function formatControlCredentialWarnings(warnings: readonly string[]): string {
+  if (warnings.length === 0) return "";
+  return [
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "WARNING: THE CONTROL CREDENTIAL IS OVER-SCOPED",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    ...warnings.map((warning) => `WARNING: ${warning}`),
+    "WARNING: Installation is continuing because required permissions and",
+    "WARNING: the fresh artifact Bucket write/read-back proof passed.",
+    "WARNING: Replace this credential with a narrower token when possible.",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
     "",
   ].join("\n");
 }

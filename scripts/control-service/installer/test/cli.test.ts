@@ -144,6 +144,8 @@ describe("installer CLI contract", () => {
   it("keeps activation separate after a verified installation", () => {
     const output = formatConfigureOutput("example/control", {
       status: "installed",
+      control_credential_warnings: [],
+      control_credential_warnings_reported: false,
       verification: {
         production_ready: false,
         space_url: "https://placeholder-control.hf.space",
@@ -158,6 +160,32 @@ describe("installer CLI contract", () => {
     expect(output).toContain("Write mode: disabled");
     expect(output).toContain("Production ready: no");
     expect(output).toContain("before activation");
+    expect(output).not.toContain("OVER-SCOPED");
+  });
+
+  it("prints control credential scope warnings prominently", () => {
+    const output = formatConfigureOutput("example/control", {
+      status: "installed",
+      control_credential_warnings: [
+        "The control credential has global permissions: repo.write.",
+      ],
+      control_credential_warnings_reported: false,
+      verification: {
+        production_ready: false,
+        space_url: "https://placeholder-control.hf.space",
+        anonymous_live: "passed",
+        anonymous_ready: "passed",
+        authenticated_system: "skipped",
+        source_upload_revision: "passed",
+      },
+    });
+
+    expect(output).toContain("WARNING: THE CONTROL CREDENTIAL IS OVER-SCOPED");
+    expect(output).toContain(
+      "WARNING: The control credential has global permissions: repo.write.",
+    );
+    expect(output).toContain("WARNING: Installation is continuing");
+    expect(output).toContain("Installation verified.");
   });
 
   it("explains the successful credential-scoping bootstrap stop", () => {

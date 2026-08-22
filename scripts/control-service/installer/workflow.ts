@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import type { BucketWriteProbeAdapter } from "./bucket-write-probe.js";
 import { canonicalJson } from "./canonical.js";
-import type { ControlTokenScopeAdapter } from "./control-token-scope.js";
+import {
+  type ControlTokenScopeAdapter,
+  ControlTokenScopeError,
+} from "./control-token-scope.js";
 import { type HfAdapter, HfCommandFailure } from "./hf.js";
 import type { HttpAdapter } from "./http.js";
 import type { IdentityAdapter } from "./identity.js";
@@ -37,6 +40,7 @@ export interface InstallerDependencies {
   bucketWriteProbe?: BucketWriteProbeAdapter;
   controlTokenScope?: ControlTokenScopeAdapter;
   inferenceTokenScope?: InferenceTokenScopeAdapter;
+  reportControlCredentialWarnings?: (warnings: readonly string[]) => void;
   environment?: NodeJS.ProcessEnv;
   secretInput?: InstallerSecretInput;
 }
@@ -806,18 +810,27 @@ async function assertControlCredentialCanUseBucket(
   plan: InstallPlan,
   secrets: Record<string, string>,
   dependencies: InstallerDependencies,
-): Promise<void> {
+): Promise<{ warnings: string[]; reported: boolean }> {
   const controlCredential = secrets.HF_TOKEN;
   if (!controlCredential) {
     throw new InstallerInputError("control credential is missing");
   }
+  let warnings: string[];
   try {
     if (!dependencies.controlTokenScope) throw new Error();
-    await dependencies.controlTokenScope.attest({
+    const attestation = await dependencies.controlTokenScope.attest({
       namespace: plan.targets.namespace,
       bucketId: plan.targets.bucket_id,
       accessToken: controlCredential,
     });
+    warnings = attestation.warnings;
+  } catch (error) {
+    const detail = error instanceof ControlTokenScopeError ? `: ${error.message}` : "";
+    throw new InstallerInputError(
+      `control credential scope inspection failed${detail}`,
+    );
+  }
+  try {
     if (!dependencies.bucketWriteProbe) throw new Error();
     await dependencies.bucketWriteProbe.createAndVerify({
       bucketId: plan.targets.bucket_id,
@@ -827,9 +840,19 @@ async function assertControlCredentialCanUseBucket(
     });
   } catch {
     throw new InstallerInputError(
-      "control credential does not have the exact approved control scope",
+      "control credential scope was accepted, but the fresh artifact Bucket write/read-back proof failed",
     );
   }
+  let reported = false;
+  if (warnings.length > 0 && dependencies.reportControlCredentialWarnings) {
+    try {
+      dependencies.reportControlCredentialWarnings(warnings);
+      reported = true;
+    } catch {
+      // Reporting must never turn an accepted over-scoped credential into a blocker.
+    }
+  }
+  return { warnings, reported };
 }
 
 async function assertInferenceCredentialScope(
@@ -875,6 +898,8 @@ export interface CredentialsRequiredResult {
 export interface InstalledResult {
   status: "installed";
   verification: VerificationResult;
+  control_credential_warnings: string[];
+  control_credential_warnings_reported: boolean;
 }
 
 export type ApplyInstallResult = CredentialsRequiredResult | InstalledResult;
@@ -1540,6 +1565,8 @@ async function completeInstall(
   const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-install-"));
   let remoteMutationStarted = false;
   let sourceUploadAttempted = false;
+  let controlCredentialWarnings: string[] = [];
+  let controlCredentialWarningsReported = false;
   try {
     const stagedBundle = resolve(tempDirectory, "bundle");
     await cp(plan.bundle.directory, stagedBundle, {
@@ -1654,7 +1681,13 @@ async function completeInstall(
           dependencies.secretInput,
         );
         await assertInferenceCredentialScope(secrets, dependencies);
-        await assertControlCredentialCanUseBucket(plan, secrets, dependencies);
+        const controlAttestation = await assertControlCredentialCanUseBucket(
+          plan,
+          secrets,
+          dependencies,
+        );
+        controlCredentialWarnings = controlAttestation.warnings;
+        controlCredentialWarningsReported = controlAttestation.reported;
         const secretsFile = await writePrivateEnvironmentFile(
           tempDirectory,
           "secrets.env",
@@ -1697,7 +1730,13 @@ async function completeInstall(
           dependencies.secretInput,
         );
         await assertInferenceCredentialScope(secrets, dependencies);
-        await assertControlCredentialCanUseBucket(plan, secrets, dependencies);
+        const controlAttestation = await assertControlCredentialCanUseBucket(
+          plan,
+          secrets,
+          dependencies,
+        );
+        controlCredentialWarnings = controlAttestation.warnings;
+        controlCredentialWarningsReported = controlAttestation.reported;
         const secretsFile = await writePrivateEnvironmentFile(
           tempDirectory,
           "secrets.env",
@@ -1744,6 +1783,8 @@ async function completeInstall(
     return {
       status: "installed",
       verification: await verifyPlan(plan, dependencies, uploadSha),
+      control_credential_warnings: controlCredentialWarnings,
+      control_credential_warnings_reported: controlCredentialWarningsReported,
     };
   } catch (error) {
     if (remoteMutationStarted) {
