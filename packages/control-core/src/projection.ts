@@ -276,6 +276,8 @@ export interface CampaignView {
   exhausted_tasks: number;
   successful_tasks: number;
   pending_actions: number;
+  replacement_assigned_tasks: number;
+  replacement_recorded_tasks: number;
   publication_status: string | null;
   cleanup_pending: boolean;
   cancellation_requested: boolean;
@@ -367,6 +369,40 @@ function parseRecord(bytes: Uint8Array, entry: ObjectEntry): HarborHFControlReco
       `invalid control record at ${entry.key}: ${details}`,
     );
   }
+}
+
+const terminalJobStates = new Set([
+  "STOPPED",
+  "COMPLETED",
+  "CANCELLED",
+  "CANCELED",
+  "ERROR",
+]);
+
+function jobStateIsTerminal(state: string | null): boolean {
+  return state !== null && terminalJobStates.has(state.toUpperCase());
+}
+
+export function assignedTasksFromIntent(intentBody: string): number {
+  const intent = JSON.parse(intentBody) as ActionIntent;
+  return Array.isArray(intent.payload.task_ids) ? intent.payload.task_ids.length : 0;
+}
+
+function launchStillRunning(
+  launch: Selectable<ActionRow>,
+  actions: ReadonlyArray<Selectable<ActionRow>>,
+): boolean {
+  if (launch.receipt_body === null) return true;
+  if (jobStateIsTerminal(launch.observed_state)) return false;
+  return !actions.some((action) => {
+    if (action.action_kind !== "job.observe" || action.receipt_body === null)
+      return false;
+    const intent = JSON.parse(action.intent_body) as ActionIntent;
+    return (
+      intent.payload.launch_action_id === launch.action_id &&
+      jobStateIsTerminal(action.observed_state)
+    );
+  });
 }
 
 function jobIdentity(row: Selectable<ActionRow>): string {
@@ -2278,6 +2314,7 @@ export class Projection {
     const pending = Number(actionCounts.pending);
     const cancelled = await this.hasCampaignAction(row.campaign_id, "campaign.cancel");
     const paused = await this.campaignPaused(row.campaign_id);
+    const replacement = await this.replacementProgress(row.campaign_id);
     const reserved = budgets.reduce(
       (sum, item) =>
         item.event_kind === "reserve"
@@ -2320,10 +2357,42 @@ export class Projection {
       exhausted_tasks: exhausted,
       successful_tasks: successful,
       pending_actions: pending,
+      replacement_assigned_tasks: replacement.assigned,
+      replacement_recorded_tasks: replacement.recorded,
       publication_status: publication?.status ?? null,
       cleanup_pending: cleanupPending,
       cancellation_requested: cancelled,
       paused,
+    };
+  }
+
+  private async replacementProgress(
+    campaignId: string,
+  ): Promise<{ assigned: number; recorded: number }> {
+    const actions = await this.campaignActions(campaignId);
+    const runningLaunchIds: string[] = [];
+    const assigned = new Set<string>();
+    for (const action of actions) {
+      if (action.action_kind !== "job.launch") continue;
+      if (action.observed_state?.startsWith("suppressed-")) continue;
+      const intent = JSON.parse(action.intent_body) as ActionIntent;
+      if (intent.payload.worker_role === "preparation") continue;
+      if (!launchStillRunning(action, actions)) continue;
+      if (!Array.isArray(intent.payload.task_ids)) continue;
+      runningLaunchIds.push(action.action_id);
+      for (const taskId of intent.payload.task_ids) assigned.add(taskId);
+    }
+    if (assigned.size === 0 || runningLaunchIds.length === 0)
+      return { assigned: 0, recorded: 0 };
+    const recordedRows = await this.db
+      .selectFrom("attempts")
+      .select("task_id")
+      .where("campaign_id", "=", campaignId)
+      .where("action_id", "in", runningLaunchIds)
+      .execute();
+    return {
+      assigned: assigned.size,
+      recorded: new Set(recordedRows.map((row) => row.task_id)).size,
     };
   }
 
@@ -2560,7 +2629,9 @@ export class Projection {
     limit = 100,
     offset = 0,
     campaignId?: string,
-  ): Promise<Array<Selectable<ActionRow> & { cost_microusd: number }>> {
+  ): Promise<
+    Array<Selectable<ActionRow> & { cost_microusd: number; assigned_tasks: number }>
+  > {
     let query = this.db
       .selectFrom("actions")
       .selectAll()
@@ -2584,6 +2655,7 @@ export class Projection {
     return [...latest.values()].slice(offset, offset + limit).map((row) => ({
       ...row,
       cost_microusd: receiptCostMicrousd(row),
+      assigned_tasks: assignedTasksFromIntent(row.intent_body),
     }));
   }
 

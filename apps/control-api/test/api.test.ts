@@ -582,6 +582,7 @@ describe("control API", () => {
       observed_state: "ERROR",
       resource_id: resourceId,
       cost_microusd: 40_000,
+      assigned_tasks: 1,
       inspect_url: `https://huggingface.co/jobs/test/${resourceId}`,
     });
     const scoped = await app.inject({

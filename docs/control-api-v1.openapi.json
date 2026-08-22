@@ -359,6 +359,8 @@
                           "exhausted_tasks",
                           "successful_tasks",
                           "pending_actions",
+                          "replacement_assigned_tasks",
+                          "replacement_recorded_tasks",
                           "publication_status",
                           "cleanup_pending",
                           "cancellation_requested",
@@ -403,6 +405,12 @@
                             "type": "integer"
                           },
                           "pending_actions": {
+                            "type": "integer"
+                          },
+                          "replacement_assigned_tasks": {
+                            "type": "integer"
+                          },
+                          "replacement_recorded_tasks": {
                             "type": "integer"
                           },
                           "publication_status": {
@@ -587,6 +595,8 @@
                     "exhausted_tasks",
                     "successful_tasks",
                     "pending_actions",
+                    "replacement_assigned_tasks",
+                    "replacement_recorded_tasks",
                     "publication_status",
                     "cleanup_pending",
                     "cancellation_requested",
@@ -631,6 +641,12 @@
                       "type": "integer"
                     },
                     "pending_actions": {
+                      "type": "integer"
+                    },
+                    "replacement_assigned_tasks": {
+                      "type": "integer"
+                    },
+                    "replacement_recorded_tasks": {
                       "type": "integer"
                     },
                     "publication_status": {
@@ -2817,7 +2833,8 @@
                           "resource_id",
                           "created_at",
                           "inspect_url",
-                          "cost_microusd"
+                          "cost_microusd",
+                          "assigned_tasks"
                         ],
                         "properties": {
                           "action_id": {
@@ -2880,6 +2897,9 @@
                             ]
                           },
                           "cost_microusd": {
+                            "type": "integer"
+                          },
+                          "assigned_tasks": {
                             "type": "integer"
                           }
                         }

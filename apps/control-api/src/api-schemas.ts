@@ -21,6 +21,8 @@ export const campaignViewSchema = {
     "exhausted_tasks",
     "successful_tasks",
     "pending_actions",
+    "replacement_assigned_tasks",
+    "replacement_recorded_tasks",
     "publication_status",
     "cleanup_pending",
     "cancellation_requested",
@@ -40,6 +42,8 @@ export const campaignViewSchema = {
     exhausted_tasks: integer,
     successful_tasks: integer,
     pending_actions: integer,
+    replacement_assigned_tasks: integer,
+    replacement_recorded_tasks: integer,
     publication_status: nullableString,
     cleanup_pending: { type: "boolean" },
     cancellation_requested: { type: "boolean" },
@@ -332,11 +336,17 @@ export const actionSchema = {
 export const jobSchema = {
   type: "object",
   additionalProperties: false,
-  required: [...actionSchema.required, "inspect_url", "cost_microusd"],
+  required: [
+    ...actionSchema.required,
+    "inspect_url",
+    "cost_microusd",
+    "assigned_tasks",
+  ],
   properties: {
     ...actionSchema.properties,
     inspect_url: nullableString,
     cost_microusd: integer,
+    assigned_tasks: integer,
   },
 } as const;
 

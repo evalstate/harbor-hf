@@ -85,9 +85,9 @@ export const hints = {
       "All recorded sources for this campaign: attempt receipts plus the latest hardware cost on each Job and Sandbox. Reserved is money still held against the ceiling.",
     endpointCleanup:
       "Verified pause with zero ready replicas is required before the campaign can complete.",
-    jobs: "Hugging Face Jobs launched for this campaign. Preparation and execution are separate Jobs when preparation is required.",
+    jobs: "Hugging Face Jobs launched for this campaign. Preparation and execution are separate Jobs when preparation is required. Assigned is the task count on that Job.",
     outcome:
-      "Sealed logical result for this task. Hover the badge for the exact meaning. Scored success is a verifier pass. Provider rejected the request means the inference API refused the locked call. Agent ended without a score means the agent loop finished without a pass. Infrastructure failures can be replaced; the other sealed failures cannot.",
+      "Selected sealed result for this task. A replacement Job can be assigned while this still shows Infrastructure. Hover the badge for the exact meaning. Scored success is a verifier pass. Provider rejected the request means the inference API refused the locked call. Agent ended without a score means the agent loop finished without a pass. Infrastructure failures can be replaced; the other sealed failures cannot.",
     selectedAttempt:
       "The physical attempt chosen as the logical outcome. Infrastructure replacements create a new attempt.",
     inputDigest: "Digest of the locked task input. Retries must use this same input.",
@@ -105,6 +105,8 @@ export const hints = {
     action: "Latest control action for this Job: launch, observe, or cancel.",
     observed:
       "Latest Hub stage copied onto the action receipt, such as RUNNING or COMPLETED.",
+    assigned:
+      "How many locked tasks this Job was given. A replacement uses the existing run. It does not add a second run row.",
     recorded: "When this latest Job observation was written.",
     cost: "Locked Job hardware cost from the latest observe or cancel receipt. Inference spend is on attempt receipts, not this row.",
   },

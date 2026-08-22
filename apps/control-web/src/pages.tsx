@@ -21,6 +21,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { z } from "zod";
 import {
   type AuditResponse,
+  type Capacity,
   actOnCampaign,
   type CampaignAction,
   type CampaignList,
@@ -37,6 +38,7 @@ import { DataTable } from "./components/data-table";
 import { useControlState } from "./control-state";
 import { hints } from "./hints";
 import {
+  counted,
   doubleReservationMicrousd,
   harnessAgent,
   LAUNCH_DEFAULTS,
@@ -109,7 +111,11 @@ function campaignHasSealedFailures(campaign: CampaignRow): boolean {
 }
 
 function campaignIsRecovering(campaign: CampaignRow): boolean {
-  return campaign.pending_actions > 0;
+  return (
+    campaign.pending_actions > 0 &&
+    campaign.total_tasks > 0 &&
+    campaign.terminal_tasks === campaign.total_tasks
+  );
 }
 
 function campaignResultStatus(campaign: CampaignRow): string {
@@ -133,8 +139,12 @@ function campaignStatusNote(campaign: CampaignRow): string {
     ? humanize(campaign.publication_status)
     : "Not published";
   if (campaignIsRecovering(campaign)) {
+    const assigned = campaign.replacement_assigned_tasks;
+    const recorded = campaign.replacement_recorded_tasks;
     const pending = campaign.pending_actions;
-    return `${pending} pending ${pending === 1 ? "action" : "actions"} on this run. This is not a new run.`;
+    if (assigned > 0)
+      return `${recorded} of ${assigned} replacement tasks recorded. ${counted(pending, "pending action")} on this run.`;
+    return `${counted(pending, "pending action")} on this run. This is not a new run.`;
   }
   if (campaign.status === "cancelled") {
     const cancelled = campaign.total_tasks - campaign.successful_tasks;
@@ -206,6 +216,16 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
       ),
     },
     {
+      accessorKey: "assigned_tasks",
+      header: () => <Hint text={hints.jobs.assigned}>Assigned</Hint>,
+      cell: ({ getValue }) => {
+        const value = getValue();
+        if (typeof value !== "number")
+          throw new Error("Job assigned task count is missing");
+        return counted(value, "task");
+      },
+    },
+    {
       accessorKey: "cost_microusd",
       header: () => <Hint text={hints.jobs.cost}>Cost</Hint>,
       cell: ({ getValue }) => {
@@ -222,6 +242,53 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   ];
 }
 
+function ReplacementProgress({
+  campaign,
+  capacity,
+}: {
+  campaign: CampaignRow;
+  capacity: Capacity | undefined;
+}) {
+  const assigned = campaign.replacement_assigned_tasks;
+  const recorded = campaign.replacement_recorded_tasks;
+  const active = capacity?.campaign_active;
+  const queued = capacity?.queued;
+  const burst = capacity?.start_burst;
+  return (
+    <Card className="my-6 border-cyan-500/40 bg-cyan-950/20">
+      <h2 className="text-base font-semibold text-cyan-100">
+        Replacement Job on this run
+      </h2>
+      <p className="mt-2 text-sm text-cyan-100">
+        {assigned > 0
+          ? `${recorded} of ${assigned} assigned tasks have a replacement receipt. This is not a new run.`
+          : "A replacement Job is queued on this run. The run list does not add a second row."}
+      </p>
+      {typeof active === "number" ? (
+        <p className="mt-2 text-sm text-cyan-100/80">
+          {counted(active, "sandbox")} active
+          {typeof queued === "number" ? `, ${counted(queued, "queued create")}` : ""}.
+          {typeof burst === "number"
+            ? ` The start burst is ${burst}, so only a few sandboxes look alive at once.`
+            : " Only the live sandbox window looks alive."}
+        </p>
+      ) : null}
+      <p className="mt-2 text-sm text-cyan-100/80">
+        The task list still shows selected seals. Rows stay Infrastructure until a
+        replacement attempt is chosen.
+      </p>
+      {assigned > 0 ? (
+        <div className="mt-4">
+          <Progress
+            label={`${recorded}/${assigned} replacement receipts`}
+            value={(recorded / assigned) * 100}
+          />
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
 function CampaignJobs({ campaignId }: { campaignId: string }) {
   const query = useJobs(undefined, campaignId);
   return (
@@ -230,8 +297,8 @@ function CampaignJobs({ campaignId }: { campaignId: string }) {
         <Hint text={hints.campaign.jobs}>Jobs</Hint>
       </h2>
       <p className="mb-4 mt-1 text-sm text-slate-400">
-        HF Jobs launched for this campaign, with Hub inspect links, latest observed
-        state, and recorded hardware cost.
+        HF Jobs launched for this campaign. Assigned is the task count on that Job, not
+        a new run.
       </p>
       <QueryContent query={query}>
         <DataTable
@@ -1003,16 +1070,27 @@ export function CampaignsPage() {
       {
         id: "progress",
         header: () => <Hint text={hints.campaign.logicalTasks}>Logical progress</Hint>,
-        cell: ({ row }) => (
-          <Progress
-            label={`${row.original.terminal_tasks}/${row.original.total_tasks} tasks`}
-            value={
-              row.original.total_tasks
-                ? (row.original.terminal_tasks / row.original.total_tasks) * 100
-                : 0
-            }
-          />
-        ),
+        cell: ({ row }) => {
+          const recovering =
+            campaignIsRecovering(row.original) &&
+            row.original.replacement_assigned_tasks > 0;
+          const done = recovering
+            ? row.original.replacement_recorded_tasks
+            : row.original.terminal_tasks;
+          const total = recovering
+            ? row.original.replacement_assigned_tasks
+            : row.original.total_tasks;
+          return (
+            <Progress
+              label={
+                recovering
+                  ? `${done}/${total} replacement tasks`
+                  : `${row.original.terminal_tasks}/${row.original.total_tasks} tasks`
+              }
+              value={total ? (done / total) * 100 : 0}
+            />
+          );
+        },
       },
       {
         accessorKey: "observed_microusd",
@@ -1323,12 +1401,7 @@ export function CampaignPage() {
         />
       </div>
       {campaignIsRecovering(item) ? (
-        <Card className="my-6 border-cyan-500/40 bg-cyan-950/20">
-          <p className="text-sm text-cyan-100">
-            A replacement Job is running on this run. It appears in Jobs below. The run
-            list does not add a second row.
-          </p>
-        </Card>
+        <ReplacementProgress campaign={item} capacity={capacity.data} />
       ) : null}
       {item.invalid_selected_tasks > 0 || item.exhausted_tasks > 0 ? (
         <Card className="my-6 border-amber-800 bg-amber-950/30">
@@ -1396,6 +1469,12 @@ export function CampaignPage() {
         </Card>
       ) : null}
       <QueryContent query={tasks}>
+        {campaignIsRecovering(item) ? (
+          <p className="mb-3 text-sm text-slate-400">
+            Outcome is the selected seal. A replacement Job can be assigned to a row
+            that still shows Infrastructure.
+          </p>
+        ) : null}
         <DataTable
           columns={columns}
           data={tasks.data?.items ?? []}

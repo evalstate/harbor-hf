@@ -4101,6 +4101,32 @@ describe("control service", () => {
         operator,
       ),
     ).toMatchObject({ action_id: retry.action_id, adopted: true });
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "COMPLETED",
+      resource_id: "batch-original-job",
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      replacement_assigned_tasks: 2,
+      replacement_recorded_tasks: 0,
+    });
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-batch-replacement-1",
+      action_id: retry.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:03.000Z",
+    });
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      replacement_assigned_tasks: 2,
+      replacement_recorded_tasks: 1,
+    });
   });
 
   it("retries after an unselected policy receipt on an infrastructure seal", async () => {

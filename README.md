@@ -86,7 +86,7 @@ harbor-hf campaign retry-infrastructure <campaign-id> \
   --yes
 ```
 
-The run page has the same control: **Retry infrastructure failures**. It only queues replacement Jobs for eligible infrastructure outcomes, including an infrastructure seal that should not have closed the logical task. Scored misses and other sealed outcomes stay sealed. A retry is a Job on the existing run. The run list does not add a second row.
+The run page has the same control: **Retry infrastructure failures**. It only queues replacement Jobs for eligible infrastructure outcomes, including an infrastructure seal that should not have closed the logical task. Scored misses and other sealed outcomes stay sealed. A retry is a Job on the existing run. The run list does not add a second row. While that Job is running, the run page shows assigned tasks, replacement receipts, and the live sandbox window. The task list still shows selected seals.
 
 Cancellation also preserves existing evidence:
 

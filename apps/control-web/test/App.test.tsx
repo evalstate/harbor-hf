@@ -360,6 +360,8 @@ describe("control web", () => {
             admissible_tasks: 13,
             exhausted_tasks: 0,
             invalid_selected_tasks: 89,
+            replacement_assigned_tasks: 75,
+            replacement_recorded_tasks: 21,
           });
         if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
           return json({ items: [], next_cursor: null });
@@ -378,6 +380,7 @@ describe("control web", () => {
                 inspect_url: "https://huggingface.co/jobs/test/job-retry",
                 created_at: "2026-08-22T22:37:55.000Z",
                 cost_microusd: 0,
+                assigned_tasks: 75,
               },
             ],
             next_cursor: null,
@@ -390,18 +393,26 @@ describe("control web", () => {
             namespace_limit: 8,
             provider_reserved: 0,
             provider_limit: 0,
-            queued: 0,
+            queued: 2,
             cleanup_held: 0,
             limiting_factor: null,
+            start_burst: 4,
           });
         throw new Error(`unexpected request: ${path}`);
       }),
     );
     renderApp("/campaigns/campaign-1");
     expect(await screen.findByText("Replacement in progress")).toBeInTheDocument();
+    expect(screen.getByText("Replacement Job on this run")).toBeInTheDocument();
     expect(
-      screen.getByText(/A replacement Job is running on this run/),
+      screen.getByText(/21 of 75 assigned tasks have a replacement receipt/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/1 sandbox active, 2 queued creates/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/The task list still shows selected seals/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("21/75 replacement receipts")).toBeInTheDocument();
+    expect(await screen.findByText("75 tasks")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Jobs" })).toBeInTheDocument();
   });
 
@@ -469,6 +480,7 @@ describe("control web", () => {
                   "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
                 created_at: "2026-08-18T00:00:00.000Z",
                 cost_microusd: 1_000_000,
+                assigned_tasks: 1,
               },
             ],
             next_cursor: null,
@@ -511,6 +523,7 @@ describe("control web", () => {
                   "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
                 created_at: "2026-08-18T00:00:00.000Z",
                 cost_microusd: 1_000_000,
+                assigned_tasks: 1,
               },
             ],
             next_cursor: null,

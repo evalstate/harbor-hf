@@ -326,6 +326,8 @@ export interface paths {
                                 exhausted_tasks: number;
                                 successful_tasks: number;
                                 pending_actions: number;
+                                replacement_assigned_tasks: number;
+                                replacement_recorded_tasks: number;
                                 publication_status: string | null;
                                 cleanup_pending: boolean;
                                 cancellation_requested: boolean;
@@ -422,6 +424,8 @@ export interface paths {
                             exhausted_tasks: number;
                             successful_tasks: number;
                             pending_actions: number;
+                            replacement_assigned_tasks: number;
+                            replacement_recorded_tasks: number;
                             publication_status: string | null;
                             cleanup_pending: boolean;
                             cancellation_requested: boolean;
@@ -1477,6 +1481,7 @@ export interface paths {
                                 created_at: string;
                                 inspect_url: string | null;
                                 cost_microusd: number;
+                                assigned_tasks: number;
                             }[];
                             next_cursor: string | null;
                         };
