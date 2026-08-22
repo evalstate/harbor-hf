@@ -334,7 +334,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
   });
 
   it("pins gpt-oss-20b provider deployments to the Chat Completions worker zip", async () => {
-    const pin = "ea5e39e554211daf0c4768868f48026124db96b9";
+    const pin = "96523e72488a37f6caa44d6436d24ff2039b3336";
     for (const harness of [
       "qwen-code",
       "mini-swe-agent",
