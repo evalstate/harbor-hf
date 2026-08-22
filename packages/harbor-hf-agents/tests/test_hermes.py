@@ -304,10 +304,15 @@ class TestHermesInstall:
         await agent.install(AsyncMock())
 
         root_command = agent.exec_as_root.await_args.kwargs["command"]
-        assert "curl git passwd ripgrep util-linux xz-utils" in root_command
+        assert "curl git passwd ripgrep tar util-linux xz-utils" in root_command
+        assert "node-v26.7.0-linux-x64.tar.xz" in root_command
         command = agent.exec_as_agent.await_args.kwargs["command"]
         assert f"hermes-agent/{revision}/scripts/install.sh" in command
         assert f"--commit {revision}" in command
+        assert "--skip-browser" in command
+        assert "--skip-computer-use" in command
+        assert "--hermes-home /tmp/hermes" in command
+        assert "|| true" in command
         assert "--branch" not in command
 
     @pytest.mark.asyncio

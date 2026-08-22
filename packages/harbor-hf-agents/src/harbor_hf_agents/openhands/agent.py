@@ -78,6 +78,13 @@ class OpenHandsAgent(IsolatedProviderAgent, OpenHands):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
+        """Create the isolated user before the OpenHands venv is owned.
+
+        Harbor's installer chowns ``/opt/openhands-venv`` to
+        ``environment.default_user`` (root here). Create ``harbor-agent``
+        first, then give that user the venv directory and install as that
+        user.
+        """
         await self.exec_as_root(
             environment,
             command=(
@@ -89,8 +96,7 @@ class OpenHandsAgent(IsolatedProviderAgent, OpenHands):
         await self.ensure_system_dependencies(
             environment, ("curl", "git", "build_tools", "tmux")
         )
-        # Harbor's installer chowns /opt/openhands-venv to environment.default_user
-        # (root here). The isolated agent user then cannot write the venv.
+        await self._ensure_isolated_agent_user(environment)
         await self.exec_as_root(
             environment,
             command=(

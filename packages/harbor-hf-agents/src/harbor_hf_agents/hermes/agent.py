@@ -163,12 +163,24 @@ class HermesAgent(IsolatedProviderAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
+        """Install Hermes under the isolated agent user.
+
+        Hermes requires Node >= 26. Task images ship an older apt Node, so the
+        installer downloads Node 26 and then exits 127 when ``tar xf`` cannot
+        extract ``.tar.xz``. Preinstall that Node as root. Keep optional
+        browser ``npm`` failures from aborting once ``hermes version`` works.
+        """
         installer_url, revision_flag = self._installation_spec(self._version)
         await self.exec_as_root(
             environment,
             command=(
+                "set -euo pipefail; "
                 "apt-get update && apt-get install -y --no-install-recommends "
-                "curl git passwd ripgrep util-linux xz-utils"
+                "curl git passwd ripgrep tar util-linux xz-utils && "
+                "mkdir -p /opt/harbor-hf-node && "
+                "curl -fsSL "
+                "https://nodejs.org/dist/v26.7.0/node-v26.7.0-linux-x64.tar.xz "
+                "| tar -xJ -C /opt/harbor-hf-node --strip-components=1"
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
@@ -176,12 +188,15 @@ class HermesAgent(IsolatedProviderAgent):
             environment,
             command=(
                 "set -euo pipefail; "
-                f"curl -fsSL {shlex.quote(installer_url)} | "
-                f"bash -s -- --skip-setup{revision_flag} && "
-                'export PATH="$HOME/.local/bin:$PATH" && '
-                'export HERMES_HOME="${HERMES_HOME:-/tmp/hermes}" && '
+                "export HERMES_HOME=/tmp/hermes; "
+                'export PATH="/opt/harbor-hf-node/bin:$HOME/.local/bin:'
+                '$HERMES_HOME/bin:$PATH"; '
                 'mkdir -p "$HERMES_HOME" "$HERMES_HOME/sessions" '
-                '"$HERMES_HOME/skills" "$HERMES_HOME/memories" && '
+                '"$HERMES_HOME/skills" "$HERMES_HOME/memories"; '
+                f"curl -fsSL {shlex.quote(installer_url)} | "
+                "bash -s -- --skip-setup --skip-browser --skip-computer-use "
+                f"--hermes-home /tmp/hermes{revision_flag} || true; "
+                "command -v hermes >/dev/null; "
                 "hermes version"
             ),
         )
