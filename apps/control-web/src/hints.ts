@@ -9,6 +9,8 @@ export const hints = {
       "Inference Endpoints owned by runs. Completion requires a verified pause with zero ready replicas.",
     results:
       "Published catalog scores after runs finish. Open a result for pass rate CIs, token cost, publication identity, and the Bucket prefix. This is not the live run queue.",
+    leaderboard:
+      "Official cost and score board rebuilt from the Bucket SQLite snapshot. Only final, clean, fully scored campaigns appear.",
     profiles:
       "Immutable benchmark, model, harness, deployment, and launch-policy records. Runs lock aliases at submit time.",
     audit:
@@ -146,6 +148,20 @@ export const hints = {
       "How many locked tasks contributed a score, over the locked task count.",
     state: "Whether this publication is published, pending, or failed.",
     published: "When the catalog row was written.",
+  },
+  leaderboard: {
+    rank: "Score first, then lower observed cost. Rank is computed when the snapshot is read.",
+    model: "Locked model identity from the eligible catalog row.",
+    harness: "Locked agent wrapper. The profile alias stays in the snapshot.",
+    benchmark: "Locked benchmark identity.",
+    score: "Primary metric from the eligible catalog. Higher is better on this board.",
+    cost: "Observed campaign spend in USD from attempt and hardware receipts.",
+    trials: "Distinct trial indices in the configuration digest.",
+    reasoning: "Reasoning effort locked on the harness for this configuration.",
+    pareto:
+      "No other official row is both cheaper and higher scoring. The gold line on the plot connects these points.",
+    published: "When the winning catalog row for this configuration was written.",
+    plot: "Observed cost on X, primary metric on Y. Gold is the undominated frontier.",
   },
   profiles: {
     name: "Profile alias and content-derived profile id.",

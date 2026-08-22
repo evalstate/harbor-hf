@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -326,4 +326,117 @@ export async function refreshLeaderboardSnapshot(
     new TextEncoder().encode(canonicalJson(receipt)),
   );
   return receipt;
+}
+
+export interface RankedLeaderboardRow extends LeaderboardRow {
+  rank: number;
+  pareto: boolean;
+}
+
+export interface LoadedLeaderboard {
+  snapshot: HarborHFLeaderboardSnapshotV1 | null;
+  rows: RankedLeaderboardRow[];
+}
+
+/**
+ * Read shown leaderboard rows from a content-addressed SQLite snapshot.
+ */
+export async function decodeLeaderboardSqlite(
+  bytes: Uint8Array,
+): Promise<LeaderboardRow[]> {
+  const directory = await mkdtemp(join(tmpdir(), "harbor-hf-leaderboard-read-"));
+  const path = join(directory, "leaderboard.sqlite");
+  try {
+    await writeFile(path, bytes);
+    const database = new Database(path, { readonly: true });
+    const rows = database
+      .prepare(
+        `SELECT
+          configuration_digest, campaign_id, publication_id, published_at,
+          benchmark, model, harness, inference_provider, reasoning_effort,
+          harbor_version, trial_count, task_count, scored_task_count,
+          primary_metric_name, primary_metric_value, primary_metric_unit,
+          observed_microusd
+        FROM entries
+        ORDER BY configuration_digest`,
+      )
+      .all() as LeaderboardRow[];
+    database.close();
+    return rows;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Points that no other row beats on both cost and score.
+ *
+ * Lower observed cost is better. Higher primary metric is better.
+ */
+export function paretoFrontier(rows: readonly LeaderboardRow[]): ReadonlySet<string> {
+  const frontier = new Set<string>();
+  for (const row of rows) {
+    const dominated = rows.some(
+      (other) =>
+        other.configuration_digest !== row.configuration_digest &&
+        other.observed_microusd <= row.observed_microusd &&
+        other.primary_metric_value >= row.primary_metric_value &&
+        (other.observed_microusd < row.observed_microusd ||
+          other.primary_metric_value > row.primary_metric_value),
+    );
+    if (!dominated) frontier.add(row.configuration_digest);
+  }
+  return frontier;
+}
+
+/** Rank by score descending, then cost ascending. Mark the Pareto frontier. */
+export function rankLeaderboardRows(
+  rows: readonly LeaderboardRow[],
+): RankedLeaderboardRow[] {
+  const frontier = paretoFrontier(rows);
+  const ordered = [...rows].sort((left, right) => {
+    const score = right.primary_metric_value - left.primary_metric_value;
+    if (score !== 0) return score;
+    const cost = left.observed_microusd - right.observed_microusd;
+    if (cost !== 0) return cost;
+    return left.configuration_digest.localeCompare(right.configuration_digest);
+  });
+  return ordered.map((row, index) => ({
+    ...row,
+    rank: index + 1,
+    pareto: frontier.has(row.configuration_digest),
+  }));
+}
+
+/**
+ * Load the latest Bucket snapshot receipt and its SQLite rows.
+ *
+ * Rank is computed here. Identical later receipts win by created_at, then id.
+ */
+export async function loadLatestLeaderboard(
+  store: ImmutableObjectStore,
+): Promise<LoadedLeaderboard> {
+  const receipts: HarborHFLeaderboardSnapshotV1[] = [];
+  for (const object of await store.list(LEADERBOARD_RECEIPT_PREFIX)) {
+    receipts.push(
+      validateLeaderboardSnapshot<HarborHFLeaderboardSnapshotV1>(
+        JSON.parse(new TextDecoder().decode(await store.read(object.key))),
+      ),
+    );
+  }
+  if (receipts.length === 0) return { snapshot: null, rows: [] };
+  receipts.sort((left, right) => {
+    const created = right.created_at.localeCompare(left.created_at);
+    if (created !== 0) return created;
+    return right.record_id.localeCompare(left.record_id);
+  });
+  const snapshot = receipts[0];
+  if (!snapshot) throw new Error("leaderboard receipt list is empty");
+  const bytes = await store.read(snapshot.sqlite_key);
+  if (sha256(bytes) !== snapshot.sqlite_digest)
+    throw new Error("leaderboard snapshot digest mismatch");
+  return {
+    snapshot,
+    rows: rankLeaderboardRows(await decodeLeaderboardSqlite(bytes)),
+  };
 }

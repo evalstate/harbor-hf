@@ -35,7 +35,7 @@ test("shows the operational overview on desktop and mobile", async ({ page }) =>
     route.fulfill({ json: { items: [], next_cursor: null } }),
   );
   await page.route("**/api/v1/events", (route) => route.abort());
-  await page.goto("/");
+  await page.goto("/overview");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await expect(page.getByText("All observed endpoints safe")).toBeVisible();
   await expect(page.getByText("test-revision-0123456789abcdef")).toBeVisible();
@@ -196,4 +196,60 @@ test("shows campaign failures as errors rather than missing data", async ({ page
   await expect(page.getByText("Forbidden")).toBeVisible();
   await expect(page.getByText(/browser-request-id/)).toBeVisible();
   await expect(page.getByText("Run not found")).toHaveCount(0);
+});
+
+test("shows the official leaderboard table and cost-score plot", async ({ page }) => {
+  await page.route("**/api/v1/auth/session", (route) =>
+    route.fulfill({ json: session }),
+  );
+  await page.route("**/api/v1/system", (route) => route.fulfill({ json: system() }));
+  await page.route("**/api/v1/leaderboard", (route) =>
+    route.fulfill({
+      json: {
+        snapshot: {
+          record_id: "leaderboard-snapshot-one",
+          created_at: "2026-08-21T00:00:00.000Z",
+          sqlite_digest: "sha256:sqlite",
+          source_digest: "sha256:source",
+          entry_count: 1,
+        },
+        items: [
+          {
+            rank: 1,
+            pareto: true,
+            configuration_digest: "sha256:strong",
+            campaign_id: "run-strong",
+            publication_id: "publication-strong",
+            published_at: "2026-08-21T00:00:00.000Z",
+            benchmark: "terminal-bench-2-1",
+            model: "openai/gpt-oss-20b",
+            harness: "opencode",
+            inference_provider: "together",
+            reasoning_effort: "off",
+            harbor_version: "0.21.0",
+            trial_count: 1,
+            task_count: 2,
+            scored_task_count: 2,
+            primary_metric_name: "mean_reward",
+            primary_metric_value: 0.9,
+            primary_metric_unit: "score",
+            observed_microusd: 40_000,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/v1/events", (route) => route.abort());
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Leaderboard" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "openai/gpt-oss-20b", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Run benchmark" })).toHaveAttribute(
+    "href",
+    "/overview",
+  );
+  await expect(
+    page.getByRole("img", { name: /cost versus score, with the pareto frontier/i }),
+  ).toBeVisible();
 });

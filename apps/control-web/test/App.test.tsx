@@ -171,7 +171,7 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp();
+    renderApp("/overview");
     expect(await screen.findByText("visible-user")).toBeInTheDocument();
     expect(screen.queryByText("opaque-oauth-subject")).not.toBeInTheDocument();
 
@@ -201,7 +201,7 @@ describe("control web", () => {
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(keys.session, session("cached-user"));
-    renderApp("/", client);
+    renderApp("/overview", client);
     expect(await screen.findByText("cached-user")).toBeInTheDocument();
 
     act(() => {
@@ -267,7 +267,7 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/");
+    renderApp("/overview");
     expect(
       await screen.findByRole("img", {
         name: /observed run spend in usd, from oldest run to newest/i,
@@ -1009,5 +1009,115 @@ describe("control web", () => {
     );
     expect(screen.getByText("task-a")).toBeInTheDocument();
     expect(await screen.findByText("Benchmark Timeout")).toBeInTheDocument();
+  });
+
+  it("shows official snapshot rows and the cost-score plot", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/leaderboard"))
+          return json({
+            snapshot: {
+              record_id: "leaderboard-snapshot-one",
+              created_at: "2026-08-21T00:00:00.000Z",
+              sqlite_digest: "sha256:sqlite",
+              source_digest: "sha256:source",
+              entry_count: 2,
+            },
+            items: [
+              {
+                rank: 1,
+                pareto: true,
+                configuration_digest: "sha256:strong",
+                campaign_id: "run-strong",
+                publication_id: "publication-strong",
+                published_at: "2026-08-21T00:00:00.000Z",
+                benchmark: "terminal-bench-2-1",
+                model: "openai/gpt-oss-20b",
+                harness: "opencode",
+                inference_provider: "together",
+                reasoning_effort: "off",
+                harbor_version: "0.21.0",
+                trial_count: 1,
+                task_count: 2,
+                scored_task_count: 2,
+                primary_metric_name: "mean_reward",
+                primary_metric_value: 0.9,
+                primary_metric_unit: "score",
+                observed_microusd: 40_000,
+              },
+              {
+                rank: 2,
+                pareto: false,
+                configuration_digest: "sha256:weak",
+                campaign_id: "run-weak",
+                publication_id: "publication-weak",
+                published_at: "2026-08-21T00:00:00.000Z",
+                benchmark: "terminal-bench-2-1",
+                model: "openai/gpt-oss-20b",
+                harness: "pi",
+                inference_provider: "together",
+                reasoning_effort: "off",
+                harbor_version: "0.21.0",
+                trial_count: 1,
+                task_count: 2,
+                scored_task_count: 2,
+                primary_metric_name: "mean_reward",
+                primary_metric_value: 0.2,
+                primary_metric_unit: "score",
+                observed_microusd: 90_000,
+              },
+            ],
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/");
+    expect(
+      await screen.findByRole("heading", { name: "Leaderboard" }),
+    ).toBeInTheDocument();
+    expect((await screen.findAllByText("openai/gpt-oss-20b")).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByText("OpenCode")).toBeInTheDocument();
+    expect(screen.getByText("Pareto")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Run benchmark" })).toHaveAttribute(
+      "href",
+      "/overview",
+    );
+    expect(
+      screen.getByRole("img", {
+        name: /cost versus score, with the pareto frontier/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the public leaderboard without a session", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session"))
+          return json({ authenticated: false, login_url: "/auth/login" }, 401);
+        if (path.includes("/api/v1/leaderboard"))
+          return json({ snapshot: null, items: [] });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/");
+    expect(
+      await screen.findByRole("heading", { name: "Leaderboard" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Run benchmark" })).toHaveAttribute(
+      "href",
+      "/auth/login?return_to=%2Foverview",
+    );
+    expect(
+      screen.queryByRole("link", { name: /sign in with hugging face/i }),
+    ).not.toBeInTheDocument();
   });
 });

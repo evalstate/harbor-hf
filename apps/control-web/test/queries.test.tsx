@@ -180,6 +180,7 @@ describe("live query updates", () => {
 
     const invalidated = invalidate.mock.calls.map(([options]) => options?.queryKey);
     expect(invalidated).toContainEqual(keys.results);
+    expect(invalidated).toContainEqual(keys.leaderboard);
     expect(invalidated).toContainEqual(keys.campaigns);
     expect(invalidated).toContainEqual(keys.campaign("campaign-1"));
     expect(invalidated).toContainEqual(keys.audit);

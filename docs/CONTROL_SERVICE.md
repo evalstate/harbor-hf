@@ -261,6 +261,7 @@ GET  /api/v1/jobs
 GET  /api/v1/endpoints
 GET  /api/v1/profiles
 GET  /api/v1/results
+GET  /api/v1/leaderboard
 GET  /api/v1/audit
 GET  /api/v1/events
 ```
@@ -490,8 +491,13 @@ Each SQLite file is content-addressed. The snapshot receipt is written after
 the database bytes. Rank is computed at read time. The latest published
 eligible row wins for a configuration digest.
 
-Anonymous HTTP access to the snapshot is a separate grant. This object lives in
-the existing Bucket and does not add a second store.
+`GET /api/v1/leaderboard` is a public, rate-limited read. It returns the latest
+snapshot metadata (without `sqlite_key`) and the ranked rows, each marked as on
+or off the cost-versus-score Pareto frontier. The browser never reads the
+Bucket. Campaigns, result details, system, events, and mutations stay
+authenticated.
+
+This object lives in the existing Bucket and does not add a second store.
 
 ## Web routes
 
@@ -499,13 +505,15 @@ The React application provides:
 
 | Route | Content |
 | --- | --- |
-| `/` | Queue, active campaigns, failures, spend and endpoint safety. |
+| `/` | Public official leaderboard: snapshot table and cost-versus-score Pareto plot. |
+| `/overview` | Queue, active campaigns, failures, spend and endpoint safety. Authenticated. |
 | `/campaigns` | Searchable and filterable campaign list. |
 | `/campaigns/:campaignId` | Campaign progress, task states, HF Jobs, cost, publication, cleanup, endpoint safety, and timeline. |
 | `/campaigns/:campaignId/tasks/:taskId` | Logical outcome, every physical attempt, and the HF Jobs that ran for the campaign. |
 | `/jobs` | Current HF Job identity, Hub inspect links, latest observed state, recorded hardware cost, ownership, timing and infrastructure failures. |
 | `/endpoints` | Endpoint ownership, requested state, observed state, active cost, and cleanup. |
 | `/results` | Published catalog: pass rate, 95% CIs, token cost, Bucket output links, and provenance. |
+| `/leaderboard` | Redirects to `/`. |
 | `/profiles` | Immutable profiles, aliases, promotions, approval state, and resolved locks. |
 | `/audit` | Recorded receipts, effective dispositions, actors, integrity failures, and policy stops. |
 
@@ -525,8 +533,9 @@ sealed non-success tasks is labeled Completed with failures, not Completed.
 
 The Space is publicly reachable so Jobs can present short-lived worker
 capabilities without receiving a Hugging Face credential. Anonymous callers can
-reach static application assets, login and callback routes, and minimal health
-checks. Control data and mutations remain protected by the application.
+reach static application assets, login and callback routes, minimal health
+checks, and `GET /api/v1/leaderboard`. Campaigns, result details, system,
+events, and mutations remain protected by the application.
 
 Hugging Face OAuth provides verified user identities. The service stores
 operators and readers in an immutable private Bucket access-list record. A
@@ -553,8 +562,8 @@ limits. Forwarded client IP headers are not trusted because the hosting proxy
 may pass caller-supplied values. Unverified credentials stay in shared
 anonymous route limits. After authentication, limits use hashes of verified
 worker actions, actors, or sessions. Anonymous limits are separate for health,
-authentication, API, and static routes, so exhausting one does not block an
-authorized worker or operator. Authentication runs before request-body parsing,
+authentication, the public leaderboard, API, and static routes, so exhausting
+one does not block an authorized worker or operator. Authentication runs before request-body parsing,
 so an anonymous caller cannot force the service to parse a large worker
 submission. Public health responses contain only `live`, `ready`, or
 `rebuilding` state.

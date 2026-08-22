@@ -516,6 +516,85 @@ export const publicationSchema = {
   },
 } as const;
 
+export const leaderboardRowSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "rank",
+    "pareto",
+    "configuration_digest",
+    "campaign_id",
+    "publication_id",
+    "published_at",
+    "benchmark",
+    "model",
+    "harness",
+    "inference_provider",
+    "reasoning_effort",
+    "harbor_version",
+    "trial_count",
+    "task_count",
+    "scored_task_count",
+    "primary_metric_name",
+    "primary_metric_value",
+    "primary_metric_unit",
+    "observed_microusd",
+  ],
+  properties: {
+    rank: integer,
+    pareto: { type: "boolean" },
+    configuration_digest: { type: "string" },
+    campaign_id: { type: "string" },
+    publication_id: { type: "string" },
+    published_at: { type: "string", format: "date-time" },
+    benchmark: { type: "string" },
+    model: { type: "string" },
+    harness: { type: "string" },
+    inference_provider: { type: "string" },
+    reasoning_effort: { type: "string" },
+    harbor_version: { type: "string" },
+    trial_count: integer,
+    task_count: integer,
+    scored_task_count: integer,
+    primary_metric_name: { type: "string" },
+    primary_metric_value: { type: "number" },
+    primary_metric_unit: { type: "string" },
+    observed_microusd: integer,
+  },
+} as const;
+
+export const leaderboardSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["snapshot", "items"],
+  properties: {
+    snapshot: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "record_id",
+            "created_at",
+            "sqlite_digest",
+            "source_digest",
+            "entry_count",
+          ],
+          properties: {
+            record_id: { type: "string" },
+            created_at: { type: "string", format: "date-time" },
+            sqlite_digest: { type: "string" },
+            source_digest: { type: "string" },
+            entry_count: integer,
+          },
+        },
+        { type: "null" },
+      ],
+    },
+    items: { type: "array", items: leaderboardRowSchema },
+  },
+} as const;
+
 export const itemList = (item: object) =>
   ({
     type: "object",

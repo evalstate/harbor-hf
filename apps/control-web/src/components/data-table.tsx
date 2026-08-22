@@ -21,10 +21,12 @@ export function DataTable<T>({
   columns,
   data,
   empty = "No records found",
+  rowClassName,
 }: {
   columns: ColumnDef<T>[];
   data: T[];
   empty?: string;
+  rowClassName?(row: T): string | undefined;
 }) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const table = useReactTable({
@@ -74,7 +76,10 @@ export function DataTable<T>({
         <tbody>
           {table.getRowModel().rows.map((row) => (
             <tr
-              className="border-t border-slate-800/80 hover:bg-slate-900/60"
+              className={cn(
+                "border-t border-slate-800/80 hover:bg-slate-900/60",
+                rowClassName?.(row.original),
+              )}
               key={row.id}
             >
               {row.getVisibleCells().map((cell) => (

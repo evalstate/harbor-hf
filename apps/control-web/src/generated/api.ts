@@ -1598,6 +1598,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/leaderboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Official snapshot rows. Anonymous GET is allowed. Campaigns and result details stay authenticated. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            snapshot: {
+                                record_id: string;
+                                /** Format: date-time */
+                                created_at: string;
+                                sqlite_digest: string;
+                                source_digest: string;
+                                entry_count: number;
+                            } | null;
+                            items: {
+                                rank: number;
+                                pareto: boolean;
+                                configuration_digest: string;
+                                campaign_id: string;
+                                publication_id: string;
+                                /** Format: date-time */
+                                published_at: string;
+                                benchmark: string;
+                                model: string;
+                                harness: string;
+                                inference_provider: string;
+                                reasoning_effort: string;
+                                harbor_version: string;
+                                trial_count: number;
+                                task_count: number;
+                                scored_task_count: number;
+                                primary_metric_name: string;
+                                primary_metric_value: number;
+                                primary_metric_unit: string;
+                                observed_microusd: number;
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/results": {
         parameters: {
             query?: never;

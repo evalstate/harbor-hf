@@ -13,9 +13,16 @@ import {
   deterministicId,
   sandboxActionResultPath,
   sha256,
+  validateLeaderboardSnapshot,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
-import { mintWorkerCapability } from "@harbor-hf/control-core";
+import {
+  encodeLeaderboardSqlite,
+  LEADERBOARD_RECEIPT_PREFIX,
+  LEADERBOARD_SNAPSHOT_PREFIX,
+  loadLatestLeaderboard,
+  mintWorkerCapability,
+} from "@harbor-hf/control-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { AuthenticationService, AuthStore, safeReturnPath } from "../src/auth.js";
@@ -708,6 +715,12 @@ describe("control API", () => {
         error: { code: "authentication_required" },
       });
     }
+    const leaderboard = await app.inject({
+      method: "GET",
+      url: "/api/v1/leaderboard",
+    });
+    expect(leaderboard.statusCode).toBe(200);
+    expect(leaderboard.json()).toEqual({ snapshot: null, items: [] });
     const session = await app.inject({
       method: "GET",
       url: "/api/v1/auth/session",
@@ -1162,6 +1175,70 @@ describe("control API", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json().items).toEqual([]);
+    await app.close();
+  });
+
+  it("reads ranked leaderboard rows from the latest Bucket snapshot", async () => {
+    const { runtime, app } = await setup("disabled");
+    expect(await loadLatestLeaderboard(runtime.store)).toEqual({
+      snapshot: null,
+      rows: [],
+    });
+    const empty = await app.inject({ method: "GET", url: "/api/v1/leaderboard" });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ snapshot: null, items: [] });
+
+    const row = {
+      configuration_digest: `sha256:${"b".repeat(64)}`,
+      campaign_id: "run-leaderboard",
+      publication_id: "publication-leaderboard",
+      published_at: "2026-08-21T00:00:00.000Z",
+      benchmark: "control-smoke",
+      model: "control-smoke",
+      harness: "control-smoke",
+      inference_provider: "hf-cpu-smoke",
+      reasoning_effort: "off",
+      harbor_version: "0.21.0",
+      trial_count: 1,
+      task_count: 1,
+      scored_task_count: 1,
+      primary_metric_name: "mean_reward",
+      primary_metric_value: 1,
+      primary_metric_unit: "score",
+      observed_microusd: 2500,
+    };
+    const bytes = await encodeLeaderboardSqlite([row]);
+    const sqliteDigest = sha256(bytes);
+    const sqliteKey = `${LEADERBOARD_SNAPSHOT_PREFIX}${sqliteDigest.slice("sha256:".length)}/leaderboard.sqlite`;
+    await runtime.store.create(sqliteKey, bytes);
+    const receipt = validateLeaderboardSnapshot({
+      schema_version: "v1",
+      kind: "leaderboard.snapshot",
+      record_id: deterministicId("leaderboard-snapshot", sqliteDigest),
+      created_at: row.published_at,
+      actor: { subject: "harbor-hf-control", role: "service" },
+      sqlite_key: sqliteKey,
+      sqlite_digest: sqliteDigest,
+      source_digest: sha256(canonicalJson([row.campaign_id])),
+      entry_count: 1,
+    });
+    await runtime.store.create(
+      `${LEADERBOARD_RECEIPT_PREFIX}${receipt.record_id}.json`,
+      new TextEncoder().encode(canonicalJson(receipt)),
+    );
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/leaderboard" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      snapshot: {
+        record_id: receipt.record_id,
+        created_at: receipt.created_at,
+        sqlite_digest: receipt.sqlite_digest,
+        source_digest: receipt.source_digest,
+        entry_count: 1,
+      },
+      items: [{ ...row, rank: 1, pareto: true }],
+    });
     await app.close();
   });
 

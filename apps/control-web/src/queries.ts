@@ -7,6 +7,7 @@ import type {
   Capacity,
   EndpointList,
   JobList,
+  Leaderboard,
   ProfileList,
   ResultDetail,
   ResultList,
@@ -29,6 +30,7 @@ export const keys = {
   endpoints: ["endpoints"] as const,
   profiles: ["profiles"] as const,
   results: ["results"] as const,
+  leaderboard: ["leaderboard"] as const,
   result: (id: string) => ["result", id] as const,
   audit: ["audit"] as const,
 };
@@ -230,6 +232,13 @@ export const useResults = (cursor?: string, filters: ResultFilters = {}) =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
+export const useLeaderboard = () =>
+  useQuery({
+    queryKey: keys.leaderboard,
+    queryFn: () => request<Leaderboard>("/api/v1/leaderboard"),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+  });
 export const useResult = (id: string) =>
   useQuery({
     queryKey: keys.result(id),
@@ -260,7 +269,8 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
     affected.push(keys.profiles);
     if (stringData(event, "profile_kind") === "capacity") affected.push(["capacity"]);
   }
-  if (event.type === "publication.receipt") affected.push(keys.results);
+  if (event.type === "publication.receipt")
+    affected.push(keys.results, keys.leaderboard);
   if (
     event.type.startsWith("campaign.") ||
     event.type.startsWith("budget.") ||

@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Route, Routes, useLocation } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, type SessionResponse, signOut } from "./api";
 import { ControlStateProvider, type DisplayActor } from "./control-state";
 import { Layout } from "./layout";
@@ -9,6 +9,7 @@ import {
   CampaignsPage,
   EndpointsPage,
   JobsPage,
+  LeaderboardPage,
   NotFoundPage,
   OverviewPage,
   ProfilesPage,
@@ -18,6 +19,48 @@ import {
 } from "./pages";
 import { keys, useLiveUpdates, useSession, useSystem } from "./queries";
 import { Button, Card, ErrorNotice, Loading, QueryContent } from "./ui";
+
+function isPublicBoard(path: string): boolean {
+  return path === "/" || path === "/leaderboard";
+}
+
+function RunBenchmarkButton({ authenticated }: { authenticated: boolean }) {
+  if (authenticated)
+    return (
+      <Link to="/overview">
+        <Button>Run benchmark</Button>
+      </Link>
+    );
+  return (
+    <a href="/auth/login?return_to=%2Foverview">
+      <Button>Run benchmark</Button>
+    </a>
+  );
+}
+
+function PublicLeaderboard({ authenticated }: { authenticated: boolean }) {
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <header className="border-b border-slate-800">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4">
+          <div className="flex items-center gap-3">
+            <span className="grid h-9 w-9 place-items-center rounded-lg bg-cyan-400 font-black text-slate-950">
+              H
+            </span>
+            <div>
+              <div className="font-semibold tracking-tight">Harbor-HF</div>
+              <div className="text-xs text-slate-500">Official leaderboard</div>
+            </div>
+          </div>
+          <RunBenchmarkButton authenticated={authenticated} />
+        </div>
+      </header>
+      <main className="mx-auto max-w-6xl px-4 py-8">
+        <LeaderboardPage />
+      </main>
+    </div>
+  );
+}
 
 function AuthenticatedApp({
   actor,
@@ -58,7 +101,7 @@ function AuthenticatedApp({
       >
         {system.data ? (
           <Routes>
-            <Route path="/" element={<OverviewPage />} />
+            <Route path="/overview" element={<OverviewPage />} />
             <Route path="/runs" element={<CampaignsPage />} />
             <Route path="/runs/:campaignId" element={<CampaignPage />} />
             <Route path="/runs/:campaignId/tasks/:taskId" element={<TaskPage />} />
@@ -90,6 +133,11 @@ export default function App() {
         <Loading />
       </div>
     );
+
+  if (isPublicBoard(location.pathname)) {
+    if (location.pathname === "/leaderboard") return <Navigate to="/" replace />;
+    return <PublicLeaderboard authenticated={session.data?.authenticated === true} />;
+  }
 
   const unauthorized =
     (session.error instanceof ApiError && session.error.status === 401) ||

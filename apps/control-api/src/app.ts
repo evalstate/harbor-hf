@@ -34,6 +34,7 @@ import {
   preparedSandboxPolicy,
   preparationRequired,
   staticSandboxPolicy,
+  loadLatestLeaderboard,
   summarizePublishedResult,
   verifyWorkerCapability,
 } from "@harbor-hf/control-core";
@@ -62,6 +63,7 @@ import {
   evidenceUploadSchema,
   itemList,
   jobSchema,
+  leaderboardSchema,
   profileSchema,
   publicationSchema,
   sessionSchema,
@@ -159,8 +161,14 @@ function anonymousRequestLimit(path: string): readonly [string, number] {
   if (path === "/auth/callback") return ["anonymous:callback", 30];
   if (path === "/auth/logout") return ["anonymous:logout", 30];
   if (path === "/api/v1/auth/session") return ["anonymous:auth-session", 120];
+  if (path === "/api/v1/leaderboard") return ["anonymous:leaderboard", 120];
   if (path.startsWith("/api/")) return ["anonymous:api", 240];
   return ["anonymous:static", 600];
+}
+
+function isAnonymousLeaderboard(request: FastifyRequest): boolean {
+  const path = request.url.split("?", 1)[0] ?? request.url;
+  return request.method === "GET" && path === "/api/v1/leaderboard";
 }
 
 async function admitRequest(
@@ -978,6 +986,19 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       }
     }
     if (!request.actor) {
+      if (isAnonymousLeaderboard(request)) {
+        if (
+          !(await admitRequest(
+            requestLimiter,
+            "anonymous:leaderboard",
+            120,
+            request,
+            reply,
+          ))
+        )
+          return;
+        return;
+      }
       if (!(await admitRequest(requestLimiter, "anonymous:api", 240, request, reply)))
         return;
       await reply.code(401).send({
@@ -2164,6 +2185,32 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         offset,
         limit,
       );
+    },
+  );
+  app.get(
+    "/api/v1/leaderboard",
+    {
+      schema: {
+        tags: ["results"],
+        description:
+          "Official snapshot rows. Anonymous GET is allowed. Campaigns and result details stay authenticated.",
+        response: { 200: leaderboardSchema },
+      },
+    },
+    async () => {
+      const loaded = await loadLatestLeaderboard(runtime.store);
+      return {
+        snapshot: loaded.snapshot
+          ? {
+              record_id: loaded.snapshot.record_id,
+              created_at: loaded.snapshot.created_at,
+              sqlite_digest: loaded.snapshot.sqlite_digest,
+              source_digest: loaded.snapshot.source_digest,
+              entry_count: loaded.snapshot.entry_count,
+            }
+          : null,
+        items: loaded.rows,
+      };
     },
   );
   app.get(

@@ -22,6 +22,8 @@ export type ProfileList =
   paths["/api/v1/profiles"]["get"]["responses"][200]["content"]["application/json"];
 export type ResultList =
   paths["/api/v1/results"]["get"]["responses"][200]["content"]["application/json"];
+export type Leaderboard =
+  paths["/api/v1/leaderboard"]["get"]["responses"][200]["content"]["application/json"];
 export type ResultDetail =
   paths["/api/v1/results/{publication_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type AuditResponse =

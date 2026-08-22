@@ -11,6 +11,7 @@ import {
   Network,
   ServerCog,
   ShieldCheck,
+  Trophy,
   X,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
@@ -22,7 +23,8 @@ import type { LiveState } from "./queries";
 import { Badge, Button, ErrorNotice, Hint } from "./ui";
 
 const navigation = [
-  ["/", "Overview", Gauge, hints.nav.overview],
+  ["/", "Leaderboard", Trophy, hints.nav.leaderboard],
+  ["/overview", "Overview", Gauge, hints.nav.overview],
   ["/runs", "Runs", ClipboardList, hints.nav.campaigns],
   ["/jobs", "Jobs", ServerCog, hints.nav.jobs],
   ["/endpoints", "Endpoints", Network, hints.nav.endpoints],
@@ -98,7 +100,7 @@ export function Layout({
           {navigation.map(([href, label, Icon, hint]) => (
             <NavLink
               key={href}
-              end={href === "/"}
+              end={href === "/" || href === "/overview"}
               to={href}
               onClick={() => setOpen(false)}
               className={({ isActive }) =>

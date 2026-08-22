@@ -2126,6 +2126,8 @@ export function AuditPage() {
   );
 }
 
+export { LeaderboardPage } from "./leaderboard-page";
+
 export function NotFoundPage() {
   return (
     <Empty>
