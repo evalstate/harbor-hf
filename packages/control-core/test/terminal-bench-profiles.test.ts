@@ -9,8 +9,8 @@ import {
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
-const WORKER_REVISION = "c5ffef26652129bc3354be5b3bc9c9ba8110629b";
-const PREVIOUS_WORKER_REVISION = "eec0829abf75e8d3f271c8114462a2ffc3dfecbf";
+const WORKER_REVISION = "e9b18497bbc2840f13525f62693917dfad8a5b30";
+const BRIDGE_REVISION = "c5ffef26652129bc3354be5b3bc9c9ba8110629b";
 const BRIDGE_DIGESTS = [
   "a67e6442b5a9be11591699aaf8a861c021ac1e49c10bcd09992ab562098ea2eb",
   "ec80056b2eba539040bd411848b8e09f5dfce2066f715f814f40c8d909222da4",
@@ -42,6 +42,7 @@ function protectedDeployment(spec: Record<string, unknown>): Record<string, unkn
     preparation_job_command: _preparationCommand,
     job_command: _jobCommand,
     worker_revision: _workerRevision,
+    harbor_version: _harborVersion,
     worker_concurrency: _workerConcurrency,
     worker_max_tasks_per_job: _workerCapacity,
     sandbox_template: sandboxValue,
@@ -170,6 +171,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       [diagnostic, 89, 8, 16],
     ] as const) {
       expect(spec.worker_revision).toBe(WORKER_REVISION);
+      expect(spec.harbor_version).toBe("0.22.0");
       expect(spec.worker_max_tasks_per_job).toBe(capacity);
       expect(spec.worker_concurrency).toBe(concurrency);
 
@@ -177,10 +179,11 @@ describe("Terminal-Bench 2.1 profiles", () => {
       const jobCommand = (spec.job_command as string[]).join("\n");
       const sandbox = record(spec.sandbox_template);
       const bootstrapCommand = (sandbox.root_bootstrap_command as string[]).join("\n");
-      for (const command of [preparationCommand, jobCommand, bootstrapCommand]) {
+      for (const command of [preparationCommand, jobCommand]) {
         expect(command).toContain(WORKER_REVISION);
-        expect(command).not.toContain(PREVIOUS_WORKER_REVISION);
+        expect(command).not.toContain(BRIDGE_REVISION);
       }
+      expect(bootstrapCommand).toContain(BRIDGE_REVISION);
       for (const digest of BRIDGE_DIGESTS) expect(bootstrapCommand).toContain(digest);
 
       expect(spec.inference_token).toBe("forbidden");
@@ -336,7 +339,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
   });
 
   it("pins gpt-oss-20b provider deployments to the Chat Completions worker zip", async () => {
-    const pin = "3c11b6d765ef91468f8b817505778b415f95dd13";
+    const pin = WORKER_REVISION;
     for (const harness of [
       "qwen-code",
       "mini-swe-agent",
@@ -352,6 +355,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(deployment.models).toEqual(["gpt-oss-20b"]);
       expect(deployment.harnesses).toEqual([harness]);
       expect(deployment.worker_revision).toBe(pin);
+      expect(deployment.harbor_version).toBe("0.22.0");
       expect(deployment.inference_provider).toBe("together");
       const jobCommand = (deployment.job_command as string[]).join("\n");
       expect(jobCommand).toContain(pin);
