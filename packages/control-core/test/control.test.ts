@@ -3856,6 +3856,165 @@ describe("control service", () => {
     });
   });
 
+  it("retries a sealed infrastructure outcome and accepts a replacement attempt", async () => {
+    const control = await createTestControl(1, 2, 150_000);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "sealed-infrastructure-retry-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 150_000,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "sealed-infrastructure-retry-evidence",
+    );
+    const attempt = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-sealed-infrastructure",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    await control.service.append({
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: deterministicId(
+        "terminal",
+        result.campaign_id,
+        "task-001",
+        attempt.attempt_id,
+      ),
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: attempt.attempt_id,
+      outcome: "infrastructure",
+      reason: "historical infrastructure seal",
+    });
+    expect(
+      (await control.projection.task(result.campaign_id, "task-001"))?.task,
+    ).toMatchObject({ terminal_outcome: "infrastructure" });
+
+    const retry = await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: "task-001",
+        reason: "retry sealed infrastructure",
+        confirmed: true,
+      },
+      "sealed-infrastructure-retry-key",
+      operator,
+    );
+    const replacementEvidence = await putEvidenceReference(
+      control,
+      "sealed-infrastructure-replacement-evidence",
+    );
+    const replacement = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-sealed-infrastructure-replacement",
+      action_id: retry.action_id,
+      outcome: "complete",
+      replacement_eligible: false,
+      ...replacementEvidence,
+      cost_microusd: 0,
+      metrics: { input_tokens: 1, output_tokens: 1 },
+      completed_at: "2026-08-16T00:00:03.000Z",
+    });
+    await control.service.selectTerminal(replacement, "replacement scored");
+    expect(
+      (await control.projection.task(result.campaign_id, "task-001"))?.task,
+    ).toMatchObject({
+      terminal_outcome: "complete",
+      selected_attempt_id: replacement.attempt_id,
+    });
+  });
+
+  it("retries every eligible infrastructure task when no task is specified", async () => {
+    const control = await createTestControl(1, 2, 150_000);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "batch-infrastructure-retry-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 150_000,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "batch-infrastructure-retry-evidence",
+    );
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-batch-infrastructure",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+
+    const retry = await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry eligible infrastructure failures",
+        confirmed: true,
+      },
+      "batch-infrastructure-retry-key",
+      operator,
+    );
+    expect(await control.projection.action(retry.action_id)).toMatchObject({
+      action_kind: "job.launch",
+    });
+    expect(
+      await control.service.campaignAction(
+        result.campaign_id,
+        {
+          action: "retry_infrastructure",
+          task_id: null,
+          reason: "retry eligible infrastructure failures",
+          confirmed: true,
+        },
+        "batch-infrastructure-retry-key",
+        operator,
+      ),
+    ).toMatchObject({ action_id: retry.action_id, adopted: true });
+  });
+
   it("includes observed overage when admitting a replacement", async () => {
     const control = await createTestControl(1, 2, 50);
     controls.push(control);

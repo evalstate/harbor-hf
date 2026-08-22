@@ -110,7 +110,7 @@ class _ControlClient:
                 detail = error.read(4096).decode("utf-8", "replace")
                 if (
                     retry_safe
-                    and error.code in {429, 502, 503, 504}
+                    and error.code in {429, 500, 502, 503, 504}
                     and attempt + 1 < attempts
                 ):
                     delay = min(

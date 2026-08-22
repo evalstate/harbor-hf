@@ -158,6 +158,39 @@ def test_campaign_submit_can_start_paused(
         ),
         (
             [
+                "retry-infrastructure",
+                "campaign-one",
+                "--task",
+                "task-one",
+                "--reason",
+                "transient infrastructure failure",
+                "--yes",
+            ],
+            {
+                "action": "retry_infrastructure",
+                "task_id": "task-one",
+                "reason": "transient infrastructure failure",
+                "confirmed": True,
+            },
+        ),
+        (
+            [
+                "retry-infrastructure",
+                "campaign-one",
+                "--all-eligible",
+                "--reason",
+                "retry eligible infrastructure failures",
+                "--yes",
+            ],
+            {
+                "action": "retry_infrastructure",
+                "task_id": None,
+                "reason": "retry eligible infrastructure failures",
+                "confirmed": True,
+            },
+        ),
+        (
+            [
                 "resume",
                 "campaign-one",
                 "--task-limit",
@@ -215,6 +248,18 @@ def test_campaign_lifecycle_actions_use_control_api(
         "https://control.example/api/v1/campaigns/campaign-one/actions"
     )
     assert observed["json"] == expected
+
+
+def test_retry_infrastructure_requires_task_or_all_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure(monkeypatch)
+    result = runner.invoke(
+        app,
+        ["campaign", "retry-infrastructure", "campaign-one", "--yes"],
+    )
+    assert result.exit_code != 0
+    assert "exactly one of --task or --all-eligible" in result.output
 
 
 def test_campaign_pause_endpoint_uses_confirmed_control_action(

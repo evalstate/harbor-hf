@@ -232,15 +232,18 @@ def campaign_supersede(
 @campaign_app.command("retry-infrastructure")
 def campaign_retry_infrastructure(
     campaign_id: Annotated[str, typer.Argument()],
-    task_id: Annotated[str, typer.Option("--task")],
+    task_id: Annotated[str | None, typer.Option("--task")] = None,
+    all_eligible: Annotated[bool, typer.Option("--all-eligible")] = False,
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
     """Request a bounded infrastructure-only replacement."""
+    if all_eligible == bool(task_id):
+        raise typer.BadParameter("provide exactly one of --task or --all-eligible")
     _campaign_action(
         campaign_id,
         "retry_infrastructure",
-        task_id=task_id,
+        task_id=None if all_eligible else task_id,
         reason=reason,
         yes=yes,
     )

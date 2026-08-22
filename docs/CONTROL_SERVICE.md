@@ -464,7 +464,7 @@ retry does not increase the campaign denominator.
 Campaign pages show:
 
 - total logical tasks and sealed outcomes;
-- active tasks and infrastructure replacements;
+- active tasks and infrastructure replacements, including a run-page control that retries every eligible infrastructure failure;
 - terminal invalid, provider-rejected, agent, cancellation, verifier and benchmark failures;
 - physical attempt counts;
 - reserved, observed and reconciled cost plus the approved ceiling;

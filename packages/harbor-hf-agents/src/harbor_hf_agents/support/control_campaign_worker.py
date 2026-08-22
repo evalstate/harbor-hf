@@ -37,6 +37,11 @@ _POLICY_FAILURES = {
     "ModelNotFoundError",
 }
 _INFRASTRUCTURE_MARKERS = ("Sandbox", "Connection", "Network", "HTTP")
+_ENVIRONMENT_SETUP_ERRORS = {
+    "AddTestsDirError",
+    "DownloadEnvironmentDirError",
+    "DownloadVerifierDirError",
+}
 
 
 @dataclass(frozen=True)
@@ -308,6 +313,8 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
     )
     if name in {"AgentTimeoutError", "VerifierTimeoutError"}:
         return "benchmark_timeout", False
+    if name in _ENVIRONMENT_SETUP_ERRORS:
+        return "infrastructure", True
     if name == "IndexError" and "_update_metric_display" in f"{detail} {stderr}":
         return "complete", False
     if name == TransientProviderError.__name__:
@@ -472,6 +479,43 @@ def _upload_evidence(
     return manifest_digest, str(uploaded_manifest["path"])
 
 
+def _transient_control_failure(error: BaseException) -> bool:
+    text = str(error)
+    return any(
+        marker in text
+        for marker in ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504")
+    )
+
+
+def _upload_failure_note(
+    config: WorkerConfig, task: LockedTask, error: BaseException
+) -> tuple[str, str]:
+    """Upload a tiny note when the trial archive cannot be stored."""
+    client = _ControlClient(config.campaign_id, task.task_id)
+    note = _canonical_json(
+        {
+            "schema_version": "v1",
+            "kind": "worker.evidence.upload_failure",
+            "task_id": task.task_id,
+            "error": str(error)[:500],
+        }
+    )
+    digest = _digest(note)
+    uploaded = client.request(
+        "POST",
+        f"{client.prefix}/attempts",
+        body={
+            "operation": "upload_evidence",
+            "action_id": config.action_id,
+            "digest": digest,
+            "content_base64": base64.b64encode(note).decode(),
+        },
+        idempotency_key=f"evidence-failure-{config.action_id}-{task.task_id}",
+        timeout=120.0,
+    )
+    return digest, str(uploaded["path"])
+
+
 def _submit_attempt(
     config: WorkerConfig,
     task: LockedTask,
@@ -481,8 +525,11 @@ def _submit_attempt(
     evidence_path: str,
     *,
     timed_out: bool = False,
+    outcome_override: tuple[str, bool] | None = None,
 ) -> None:
-    outcome, replacement = _exception_outcome(result, stderr, timed_out=timed_out)
+    outcome, replacement = outcome_override or _exception_outcome(
+        result, stderr, timed_out=timed_out
+    )
     metrics, _ = _metrics(result)
     if metrics.get("input_tokens", 0) <= 0 or metrics.get("output_tokens", 0) <= 0:
         replacement = True
@@ -595,8 +642,35 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
         for trial_file in result_path.parent.rglob("*"):
             if trial_file.is_file() and capability in trial_file.read_bytes():
                 raise RuntimeError("worker capability leaked into trial evidence")
+    _deliver_trial(config, task, root, result_path, result, output, timed_out)
+    return task.task_id
+
+
+def _deliver_trial(
+    config: WorkerConfig,
+    task: LockedTask,
+    root: Path,
+    result_path: Path,
+    result: dict[str, Any],
+    output: str,
+    timed_out: bool,
+) -> None:
     archive = _archive_trial(root, task, result_path, output)
-    digest, evidence_path = _upload_evidence(config, task, archive)
+    outcome_override: tuple[str, bool] | None = None
+    try:
+        digest, evidence_path = _upload_evidence(config, task, archive)
+    except RuntimeError as error:
+        if not _transient_control_failure(error):
+            raise
+        _log(
+            {
+                "status": "evidence_upload_failed",
+                "task_id": task.task_id,
+                "error": str(error)[:500],
+            }
+        )
+        digest, evidence_path = _upload_failure_note(config, task, error)
+        outcome_override = ("infrastructure", True)
     _submit_attempt(
         config,
         task,
@@ -605,8 +679,8 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
         digest,
         evidence_path,
         timed_out=timed_out,
+        outcome_override=outcome_override,
     )
-    return task.task_id
 
 
 def _campaign_stopped(config: WorkerConfig) -> bool:
@@ -658,7 +732,6 @@ def _run_assigned_tasks(
         futures: dict[concurrent.futures.Future[str], LockedTask] = {}
 
         _fill_available_slots(executor, futures, pending, config, root, width)
-        accepting = True
         while futures:
             done, _ = concurrent.futures.wait(
                 futures, return_when=concurrent.futures.FIRST_COMPLETED
@@ -669,10 +742,7 @@ def _run_assigned_tasks(
                     completed.append(future.result())
                 except BaseException as error:
                     failures.append(error)
-            if failures:
-                accepting = False
-            if accepting:
-                _fill_available_slots(executor, futures, pending, config, root, width)
+            _fill_available_slots(executor, futures, pending, config, root, width)
 
     return completed, failures
 

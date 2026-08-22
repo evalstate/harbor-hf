@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 import shlex
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 from harbor.models.task.config import EnvironmentConfig
@@ -226,6 +229,41 @@ async def _noop() -> None:
 
 async def _noop_sleep(_delay: float) -> None:
     return None
+
+
+def test_retries_http_500_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in {
+        "HARBOR_HF_CONTROL_URL": "https://control.example",
+        "HARBOR_HF_WORKER_CAPABILITY": "capability",
+        "HARBOR_HF_CAMPAIGN_ID": "campaign-1",
+        "HARBOR_HF_ACTION_ID": "action-attempt-1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    attempts = {"count": 0}
+
+    def urlopen(_request: object, timeout: float = 0) -> io.BytesIO:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise HTTPError(
+                "https://control.example/api",
+                500,
+                "Internal Server Error",
+                {"Retry-After": "0"},
+                io.BytesIO(b'{"error":{"code":"internal_error"}}'),
+            )
+        return io.BytesIO(json.dumps({"path": "evidence/note"}).encode())
+
+    monkeypatch.setattr(control, "urlopen", urlopen)
+    monkeypatch.setattr(control.time, "sleep", lambda _delay: None)
+    client = control._ControlClient("campaign-1", "task-1")
+
+    assert client.request(
+        "POST",
+        "/api/v1/campaigns/campaign-1/tasks/task-1/attempts",
+        body={"operation": "upload_evidence"},
+        idempotency_key="evidence-1",
+    ) == {"path": "evidence/note"}
+    assert attempts["count"] == 2
 
 
 def test_preflight_rejects_broad_hf_token(monkeypatch: pytest.MonkeyPatch) -> None:

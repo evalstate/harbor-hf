@@ -1072,10 +1072,12 @@ export function CampaignPage() {
   const { writesAllowed, writeMode } = useControlState();
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelAcknowledged, setCancelAcknowledged] = useState(false);
+  const [retryOpen, setRetryOpen] = useState(false);
   const closeCancel = () => {
     setCancelOpen(false);
     setCancelAcknowledged(false);
   };
+  const closeRetry = () => setRetryOpen(false);
   const cancel = useMutation({
     mutationFn: () =>
       actOnCampaign(campaignId, {
@@ -1086,6 +1088,19 @@ export function CampaignPage() {
       } as CampaignAction),
     onSuccess: () => {
       closeCancel();
+      return client.invalidateQueries({ queryKey: keys.campaign(campaignId) });
+    },
+  });
+  const retryInfrastructure = useMutation({
+    mutationFn: () =>
+      actOnCampaign(campaignId, {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry eligible infrastructure failures",
+        confirmed: true,
+      } as CampaignAction),
+    onSuccess: () => {
+      closeRetry();
       return client.invalidateQueries({ queryKey: keys.campaign(campaignId) });
     },
   });
@@ -1142,23 +1157,71 @@ export function CampaignPage() {
         titleClassName="break-all font-mono text-lg sm:text-xl"
         description="Run lock, logical outcomes, cost and publication state."
         action={
-          !campaignIsFinished(item.status) ? (
+          <div className="flex flex-wrap gap-2">
             <Button
-              variant="destructive"
-              disabled={!writesAllowed || cancel.isPending}
+              disabled={!writesAllowed || retryInfrastructure.isPending}
               title={
                 writesAllowed
-                  ? "Cancel this run"
-                  : `Cancellation is unavailable while write mode is ${writeMode}`
+                  ? "Retry eligible infrastructure failures"
+                  : `Retry is unavailable while write mode is ${writeMode}`
               }
-              onClick={() => setCancelOpen(true)}
+              onClick={() => setRetryOpen(true)}
             >
-              <PauseCircle size={16} />
-              Cancel run
+              <RefreshCw size={16} />
+              Retry infrastructure failures
             </Button>
-          ) : undefined
+            {!campaignIsFinished(item.status) ? (
+              <Button
+                variant="destructive"
+                disabled={!writesAllowed || cancel.isPending}
+                title={
+                  writesAllowed
+                    ? "Cancel this run"
+                    : `Cancellation is unavailable while write mode is ${writeMode}`
+                }
+                onClick={() => setCancelOpen(true)}
+              >
+                <PauseCircle size={16} />
+                Cancel run
+              </Button>
+            ) : null}
+          </div>
         }
       />
+      {retryOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4">
+          <Card
+            className="w-full max-w-lg border-cyan-500/40"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="retry-infra-title"
+            aria-describedby="retry-infra-effect"
+          >
+            <h2 id="retry-infra-title" className="text-lg font-semibold text-white">
+              Retry infrastructure failures?
+            </h2>
+            <p id="retry-infra-effect" className="mt-2 text-sm text-slate-300">
+              This queues replacement Jobs only for eligible infrastructure failures.
+              Scored misses and other sealed outcomes stay sealed.
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={closeRetry}
+                disabled={retryInfrastructure.isPending}
+              >
+                Keep sealed
+              </Button>
+              <Button
+                disabled={!writesAllowed || retryInfrastructure.isPending}
+                onClick={() => retryInfrastructure.mutate()}
+              >
+                {retryInfrastructure.isPending ? "Retrying…" : "Confirm retry"}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      ) : null}
       {cancelOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4">
           <Card

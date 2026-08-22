@@ -1229,7 +1229,12 @@ export class Projection {
       .set({ terminal_outcome: record.outcome, selected_attempt_id: record.attempt_id })
       .where("campaign_id", "=", record.campaign_id)
       .where("task_id", "=", record.task_id)
-      .where("terminal_outcome", "is", null)
+      .where((eb) =>
+        eb.or([
+          eb("terminal_outcome", "is", null),
+          eb("terminal_outcome", "=", "infrastructure"),
+        ]),
+      )
       .executeTakeFirst();
     if (Number(result.numUpdatedRows) !== 1)
       throw new ProjectionIntegrityError(`task is already terminal: ${record.task_id}`);

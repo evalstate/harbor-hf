@@ -130,9 +130,14 @@ uv run harbor-hf campaign retry-infrastructure <campaign-id> \
   --task <task-id> \
   --reason "<infrastructure reason>" \
   --yes
+
+uv run harbor-hf campaign retry-infrastructure <campaign-id> \
+  --all-eligible \
+  --reason "<infrastructure reason>" \
+  --yes
 ```
 
-A retry is valid only when the task is unsealed, the latest attempt is an eligible infrastructure failure, and the physical-attempt limit remains. Semantic outcomes, refusals, verifier failures, and benchmark failures are terminal. The same is true for cancellations and benchmark timeouts.
+A retry is valid when the latest attempt is an eligible infrastructure failure and the physical-attempt limit remains. An infrastructure seal is replaceable. Semantic outcomes, refusals, verifier failures, and benchmark failures are terminal. The same is true for cancellations and benchmark timeouts.
 
 Never rerun a valid logical task. Never turn publication recovery into inference.
 

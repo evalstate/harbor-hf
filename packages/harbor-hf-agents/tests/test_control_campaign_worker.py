@@ -363,7 +363,7 @@ def test_stops_refilling_after_campaign_cancellation(
     assert not third_started.is_set()
 
 
-def test_stops_refilling_after_task_failure(
+def test_keeps_refilling_after_task_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _scheduler_config(monkeypatch)
@@ -387,16 +387,28 @@ def test_stops_refilling_after_task_failure(
         release_second.set()
         completed, failures = future.result(timeout=2)
 
-    assert completed == ["task-1"]
+    assert set(completed) == {"task-1", "task-2"}
     assert len(failures) == 1
     assert isinstance(failures[0], RuntimeError)
-    assert not third_started.is_set()
+    assert third_started.is_set()
 
 
 @pytest.mark.parametrize(
     ("result", "stderr", "timed_out", "expected"),
     [
         ({"exception_info": None}, "", False, ("complete", False)),
+        (
+            {"exception_info": {"exception_type": "DownloadVerifierDirError"}},
+            "",
+            False,
+            ("infrastructure", True),
+        ),
+        (
+            {"exception_info": {"exception_type": "AddTestsDirError"}},
+            "",
+            False,
+            ("infrastructure", True),
+        ),
         (
             {"exception_info": {"exception_type": "TransientProviderError"}},
             "",
@@ -470,6 +482,15 @@ def test_stops_refilling_after_task_failure(
 )
 def test_classifies_terminal_outcomes(result, stderr, timed_out, expected) -> None:
     assert worker._exception_outcome(result, stderr, timed_out=timed_out) == expected
+
+
+def test_treats_control_http_500_as_transient() -> None:
+    assert worker._transient_control_failure(
+        RuntimeError("control Sandbox API returned HTTP 500: internal_error")
+    )
+    assert not worker._transient_control_failure(
+        RuntimeError("control Sandbox API returned HTTP 422: policy_rejected")
+    )
 
 
 def test_computes_conservative_token_cost(monkeypatch: pytest.MonkeyPatch) -> None:

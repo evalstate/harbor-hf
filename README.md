@@ -79,7 +79,14 @@ harbor-hf campaign retry-infrastructure <campaign-id> \
   --task <task-id> \
   --reason "transient infrastructure failure" \
   --yes
+
+harbor-hf campaign retry-infrastructure <campaign-id> \
+  --all-eligible \
+  --reason "retry eligible infrastructure failures" \
+  --yes
 ```
+
+The run page has the same control: **Retry infrastructure failures**. It only queues replacement Jobs for eligible infrastructure outcomes, including an infrastructure seal that should not have closed the logical task. Scored misses and other sealed outcomes stay sealed.
 
 Cancellation also preserves existing evidence:
 

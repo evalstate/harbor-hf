@@ -352,6 +352,10 @@ function jobStateIsTerminal(state: string | null): boolean {
   return state !== null && terminalJobStates.has(state.toUpperCase());
 }
 
+export function infrastructureSealReplaceable(terminalOutcome: string | null): boolean {
+  return terminalOutcome === null || terminalOutcome === "infrastructure";
+}
+
 export class ControlService {
   readonly resolver: ProfileResolver;
   private appendQueue: Promise<void> = Promise.resolve();
@@ -2163,7 +2167,7 @@ export class ControlService {
     }
     const task = await this.projection.task(input.campaign_id, input.task_id);
     if (!task) throw new PolicyError(`task does not exist: ${input.task_id}`);
-    if (task.task.terminal_outcome)
+    if (!infrastructureSealReplaceable(task.task.terminal_outcome))
       throw new PolicyError(`terminal task cannot receive attempt: ${input.task_id}`);
     const campaign = await this.projection.campaign(input.campaign_id);
     if (!campaign)
@@ -2797,6 +2801,72 @@ export class ControlService {
     return queued;
   }
 
+  private async queueEligibleInfrastructureRetries(
+    campaignId: string,
+    lock: CampaignLock,
+    input: CampaignActionV1,
+    idempotencyKey: string,
+    generation: number,
+    actor: Actor,
+  ): Promise<SubmissionResult> {
+    const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
+    const launched: SubmissionResult[] = [];
+    for (const task of await this.projection.tasks(campaignId)) {
+      const expectedActionId = deterministicId(
+        "action",
+        campaignId,
+        "job.launch",
+        task.task_id,
+        String(generation),
+      );
+      if (await this.projection.action(expectedActionId)) {
+        launched.push({
+          campaign_id: campaignId,
+          action_id: expectedActionId,
+          status_url: `/api/v1/campaigns/${campaignId}`,
+          adopted: true,
+        });
+        continue;
+      }
+      const detail = await this.projection.task(campaignId, task.task_id);
+      if (!detail) continue;
+      const priorAttempt = detail.attempts.at(-1);
+      const settlement = await this.settleClosedSandboxAmbiguities(
+        campaignId,
+        task.task_id,
+        actor,
+      );
+      const unresolved = await this.projection.pendingDispatchedSandboxExecActions(
+        campaignId,
+        task.task_id,
+      );
+      if (
+        !infrastructureSealReplaceable(detail.task.terminal_outcome) ||
+        priorAttempt?.outcome !== "infrastructure" ||
+        priorAttempt.replacement_eligible !== 1 ||
+        detail.attempts.length >= policy.max_infrastructure_attempts ||
+        settlement.unresolved > 0 ||
+        unresolved.length > 0 ||
+        (await this.projection.retryActionForAttempt(
+          campaignId,
+          priorAttempt.attempt_id,
+        ))
+      )
+        continue;
+      launched.push(
+        await this.campaignActionValidated(
+          campaignId,
+          { ...input, task_id: task.task_id },
+          idempotencyKey,
+          actor,
+        ),
+      );
+    }
+    const first = launched[0];
+    if (!first) throw new PolicyError("no eligible infrastructure failures");
+    return first;
+  }
+
   async campaignAction(
     campaignId: string,
     raw: unknown,
@@ -3022,10 +3092,17 @@ export class ControlService {
       payload = { endpoint_id: endpoint.endpoint_id };
     } else {
       if (!input.task_id)
-        throw new PolicyError("infrastructure retry requires a task ID");
+        return this.queueEligibleInfrastructureRetries(
+          campaignId,
+          lock,
+          input,
+          idempotencyKey,
+          generation,
+          actor,
+        );
       const task = await this.projection.task(campaignId, input.task_id);
       if (!task) throw new PolicyError("retry task does not exist");
-      if (task.task.terminal_outcome)
+      if (!infrastructureSealReplaceable(task.task.terminal_outcome))
         throw new PolicyError("terminal tasks cannot be retried");
       const priorAttempt = task.attempts.at(-1);
       if (

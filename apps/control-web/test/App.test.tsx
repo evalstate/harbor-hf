@@ -724,11 +724,109 @@ describe("control web", () => {
     expect(
       screen.getByText("Published. 1 sealed task did not succeed."),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Retry infrastructure failures" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Scored success").className).toContain("emerald");
     expect(screen.getByText("Timed out").className).toContain("amber");
     expect(screen.getByText("Sandbox capacity")).toBeInTheDocument();
     expect(await screen.findByText("Namespace Sandbox Capacity")).toBeInTheDocument();
     expect(screen.getByText("3/8 active")).toBeInTheDocument();
+  });
+
+  it("queues eligible infrastructure retries from a finished run", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const posts: Array<{ path: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system("enabled"));
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed/capacity"))
+          return json({
+            configured: false,
+            profile_id: null,
+            namespace_limit: null,
+            namespace_active: 0,
+            campaign_limit: 1,
+            campaign_active: 0,
+            hardware_limit: null,
+            hardware_active: 0,
+            provider_limit: 0,
+            provider_reserved: 0,
+            start_tokens: null,
+            start_burst: null,
+            queued: 0,
+            cleanup_held: 0,
+            limiting_factor: null,
+            not_before: null,
+          });
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed/actions")) {
+          posts.push({
+            path,
+            body: init?.body ? JSON.parse(String(init.body)) : null,
+          });
+          return json(
+            {
+              campaign_id: "campaign-mixed",
+              action_id: "action-retry",
+              adopted: false,
+            },
+            202,
+          );
+        }
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed"))
+          return json({
+            campaign_id: "campaign-mixed",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 2,
+            terminal_tasks: 2,
+            successful_tasks: 1,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+            cancellation_requested: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-mixed/tasks"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-mixed",
+                task_id: "infra-task",
+                input_digest: "sha256:aa",
+                terminal_outcome: "infrastructure",
+                selected_attempt_id: "attempt-infra",
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-mixed");
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "Retry infrastructure failures" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Confirm retry" }));
+    expect(posts).toEqual([
+      {
+        path: "/api/v1/campaigns/campaign-mixed/actions",
+        body: {
+          action: "retry_infrastructure",
+          task_id: null,
+          reason: "retry eligible infrastructure failures",
+          confirmed: true,
+        },
+      },
+    ]);
   });
 
   it("shows cancelled outcomes in orange", async () => {
