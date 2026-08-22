@@ -167,7 +167,8 @@ class HermesAgent(IsolatedProviderAgent):
 
         Hermes requires Node >= 26. Task images ship an older apt Node, so the
         installer downloads Node 26 and then exits 127 when ``tar xf`` cannot
-        extract ``.tar.xz``. Preinstall that Node as root. Keep optional
+        extract ``.tar.xz``. Preinstall that Node as root and install
+        ``libatomic1`` so the official binary can start. Keep optional
         browser ``npm`` failures from aborting once ``hermes version`` works.
         """
         installer_url, revision_flag = self._installation_spec(self._version)
@@ -176,11 +177,13 @@ class HermesAgent(IsolatedProviderAgent):
             command=(
                 "set -euo pipefail; "
                 "apt-get update && apt-get install -y --no-install-recommends "
-                "curl git passwd ripgrep tar util-linux xz-utils && "
+                "curl git libatomic1 passwd ripgrep tar util-linux xz-utils && "
                 "mkdir -p /opt/harbor-hf-node && "
                 "curl -fsSL "
                 "https://nodejs.org/dist/v26.7.0/node-v26.7.0-linux-x64.tar.xz "
-                "| tar -xJ -C /opt/harbor-hf-node --strip-components=1"
+                "| tar -xJ -C /opt/harbor-hf-node --strip-components=1 && "
+                "/opt/harbor-hf-node/bin/node --version && "
+                "/opt/harbor-hf-node/bin/npm --version"
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )

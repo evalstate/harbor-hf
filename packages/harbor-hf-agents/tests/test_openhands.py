@@ -45,7 +45,7 @@ async def test_sandbox_route_injects_loopback_env(
     agent = OpenHandsAgent(
         logs_dir=temp_dir,
         model_name="openai/openai/gpt-oss-20b:together",
-        version="1.11.0",
+        version="1.6.0",
     )
     mock_env = AsyncMock()
     mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
@@ -63,7 +63,7 @@ async def test_missing_sandbox_route_fails(temp_dir) -> None:
     agent = OpenHandsAgent(
         logs_dir=temp_dir,
         model_name="openai/openai/gpt-oss-20b:together",
-        version="1.11.0",
+        version="1.6.0",
     )
     mock_env = AsyncMock()
     mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
@@ -77,7 +77,7 @@ async def test_install_creates_isolated_agent_user(temp_dir) -> None:
     agent = OpenHandsAgent(
         logs_dir=temp_dir,
         model_name="openai/openai/gpt-oss-20b:together",
-        version="1.11.0",
+        version="1.6.0",
     )
     mock_env = AsyncMock()
     mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
@@ -97,6 +97,6 @@ async def test_install_creates_isolated_agent_user(temp_dir) -> None:
     )
     assert useradd_at < chown_at
     assert any(
-        "openhands-ai==1.11.0" in call.kwargs["command"]
+        "openhands-ai==1.6.0" in call.kwargs["command"]
         for call in mock_env.exec.call_args_list
     )

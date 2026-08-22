@@ -80,10 +80,9 @@ class OpenHandsAgent(IsolatedProviderAgent, OpenHands):
     async def install(self, environment: BaseEnvironment) -> None:
         """Create the isolated user before the OpenHands venv is owned.
 
-        Harbor's installer chowns ``/opt/openhands-venv`` to
-        ``environment.default_user`` (root here). Create ``harbor-agent``
-        first, then give that user the venv directory and install as that
-        user.
+        Harbor 0.21.0 starts OpenHands with ``openhands.core.main``. That
+        module is the V0 CLI. Create ``harbor-agent`` first, then give that
+        user the venv directory and install as that user.
         """
         await self.exec_as_root(
             environment,

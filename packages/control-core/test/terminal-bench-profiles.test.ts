@@ -309,7 +309,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       ["qwen-code", "harbor_hf_agents.qwen_code.agent:QwenCodeAgent", "0.21.15"],
       ["mini-swe-agent", "harbor_hf_agents.mini_swe.agent:MiniSweAgent", "2.4.6"],
       ["kimi-code", "harbor_hf_agents.kimi_code.agent:KimiCodeAgent", "0.38.0"],
-      ["openhands", "harbor_hf_agents.openhands.agent:OpenHandsAgent", "1.11.0"],
+      ["openhands", "harbor_hf_agents.openhands.agent:OpenHandsAgent", "1.6.0"],
       ["pi", "harbor_hf_agents.pi.agent:PiAgent", "0.84.2"],
       [
         "hermes",
