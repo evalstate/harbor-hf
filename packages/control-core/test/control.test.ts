@@ -1846,6 +1846,86 @@ describe("control service", () => {
     );
   });
 
+  it("allows Sandbox work on a replaceable infrastructure seal", async () => {
+    const control = await createTestControl(1, 2, 0);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "infrastructure-sandbox-work-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "infrastructure-sandbox-work-evidence",
+    );
+    const sealed = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-infrastructure-sandbox-work",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    await control.service.append({
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: deterministicId(
+        "terminal",
+        result.campaign_id,
+        "task-001",
+        sealed.attempt_id,
+      ),
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: sealed.attempt_id,
+      outcome: "infrastructure",
+      reason: "infrastructure seal",
+    });
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"f".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 600,
+      idle_timeout_seconds: 300,
+      inference_token: "forbidden",
+      reservation_microusd: 0,
+      active_hourly_cost_microusd: 0,
+      max_sandboxes: 1,
+      max_commands: 8,
+      max_command_seconds: 300,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/tmp"],
+    };
+    await expect(
+      control.service.writeAction(
+        control.service.actionIntent(
+          result.campaign_id,
+          "sandbox.create",
+          "task-001",
+          0,
+          { task_id: "task-001", sandbox: policy },
+        ),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it("closes active Sandboxes before normal publication", async () => {
     const control = await createTestControl();
     controls.push(control);
@@ -4021,6 +4101,110 @@ describe("control service", () => {
         operator,
       ),
     ).toMatchObject({ action_id: retry.action_id, adopted: true });
+  });
+
+  it("retries after an unselected policy receipt on an infrastructure seal", async () => {
+    const control = await createTestControl(1, 2, 0);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "unselected-policy-retry-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "unselected-policy-retry-evidence",
+    );
+    const sealed = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-unselected-policy-infra",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    await control.service.append({
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: deterministicId(
+        "terminal",
+        result.campaign_id,
+        "task-001",
+        sealed.attempt_id,
+      ),
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: sealed.attempt_id,
+      outcome: "infrastructure",
+      reason: "infrastructure seal",
+    });
+    const failedLaunch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "eligible",
+      1,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(failedLaunch);
+    const failedReceipt = await control.service.receipt(failedLaunch, {
+      outcome: "completed",
+      observed_state: "COMPLETED",
+      resource_id: "unselected-policy-job",
+    });
+    await control.service.markAdvanced(failedLaunch, failedReceipt);
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-unselected-policy",
+      action_id: failedLaunch.action_id,
+      outcome: "policy",
+      replacement_eligible: false,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:02.000Z",
+    });
+    expect(
+      (await control.projection.task(result.campaign_id, "task-001"))?.task,
+    ).toMatchObject({ terminal_outcome: "infrastructure" });
+    const retry = await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry after unselected policy receipt",
+        confirmed: true,
+      },
+      "unselected-policy-retry-key",
+      operator,
+    );
+    expect(await control.projection.action(retry.action_id)).toMatchObject({
+      action_kind: "job.launch",
+    });
   });
 
   it("dispatches an infrastructure retry after tasks are already sealed", async () => {

@@ -1492,7 +1492,11 @@ export class ControlService {
       typeof intent.payload.task_id === "string" ? intent.payload.task_id : null;
     if (taskId) {
       const task = await this.projection.task(intent.campaign_id, taskId);
-      if (task?.task.terminal_outcome && intent.action_kind !== "sandbox.close")
+      if (
+        task?.task.terminal_outcome &&
+        intent.action_kind !== "sandbox.close" &&
+        !infrastructureSealReplaceable(task.task.terminal_outcome)
+      )
         throw new PolicyError(`terminal task cannot receive action: ${taskId}`);
     }
     await this.appendAdopting(intent, (recorded) => {
@@ -2802,11 +2806,45 @@ export class ControlService {
     return queued;
   }
 
+  private selectedInfrastructureAttempt(detail: {
+    task: { selected_attempt_id: string | null; terminal_outcome: string | null };
+    attempts: ReadonlyArray<{
+      action_id: string;
+      attempt_id: string;
+      outcome: string;
+      replacement_eligible: number;
+      created_at: string;
+    }>;
+  }): (typeof detail.attempts)[number] | null {
+    if (!infrastructureSealReplaceable(detail.task.terminal_outcome)) return null;
+    const selected = detail.attempts.find(
+      (attempt) => attempt.attempt_id === detail.task.selected_attempt_id,
+    );
+    const prior = selected ?? detail.attempts.at(-1);
+    if (
+      !prior ||
+      prior.outcome !== "infrastructure" ||
+      prior.replacement_eligible !== 1
+    )
+      return null;
+    return prior;
+  }
+
+  private consumedInfrastructureAttempts(
+    attempts: ReadonlyArray<{ outcome: string; replacement_eligible: number }>,
+  ): number {
+    return attempts.filter(
+      (attempt) =>
+        attempt.outcome === "infrastructure" && attempt.replacement_eligible === 1,
+    ).length;
+  }
+
   private async laterExecutionLaunchExists(
     campaignId: string,
     taskId: string,
     sourceActionId: string,
   ): Promise<boolean> {
+    const detail = await this.projection.task(campaignId, taskId);
     for (const action of await this.projection.campaignActions(campaignId)) {
       if (action.action_kind !== "job.launch" || action.action_id === sourceActionId)
         continue;
@@ -2814,8 +2852,20 @@ export class ControlService {
       const intent = JSON.parse(action.intent_body) as ActionIntent;
       if (intent.payload.worker_role === "preparation") continue;
       if (
-        Array.isArray(intent.payload.task_ids) &&
-        intent.payload.task_ids.includes(taskId)
+        !Array.isArray(intent.payload.task_ids) ||
+        !intent.payload.task_ids.includes(taskId)
+      )
+        continue;
+      const inFlight =
+        action.receipt_body === null || !jobStateIsTerminal(action.observed_state);
+      if (inFlight) return true;
+      const selected = detail?.task.selected_attempt_id;
+      if (
+        selected &&
+        detail.attempts.some(
+          (attempt) =>
+            attempt.action_id === action.action_id && attempt.attempt_id === selected,
+        )
       )
         return true;
     }
@@ -2852,7 +2902,7 @@ export class ControlService {
     for (const task of await this.projection.tasks(campaignId)) {
       const detail = await this.projection.task(campaignId, task.task_id);
       if (!detail) continue;
-      const priorAttempt = detail.attempts.at(-1);
+      const priorAttempt = this.selectedInfrastructureAttempt(detail);
       const settlement = await this.settleClosedSandboxAmbiguities(
         campaignId,
         task.task_id,
@@ -2864,10 +2914,8 @@ export class ControlService {
       );
       if (
         !priorAttempt ||
-        !infrastructureSealReplaceable(detail.task.terminal_outcome) ||
-        priorAttempt.outcome !== "infrastructure" ||
-        priorAttempt.replacement_eligible !== 1 ||
-        detail.attempts.length >= policy.max_infrastructure_attempts ||
+        this.consumedInfrastructureAttempts(detail.attempts) >=
+          policy.max_infrastructure_attempts ||
         settlement.unresolved > 0 ||
         unresolved.length > 0 ||
         (await this.projection.retryActionForAttempt(
@@ -3203,11 +3251,8 @@ export class ControlService {
       if (!task) throw new PolicyError("retry task does not exist");
       if (!infrastructureSealReplaceable(task.task.terminal_outcome))
         throw new PolicyError("terminal tasks cannot be retried");
-      const priorAttempt = task.attempts.at(-1);
-      if (
-        priorAttempt?.outcome !== "infrastructure" ||
-        priorAttempt.replacement_eligible !== 1
-      )
+      const priorAttempt = this.selectedInfrastructureAttempt(task);
+      if (!priorAttempt)
         throw new PolicyError(
           "infrastructure retry requires an eligible infrastructure failure",
         );
@@ -3231,7 +3276,10 @@ export class ControlService {
       if (deployment.route !== "hf_job")
         throw new PolicyError("imported deployment profiles cannot launch retries");
       const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
-      if (task.attempts.length >= policy.max_infrastructure_attempts)
+      if (
+        this.consumedInfrastructureAttempts(task.attempts) >=
+        policy.max_infrastructure_attempts
+      )
         throw new PolicyError("infrastructure retry budget is exhausted");
       retryReservation = {
         attemptId: priorAttempt.attempt_id,
