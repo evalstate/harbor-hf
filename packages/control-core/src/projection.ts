@@ -1830,6 +1830,19 @@ export class Projection {
     return Number(row.count);
   }
 
+  async campaignPendingSandboxCreate(campaignId: string): Promise<ActionIntent | null> {
+    const row = await this.db
+      .selectFrom("actions")
+      .select("intent_body")
+      .where("campaign_id", "=", campaignId)
+      .where("action_kind", "=", "sandbox.create")
+      .where("receipt_body", "is", null)
+      .orderBy("created_at")
+      .orderBy("action_id")
+      .executeTakeFirst();
+    return row ? (JSON.parse(row.intent_body) as ActionIntent) : null;
+  }
+
   async pendingSandboxCreates(limit = 1_024): Promise<ActionIntent[]> {
     const rows = await this.db
       .selectFrom("actions")

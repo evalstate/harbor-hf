@@ -1,5 +1,10 @@
-import type { ActionIntent } from "@harbor-hf/contracts";
-import { canonicalJson, sha256 } from "@harbor-hf/contracts";
+import type {
+  ActionIntent,
+  ProfileObject,
+  ProfilePromotion,
+  SandboxPolicy,
+} from "@harbor-hf/contracts";
+import { canonicalJson, deterministicId, sha256 } from "@harbor-hf/contracts";
 import {
   FilesystemObjectStore,
   Projection,
@@ -45,7 +50,51 @@ async function setup() {
   return { service, projection };
 }
 
-async function campaign(service: Service) {
+async function configureCapacity(service: Service): Promise<void> {
+  const createdAt = "2026-08-22T00:00:00.000Z";
+  const spec = {
+    namespace: "test",
+    max_active_sandboxes: 2,
+    hardware_limits: [{ hardware: "cpu-basic", max_active_sandboxes: 1 }],
+    start_burst: 2,
+    start_refill_tokens: 1,
+    start_refill_period_seconds: 60,
+  };
+  const profile: ProfileObject = {
+    schema_version: "v1",
+    kind: "profile.object",
+    record_id: deterministicId(
+      "profile",
+      "capacity",
+      "prepared-capacity",
+      sha256(canonicalJson(spec)),
+    ),
+    created_at: createdAt,
+    actor: { subject: "test", role: "service" },
+    profile_kind: "capacity",
+    name: "prepared-capacity",
+    spec,
+  };
+  const promotion: ProfilePromotion = {
+    schema_version: "v1",
+    kind: "profile.promotion",
+    record_id: deterministicId("profile-promotion", "capacity", "current"),
+    created_at: createdAt,
+    actor: { subject: "operator", role: "operator" },
+    profile_kind: "capacity",
+    alias: "current",
+    profile_id: sha256(canonicalJson(profile)),
+    promotion_state: "approved",
+    reason: "test capacity policy",
+    evidence: [],
+  };
+  await service.append(profile);
+  await service.append(promotion);
+  await service.refreshProfileResolver();
+  service.configureCapacityProfile("current");
+}
+
+async function campaign(service: Service, idempotencyKey = "prepared-campaign") {
   const submitted = await service.submit(
     {
       benchmark: "prepared-benchmark",
@@ -56,7 +105,7 @@ async function campaign(service: Service) {
       ceiling_microusd: 1_000_000,
       confirmed: true,
     },
-    "prepared-campaign",
+    idempotencyKey,
     { subject: "operator", role: "operator" },
   );
   const lock = await service.projection.campaignLock(submitted.campaign_id);
@@ -193,6 +242,52 @@ async function settle(reconciler: Reconciler, rounds: number): Promise<void> {
 }
 
 describe("prepared Harbor jobs", () => {
+  it("reports hardware capacity before a queued campaign gets a Sandbox", async () => {
+    const { service } = await setup();
+    await configureCapacity(service);
+    const first = await campaign(service, "hardware-view-first");
+    const queued = await campaign(service, "hardware-view-queued");
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"d".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 3_600,
+      idle_timeout_seconds: 600,
+      inference_token: "forbidden",
+      reservation_microusd: 100,
+      active_hourly_cost_microusd: 10_000,
+      max_sandboxes: 2,
+      max_commands: 128,
+      max_command_seconds: 3_600,
+      max_transfer_bytes: 67_108_864,
+      allowed_roots: ["/app", "/logs", "/tmp"],
+    };
+    const create = (campaignId: string) =>
+      service.actionIntent(campaignId, "sandbox.create", "task-001-trial-1", 0, {
+        task_id: "task-001-trial-1",
+        sandbox: policy,
+      });
+    const firstIntent = create(first.campaignId);
+    const queuedIntent = create(queued.campaignId);
+
+    await expect(service.admitSandboxCreate(firstIntent, 2)).resolves.toEqual(
+      expect.objectContaining({ status: "admitted" }),
+    );
+    await expect(service.admitSandboxCreate(queuedIntent, 2)).resolves.toEqual(
+      expect.objectContaining({
+        status: "deferred",
+        limiting_factor: "hardware_sandbox_capacity",
+      }),
+    );
+
+    await expect(service.sandboxCapacityView(queued.campaignId)).resolves.toEqual(
+      expect.objectContaining({
+        hardware_limit: 1,
+        hardware_active: 1,
+        limiting_factor: "hardware_sandbox_capacity",
+      }),
+    );
+  });
+
   it("stores one exact immutable Harbor lock before execution", async () => {
     const { service } = await setup();
     const { campaignId, lock, launch } = await campaign(service);

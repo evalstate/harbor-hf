@@ -24,7 +24,6 @@ from harbor.models.job.config import JobConfig
 from harbor.models.job.lock import TrialLock
 
 from harbor_hf_agents.support.control_sandbox_environment import _ControlClient, _digest
-from harbor_hf_agents.support.harbor_0210_empty_metrics import harbor_cli_env
 from harbor_hf_agents.support.provider_outcome import (
     ProviderPolicyError,
     TerminalProviderError,
@@ -213,13 +212,7 @@ def _locked_config(lock: dict[str, Any]) -> WorkerConfig:
 
 
 def _task_source(task: LockedTask) -> dict[str, Any]:
-    """Build the Harbor run task without a dataset source label.
-
-    Harbor 0.21.0 still reloads ``source`` from the task itself, so omitting it
-    here is not enough. The Harbor CLI subprocess also applies
-    ``harbor_0210_empty_metrics``. Delete that module when Harbor ships
-    https://github.com/harbor-framework/harbor/pull/2681.
-    """
+    """Build the Harbor run task without a dataset source label."""
     source = task.trial_lock.task
     if source.type == "package":
         return {
@@ -582,7 +575,7 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
     output, timed_out = _run_logged_command(
         ["harbor", "run", "--config", str(path), "--yes"],
         task.timeout_seconds + 600,
-        harbor_cli_env(root),
+        os.environ.copy(),
     )
     result_path = _result_path(root, task)
     if not result_path:

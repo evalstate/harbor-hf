@@ -987,6 +987,8 @@ export class ControlService {
     const campaignLegacy = legacy.filter((row) => row.campaign_id === campaignId);
     const latest = await this.projection.latestSandboxAdmission(this.namespace);
     const queued = await this.projection.campaignPendingSandboxCreateCount(campaignId);
+    const pendingCreate =
+      await this.projection.campaignPendingSandboxCreate(campaignId);
     const template =
       deployment.route === "hf_job"
         ? (deployment.sandbox_template ?? deployment.sandbox)
@@ -1046,7 +1048,8 @@ export class ControlService {
       (campaignLegacy[0]
         ? (JSON.parse(campaignLegacy[0].intent_body) as ActionIntent).payload.sandbox
             ?.hardware
-        : undefined);
+        : undefined) ??
+      pendingCreate?.payload.sandbox?.hardware;
     const hardwareLimit = hardware
       ? (capacity?.spec.hardware_limits.find((limit) => limit.hardware === hardware)
           ?.max_active_sandboxes ?? null)
