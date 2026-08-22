@@ -13,12 +13,7 @@
     "agent": "openhands",
     "revision": "1.6.0",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier",
-      "provider-usage"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier", "provider-usage"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.openhands.agent:OpenHandsAgent",
       "model_name": "openai/openai/gpt-oss-20b:together",

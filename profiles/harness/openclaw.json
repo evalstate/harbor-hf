@@ -13,12 +13,7 @@
     "agent": "openclaw",
     "revision": "2026.7.1-2",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier",
-      "provider-usage"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier", "provider-usage"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.openclaw.agent:OpenClawAgent",
       "model_name": "openai/openai/gpt-oss-20b:together",

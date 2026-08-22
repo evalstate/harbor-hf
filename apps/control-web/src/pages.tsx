@@ -1259,8 +1259,7 @@ export function CampaignPage() {
             <div>
               <dt className="text-slate-500">Namespace</dt>
               <dd className="mt-1">
-                {capacity.data.namespace_active}/
-                {capacity.data.namespace_limit ?? "unconfigured"} active
+                {`${capacity.data.namespace_active}/${capacity.data.namespace_limit ?? "unconfigured"} active`}
               </dd>
             </div>
             <div>

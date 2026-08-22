@@ -13,12 +13,7 @@
     "agent": "hermes",
     "revision": "b6bcb3e791c673e63974029bbab40cc9326803ff",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier",
-      "provider-usage"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier", "provider-usage"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.hermes.agent:HermesAgent",
       "model_name": "openai/openai/gpt-oss-20b:together",

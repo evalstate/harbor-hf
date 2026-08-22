@@ -13,12 +13,7 @@
     "agent": "mini-swe-agent",
     "revision": "2.4.6",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier",
-      "provider-usage"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier", "provider-usage"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.mini_swe.agent:MiniSweAgent",
       "model_name": "openai/openai/gpt-oss-20b:together",

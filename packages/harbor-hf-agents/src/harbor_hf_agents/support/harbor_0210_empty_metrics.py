@@ -87,8 +87,8 @@ def apply_harbor_0210_empty_metrics_patch() -> None:
             return
         original_display(self, event, loading_progress, loading_progress_task)
 
-    setattr(Job, "_resolve_metrics", staticmethod(wrapped_resolve))
-    setattr(Job, "_update_metric_display", wrapped_display)
+    setattr(Job, "_resolve_metrics", staticmethod(wrapped_resolve))  # noqa: B010
+    setattr(Job, "_update_metric_display", wrapped_display)  # noqa: B010
     setattr(Job, _PATCH_FLAG, True)
 
 

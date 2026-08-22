@@ -13,12 +13,7 @@
     "agent": "pi",
     "revision": "0.84.2",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier",
-      "provider-usage"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier", "provider-usage"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.pi.agent:PiAgent",
       "model_name": "openai/openai/gpt-oss-20b:together",
@@ -40,9 +35,7 @@
                   "id": "openai/gpt-oss-20b:together",
                   "name": "openai/gpt-oss-20b:together",
                   "reasoning": false,
-                  "input": [
-                    "text"
-                  ],
+                  "input": ["text"],
                   "contextWindow": 131072,
                   "maxTokens": 32768,
                   "cost": {

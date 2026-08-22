@@ -13,12 +13,7 @@
     "agent": "kimi-code",
     "revision": "0.38.0",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier",
-      "provider-usage"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier", "provider-usage"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.kimi_code.agent:KimiCodeAgent",
       "model_name": "openai/openai/gpt-oss-20b:together",

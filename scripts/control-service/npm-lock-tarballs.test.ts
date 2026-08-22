@@ -40,9 +40,9 @@ describe("productionTarballUrls", () => {
   });
 
   it("fails when the lockfile has no packages map", () => {
-    expect(() => productionTarballUrls({} as { packages: Record<string, never> })).toThrow(
-      "package-lock.json is missing packages",
-    );
+    expect(() =>
+      productionTarballUrls({} as { packages: Record<string, never> }),
+    ).toThrow("package-lock.json is missing packages");
   });
 
   it("selects only production tarballs from the committed lockfile", () => {
