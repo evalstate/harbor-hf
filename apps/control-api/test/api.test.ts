@@ -276,6 +276,52 @@ function capacityRecords(): Array<ProfileObject | ProfilePromotion> {
 }
 
 describe("control API", () => {
+  it("answers liveness before the projection rebuild finishes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hhf-api-"));
+    roots.push(root);
+    const bucket = join(root, "bucket");
+    await mkdir(bucket);
+    const runtime = await createRuntime({
+      node_env: "test",
+      port: 7860,
+      namespace: "test",
+      bucket_id: "test/artifacts",
+      bucket_root: bucket,
+      store_mode: "filesystem",
+      projection_path: join(root, "projection.sqlite"),
+      auth_path: join(root, "auth.sqlite"),
+      profiles_root: resolve("profiles"),
+      capacity_profile_alias: null,
+      max_active_sandboxes: 16,
+      web_root: join(root, "web"),
+      auth_mode: "development",
+      write_mode: "disabled",
+      public_origin: "http://127.0.0.1:7860",
+      oauth: null,
+      hf_token: "test-token-not-a-real-credential",
+      hf_inference_token: null,
+      reconcile_interval_ms: 60_000,
+      observe_interval_ms: 0,
+      worker_receipt_grace_ms: 0,
+      source_revision: "test-revision",
+      bootstrap_operator_subjects: [],
+    });
+    runtimes.push(runtime);
+    const app = await buildApp(runtime);
+    expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(
+      200,
+    );
+    expect((await app.inject({ method: "GET", url: "/health/ready" })).statusCode).toBe(
+      503,
+    );
+    const campaigns = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
+    expect(campaigns.statusCode).toBe(503);
+    expect(campaigns.json()).toMatchObject({
+      error: { code: "control_not_ready" },
+    });
+    await app.close();
+  });
+
   it("reports liveness and projection readiness separately", async () => {
     const { app } = await setup();
     expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(

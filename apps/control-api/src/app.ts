@@ -795,6 +795,15 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     });
   };
 
+  app.addHook("onRequest", async (request) => {
+    const path = request.url.split("?", 1)[0] ?? request.url;
+    if (path.startsWith("/health/") || path.startsWith("/auth/")) return;
+    if (path === "/api/v1/system") return;
+    if (!path.startsWith("/api/")) return;
+    if (runtime.projection.system().ready) return;
+    throw new ControlNotReadyError("projection is rebuilding");
+  });
+
   app.addHook("onRequest", async (request, reply) => {
     const origin = request.headers.origin;
     if (origin && origin !== runtime.config.public_origin) {

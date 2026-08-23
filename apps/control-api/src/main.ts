@@ -19,8 +19,11 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
 try {
-  await runtime.initialize();
+  // Listen before the Bucket projection rebuild. Hugging Face marks the
+  // Space unhealthy if port 7860 stays closed for 30 minutes, and a full
+  // rebuild of the live store now exceeds that window.
   await app.listen({ host: "0.0.0.0", port: config.port });
+  await runtime.initialize();
   runtime.start();
 } catch (error) {
   app.log.error(
