@@ -43,6 +43,7 @@ async function setup(
   writeMode: AppConfig["write_mode"] = "canary",
   seed?: (runtime: Runtime) => Promise<void>,
   capacityProfileAlias: string | null = null,
+  seedCapacity = true,
 ): Promise<{
   runtime: Runtime;
   app: Awaited<ReturnType<typeof buildApp>>;
@@ -64,6 +65,7 @@ async function setup(
     auth_path: join(root, "auth.sqlite"),
     profiles_root: resolve("profiles"),
     capacity_profile_alias: selectedCapacityAlias,
+    max_active_sandboxes: 16,
     web_root: join(root, "web"),
     auth_mode: "development",
     write_mode: writeMode,
@@ -78,7 +80,7 @@ async function setup(
     bootstrap_operator_subjects: [],
   };
   const runtime = await createRuntime(config);
-  if (selectedCapacityAlias)
+  if (selectedCapacityAlias && seedCapacity)
     for (const record of capacityRecords())
       await runtime.store.create(
         controlRecordPath(record),
@@ -306,6 +308,66 @@ describe("control API", () => {
       campaign_active: 0,
       provider_limit: 0,
     });
+    await app.close();
+  });
+
+  it("reads and replaces the namespace Sandbox cap", async () => {
+    const { app } = await setup();
+    const initial = await app.inject({ method: "GET", url: "/api/v1/capacity" });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toMatchObject({
+      alias: "capacity-test",
+      configured: true,
+      max_active_sandboxes: 1,
+      start_burst: 1,
+    });
+
+    const updated = await app.inject({
+      method: "POST",
+      url: "/api/v1/capacity",
+      headers: { "idempotency-key": "capacity-set-128" },
+      payload: { max_active_sandboxes: 128, confirmed: true },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      alias: "capacity-test",
+      configured: true,
+      max_active_sandboxes: 128,
+      start_burst: 128,
+      start_refill_tokens: 128,
+    });
+
+    const repeated = await app.inject({
+      method: "GET",
+      url: "/api/v1/capacity",
+    });
+    expect(repeated.json().max_active_sandboxes).toBe(128);
+    await app.close();
+  });
+
+  it("seeds a missing namespace Sandbox cap from the service default", async () => {
+    const { app } = await setup("enabled", undefined, "current", false);
+    const response = await app.inject({ method: "GET", url: "/api/v1/capacity" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      alias: "current",
+      configured: true,
+      max_active_sandboxes: 16,
+      start_burst: 16,
+      start_refill_tokens: 16,
+    });
+    await app.close();
+  });
+
+  it("rejects a namespace Sandbox cap change when writes are disabled", async () => {
+    const { app } = await setup("disabled");
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/capacity",
+      headers: { "idempotency-key": "capacity-disabled" },
+      payload: { max_active_sandboxes: 128, confirmed: true },
+    });
+    expect(response.statusCode).toBe(503);
     await app.close();
   });
 

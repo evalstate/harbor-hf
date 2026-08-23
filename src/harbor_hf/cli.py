@@ -14,6 +14,8 @@ app = typer.Typer(
 )
 campaign_app = typer.Typer(no_args_is_help=True, help="Submit and inspect campaigns.")
 app.add_typer(campaign_app, name="campaign")
+capacity_app = typer.Typer(help="Inspect and set the shared namespace Sandbox cap.")
+app.add_typer(capacity_app, name="capacity")
 
 
 def _base_url() -> str:
@@ -77,6 +79,44 @@ def _request(
 
 def _echo(value: object) -> None:
     typer.echo(json.dumps(value, indent=2, sort_keys=True))
+
+
+@capacity_app.callback(invoke_without_command=True)
+def capacity(ctx: typer.Context) -> None:
+    """Show the shared namespace Sandbox cap."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _echo(_request("GET", "/api/v1/capacity"))
+
+
+@capacity_app.command("set")
+def capacity_set(
+    max_sandboxes: Annotated[int, typer.Option("--max-sandboxes", min=1, max=1024)],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm the namespace Sandbox cap change."),
+    ] = False,
+) -> None:
+    """Replace the promoted namespace Sandbox cap and start pacing."""
+    if not yes:
+        typer.confirm(
+            f"Set the namespace Sandbox cap to {max_sandboxes}? "
+            "Existing campaigns keep their locked per-run Sandbox and worker limits.",
+            abort=True,
+        )
+    key = str(uuid4())
+    typer.echo(json.dumps({"idempotency_key": key}), err=True)
+    _echo(
+        _request(
+            "POST",
+            "/api/v1/capacity",
+            payload={
+                "max_active_sandboxes": max_sandboxes,
+                "confirmed": True,
+            },
+            idempotency_key=key,
+        )
+    )
 
 
 @app.command("status")

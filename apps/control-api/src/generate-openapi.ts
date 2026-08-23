@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ const config: AppConfig = {
   auth_path: join(scratch, "auth.sqlite"),
   profiles_root: join(repository, "profiles"),
   capacity_profile_alias: null,
+  max_active_sandboxes: 16,
   web_root: join(scratch, "web"),
   auth_mode: "development",
   write_mode: "disabled",

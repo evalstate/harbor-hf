@@ -1,5 +1,9 @@
 import { existsSync } from "node:fs";
 import { posix } from "node:path";
+import cookie from "@fastify/cookie";
+import helmet from "@fastify/helmet";
+import fastifyStatic from "@fastify/static";
+import swagger from "@fastify/swagger";
 import type {
   ActionIntent,
   ActionReceipt,
@@ -20,33 +24,29 @@ import {
   validateResultCatalog,
 } from "@harbor-hf/contracts";
 import {
+  type ActionDispositionCorrectionInput,
   ConfirmationRequiredError,
+  type ControlEvent,
   ControlNotReadyError,
   createJson,
   IdempotencyConflictError,
+  loadLatestLeaderboard,
   PolicyError,
   ProfileResolutionError,
-  SandboxActionAmbiguousError,
-  type ActionDispositionCorrectionInput,
-  type ControlEvent,
-  type WorkerCapability,
-  type WorkerOperation,
-  preparedSandboxPolicy,
   preparationRequired,
+  preparedSandboxPolicy,
+  SandboxActionAmbiguousError,
   staticSandboxPolicy,
-  loadLatestLeaderboard,
   summarizePublishedResult,
   verifyWorkerCapability,
+  type WorkerCapability,
+  type WorkerOperation,
 } from "@harbor-hf/control-core";
-import cookie from "@fastify/cookie";
-import helmet from "@fastify/helmet";
-import fastifyStatic from "@fastify/static";
-import swagger from "@fastify/swagger";
 import Fastify, {
-  LogController,
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
+  LogController,
 } from "fastify";
 import {
   acceptedSchema,
@@ -64,6 +64,8 @@ import {
   itemList,
   jobSchema,
   leaderboardSchema,
+  namespaceCapacityPolicySchema,
+  namespaceCapacityUpdateSchema,
   profileSchema,
   publicationSchema,
   sessionSchema,
@@ -1195,6 +1197,39 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       projection: runtime.projection.system(),
       resource_contract: { spaces: 1, buckets: 1, operator_secrets: 2 },
     }),
+  );
+
+  app.get(
+    "/api/v1/capacity",
+    {
+      schema: {
+        tags: ["system"],
+        response: { 200: namespaceCapacityPolicySchema },
+      },
+    },
+    async () => runtime.service.namespaceCapacityPolicy(),
+  );
+
+  app.post(
+    "/api/v1/capacity",
+    {
+      schema: {
+        tags: ["system"],
+        body: namespaceCapacityUpdateSchema,
+        response: {
+          200: namespaceCapacityPolicySchema,
+          503: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("capacity writes are disabled before cutover");
+      void idempotencyKey(request);
+      const body = request.body as { max_active_sandboxes: number; confirmed: true };
+      await runtime.service.setMaxActiveSandboxes(body.max_active_sandboxes);
+      return runtime.service.namespaceCapacityPolicy();
+    },
   );
 
   app.get(

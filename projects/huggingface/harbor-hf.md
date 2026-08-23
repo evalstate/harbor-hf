@@ -11,7 +11,7 @@ default_branch: main
 
 Status: approved
 Approved at: 2026-08-17T06:48:55Z
-Amended at: 2026-08-17T09:13:49Z
+Amended at: 2026-08-23T09:01:00Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -32,7 +32,6 @@ Harbor-from-source amendment approved at: 2026-08-23T07:20:00Z
 FX harness amendment approved at: 2026-08-23T07:40:00Z
 Harness full-run repair amendment approved at: 2026-08-23T08:21:00Z
 Sandbox-parallelism amendment approved at: 2026-08-23T09:01:00Z
-Amended at: 2026-08-23T09:01:00Z
 
 ### Scope
 

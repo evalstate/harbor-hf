@@ -69,6 +69,7 @@ script. Apply the same check to harness support.
 export HARBOR_HF_CONTROL_URL=https://<control-space>.hf.space
 uv run harbor-hf status
 uv run harbor-hf profiles
+uv run harbor-hf capacity
 uv run harbor-hf campaign list
 uv run harbor-hf jobs
 uv run harbor-hf endpoints

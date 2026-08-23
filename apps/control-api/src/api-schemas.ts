@@ -51,6 +51,39 @@ export const campaignViewSchema = {
   },
 } as const;
 
+export const namespaceCapacityPolicySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "alias",
+    "configured",
+    "max_active_sandboxes",
+    "start_burst",
+    "start_refill_tokens",
+    "start_refill_period_seconds",
+    "profile_id",
+  ],
+  properties: {
+    alias: nullableString,
+    configured: { type: "boolean" },
+    max_active_sandboxes: nullableInteger,
+    start_burst: nullableInteger,
+    start_refill_tokens: nullableInteger,
+    start_refill_period_seconds: nullableInteger,
+    profile_id: nullableString,
+  },
+} as const;
+
+export const namespaceCapacityUpdateSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["max_active_sandboxes", "confirmed"],
+  properties: {
+    max_active_sandboxes: { type: "integer", minimum: 1, maximum: 1024 },
+    confirmed: { const: true },
+  },
+} as const;
+
 export const capacitySchema = {
   type: "object",
   additionalProperties: false,

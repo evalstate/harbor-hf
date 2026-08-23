@@ -29,6 +29,16 @@ describe("control API configuration", () => {
     });
 
     expect(config.capacity_profile_alias).toBe("capacity-current");
+    expect(config.max_active_sandboxes).toBe(16);
+  });
+
+  it("loads an explicit namespace Sandbox cap", () => {
+    const config = loadConfig({
+      ...environment,
+      HARBOR_HF_MAX_ACTIVE_SANDBOXES: "128",
+    });
+
+    expect(config.max_active_sandboxes).toBe(128);
   });
 
   it("loads a distinct worker inference credential without exposing it elsewhere", () => {

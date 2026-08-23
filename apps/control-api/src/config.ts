@@ -12,6 +12,7 @@ const schema = z.object({
   HARBOR_HF_AUTH_PATH: z.string().min(1).default("/tmp/harbor-hf/auth.sqlite"),
   HARBOR_HF_PROFILES_ROOT: z.string().min(1).default("./profiles"),
   HARBOR_HF_CAPACITY_PROFILE_ALIAS: z.string().min(2).max(160).optional(),
+  HARBOR_HF_MAX_ACTIVE_SANDBOXES: z.coerce.number().int().min(1).max(1024).default(16),
   HARBOR_HF_WEB_ROOT: z.string().min(1).default("./apps/control-web/dist"),
   HARBOR_HF_AUTH_MODE: z.enum(["oauth", "development"]).default("oauth"),
   HARBOR_HF_WRITE_MODE: z.enum(["disabled", "canary", "enabled"]).default("disabled"),
@@ -56,6 +57,7 @@ export interface AppConfig {
   auth_path: string;
   profiles_root: string;
   capacity_profile_alias: string | null;
+  max_active_sandboxes: number;
   web_root: string;
   auth_mode: "oauth" | "development";
   write_mode: "disabled" | "canary" | "enabled";
@@ -147,6 +149,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     auth_path: resolve(parsed.HARBOR_HF_AUTH_PATH),
     profiles_root: resolve(parsed.HARBOR_HF_PROFILES_ROOT),
     capacity_profile_alias: parsed.HARBOR_HF_CAPACITY_PROFILE_ALIAS ?? null,
+    max_active_sandboxes: parsed.HARBOR_HF_MAX_ACTIVE_SANDBOXES,
     web_root: resolve(parsed.HARBOR_HF_WEB_ROOT),
     auth_mode: parsed.HARBOR_HF_AUTH_MODE,
     write_mode: parsed.HARBOR_HF_WRITE_MODE,

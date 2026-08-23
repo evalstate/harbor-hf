@@ -381,6 +381,53 @@ def test_campaign_correct_action_dispositions_rejects_duplicates(
     assert "must be unique" in result.output
 
 
+def test_capacity_reads_control_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    configure(monkeypatch)
+    calls: list[tuple[str, str]] = []
+
+    def request(method: str, url: str, **_kwargs: object) -> httpx.Response:
+        calls.append((method, url))
+        return response(200, {"max_active_sandboxes": 16, "configured": True})
+
+    monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
+    result = runner.invoke(app, ["capacity"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "configured": True,
+        "max_active_sandboxes": 16,
+    }
+    assert calls == [("GET", "https://control.example/api/v1/capacity")]
+
+
+def test_capacity_set_sends_confirmed_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure(monkeypatch)
+    observed: dict[str, object] = {}
+
+    def request(method: str, url: str, **kwargs: object) -> httpx.Response:
+        observed.update({"method": method, "url": url, **kwargs})
+        return response(200, {"max_active_sandboxes": 128, "configured": True})
+
+    monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
+    result = runner.invoke(
+        app,
+        ["capacity", "set", "--max-sandboxes", "128", "--yes"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["max_active_sandboxes"] == 128
+    assert observed["method"] == "POST"
+    assert observed["url"] == "https://control.example/api/v1/capacity"
+    assert observed["json"] == {
+        "max_active_sandboxes": 128,
+        "confirmed": True,
+    }
+    headers = cast(dict[str, str], observed["headers"])
+    assert "Idempotency-Key" in headers
+
+
 def test_cli_reports_safe_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
     configure(monkeypatch)
     monkeypatch.setattr(

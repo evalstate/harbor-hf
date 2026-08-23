@@ -338,6 +338,37 @@ describe("control service", () => {
     );
   });
 
+  it("replaces the promoted namespace Sandbox cap and start pacing", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    control.service.configureCapacityProfile("current");
+    await configureCapacity(control, { maximum: 2, hardwareMaximum: 2, burst: 1 });
+
+    const first = await control.service.setMaxActiveSandboxes(8);
+    expect(first.max_active_sandboxes).toBe(8);
+    expect(first.start_burst).toBe(8);
+    const selected = control.service.capacityProfile();
+    expect(selected?.spec.max_active_sandboxes).toBe(8);
+    expect(selected?.spec.start_burst).toBe(8);
+    expect(selected?.spec.start_refill_tokens).toBe(8);
+    expect(selected?.spec.hardware_limits).toEqual([
+      { hardware: "cpu-basic", max_active_sandboxes: 8 },
+    ]);
+    expect(control.service.namespaceCapacityPolicy()).toMatchObject({
+      alias: "current",
+      configured: true,
+      max_active_sandboxes: 8,
+      start_burst: 8,
+      profile_id: first.profile_id,
+    });
+
+    const second = await control.service.setMaxActiveSandboxes(8);
+    expect(second.profile_id).toBe(first.profile_id);
+    await expect(control.service.setMaxActiveSandboxes(0)).rejects.toThrow(
+      "namespace Sandbox cap must be an integer from 1 to 1024",
+    );
+  });
+
   it("adopts idempotent submissions and completes a control smoke campaign", async () => {
     const control = await createTestControl();
     controls.push(control);

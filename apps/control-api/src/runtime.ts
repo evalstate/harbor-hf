@@ -17,7 +17,7 @@ import {
   type HuggingFaceSandboxGateway,
   NoopActions,
 } from "@harbor-hf/hf-adapters";
-import { AuthStore, AuthenticationService } from "./auth.js";
+import { AuthenticationService, AuthStore } from "./auth.js";
 import type { AppConfig } from "./config.js";
 
 export interface Runtime {
@@ -87,7 +87,11 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
       await auth.initialize();
       await projection.rebuild(store);
       await service.initialize(profiles);
-      if (config.write_mode !== "disabled") service.requireCapacityProfile();
+      if (config.write_mode !== "disabled") {
+        if (!service.capacityProfileOrNull())
+          await service.setMaxActiveSandboxes(config.max_active_sandboxes);
+        service.requireCapacityProfile();
+      }
       if (
         !(await projection.latestAcl()) &&
         config.bootstrap_operator_subjects.length > 0

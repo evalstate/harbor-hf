@@ -237,10 +237,17 @@ profile digest that authorized it. A later promotion applies only to later
 grants. Lower limits stop new admissions and let active work drain.
 
 Write-enabled startup resolves the promoted alias named by
-`HARBOR_HF_CAPACITY_PROFILE_ALIAS` and fails when it is absent or invalid.
-Read-only startup may replay and display historical records without one, but it
-cannot admit new Sandbox work. No production capacity value is implied by this specification.
-Operators select values from verified quota and profiling evidence.
+`HARBOR_HF_CAPACITY_PROFILE_ALIAS`. When that promotion is absent, the service
+writes and promotes a namespace cap of `HARBOR_HF_MAX_ACTIVE_SANDBOXES` (default
+16, maximum 1024) and matches start burst and refill tokens to the same value.
+An existing approved promotion is the source of truth. Restarting the Space does
+not reset it. Operators change the live cap through `GET` and `POST
+/api/v1/capacity`. The POST body requires `confirmed: true` and an
+`Idempotency-Key`. The response never includes the namespace. Read-only startup
+may replay and display historical records without a capacity profile, but it
+cannot admit new Sandbox work. No production quota is implied by the default.
+Operators select values from verified quota and profiling evidence. Existing
+campaign locks keep their per-run `max_sandboxes` and worker concurrency.
 
 ## HTTP API
 
@@ -250,6 +257,8 @@ The service exposes these route groups:
 GET  /health/live
 GET  /health/ready
 GET  /api/v1/system
+GET  /api/v1/capacity
+POST /api/v1/capacity
 GET  /api/v1/campaigns
 POST /api/v1/campaigns
 GET  /api/v1/campaigns/{campaign_id}
@@ -944,12 +953,13 @@ Bucket.
 
 Capacity admission rolls out in four stages. First, additive schemas, legacy
 replay, capacity status, and tests ship while writes stay disabled. Second, an
-operator promotes a reviewed namespace capacity profile and configures its
-alias. Write-enabled startup fails closed until that profile is available and
-no ambiguous legacy create can escape conservative accounting. Third, every new
-Sandbox create requires a durable admission grant. Fourth, new deployment
-profiles pin the worker revision that includes cancellation awareness. Existing
-campaign locks keep their recorded worker revision and are not changed.
+operator promotes a reviewed namespace capacity profile, or write-enabled
+startup seeds the default cap and alias. Write-enabled startup fails closed
+until that profile is available and no ambiguous legacy create can escape
+conservative accounting. Third, every new Sandbox create requires a durable
+admission grant. Fourth, new deployment profiles pin the worker revision that
+includes cancellation awareness. Existing campaign locks keep their recorded
+worker revision and are not changed.
 
 At the boundary, the TypeScript service becomes the only campaign writer. New
 campaigns and publications stop using the coordination and result Datasets.

@@ -12,6 +12,7 @@ import type {
   CampaignLock,
   CampaignRequest,
   CampaignSubmissionV1,
+  CapacityProfileObject,
   CapacityProfileSpec,
   DeploymentProfileSpec,
   HarborHFControlRecordV1,
@@ -21,6 +22,7 @@ import type {
   PreparedJob,
   PreparedJobSubmissionV1,
   PreparedTrial,
+  ProfilePromotion,
   PublicationReceipt,
   PublicationSupersession,
   ResolvedProfile,
@@ -54,13 +56,14 @@ import {
 } from "./evidence.js";
 import {
   type LoadedProfile,
+  ProfileResolutionError,
   ProfileResolver,
   preparationRequired,
   profileSpec,
   validatePreparedCampaignProfiles,
 } from "./profiles.js";
 import type { Projection } from "./projection.js";
-import { runIdentity, runUnique, runtimeKind } from "./run-id.js";
+import { runIdentity, runtimeKind, runUnique } from "./run-id.js";
 import {
   decideSandboxAdmission,
   type SandboxAdmissionDecision,
@@ -412,6 +415,126 @@ export class ControlService {
   requireCapacityProfile(): void {
     if (!this.capacityProfile())
       throw new PolicyError("write-enabled service requires a capacity profile");
+  }
+
+  capacityProfileOrNull(): { profile_id: string; spec: CapacityProfileSpec } | null {
+    if (!this.capacityProfileAlias) return null;
+    try {
+      return this.capacityProfile();
+    } catch (error) {
+      if (error instanceof PolicyError || error instanceof ProfileResolutionError)
+        return null;
+      throw error;
+    }
+  }
+
+  namespaceCapacityPolicy(): {
+    alias: string | null;
+    configured: boolean;
+    max_active_sandboxes: number | null;
+    start_burst: number | null;
+    start_refill_tokens: number | null;
+    start_refill_period_seconds: number | null;
+    profile_id: string | null;
+  } {
+    const selected = this.capacityProfileOrNull();
+    return {
+      alias: this.capacityProfileAlias,
+      configured: selected !== null,
+      max_active_sandboxes: selected ? selected.spec.max_active_sandboxes : null,
+      start_burst: selected ? selected.spec.start_burst : null,
+      start_refill_tokens: selected ? selected.spec.start_refill_tokens : null,
+      start_refill_period_seconds: selected
+        ? selected.spec.start_refill_period_seconds
+        : null,
+      profile_id: selected ? selected.profile_id : null,
+    };
+  }
+
+  /**
+   * Replace the promoted namespace Sandbox cap. The start burst and refill
+   * match the cap so the new limit can actually admit work.
+   */
+  async setMaxActiveSandboxes(maxActiveSandboxes: number): Promise<{
+    alias: string;
+    max_active_sandboxes: number;
+    start_burst: number;
+    profile_id: string;
+  }> {
+    if (
+      !Number.isInteger(maxActiveSandboxes) ||
+      maxActiveSandboxes < 1 ||
+      maxActiveSandboxes > 1024
+    )
+      throw new PolicyError("namespace Sandbox cap must be an integer from 1 to 1024");
+    const alias = this.capacityProfileAlias ?? "current";
+    this.configureCapacityProfile(alias);
+    const current = this.capacityProfileOrNull();
+    const hardwareLimits = (
+      current
+        ? current.spec.hardware_limits
+        : [
+            { hardware: "cpu-basic", max_active_sandboxes: maxActiveSandboxes },
+            { hardware: "cpu-upgrade", max_active_sandboxes: maxActiveSandboxes },
+          ]
+    ).map((limit) => ({
+      hardware: limit.hardware,
+      max_active_sandboxes: maxActiveSandboxes,
+    }));
+    const spec: CapacityProfileSpec = {
+      namespace: this.namespace,
+      max_active_sandboxes: maxActiveSandboxes,
+      hardware_limits: hardwareLimits,
+      start_burst: maxActiveSandboxes,
+      start_refill_tokens: maxActiveSandboxes,
+      start_refill_period_seconds: current
+        ? current.spec.start_refill_period_seconds
+        : 60,
+    };
+    if (current && canonicalJson(current.spec) === canonicalJson(spec))
+      return {
+        alias,
+        max_active_sandboxes: spec.max_active_sandboxes,
+        start_burst: spec.start_burst,
+        profile_id: current.profile_id,
+      };
+    const profile: CapacityProfileObject = {
+      schema_version: "v1",
+      kind: "profile.object",
+      record_id: deterministicId(
+        "profile",
+        "capacity",
+        alias,
+        sha256(canonicalJson(spec)),
+      ),
+      created_at: this.clock.now().toISOString(),
+      actor: serviceActor(),
+      profile_kind: "capacity",
+      name: alias,
+      spec,
+    };
+    const profileId = sha256(canonicalJson(profile));
+    const promotion: ProfilePromotion = {
+      schema_version: "v1",
+      kind: "profile.promotion",
+      record_id: deterministicId("promotion", "capacity", alias, profileId, "approved"),
+      created_at: this.clock.now().toISOString(),
+      actor: serviceActor(),
+      profile_kind: "capacity",
+      alias,
+      profile_id: profileId,
+      reason: `set namespace Sandbox cap to ${maxActiveSandboxes}`,
+      evidence: [sha256(canonicalJson({ max_active_sandboxes: maxActiveSandboxes }))],
+      promotion_state: "approved",
+    };
+    await this.append(profile);
+    await this.append(promotion);
+    return {
+      alias,
+      max_active_sandboxes: spec.max_active_sandboxes,
+      start_burst: spec.start_burst,
+      profile_id: profileId,
+    };
   }
 
   private assertReady(): void {
