@@ -9,14 +9,8 @@ the isolated legacy reader.
 
 Harbor owns the job config, task resolution, custom-agent loading, environment
 config, trial execution, locks, results, verifier rewards, exceptions, timing,
-token usage, and trial artifact inventory. Upstream Harbor remains unchanged
-except for a time-boxed Harbor 0.21.0 sitecustomize patch in the execution
-worker. That patch applies
-[PR 2681](https://github.com/harbor-framework/harbor/pull/2681) so
-`Job._update_metric_display` does not raise `IndexError` on an empty metric
-list. Delete
-`packages/harbor-hf-agents/src/harbor_hf_agents/support/harbor_0210_empty_metrics.py`
-when the pinned Harbor version includes that pull request.
+token usage, and trial artifact inventory. Workers install Harbor from a pinned
+`harbor-framework/harbor` git commit. Upstream Harbor remains unchanged.
 
 `harbor-hf` owns campaign and physical execution identity, Hugging Face
 infrastructure, immutable request storage, endpoint cleanup, infrastructure
@@ -35,7 +29,7 @@ historical evidence tools.
 ## Execution Input
 
 A campaign first locks its approved profiles and expected logical tasks. A
-secret-free preparation Job runs the pinned Harbor release and builds one
+secret-free preparation Job runs the pinned Harbor git commit and builds one
 normal `JobConfig`. Harbor resolves the dataset and task sources through its
 public `JobPlan` API. The preparation worker then writes:
 
@@ -57,7 +51,7 @@ After a trial, the worker compares Harbor's emitted `TrialLock` with the
 prepared lock before it can submit evidence or an outcome.
 
 Both workers install the reviewed Harbor-HF agent package at its immutable
-revision and use the official pinned Harbor release. The preparation worker has
+revision and use the pinned Harbor git commit. The preparation worker has
 no persistent secret, inference access, Sandbox authority, or Bucket mount. The
 execution worker has no persistent secret or Bucket mount and reaches Sandboxes
 only through its short-lived capability. The root-owned bridge receives the

@@ -436,7 +436,7 @@ def test_keeps_refilling_after_task_failure(
             },
             "",
             False,
-            ("complete", False),
+            ("agent", False),
         ),
         (None, "Sandbox API failed", False, ("infrastructure", True)),
         (None, "IndexError: list index out of range", False, ("infrastructure", True)),

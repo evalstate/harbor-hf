@@ -11,6 +11,8 @@ import { loadBuiltInProfiles } from "../src/profiles.js";
 
 const WORKER_REVISION = "66d85304eb0c0fcf0c955a35522001decb499e9e";
 const DEEPSEEK_WORKER_REVISION = "3a6af70769288614b58fc10ca764c528305bf496";
+const HARBOR_SOURCE =
+  "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
 const BRIDGE_REVISION = "c5ffef26652129bc3354be5b3bc9c9ba8110629b";
 const BRIDGE_DIGESTS = [
   "a67e6442b5a9be11591699aaf8a861c021ac1e49c10bcd09992ab562098ea2eb",
@@ -173,6 +175,14 @@ describe("Terminal-Bench 2.1 profiles", () => {
     ] as const) {
       expect(spec.worker_revision).toBe(DEEPSEEK_WORKER_REVISION);
       expect(spec.harbor_version).toBe("0.22.0");
+      expect((spec.preparation_job_command as string[]).join("\n")).toContain(
+        HARBOR_SOURCE,
+      );
+      expect((spec.job_command as string[]).join("\n")).toContain(HARBOR_SOURCE);
+      expect((spec.preparation_job_command as string[]).join("\n")).not.toContain(
+        "harbor==",
+      );
+      expect((spec.job_command as string[]).join("\n")).not.toContain("harbor==");
       expect(spec.worker_max_tasks_per_job).toBe(capacity);
       expect(spec.worker_concurrency).toBe(concurrency);
 
@@ -361,6 +371,37 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(deployment.inference_provider).toBe("together");
       const jobCommand = (deployment.job_command as string[]).join("\n");
       expect(jobCommand).toContain(pin);
+      expect(jobCommand).toContain(HARBOR_SOURCE);
+      expect(jobCommand).not.toContain("harbor==");
+    }
+  });
+
+  it("installs Harbor from a pinned git commit on every Terminal-Bench deployment", async () => {
+    const names = [
+      "tb21-deepseek-v4-flash-canary",
+      "tb21-deepseek-v4-flash-official-5",
+      "tb21-deepseek-v4-flash-replacement",
+      "tb21-deepseek-v4-flash-diagnostic-1",
+      "tb21-deepseek-v4-flash-dsh-providers",
+      "tb21-gpt-oss-20b-dsh-providers",
+      "tb21-gpt-oss-20b-opencode-providers",
+      "tb21-gpt-oss-20b-qwen-code-providers",
+      "tb21-gpt-oss-20b-mini-swe-agent-providers",
+      "tb21-gpt-oss-20b-pi-providers",
+      "tb21-gpt-oss-20b-kimi-code-providers",
+      "tb21-gpt-oss-20b-hermes-providers",
+      "tb21-gpt-oss-20b-openhands-providers",
+      "tb21-gpt-oss-20b-openclaw-providers",
+    ];
+    for (const name of names) {
+      const deployment = record((await profile("deployment", name)).spec);
+      const preparation = (deployment.preparation_job_command as string[]).join("\n");
+      const job = (deployment.job_command as string[]).join("\n");
+      expect(deployment.harbor_version).toBe("0.22.0");
+      for (const command of [preparation, job]) {
+        expect(command).toContain(HARBOR_SOURCE);
+        expect(command).not.toContain("harbor==");
+      }
     }
   });
 });

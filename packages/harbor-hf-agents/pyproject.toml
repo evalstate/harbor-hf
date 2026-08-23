@@ -11,7 +11,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-  "harbor==0.22.0",
+  "harbor @ git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893",
   "mutmut==3.7.0",
   "pytest>=8.4.0",
   "pytest-asyncio>=1.2.0",

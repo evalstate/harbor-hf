@@ -315,8 +315,6 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
         return "benchmark_timeout", False
     if name in _ENVIRONMENT_SETUP_ERRORS:
         return "infrastructure", True
-    if name == "IndexError" and "_update_metric_display" in f"{detail} {stderr}":
-        return "complete", False
     if name == TransientProviderError.__name__:
         return "infrastructure", True
     if name == ProviderPolicyError.__name__:

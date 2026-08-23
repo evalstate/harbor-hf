@@ -88,13 +88,11 @@ persistent secrets or inference access. Harbor resolves the job. The worker
 submits one `prepared.trial` record per logical task and then one `prepared.job`
 record through a short-lived capability.
 
-Execution workers pin Harbor 0.21.0. That release crashes in
-`Job._update_metric_display` with `IndexError` after a direct task writes
-`result.json` when the progress metric list is empty. The worker applies a
-sitecustomize patch that seeds task sources and skips empty progress display.
-Delete `packages/harbor-hf-agents/src/harbor_hf_agents/support/harbor_0210_empty_metrics.py`
-when the pinned Harbor version includes
-[PR 2681](https://github.com/harbor-framework/harbor/pull/2681).
+Preparation and execution workers install Harbor from a pinned
+`harbor-framework/harbor` git commit, not a PyPI release. The current pin is
+`b37833221e27435a18d7acdd41d875cdc2831893`, which reports Harbor `0.22.0` and
+includes [PR 2681](https://github.com/harbor-framework/harbor/pull/2681). The
+former Harbor 0.21.0 empty-metrics sitecustomize patch is not applied.
 
 The prepared records contain the exact Harbor trial locks and the data needed
 for admission, including source and task digests, resolved image digests,
