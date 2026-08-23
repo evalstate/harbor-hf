@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
 const WORKER_REVISION = "66d85304eb0c0fcf0c955a35522001decb499e9e";
+const FX_WORKER_REVISION = "9cd5bfbb6b340684b5d4098f1d5122e6c00baafc";
 const DEEPSEEK_WORKER_REVISION = "3a6af70769288614b58fc10ca764c528305bf496";
 const HARBOR_SOURCE =
   "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
@@ -355,7 +356,6 @@ describe("Terminal-Bench 2.1 profiles", () => {
     const pin = WORKER_REVISION;
     for (const harness of [
       "qwen-code",
-      "fx",
       "mini-swe-agent",
       "kimi-code",
       "openhands",
@@ -376,6 +376,15 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(jobCommand).toContain(HARBOR_SOURCE);
       expect(jobCommand).not.toContain("harbor==");
     }
+    const fx = record((await profile("deployment", "tb21-gpt-oss-20b-fx-providers")).spec);
+    expect(fx.models).toEqual(["gpt-oss-20b"]);
+    expect(fx.harnesses).toEqual(["fx"]);
+    expect(fx.worker_revision).toBe(FX_WORKER_REVISION);
+    expect(fx.harbor_version).toBe("0.22.0");
+    const fxJob = (fx.job_command as string[]).join("\n");
+    expect(fxJob).toContain(FX_WORKER_REVISION);
+    expect(fxJob).toContain(HARBOR_SOURCE);
+    expect(fxJob).not.toContain("harbor==");
   });
 
   it("installs Harbor from a pinned git commit on every Terminal-Bench deployment", async () => {
