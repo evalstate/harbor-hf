@@ -2627,6 +2627,67 @@ describe("control service", () => {
     });
   });
 
+  it("observes a finished Job before leftover Sandbox I/O fills the batch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "observe-before-leftover-io-key",
+      operator,
+    );
+    const leftovers = Array.from({ length: 20 }, (_, index) =>
+      control.service.actionIntent(
+        result.campaign_id,
+        "sandbox.exec",
+        `leftover-starved-exec-${index}`,
+        0,
+        {
+          task_id: "task-001",
+          command: ["true"],
+          sandbox_create_action_id: "missing-create",
+        },
+      ),
+    );
+    for (const exec of leftovers) await control.service.writeAction(exec);
+    let observes = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "sandbox.exec")
+          throw new Error("leftover Sandbox I/O must not run before Job observe");
+        if (intent.action_kind === "job.launch")
+          return {
+            outcome: "created",
+            observed_state: "SCHEDULING",
+            resource_id: `job-starved-observe-${intent.generation}`,
+          };
+        if (intent.action_kind === "job.observe") {
+          observes += 1;
+          return {
+            outcome: "completed",
+            observed_state: "ERROR",
+            resource_id: String(intent.payload.resource_id),
+          };
+        }
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 4);
+    expect(observes).toBeGreaterThan(0);
+    expect(
+      (await control.projection.campaignActions(result.campaign_id)).some(
+        (action) =>
+          action.action_kind === "job.observe" && action.observed_state === "ERROR",
+      ),
+    ).toBe(true);
+  });
+
   it("relaunches tasks left open after an execution Job errors", async () => {
     const control = await createTestControl(2, 2, 0, false, "forbidden", undefined, [
       "input_tokens",

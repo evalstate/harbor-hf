@@ -248,12 +248,16 @@ export class Reconciler {
       (intent) => intent.action_kind !== "sandbox.create",
     );
     ordinary.sort((left, right) => {
+      // Observe must beat leftover Sandbox I/O. Those I/O actions stay pending
+      // while the launch still looks running, and they would otherwise fill the
+      // batch so a finished Job never leaves SCHEDULING.
       const priority = (intent: ActionIntent): number => {
         if (
           intent.action_kind === "sandbox.close" ||
           intent.action_kind === "campaign.cancel" ||
           intent.action_kind === "job.cancel" ||
           intent.action_kind === "job.launch" ||
+          intent.action_kind === "job.observe" ||
           intent.action_kind === "campaign.resume" ||
           intent.action_kind === "campaign.pause"
         )
