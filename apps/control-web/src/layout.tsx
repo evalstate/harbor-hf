@@ -15,15 +15,14 @@ import {
   X,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import type { DisplayActor } from "./control-state";
 import { hints } from "./hints";
 import { cn, formatDate, humanize } from "./lib";
 import type { LiveState } from "./queries";
 import { Badge, Button, ErrorNotice, Hint } from "./ui";
 
-const navigation = [
-  ["/", "Leaderboard", Trophy, hints.nav.leaderboard],
+const adminNavigation = [
   ["/overview", "Overview", Gauge, hints.nav.overview],
   ["/runs", "Runs", ClipboardList, hints.nav.campaigns],
   ["/jobs", "Jobs", ServerCog, hints.nav.jobs],
@@ -32,6 +31,32 @@ const navigation = [
   ["/profiles", "Profiles", Boxes, hints.nav.profiles],
   ["/audit", "Audit", FileClock, hints.nav.audit],
 ] as const;
+
+function loginHref(returnTo: string): string {
+  return `/auth/login?return_to=${encodeURIComponent(returnTo)}`;
+}
+
+function isAdminPath(path: string): boolean {
+  return (
+    path === "/overview" ||
+    path.startsWith("/runs") ||
+    path.startsWith("/campaigns") ||
+    path.startsWith("/jobs") ||
+    path.startsWith("/endpoints") ||
+    path.startsWith("/results") ||
+    path.startsWith("/profiles") ||
+    path.startsWith("/audit")
+  );
+}
+
+function navItemClass(active: boolean): string {
+  return cn(
+    "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400",
+    active
+      ? "bg-cyan-400/10 text-cyan-300"
+      : "text-slate-400 hover:bg-slate-900 hover:text-slate-100",
+  );
+}
 
 export function Layout({
   children,
@@ -44,15 +69,19 @@ export function Layout({
   signingOut,
 }: {
   children: ReactNode;
-  actor: DisplayActor;
+  actor: DisplayActor | null;
   writeMode: string;
-  live: LiveState;
+  live: LiveState | null;
   sessionExpiresAt?: string | undefined;
   serviceError: unknown;
   onSignOut: () => void;
   signingOut: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const location = useLocation();
+  const authenticated = actor !== null;
+  const adminActive = isAdminPath(location.pathname);
+  const closeNav = () => setOpen(false);
   return (
     <div className="min-h-screen overflow-x-hidden bg-slate-950 text-slate-100">
       <a
@@ -97,95 +126,138 @@ export function Layout({
           </Button>
         </div>
         <nav className="mt-8 space-y-1" aria-label="Primary">
-          {navigation.map(([href, label, Icon, hint]) => (
-            <NavLink
-              key={href}
-              end={href === "/" || href === "/overview"}
-              to={href}
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400",
-                  isActive
-                    ? "bg-cyan-400/10 text-cyan-300"
-                    : "text-slate-400 hover:bg-slate-900 hover:text-slate-100",
-                )
-              }
+          <NavLink
+            end
+            to="/"
+            onClick={closeNav}
+            className={({ isActive }) => navItemClass(isActive)}
+          >
+            <Trophy size={18} />
+            <Hint text={hints.nav.leaderboard}>Leaderboard</Hint>
+          </NavLink>
+          <div className="pt-3">
+            <div
+              className={cn(
+                "flex items-center gap-3 px-3 py-2 text-sm font-medium",
+                adminActive ? "text-cyan-300" : "text-slate-300",
+              )}
             >
-              <Icon size={18} />
-              <Hint text={hint}>{label}</Hint>
-            </NavLink>
-          ))}
+              <ShieldCheck size={18} />
+              <Hint text={hints.nav.admin}>Admin</Hint>
+            </div>
+            <div className="ml-3 space-y-1 border-l border-slate-800 pl-2">
+              {adminNavigation.map(([href, label, Icon, hint]) =>
+                authenticated ? (
+                  <NavLink
+                    key={href}
+                    end={href === "/overview"}
+                    to={href}
+                    onClick={closeNav}
+                    className={({ isActive }) => navItemClass(isActive)}
+                  >
+                    <Icon size={18} />
+                    <Hint text={hint}>{label}</Hint>
+                  </NavLink>
+                ) : (
+                  <a
+                    key={href}
+                    href={loginHref(href)}
+                    onClick={closeNav}
+                    className={navItemClass(false)}
+                  >
+                    <Icon size={18} />
+                    <Hint text={hint}>{label}</Hint>
+                  </a>
+                ),
+              )}
+            </div>
+          </div>
         </nav>
         <div className="mt-auto space-y-4 rounded-xl border border-slate-800 bg-slate-900/50 p-4">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-2 text-xs text-slate-400">
-              <Activity size={14} />
-              <Hint text={hints.chrome.liveUpdates}>Live updates</Hint>
-            </span>
-            <Badge status={live.status === "connected" ? "ready" : "pending"}>
-              {humanize(live.status)}
-            </Badge>
-          </div>
-          <p className="text-xs leading-5 text-slate-500">
-            {live.lastSuccessfulUpdate
-              ? `Last update ${formatDate(new Date(live.lastSuccessfulUpdate).toISOString())}`
-              : "Waiting for the first live update"}
-          </p>
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-2 text-xs text-slate-400">
-              <ShieldCheck size={14} />
-              <Hint text={hints.chrome.writeMode}>Write mode</Hint>
-            </span>
-            <Badge status={writeMode === "enabled" ? "ready" : "pending"}>
-              {humanize(writeMode)}
-            </Badge>
-          </div>
-          <div className="border-t border-slate-800 pt-3">
-            <div className="flex items-center gap-2">
-              <div className="min-w-0 flex-1 truncate text-sm font-medium">
-                {actor.username}
+          {authenticated && live ? (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2 text-xs text-slate-400">
+                  <Activity size={14} />
+                  <Hint text={hints.chrome.liveUpdates}>Live updates</Hint>
+                </span>
+                <Badge status={live.status === "connected" ? "ready" : "pending"}>
+                  {humanize(live.status)}
+                </Badge>
               </div>
-              <div className="group relative shrink-0">
-                <button
-                  type="button"
-                  className="grid h-7 w-7 place-items-center rounded-md text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
-                  aria-label="Account and session details"
-                  aria-describedby="account-session-details"
-                >
-                  <CircleHelp size={15} />
-                </button>
-                <div
-                  id="account-session-details"
-                  role="tooltip"
-                  className="invisible absolute bottom-full right-0 z-50 mb-2 w-64 rounded-lg border border-slate-700 bg-slate-900 p-3 text-left text-xs leading-5 text-slate-300 opacity-0 shadow-xl transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
-                >
-                  <p className="font-medium text-slate-100">
-                    {humanize(actor.role)} role
-                  </p>
-                  <p className="mt-1 text-slate-400">
-                    Your role grants permission. Write mode controls whether this
-                    deployment accepts changes.
-                  </p>
-                  {sessionExpiresAt ? (
-                    <p className="mt-2 border-t border-slate-700 pt-2 text-slate-400">
-                      Session expires {formatDate(sessionExpiresAt)}. A service restart
-                      can require a new sign-in.
+              <p className="text-xs leading-5 text-slate-500">
+                {live.lastSuccessfulUpdate
+                  ? `Last update ${formatDate(new Date(live.lastSuccessfulUpdate).toISOString())}`
+                  : "Waiting for the first live update"}
+              </p>
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2 text-xs text-slate-400">
+                  <ShieldCheck size={14} />
+                  <Hint text={hints.chrome.writeMode}>Write mode</Hint>
+                </span>
+                <Badge status={writeMode === "enabled" ? "ready" : "pending"}>
+                  {humanize(writeMode)}
+                </Badge>
+              </div>
+            </>
+          ) : (
+            <p className="text-xs leading-5 text-slate-500">
+              Admin views require a Hugging Face login.
+            </p>
+          )}
+          {authenticated && actor ? (
+            <div className="border-t border-slate-800 pt-3">
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1 truncate text-sm font-medium">
+                  {actor.username}
+                </div>
+                <div className="group relative shrink-0">
+                  <button
+                    type="button"
+                    className="grid h-7 w-7 place-items-center rounded-md text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                    aria-label="Account and session details"
+                    aria-describedby="account-session-details"
+                  >
+                    <CircleHelp size={15} />
+                  </button>
+                  <div
+                    id="account-session-details"
+                    role="tooltip"
+                    className="invisible absolute bottom-full right-0 z-50 mb-2 w-64 rounded-lg border border-slate-700 bg-slate-900 p-3 text-left text-xs leading-5 text-slate-300 opacity-0 shadow-xl transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+                  >
+                    <p className="font-medium text-slate-100">
+                      {humanize(actor.role)} role
                     </p>
-                  ) : null}
+                    <p className="mt-1 text-slate-400">
+                      Your role grants permission. Write mode controls whether this
+                      deployment accepts changes.
+                    </p>
+                    {sessionExpiresAt ? (
+                      <p className="mt-2 border-t border-slate-700 pt-2 text-slate-400">
+                        Session expires {formatDate(sessionExpiresAt)}. A service
+                        restart can require a new sign-in.
+                      </p>
+                    ) : null}
+                  </div>
                 </div>
               </div>
+              <Button
+                className="mt-2 w-full"
+                variant="ghost"
+                disabled={signingOut}
+                onClick={onSignOut}
+              >
+                <LogOut size={14} />
+                {signingOut ? "Signing out" : "Sign out"}
+              </Button>
             </div>
-            <Button
-              className="mt-2 w-full"
-              variant="ghost"
-              disabled={signingOut}
-              onClick={onSignOut}
-            >
-              <LogOut size={14} />
-              {signingOut ? "Signing out" : "Sign out"}
-            </Button>
-          </div>
+          ) : isAdminPath(location.pathname) ? null : (
+            <div className="border-t border-slate-800 pt-3">
+              <a className="block" href={loginHref(location.pathname)}>
+                <Button className="w-full">Sign in with Hugging Face</Button>
+              </a>
+            </div>
+          )}
         </div>
       </aside>
       <main

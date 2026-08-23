@@ -509,7 +509,9 @@ This object lives in the existing Bucket and does not add a second store.
 
 ## Web routes
 
-The React application provides:
+The React application provides one left navigation. Leaderboard is public.
+Admin lists Overview, Runs, Jobs, Endpoints, Results, Profiles, and Audit.
+Those Admin routes require Hugging Face login.
 
 | Route | Content |
 | --- | --- |

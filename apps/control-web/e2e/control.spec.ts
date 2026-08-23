@@ -245,7 +245,10 @@ test("shows the official leaderboard table and cost-score plot", async ({ page }
   await expect(
     page.getByRole("link", { name: "openai/gpt-oss-20b", exact: true }),
   ).toBeVisible();
-  await expect(page.getByRole("link", { name: "Run benchmark" })).toHaveAttribute(
+  await expect(page.getByRole("navigation", { name: "Primary" })).toContainText(
+    "Admin",
+  );
+  await expect(page.getByRole("link", { name: "Overview" })).toHaveAttribute(
     "href",
     "/overview",
   );

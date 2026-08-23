@@ -21,11 +21,11 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { z } from "zod";
 import {
   type AuditResponse,
-  type Capacity,
   actOnCampaign,
   type CampaignAction,
   type CampaignList,
   type CampaignSubmission,
+  type Capacity,
   type EndpointList,
   type JobList,
   type ProfileList,
@@ -2294,7 +2294,7 @@ export function NotFoundPage() {
       <p>That control view does not exist.</p>
       <Link
         className="mt-4 inline-flex items-center gap-2 text-cyan-300 hover:underline"
-        to="/"
+        to="/overview"
       >
         Return to overview <ArrowRight size={15} />
       </Link>

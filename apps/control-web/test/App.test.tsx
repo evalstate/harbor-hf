@@ -154,6 +154,13 @@ describe("control web", () => {
     );
     renderApp(`/results?platform_access=${"x".repeat(600)}#private`);
     expect(
+      await screen.findByRole("navigation", { name: "Primary" }),
+    ).toHaveTextContent("Admin");
+    expect(screen.getByRole("link", { name: /^Leaderboard$/ })).toHaveAttribute(
+      "href",
+      "/",
+    );
+    expect(
       await screen.findByRole("link", { name: /sign in with hugging face/i }),
     ).toHaveAttribute("href", "/auth/login?return_to=%2Fresults");
   });
@@ -1266,7 +1273,13 @@ describe("control web", () => {
     );
     expect(screen.getByText("OpenCode")).toBeInTheDocument();
     expect(screen.getByText("Pareto")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Run benchmark" })).toHaveAttribute(
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav).toHaveTextContent("Admin");
+    expect(screen.getByRole("link", { name: /^Leaderboard$/ })).toHaveAttribute(
+      "href",
+      "/",
+    );
+    expect(screen.getByRole("link", { name: /^Overview$/ })).toHaveAttribute(
       "href",
       "/overview",
     );
@@ -1293,12 +1306,18 @@ describe("control web", () => {
     expect(
       await screen.findByRole("heading", { name: "Leaderboard" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Run benchmark" })).toHaveAttribute(
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav).toHaveTextContent("Admin");
+    expect(screen.getByRole("link", { name: /^Overview$/ })).toHaveAttribute(
       "href",
       "/auth/login?return_to=%2Foverview",
     );
+    expect(screen.getByRole("link", { name: /^Runs$/ })).toHaveAttribute(
+      "href",
+      "/auth/login?return_to=%2Fruns",
+    );
     expect(
-      screen.queryByRole("link", { name: /sign in with hugging face/i }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("link", { name: /sign in with hugging face/i }),
+    ).toHaveAttribute("href", "/auth/login?return_to=%2F");
   });
 });
