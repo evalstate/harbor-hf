@@ -2759,6 +2759,92 @@ describe("control service", () => {
     });
   });
 
+  it("abandons open tasks after a Job later errors despite an earlier COMPLETED observe", async () => {
+    const control = await createTestControl(2, 1, 0, false);
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "completed-then-error-abandon-key",
+      operator,
+    );
+    const resourceId = "job-completed-then-error";
+    const running: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch")
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: resourceId,
+          };
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: resourceId,
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      running,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 6);
+    const launchRow = (
+      await control.projection.campaignActions(result.campaign_id)
+    ).find((action) => action.action_kind === "job.launch");
+    if (!launchRow) throw new Error("execution launch is missing");
+    const completed = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      resourceId,
+      80,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001", "task-002"],
+        launch_action_id: launchRow.action_id,
+      },
+    );
+    await control.service.writeAction(completed);
+    await control.service.markAdvanced(
+      completed,
+      await control.service.receipt(completed, {
+        outcome: "completed",
+        observed_state: "COMPLETED",
+        resource_id: resourceId,
+      }),
+    );
+    expect(
+      await control.projection.abandonedUnresolvedTaskIds(result.campaign_id),
+    ).toEqual(["task-001", "task-002"]);
+    const errored = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      resourceId,
+      81,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001", "task-002"],
+        launch_action_id: launchRow.action_id,
+      },
+    );
+    await control.service.writeAction(errored);
+    await control.service.markAdvanced(
+      errored,
+      await control.service.receipt(errored, {
+        outcome: "completed",
+        observed_state: "ERROR",
+        resource_id: resourceId,
+      }),
+    );
+    expect(
+      await control.projection.abandonedUnresolvedTaskIds(result.campaign_id),
+    ).toEqual(["task-001", "task-002"]);
+  });
+
   it("retries zero-token outcomes and fails closed after the attempt limit", async () => {
     const control = await createTestControl(1, 2, 0, false, "forbidden", undefined, [
       "input_tokens",

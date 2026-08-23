@@ -407,6 +407,25 @@ function launchStillRunning(
   });
 }
 
+function latestObservedJobState(
+  launch: Selectable<ActionRow>,
+  actions: ReadonlyArray<Selectable<ActionRow>>,
+): string | null {
+  const observes = actions
+    .filter((row) => {
+      if (row.action_kind !== "job.observe" || row.receipt_body === null) return false;
+      const intent = JSON.parse(row.intent_body) as ActionIntent;
+      return intent.payload.launch_action_id === launch.action_id;
+    })
+    .sort((left, right) => {
+      if (left.generation !== right.generation)
+        return left.generation - right.generation;
+      const time = left.created_at.localeCompare(right.created_at);
+      return time === 0 ? left.action_id.localeCompare(right.action_id) : time;
+    });
+  return observes.at(-1)?.observed_state ?? launch.observed_state;
+}
+
 function abandonedExecutionLaunch(
   action: Selectable<ActionRow>,
   actions: ReadonlyArray<Selectable<ActionRow>>,
@@ -414,25 +433,9 @@ function abandonedExecutionLaunch(
   if (action.action_kind !== "job.launch" || action.receipt_body === null) return false;
   if (action.observed_state?.startsWith("suppressed-")) return false;
   if (launchStillRunning(action, actions)) return false;
-  const states = [
-    action.observed_state,
-    ...actions.map((row) => {
-      if (row.action_kind !== "job.observe" || row.receipt_body === null) return null;
-      const intent = JSON.parse(row.intent_body) as ActionIntent;
-      return intent.payload.launch_action_id === action.action_id
-        ? row.observed_state
-        : null;
-    }),
-  ];
-  const normalized = states
-    .filter((state): state is string => typeof state === "string")
-    .map((state) => state.toUpperCase());
-  if (normalized.includes("COMPLETED")) return false;
   const receipt = JSON.parse(action.receipt_body) as ActionReceipt;
   if (receipt.outcome === "failed") return true;
-  return normalized.some((state) =>
-    ["ERROR", "STOPPED", "CANCELLED", "CANCELED", "JOB-CREATE-FAILED"].includes(state),
-  );
+  return jobStateIsTerminal(latestObservedJobState(action, actions));
 }
 
 function jobIdentity(row: Selectable<ActionRow>): string {
@@ -2251,7 +2254,7 @@ export class Projection {
     for (const action of actions) {
       if (action.action_kind !== "job.launch") continue;
       const intent = JSON.parse(action.intent_body) as ActionIntent;
-      if (intent.payload.worker_role !== "execution") continue;
+      if (intent.payload.worker_role === "preparation") continue;
       const taskIds = Array.isArray(intent.payload.task_ids)
         ? intent.payload.task_ids.filter(
             (taskId): taskId is string => typeof taskId === "string",
