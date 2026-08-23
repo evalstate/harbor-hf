@@ -2543,6 +2543,90 @@ describe("control service", () => {
     expect(launches).toBe(2);
   });
 
+  it("closes leftover Sandbox I/O after pause so a later resume can launch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, start_paused: true },
+      "pause-suppress-sandbox-io-key",
+      operator,
+    );
+    const observes = Array.from({ length: 20 }, (_, index) =>
+      control.service.actionIntent(
+        result.campaign_id,
+        "sandbox.exec",
+        `leftover-exec-${index}`,
+        0,
+        {
+          task_id: "task-001",
+          command: ["true"],
+          sandbox_create_action_id: "missing-create",
+        },
+      ),
+    );
+    for (const exec of observes) await control.service.writeAction(exec);
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      {
+        execute: async (intent): Promise<ExternalActionResult> => {
+          if (intent.action_kind === "sandbox.exec")
+            throw new Error("paused campaign must not run leftover Sandbox I/O");
+          return new NoopActions().execute(intent);
+        },
+      },
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 6);
+    expect(
+      (await control.projection.campaignActions(result.campaign_id)).filter(
+        (action) =>
+          action.action_kind === "sandbox.exec" &&
+          action.observed_state === "suppressed-paused",
+      ),
+    ).toHaveLength(20);
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", confirmed: true },
+      "pause-suppress-sandbox-io-resume",
+      operator,
+    );
+    let launches = 0;
+    const running: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          launches += 1;
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: "job-after-io-drain",
+          };
+        }
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: "job-after-io-drain",
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const resumed = new Reconciler(
+      control.service,
+      control.projection,
+      running,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(resumed, 8);
+    expect(launches).toBe(1);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      paused: false,
+      status: "active",
+    });
+  });
+
   it("relaunches tasks left open after an execution Job errors", async () => {
     const control = await createTestControl(2, 2, 0, false, "forbidden", undefined, [
       "input_tokens",

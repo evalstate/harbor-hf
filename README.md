@@ -95,7 +95,7 @@ harbor-hf campaign retry-infrastructure <campaign-id> \
 
 The run page has the same control: **Retry infrastructure failures**. It only queues replacement Jobs for eligible infrastructure outcomes, including an infrastructure seal that should not have closed the logical task. Scored misses and other sealed outcomes stay sealed. A retry is a Job on the existing run. The run list does not add a second row. While that Job is running, the run page shows assigned tasks, replacement receipts, and the live sandbox window. The task list still shows selected seals.
 
-If an execution Job fails or stops with assigned tasks still open, the control service launches one follow-up Job for those tasks. It does not reopen sealed outcomes, and it does not start tasks that were never assigned to that Job.
+If an execution Job fails or stops with assigned tasks still open, the control service launches one follow-up Job for those tasks. Leftover Sandbox I/O from the dead Job is closed so it cannot block that launch. Sealed outcomes stay sealed, and tasks that were never assigned to that Job stay waiting.
 
 Cancellation also preserves existing evidence:
 

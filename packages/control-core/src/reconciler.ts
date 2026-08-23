@@ -248,19 +248,27 @@ export class Reconciler {
       (intent) => intent.action_kind !== "sandbox.create",
     );
     ordinary.sort((left, right) => {
-      const priority = (intent: ActionIntent): number =>
-        intent.action_kind === "sandbox.close" ||
-        intent.action_kind === "campaign.cancel" ||
-        intent.action_kind === "job.cancel"
-          ? 0
-          : 1;
+      const priority = (intent: ActionIntent): number => {
+        if (
+          intent.action_kind === "sandbox.close" ||
+          intent.action_kind === "campaign.cancel" ||
+          intent.action_kind === "job.cancel" ||
+          intent.action_kind === "job.launch" ||
+          intent.action_kind === "campaign.resume" ||
+          intent.action_kind === "campaign.pause"
+        )
+          return 0;
+        return 1;
+      };
       return priority(left) - priority(right);
     });
     let ordinaryHandled = 0;
     const ordinaryLimit = Math.max(1, this.options.batch_size - 1);
-    for (const intent of ordinary.slice(0, ordinaryLimit)) {
+    const due = ordinary.filter((intent) => {
       const notBefore = intent.payload.not_before;
-      if (typeof notBefore === "string" && Date.parse(notBefore) > Date.now()) continue;
+      return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
+    });
+    for (const intent of due.slice(0, ordinaryLimit)) {
       await this.handle(intent);
       handled += 1;
       ordinaryHandled += 1;
@@ -402,6 +410,14 @@ export class Reconciler {
       const taskId = intent.payload.task_id;
       if (typeof taskId !== "string")
         throw new PolicyError("Sandbox I/O action is missing its task identity");
+      const suppression = await this.sandboxCreateSuppression(intent);
+      if (suppression) {
+        result = { outcome: "completed", observed_state: suppression };
+        const receipt = await this.service.receipt(intent, result);
+        await this.advance(intent, receipt);
+        await this.service.markAdvanced(intent, receipt);
+        return;
+      }
       await this.service.settleClosedSandboxAmbiguities(intent.campaign_id, taskId);
       return;
     } else if (
@@ -412,12 +428,33 @@ export class Reconciler {
       if (intent.action_kind === "sandbox.create") {
         const dispatch = await this.projection.actionDispatch(intent.action_id);
         const suppression = await this.sandboxCreateSuppression(intent);
-        if (!dispatch && suppression) {
+        if (suppression && !dispatch) {
           result = { outcome: "completed", observed_state: suppression };
           const receipt = await this.service.receipt(intent, result);
           await this.advance(intent, receipt);
           await this.service.markAdvanced(intent, receipt);
           return;
+        }
+        if (suppression && dispatch) {
+          try {
+            result = await this.external.execute(intent, { adoption_only: true });
+          } catch (error) {
+            if (
+              error instanceof ExternalActionNotFoundError ||
+              error instanceof AmbiguousExternalActionError
+            ) {
+              result = {
+                outcome: "completed",
+                observed_state: `${suppression}-not-found`,
+              };
+            } else throw error;
+          }
+          if (result) {
+            const receipt = await this.service.receipt(intent, result);
+            await this.advance(intent, receipt);
+            await this.service.markAdvanced(intent, receipt);
+            return;
+          }
         }
         const policy = intent.payload.sandbox;
         if (!policy) throw new PolicyError("Sandbox create is missing policy");
@@ -430,6 +467,16 @@ export class Reconciler {
           reservation.amount_microusd !== policy.reservation_microusd
         )
           throw new PolicyError("Sandbox reservation does not match policy");
+      }
+      if (intent.action_kind === "sandbox.observe") {
+        const suppression = await this.sandboxCreateSuppression(intent);
+        if (suppression) {
+          result = { outcome: "completed", observed_state: suppression };
+          const receipt = await this.service.receipt(intent, result);
+          await this.advance(intent, receipt);
+          await this.service.markAdvanced(intent, receipt);
+          return;
+        }
       }
       const dispatch = await this.projection.actionDispatch(intent.action_id);
       const admission =
@@ -468,15 +515,24 @@ export class Reconciler {
             intent.campaign_id,
             "campaign.cancel",
           );
+          const suppression = await this.sandboxCreateSuppression(intent);
           result = {
-            outcome: cancelled ? "completed" : "failed",
+            outcome: cancelled || suppression ? "completed" : "failed",
             observed_state: cancelled
               ? "suppressed-cancelled-not-found"
-              : "sandbox-create-not-found",
-            error_code: cancelled ? null : "sandbox_create_not_found",
+              : suppression
+                ? `${suppression}-not-found`
+                : "sandbox-create-not-found",
+            error_code: cancelled || suppression ? null : "sandbox_create_not_found",
           };
-        } else if (error instanceof AmbiguousExternalActionError) return;
-        else throw error;
+        } else if (error instanceof AmbiguousExternalActionError) {
+          const suppression = await this.sandboxCreateSuppression(intent);
+          if (!suppression) return;
+          result = {
+            outcome: "completed",
+            observed_state: `${suppression}-not-found`,
+          };
+        } else throw error;
       }
     } else if (
       intent.action_kind === "endpoint.pause" ||

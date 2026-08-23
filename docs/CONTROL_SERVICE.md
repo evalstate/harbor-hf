@@ -754,9 +754,10 @@ when pending work and capacity remain. After an execution Job fails or stops wit
 assigned tasks still open, the reconciler launches one follow-up Job for those
 tasks if the campaign is not paused or cancelled and the ceiling still admits the
 reservation. Tasks that were never assigned to that Job wait for resume or a later
-operator action. Undispatched Sandbox creates from a terminal worker Job, or from a
-paused campaign, close without creating a remote Sandbox. Once pause or
-cancellation is visible, no new slot is admitted.
+operator action. Leftover Sandbox creates and I/O from a terminal worker Job, or
+from a paused campaign, close without creating a remote Sandbox and do not occupy
+the reconciler batch ahead of a follow-up Job launch. Once pause or cancellation is
+visible, no new slot is admitted.
 
 ## Safe publication and supersession
 
