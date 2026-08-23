@@ -693,11 +693,7 @@ def _campaign_stopped(config: WorkerConfig) -> bool:
     except RuntimeError:
         _log({"status": "campaign_state_unavailable"})
         return True
-    return bool(
-        campaign.get("cancellation_requested")
-        or campaign.get("paused")
-        or campaign.get("status") == "failed"
-    )
+    return bool(campaign["cancellation_requested"] or campaign["paused"])
 
 
 def _fill_available_slots(

@@ -267,7 +267,7 @@ def test_stops_new_work_when_campaign_is_paused(
     assert worker._campaign_stopped(config) is True
 
 
-def test_stops_new_work_when_campaign_has_failed(
+def test_continues_new_work_when_campaign_status_is_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure(monkeypatch)
@@ -286,7 +286,7 @@ def test_stops_new_work_when_campaign_has_failed(
 
     monkeypatch.setattr(worker, "_ControlClient", FailedClient)
 
-    assert worker._campaign_stopped(config) is True
+    assert worker._campaign_stopped(config) is False
 
 
 def _scheduler_config(

@@ -712,11 +712,13 @@ another attempt, the service writes an exhausted-task record. It does not select
 the last invalid receipt.
 
 A campaign is complete only when every locked logical task has exactly one selected
-attempt and every selection passes the locked evidence policy. A task with exhausted
-attempts makes the campaign failed. It cannot become a valid completed campaign and
-cannot publish. Historical records remain byte-for-byte unchanged. Projection
-replay may label an old campaign `completed-invalid` when its historical selection
-does not pass the current read-only audit.
+attempt and every selection passes the locked evidence policy. Exhausted tasks stay
+on the campaign while other tasks can still run. The campaign is failed only after
+every logical task is terminal and at least one task is exhausted. That campaign
+cannot become a valid completed campaign and cannot publish. An infrastructure
+exhaustion remains replaceable. Historical records remain byte-for-byte unchanged.
+Projection replay may label an old campaign `completed-invalid` when its historical
+selection does not pass the current read-only audit.
 
 ## Cooperative pause and resume
 

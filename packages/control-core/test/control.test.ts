@@ -2267,6 +2267,81 @@ describe("control service", () => {
       exhausted_tasks: 1,
       publication_status: null,
     });
+    const detail = await control.projection.task(result.campaign_id, "task-001");
+    expect(detail?.attempts).toMatchObject([
+      { outcome: "infrastructure", replacement_eligible: 1 },
+    ]);
+    expect(detail?.task).toMatchObject({
+      terminal_outcome: "infrastructure",
+      selected_attempt_id: null,
+    });
+  });
+
+  it("keeps a campaign active when one task is exhausted and others remain", async () => {
+    const control = await createTestControl(
+      2,
+      1,
+      0,
+      true,
+      "forbidden",
+      undefined,
+      [],
+      1,
+    );
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "partial-exhaustion-key",
+      operator,
+    );
+    let launches = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          launches += 1;
+          if (launches === 1)
+            return {
+              outcome: "failed",
+              observed_state: "job-create-failed",
+              error_code: "jobs-api-unavailable",
+            };
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-remaining-${launches}`,
+          };
+        }
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: "job-remaining",
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 12);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "active",
+      terminal_tasks: 1,
+      exhausted_tasks: 1,
+      publication_status: null,
+    });
+    expect(
+      (await control.projection.task(result.campaign_id, "task-001"))?.task
+        .terminal_outcome,
+    ).toBe("infrastructure");
+    expect(
+      (await control.projection.task(result.campaign_id, "task-002"))?.task
+        .terminal_outcome,
+    ).toBeNull();
   });
 
   it("retries zero-token outcomes and fails closed after the attempt limit", async () => {

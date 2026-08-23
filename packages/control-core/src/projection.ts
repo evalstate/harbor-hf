@@ -1279,7 +1279,7 @@ export class Projection {
   private async applyTaskExhaustion(record: TaskExhaustion): Promise<void> {
     const attempt = await this.db
       .selectFrom("attempts")
-      .select(["campaign_id", "task_id"])
+      .select(["campaign_id", "task_id", "outcome", "replacement_eligible"])
       .where("attempt_id", "=", record.last_attempt_id)
       .executeTakeFirst();
     if (
@@ -1290,6 +1290,8 @@ export class Projection {
       throw new ProjectionIntegrityError(
         `task exhaustion does not match attempt: ${record.record_id}`,
       );
+    const replaceable =
+      attempt.outcome === "infrastructure" && Number(attempt.replacement_eligible) > 0;
     await this.db
       .insertInto("task_exhaustions")
       .values({
@@ -1305,7 +1307,10 @@ export class Projection {
       .execute();
     const result = await this.db
       .updateTable("tasks")
-      .set({ terminal_outcome: "invalid", selected_attempt_id: null })
+      .set({
+        terminal_outcome: replaceable ? "infrastructure" : "invalid",
+        selected_attempt_id: null,
+      })
       .where("campaign_id", "=", record.campaign_id)
       .where("task_id", "=", record.task_id)
       .where("terminal_outcome", "is", null)
@@ -2337,7 +2342,7 @@ export class Projection {
     );
     let status = "queued";
     if (cancelled) status = "cancelled";
-    else if (exhausted > 0) status = "failed";
+    else if (terminal === total && total > 0 && exhausted > 0) status = "failed";
     else if (terminal === total && total > 0) {
       if (admissible !== total || invalidSelected > 0) status = "completed-invalid";
       else
