@@ -19,7 +19,8 @@ current package has separate modules for:
 - Qwen Code through Chat Completions;
 - mini-swe-agent through Chat Completions;
 - Kimi Code through Chat Completions;
-- OpenHands through Chat Completions.
+- OpenHands through Chat Completions;
+- FX through Chat Completions.
 
 Harbor Codex and Claude Code keep their native APIs. The locked
 `gpt-oss-20b` Together route is Chat Completions only, so those two

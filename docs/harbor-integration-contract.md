@@ -62,7 +62,7 @@ receives only its loopback route and placeholder key.
 
 Every provider-backed agent is loaded through Harbor's public
 `AgentConfig.import_path` field. Hermes, OpenClaw, OpenClaw Codex, Pi, DeepSeek
-Harness, and OpenCode live in separate modules under the `harbor-hf-agents`
+Harness, OpenCode, and FX live in separate modules under the `harbor-hf-agents`
 package. New provider executions do not select Harbor built-ins and have no
 fallback to them.
 

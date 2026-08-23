@@ -324,6 +324,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     const model = record((await profile("model", "gpt-oss-20b")).spec);
     const expected = [
       ["qwen-code", "harbor_hf_agents.qwen_code.agent:QwenCodeAgent", "0.21.15"],
+      ["fx", "harbor_hf_agents.fx.agent:FxAgent", "0.0.5"],
       ["mini-swe-agent", "harbor_hf_agents.mini_swe.agent:MiniSweAgent", "2.4.6"],
       ["kimi-code", "harbor_hf_agents.kimi_code.agent:KimiCodeAgent", "0.38.0"],
       ["openhands", "harbor_hf_agents.openhands.agent:OpenHandsAgent", "1.6.0"],
@@ -354,6 +355,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     const pin = WORKER_REVISION;
     for (const harness of [
       "qwen-code",
+      "fx",
       "mini-swe-agent",
       "kimi-code",
       "openhands",
@@ -386,6 +388,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "tb21-gpt-oss-20b-dsh-providers",
       "tb21-gpt-oss-20b-opencode-providers",
       "tb21-gpt-oss-20b-qwen-code-providers",
+      "tb21-gpt-oss-20b-fx-providers",
       "tb21-gpt-oss-20b-mini-swe-agent-providers",
       "tb21-gpt-oss-20b-pi-providers",
       "tb21-gpt-oss-20b-kimi-code-providers",
