@@ -286,6 +286,7 @@ export class Reconciler {
     }
     handled += await this.cleanupTerminalTaskSandboxes();
     for (const campaign of await this.projection.campaigns(10_000)) {
+      if (await this.continueUnresolvedExecution(campaign.campaign_id)) handled += 1;
       if (await this.maybePublish(campaign.campaign_id)) handled += 1;
     }
     return handled;
@@ -409,6 +410,15 @@ export class Reconciler {
       intent.action_kind === "sandbox.close"
     ) {
       if (intent.action_kind === "sandbox.create") {
+        const dispatch = await this.projection.actionDispatch(intent.action_id);
+        const suppression = await this.sandboxCreateSuppression(intent);
+        if (!dispatch && suppression) {
+          result = { outcome: "completed", observed_state: suppression };
+          const receipt = await this.service.receipt(intent, result);
+          await this.advance(intent, receipt);
+          await this.service.markAdvanced(intent, receipt);
+          return;
+        }
         const policy = intent.payload.sandbox;
         if (!policy) throw new PolicyError("Sandbox create is missing policy");
         const reservation = await this.projection.budget(
@@ -749,6 +759,63 @@ export class Reconciler {
       JSON.parse(launch.intent_body) as ActionIntent,
       createdAt,
     );
+  }
+
+  private async sandboxCreateSuppression(
+    intent: ActionIntent,
+  ): Promise<"suppressed-paused" | "suppressed-terminal-job" | null> {
+    if (await this.projection.campaignPaused(intent.campaign_id))
+      return "suppressed-paused";
+    const subject = intent.actor.subject;
+    if (!subject.startsWith("worker:")) return null;
+    const launchActionId = subject.slice("worker:".length);
+    if (
+      await this.projection.launchActionStillRunning(intent.campaign_id, launchActionId)
+    )
+      return null;
+    return "suppressed-terminal-job";
+  }
+
+  /**
+   * Launch one execution Job for tasks left open by a failed or stopped
+   * execution Job. Sealed tasks and tasks that were never assigned stay put.
+   */
+  private async continueUnresolvedExecution(campaignId: string): Promise<boolean> {
+    if (await this.projection.hasCampaignAction(campaignId, "campaign.cancel"))
+      return false;
+    if (await this.projection.campaignPaused(campaignId)) return false;
+    const campaign = await this.projection.campaign(campaignId);
+    if (!campaign || campaign.terminal_tasks === campaign.total_tasks) return false;
+    const actions = await this.projection.campaignActions(campaignId);
+    if (
+      actions.some(
+        (action) =>
+          action.action_kind === "campaign.admit" && action.receipt_body === null,
+      )
+    )
+      return false;
+    const lock = await this.projection.campaignLock(campaignId);
+    if (!lock) return false;
+    const deployment = profile(lock, "deployment") as DeploymentProfileSpec;
+    if (deployment.route !== "hf_job") return false;
+    if (
+      preparationRequired(deployment) &&
+      !(await this.service.preparedJob(campaignId))
+    )
+      return false;
+    const leftover = await this.projection.abandonedUnresolvedTaskIds(campaignId);
+    if (leftover.length === 0) return false;
+    const generation =
+      actions
+        .filter((action) => action.action_kind === "job.launch")
+        .reduce((maximum, action) => Math.max(maximum, action.generation), -1) + 1;
+    try {
+      await this.launchExecution(lock, new Date().toISOString(), generation, leftover);
+    } catch (error) {
+      if (error instanceof PolicyError) return false;
+      throw error;
+    }
+    return true;
   }
 
   private async launchExecution(
@@ -1185,6 +1252,14 @@ export class Reconciler {
         );
         return;
       }
+      if (
+        await this.service.laterExecutionLaunchExists(
+          attempt.campaign_id,
+          attempt.task_id,
+          attempt.action_id,
+        )
+      )
+        return;
       if (await this.projection.campaignPaused(attempt.campaign_id)) return;
       const reservation = scalar<number>(
         source.payload,

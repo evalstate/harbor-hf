@@ -394,6 +394,8 @@ function launchStillRunning(
 ): boolean {
   if (launch.receipt_body === null) return true;
   if (jobStateIsTerminal(launch.observed_state)) return false;
+  const receipt = JSON.parse(launch.receipt_body) as ActionReceipt;
+  if (receipt.outcome === "failed") return false;
   return !actions.some((action) => {
     if (action.action_kind !== "job.observe" || action.receipt_body === null)
       return false;
@@ -403,6 +405,34 @@ function launchStillRunning(
       jobStateIsTerminal(action.observed_state)
     );
   });
+}
+
+function abandonedExecutionLaunch(
+  action: Selectable<ActionRow>,
+  actions: ReadonlyArray<Selectable<ActionRow>>,
+): boolean {
+  if (action.action_kind !== "job.launch" || action.receipt_body === null) return false;
+  if (action.observed_state?.startsWith("suppressed-")) return false;
+  if (launchStillRunning(action, actions)) return false;
+  const states = [
+    action.observed_state,
+    ...actions.map((row) => {
+      if (row.action_kind !== "job.observe" || row.receipt_body === null) return null;
+      const intent = JSON.parse(row.intent_body) as ActionIntent;
+      return intent.payload.launch_action_id === action.action_id
+        ? row.observed_state
+        : null;
+    }),
+  ];
+  const normalized = states
+    .filter((state): state is string => typeof state === "string")
+    .map((state) => state.toUpperCase());
+  if (normalized.includes("COMPLETED")) return false;
+  const receipt = JSON.parse(action.receipt_body) as ActionReceipt;
+  if (receipt.outcome === "failed") return true;
+  return normalized.some((state) =>
+    ["ERROR", "STOPPED", "CANCELLED", "CANCELED", "JOB-CREATE-FAILED"].includes(state),
+  );
 }
 
 function jobIdentity(row: Selectable<ActionRow>): string {
@@ -2193,6 +2223,48 @@ export class Projection {
       .orderBy("action_id", "desc")
       .executeTakeFirst();
     return lifecycle?.action_kind === "campaign.pause";
+  }
+
+  async launchActionStillRunning(
+    campaignId: string,
+    actionId: string,
+  ): Promise<boolean> {
+    const actions = await this.campaignActions(campaignId);
+    const launch = actions.find((action) => action.action_id === actionId);
+    if (!launch || launch.action_kind !== "job.launch") return false;
+    return launchStillRunning(launch, actions);
+  }
+
+  /**
+   * Open tasks that were assigned to an execution Job that failed or stopped
+   * before those tasks sealed, and that are not on a still-running Job.
+   */
+  async abandonedUnresolvedTaskIds(campaignId: string): Promise<string[]> {
+    const actions = await this.campaignActions(campaignId);
+    const open = new Set(
+      (await this.tasks(campaignId))
+        .filter((task) => !task.terminal_outcome)
+        .map((task) => task.task_id),
+    );
+    const running = new Set<string>();
+    const abandoned = new Set<string>();
+    for (const action of actions) {
+      if (action.action_kind !== "job.launch") continue;
+      const intent = JSON.parse(action.intent_body) as ActionIntent;
+      if (intent.payload.worker_role !== "execution") continue;
+      const taskIds = Array.isArray(intent.payload.task_ids)
+        ? intent.payload.task_ids.filter(
+            (taskId): taskId is string => typeof taskId === "string",
+          )
+        : [];
+      if (launchStillRunning(action, actions)) {
+        for (const taskId of taskIds) running.add(taskId);
+        continue;
+      }
+      if (!abandonedExecutionLaunch(action, actions)) continue;
+      for (const taskId of taskIds) abandoned.add(taskId);
+    }
+    return [...abandoned].filter((taskId) => open.has(taskId) && !running.has(taskId));
   }
 
   async taskExhaustion(

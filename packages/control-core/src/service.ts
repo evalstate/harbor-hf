@@ -1825,13 +1825,17 @@ export class ControlService {
       const policy = intent.payload.sandbox;
       if (!policy)
         throw new PolicyError("failed Sandbox create is missing budget identity");
-      await this.finalizeSandboxBudget(
-        intent.campaign_id,
-        intent.action_id,
-        receipt.created_at,
-        policy.reservation_microusd,
-        receipt.cost_microusd ?? 0,
+      const reservation = await this.projection.budget(
+        deterministicId("budget", intent.campaign_id, "sandbox", intent.action_id),
       );
+      if (reservation)
+        await this.finalizeSandboxBudget(
+          intent.campaign_id,
+          intent.action_id,
+          receipt.created_at,
+          policy.reservation_microusd,
+          receipt.cost_microusd ?? 0,
+        );
     } else if (
       intent.action_kind === "sandbox.close" &&
       receipt.outcome === "completed" &&
@@ -3003,6 +3007,8 @@ export class ControlService {
   ): boolean {
     if (launch.receipt_body === null) return true;
     if (jobStateIsTerminal(launch.observed_state)) return false;
+    const receipt = JSON.parse(launch.receipt_body) as ActionReceipt;
+    if (receipt.outcome === "failed") return false;
     return !actions.some((action) => {
       if (action.action_kind !== "job.observe" || action.receipt_body === null)
         return false;
@@ -3014,7 +3020,7 @@ export class ControlService {
     });
   }
 
-  private async laterExecutionLaunchExists(
+  async laterExecutionLaunchExists(
     campaignId: string,
     taskId: string,
     sourceActionId: string,
