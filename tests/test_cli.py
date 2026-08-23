@@ -5,7 +5,6 @@ from typing import cast
 
 import httpx
 import pytest
-from click import unstyle
 from typer.testing import CliRunner
 
 from harbor_hf.cli import app
@@ -260,9 +259,9 @@ def test_retry_infrastructure_requires_task_or_all_eligible(
         ["campaign", "retry-infrastructure", "campaign-one", "--yes"],
     )
     assert result.exit_code != 0
-    output = " ".join(unstyle(result.output).split())
-    assert "provide exactly one" in output
-    assert "of --task or --all-eligible" in output
+    assert json.loads(result.output) == {
+        "error": "provide exactly one of --task or --all-eligible"
+    }
 
 
 def test_campaign_pause_endpoint_uses_confirmed_control_action(

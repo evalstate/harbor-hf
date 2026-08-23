@@ -239,7 +239,7 @@ def campaign_retry_infrastructure(
 ) -> None:
     """Request a bounded infrastructure-only replacement."""
     if all_eligible == bool(task_id):
-        raise typer.BadParameter("provide exactly one of --task or --all-eligible")
+        _fail("provide exactly one of --task or --all-eligible")
     _campaign_action(
         campaign_id,
         "retry_infrastructure",
