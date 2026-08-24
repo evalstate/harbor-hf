@@ -181,6 +181,53 @@ The final verification manifest stays local.
 uv run python -m json.tool run-data-reset-verification.json
 ```
 
+## Migrate preserved profiles during Run-native cutover
+
+The one-time profile migration inventories only
+`control/schema=v1/profiles/`. It converts legacy capacity limits from
+Sandboxes to Jobs and converts legacy deployment Sandbox templates to
+digest-pinned trial Job templates. It renames legacy Run-ceiling policy fields
+and creates replacement promotions for changed profile identities.
+Current-schema profiles and unrelated promotions keep their original bytes. The
+tool does not access ACLs, Run data, Space configuration, credentials, or any
+other Bucket prefix.
+
+Keep control writes disabled and confirm that no HF Job is active. Create a
+fresh local manifest with the reviewed worker image digest and source revision:
+
+```bash
+uv run python scripts/migrate_run_native_profiles.py \
+  --bucket "<namespace>/<artifact-bucket>" \
+  --job-image "<worker-image>@sha256:<digest>" \
+  --worker-revision "<full-git-commit>" \
+  --manifest run-native-profile-migration-dry-run.json
+```
+
+The manifest contains counts, content digests, and a one-way digest binding it
+to the destination Bucket. It contains no Bucket ID, profile name, alias, or
+record ID. Review its `plan_digest`, then apply that exact plan:
+
+```bash
+uv run python scripts/migrate_run_native_profiles.py \
+  --bucket "<namespace>/<artifact-bucket>" \
+  --job-image "<worker-image>@sha256:<digest>" \
+  --worker-revision "<full-git-commit>" \
+  --apply \
+  --yes \
+  --expected-plan-digest "sha256:<plan-digest>" \
+  --dry-run-manifest run-native-profile-migration-dry-run.json \
+  --verification-manifest run-native-profile-migration-verification.json
+```
+
+The installed Bucket API is not transactional. Apply therefore adds and verifies
+replacement profile objects, active promotions, and historical promotions in
+three separate phases before deleting superseded records. An interrupted partial
+batch leaves a resumable state. Rerun the same apply command. Before any write,
+the tool verifies every downloaded Xet identity and checks both complete
+operation counts against the reviewed limit. Any destination mismatch,
+unreviewed content, path collision, concurrent inventory change, or malformed
+record aborts the migration.
+
 The [control service specification](docs/CONTROL_SERVICE.md) defines the durable record protocol, authentication boundary, recovery behavior, and deployment contract.
 
 ## Development
