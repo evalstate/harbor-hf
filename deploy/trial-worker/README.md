@@ -43,6 +43,10 @@ docker build -f deploy/trial-worker/Dockerfile -t <trial-worker-image> .
 docker image inspect <trial-worker-image> --format '{{json .RepoDigests}}'
 ```
 
+The `Publish trial worker` workflow publishes only the selected commit's
+`linux/amd64` image. It does not move a mutable `latest` tag. Record the
+resulting registry digest in every deployment profile before deployment.
+
 Before updating a deployment profile, review the installed Python, Harbor,
 `git`, `proot`, `setpriv`, `skopeo`, `umoci`, and `zstd` versions from the build log.
 Test the real-UID preflight, PRoot execution, process cleanup, transfer freeze,
