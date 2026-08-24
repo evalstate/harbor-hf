@@ -15,19 +15,19 @@ from huggingface_hub import CommitOperationAdd, HfApi
 from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
-from harbor_hf.campaigns import CampaignLock
 from harbor_hf.coordination import coordination_repository
+from harbor_hf.runs import RunLock
 
 _MAX_COMMIT_ATTEMPTS = 8
 _MAX_EVENT_BATCH_OPERATIONS = 50
 _MAX_CONTROL_READ_WORKERS = 20
-_CAMPAIGN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _RECONCILER_DURABLE_EVENT_KINDS = {
-    "campaign.draining",
-    "campaign.manual-intervention-required",
-    "campaign.manual-intervention-resolved",
-    "execution.failed",
-    "execution.cancelled",
+    "run.draining",
+    "run.manual-intervention-required",
+    "run.manual-intervention-resolved",
+    "attempt.failed",
+    "attempt.cancelled",
     "trial.invalid",
     "trial.failed-infrastructure",
     "wave.draining",
@@ -35,7 +35,7 @@ _RECONCILER_DURABLE_EVENT_KINDS = {
     "wave.closed",
 }
 
-SubjectType = Literal["campaign", "run", "shard", "trial", "execution", "wave"]
+SubjectType = Literal["run", "execution", "shard", "trial", "attempt", "wave"]
 Producer = Literal["cli", "reconciler", "wave-controller", "watchdog", "publisher"]
 RetryCategory = Literal[
     "lost",
@@ -51,24 +51,24 @@ RetryCategory = Literal[
     "evidence",
 ]
 EventKind = Literal[
-    "campaign.submitted",
-    "campaign.cancel-requested",
-    "campaign.shard-retry-requested",
-    "campaign.draining",
-    "campaign.manual-intervention-required",
-    "campaign.manual-intervention-resolved",
-    "campaign.completed",
-    "campaign.partial",
-    "campaign.failed",
-    "campaign.cancelled",
-    "run.queued",
-    "run.active",
-    "run.verifying",
-    "run.publishing",
-    "run.complete",
-    "run.invalid",
-    "run.failed-infrastructure",
+    "run.submitted",
+    "run.cancel-requested",
+    "run.shard-retry-requested",
+    "run.draining",
+    "run.manual-intervention-required",
+    "run.manual-intervention-resolved",
+    "run.completed",
+    "run.partial",
+    "run.failed",
     "run.cancelled",
+    "execution.queued",
+    "execution.active",
+    "execution.verifying",
+    "execution.publishing",
+    "execution.complete",
+    "execution.invalid",
+    "execution.failed-infrastructure",
+    "execution.cancelled",
     "shard.queued",
     "shard.active",
     "shard.verifying",
@@ -81,10 +81,10 @@ EventKind = Literal[
     "trial.invalid",
     "trial.failed-infrastructure",
     "trial.cancelled",
-    "execution.started",
-    "execution.completed",
-    "execution.failed",
-    "execution.cancelled",
+    "attempt.started",
+    "attempt.completed",
+    "attempt.failed",
+    "attempt.cancelled",
     "wave.acquiring",
     "wave.provisioning",
     "wave.ready",
@@ -114,14 +114,14 @@ ActionKind = Literal[
 
 
 class ControlError(RuntimeError):
-    """Raised when durable campaign state cannot be safely read or changed."""
+    """Raised when durable run state cannot be safely read or changed."""
 
 
-class CampaignConflict(ControlError):
-    """Raised when a campaign identity or action reservation already exists."""
+class RunConflict(ControlError):
+    """Raised when a run identity or action reservation already exists."""
 
 
-class CampaignCancellationWon(ControlError):
+class RunCancellationWon(ControlError):
     """Raised when cancellation commits before guarded terminal events."""
 
 
@@ -129,7 +129,7 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class CampaignSubmittedPayload(FrozenModel):
+class RunSubmittedPayload(FrozenModel):
     plan_digest: str
 
 
@@ -166,7 +166,7 @@ class WaveLifecyclePayload(FrozenModel):
     estimated_cost_microusd: int = Field(default=0, ge=0)
 
 
-class ExecutionStartedPayload(FrozenModel):
+class AttemptStartedPayload(FrozenModel):
     trial_id: str
     shard_id: str
     physical_attempt: int = Field(ge=1)
@@ -174,7 +174,7 @@ class ExecutionStartedPayload(FrozenModel):
     estimated_cost_microusd: int = Field(default=0, ge=0)
 
 
-class ExecutionOutcomePayload(FrozenModel):
+class AttemptOutcomePayload(FrozenModel):
     trial_id: str
     physical_attempt: int = Field(ge=1)
     category: RetryCategory | None = None
@@ -185,7 +185,7 @@ class ExecutionOutcomePayload(FrozenModel):
 
 class SpendRecordedPayload(FrozenModel):
     amount_microusd: int = Field(ge=0)
-    source_execution_id: str | None = None
+    source_attempt_id: str | None = None
 
 
 class ActionReservedPayload(FrozenModel):
@@ -202,25 +202,25 @@ class ActionOutcomePayload(FrozenModel):
 
 
 EventPayload = (
-    CampaignSubmittedPayload
+    RunSubmittedPayload
     | CancellationPayload
     | ShardRetryPayload
     | TerminalPayload
     | LifecyclePayload
     | ManualInterventionResolutionPayload
     | WaveLifecyclePayload
-    | ExecutionStartedPayload
-    | ExecutionOutcomePayload
+    | AttemptStartedPayload
+    | AttemptOutcomePayload
     | SpendRecordedPayload
     | ActionReservedPayload
     | ActionOutcomePayload
 )
 
-_CAMPAIGN_TERMINAL_KINDS = {
-    "campaign.completed",
-    "campaign.partial",
-    "campaign.failed",
-    "campaign.cancelled",
+_RUN_TERMINAL_KINDS = {
+    "run.completed",
+    "run.partial",
+    "run.failed",
+    "run.cancelled",
 }
 _WAVE_KINDS = {
     "wave.acquiring",
@@ -232,23 +232,23 @@ _WAVE_KINDS = {
     "wave.closed",
     "wave.cleanup-failed",
 }
-_EXECUTION_OUTCOME_KINDS = {
-    "execution.completed",
-    "execution.failed",
-    "execution.cancelled",
+_ATTEMPT_OUTCOME_KINDS = {
+    "attempt.completed",
+    "attempt.failed",
+    "attempt.cancelled",
 }
 _EXACT_PAYLOAD_TYPES: dict[str, type[BaseModel]] = {
-    "campaign.submitted": CampaignSubmittedPayload,
-    "campaign.cancel-requested": CancellationPayload,
-    "campaign.shard-retry-requested": ShardRetryPayload,
-    "campaign.manual-intervention-resolved": ManualInterventionResolutionPayload,
-    "execution.started": ExecutionStartedPayload,
+    "run.submitted": RunSubmittedPayload,
+    "run.cancel-requested": CancellationPayload,
+    "run.shard-retry-requested": ShardRetryPayload,
+    "run.manual-intervention-resolved": ManualInterventionResolutionPayload,
+    "attempt.started": AttemptStartedPayload,
     "spend.recorded": SpendRecordedPayload,
     "action.reserved": ActionReservedPayload,
 }
 
 
-class CampaignEvent(FrozenModel):
+class RunEvent(FrozenModel):
     schema_version: Literal["harbor-hf/event/v1alpha1"] = "harbor-hf/event/v1alpha1"
     event_id: str = Field(pattern=r"^evt-[0-9a-f]{32}$")
     subject_type: SubjectType
@@ -259,16 +259,16 @@ class CampaignEvent(FrozenModel):
     payload: EventPayload
 
     @model_validator(mode="after")
-    def payload_matches_kind(self) -> CampaignEvent:
+    def payload_matches_kind(self) -> RunEvent:
         expected = _payload_type(self.kind)
         if not isinstance(self.payload, expected):
             raise ValueError(f"event payload does not match {self.kind}")
         prefix = self.kind.split(".", maxsplit=1)[0]
-        if prefix in {"campaign", "run", "shard", "trial", "execution", "wave"}:
+        if prefix in {"run", "execution", "shard", "trial", "attempt", "wave"}:
             if self.subject_type != prefix:
                 raise ValueError(f"event subject type does not match {self.kind}")
-        elif self.kind.startswith("action.") and self.subject_type != "campaign":
-            raise ValueError("action events must have a campaign subject")
+        elif self.kind.startswith("action.") and self.subject_type != "run":
+            raise ValueError("action events must have a run subject")
         return self
 
 
@@ -276,10 +276,10 @@ def _payload_type(kind: EventKind) -> type[BaseModel]:
     exact = _EXACT_PAYLOAD_TYPES.get(kind)
     if exact is not None:
         return exact
-    if kind in _CAMPAIGN_TERMINAL_KINDS:
+    if kind in _RUN_TERMINAL_KINDS:
         return TerminalPayload
-    if kind in _EXECUTION_OUTCOME_KINDS:
-        return ExecutionOutcomePayload
+    if kind in _ATTEMPT_OUTCOME_KINDS:
+        return AttemptOutcomePayload
     if kind in _WAVE_KINDS:
         return WaveLifecyclePayload
     if kind.startswith("action."):
@@ -304,8 +304,8 @@ def new_event(
     payload: EventPayload,
     clock: Clock = lambda: datetime.now(UTC),
     identifier: IdentifierFactory = lambda: uuid.uuid4().hex,
-) -> CampaignEvent:
-    return CampaignEvent(
+) -> RunEvent:
+    return RunEvent(
         event_id=f"evt-{identifier()}",
         subject_type=subject_type,
         subject_id=subject_id,
@@ -317,7 +317,7 @@ def new_event(
 
 
 ActionStatus = Literal["reserved", "succeeded", "failed", "ambiguous"]
-CampaignStatus = Literal[
+RunStatus = Literal[
     "queued",
     "active",
     "cancel_requested",
@@ -340,124 +340,122 @@ class ActionProjection(FrozenModel):
     message: str | None = None
 
 
-class CampaignProjection(FrozenModel):
-    campaign_id: str
+class RunProjection(FrozenModel):
+    run_id: str
     plan_digest: str
-    status: CampaignStatus
+    status: RunStatus
     event_count: int
     last_observed_at: datetime
     actions: dict[str, ActionProjection]
 
 
-def project_campaign(
-    lock: CampaignLock, events: list[CampaignEvent]
-) -> CampaignProjection:
+def project_run(lock: RunLock, events: list[RunEvent]) -> RunProjection:
     ordered = ordered_events(events)
     if not ordered:
-        raise ControlError("campaign has no submission event")
+        raise ControlError("run has no submission event")
     first = ordered[0]
     if (
-        first.kind != "campaign.submitted"
-        or first.subject_type != "campaign"
-        or first.subject_id != lock.campaign_id
-        or not isinstance(first.payload, CampaignSubmittedPayload)
+        first.kind != "run.submitted"
+        or first.subject_type != "run"
+        or first.subject_id != lock.run_id
+        or not isinstance(first.payload, RunSubmittedPayload)
         or first.payload.plan_digest != lock.plan_digest
     ):
-        raise ControlError("campaign submission event does not match its lock")
+        raise ControlError("run submission event does not match its lock")
 
-    status: CampaignStatus = "queued"
-    status_before_manual_intervention: CampaignStatus | None = None
+    status: RunStatus = "queued"
+    status_before_manual_intervention: RunStatus | None = None
     manual_requirements: set[str] = set()
     actions: dict[str, ActionProjection] = {}
     for event in ordered[1:]:
         if status in {"completed", "partial", "failed", "cancelled"}:
-            raise ControlError("campaign has events after a terminal transition")
-        if event.subject_type != "campaign":
+            raise ControlError("run has events after a terminal transition")
+        if event.subject_type != "run":
             continue
         status_before_manual_intervention = _manual_return_status(
             event,
-            cast(CampaignStatus, status),
+            cast(RunStatus, status),
             status_before_manual_intervention,
         )
         _update_manual_requirements(event, manual_requirements)
         status = _apply_event(
             lock,
             event,
-            cast(CampaignStatus, status),
+            cast(RunStatus, status),
             actions,
             status_before_manual_intervention=status_before_manual_intervention,
             manual_intervention_remaining=bool(manual_requirements),
         )
         if _manual_intervention_fully_resolved(event, manual_requirements):
             status_before_manual_intervention = None
-    return CampaignProjection(
-        campaign_id=lock.campaign_id,
+    return RunProjection(
+        run_id=lock.run_id,
         plan_digest=lock.plan_digest,
-        status=cast(CampaignStatus, status),
+        status=cast(RunStatus, status),
         event_count=len(ordered),
         last_observed_at=ordered[-1].observed_at,
         actions=actions,
     )
 
 
-def _update_manual_requirements(event: CampaignEvent, requirements: set[str]) -> None:
-    if event.kind == "campaign.manual-intervention-required":
+def _update_manual_requirements(event: RunEvent, requirements: set[str]) -> None:
+    if event.kind == "run.manual-intervention-required":
         payload = cast(LifecyclePayload, event.payload)
         requirements.add(payload.parent_id or event.event_id)
-    elif event.kind == "campaign.manual-intervention-resolved":
+    elif event.kind == "run.manual-intervention-resolved":
         payload = cast(ManualInterventionResolutionPayload, event.payload)
         requirements.difference_update(payload.wave_ids)
 
 
 def _manual_intervention_fully_resolved(
-    event: CampaignEvent, requirements: set[str]
+    event: RunEvent, requirements: set[str]
 ) -> bool:
-    return event.kind == "campaign.manual-intervention-resolved" and not requirements
+    return event.kind == "run.manual-intervention-resolved" and not requirements
 
 
 def _manual_return_status(
-    event: CampaignEvent,
-    status: CampaignStatus,
-    previous: CampaignStatus | None,
-) -> CampaignStatus | None:
+    event: RunEvent,
+    status: RunStatus,
+    previous: RunStatus | None,
+) -> RunStatus | None:
     if (
-        event.kind == "campaign.manual-intervention-required"
+        event.kind == "run.manual-intervention-required"
         and status != "manual_intervention"
     ):
         return status
     if (
-        event.kind == "campaign.cancel-requested"
+        event.kind == "run.cancel-requested"
         and status == "manual_intervention"
         and previous != "draining"
     ):
         return "cancel_requested"
-    if event.kind == "campaign.draining" and status == "manual_intervention":
+    if event.kind == "run.draining" and status == "manual_intervention":
         return "draining"
     return previous
 
 
 def _apply_event(
-    lock: CampaignLock,
-    event: CampaignEvent,
-    status: CampaignStatus,
+    lock: RunLock,
+    event: RunEvent,
+    status: RunStatus,
     actions: dict[str, ActionProjection],
     *,
-    status_before_manual_intervention: CampaignStatus | None,
+    status_before_manual_intervention: RunStatus | None,
     manual_intervention_remaining: bool,
-) -> CampaignStatus:
-    if event.subject_type != "campaign" or event.subject_id != lock.campaign_id:
-        raise ControlError("campaign event has the wrong subject")
-    if event.kind == "campaign.submitted":
-        raise ControlError("campaign has multiple submission events")
+) -> RunStatus:
+    if event.subject_type != "run" or event.subject_id != lock.run_id:
+        raise ControlError("run event has the wrong subject")
+    if event.kind == "run.submitted":
+        raise ControlError("run has multiple submission events")
     if event.kind in {
-        "campaign.cancel-requested",
-        "campaign.shard-retry-requested",
+        "run.cancel-requested",
+        "run.shard-retry-requested",
     }:
         return _apply_operator_request(event, status)
     if event.kind in {
-        "campaign.draining",
-        "campaign.manual-intervention-required",
-        "campaign.manual-intervention-resolved",
+        "run.draining",
+        "run.manual-intervention-required",
+        "run.manual-intervention-resolved",
     }:
         return _apply_manual_lifecycle_event(
             event,
@@ -465,21 +463,21 @@ def _apply_event(
             status_before_manual_intervention,
             manual_intervention_remaining,
         )
-    if event.kind.startswith("campaign."):
-        return cast(CampaignStatus, event.kind.removeprefix("campaign."))
+    if event.kind.startswith("run."):
+        return cast(RunStatus, event.kind.removeprefix("run."))
     _apply_action_event(event, actions)
     return "active" if status == "queued" else status
 
 
 def _apply_manual_lifecycle_event(
-    event: CampaignEvent,
-    status: CampaignStatus,
-    previous: CampaignStatus | None,
+    event: RunEvent,
+    status: RunStatus,
+    previous: RunStatus | None,
     manual_intervention_remaining: bool,
-) -> CampaignStatus:
-    if event.kind == "campaign.draining":
+) -> RunStatus:
+    if event.kind == "run.draining":
         return "manual_intervention" if status == "manual_intervention" else "draining"
-    if event.kind == "campaign.manual-intervention-required":
+    if event.kind == "run.manual-intervention-required":
         return "manual_intervention"
     if manual_intervention_remaining:
         return "manual_intervention"
@@ -487,8 +485,8 @@ def _apply_manual_lifecycle_event(
 
 
 def _resolve_manual_intervention(
-    status: CampaignStatus, previous: CampaignStatus | None
-) -> CampaignStatus:
+    status: RunStatus, previous: RunStatus | None
+) -> RunStatus:
     if status != "manual_intervention":
         raise ControlError("manual intervention can only be resolved while required")
     if previous in {"cancel_requested", "draining"}:
@@ -496,19 +494,15 @@ def _resolve_manual_intervention(
     return "active"
 
 
-def _apply_operator_request(
-    event: CampaignEvent, status: CampaignStatus
-) -> CampaignStatus:
-    if event.kind == "campaign.shard-retry-requested":
+def _apply_operator_request(event: RunEvent, status: RunStatus) -> RunStatus:
+    if event.kind == "run.shard-retry-requested":
         return "active" if status == "queued" else status
     if status in {"draining", "manual_intervention"}:
         return status
     return "cancel_requested"
 
 
-def _apply_action_event(
-    event: CampaignEvent, actions: dict[str, ActionProjection]
-) -> None:
+def _apply_action_event(event: RunEvent, actions: dict[str, ActionProjection]) -> None:
     if event.kind == "action.reserved":
         payload = cast(ActionReservedPayload, event.payload)
         if payload.action_id in actions:
@@ -551,8 +545,8 @@ def _apply_action_event(
     )
 
 
-def ordered_events(events: list[CampaignEvent]) -> list[CampaignEvent]:
-    unique: dict[str, CampaignEvent] = {}
+def ordered_events(events: list[RunEvent]) -> list[RunEvent]:
+    unique: dict[str, RunEvent] = {}
     for event in events:
         previous = unique.get(event.event_id)
         if previous is not None and previous != event:
@@ -563,7 +557,7 @@ def ordered_events(events: list[CampaignEvent]) -> list[CampaignEvent]:
     )
 
 
-class CampaignStoreApi(Protocol):
+class RunStoreApi(Protocol):
     def repo_info(self, repo_id: str, **kwargs: object) -> object: ...
 
     def get_paths_info(
@@ -585,63 +579,55 @@ class RepoTreeApi(Protocol):
     ) -> Iterable[object]: ...
 
 
-class CampaignStore(Protocol):
-    def create_campaign(
-        self, lock: CampaignLock, request: bytes, event: CampaignEvent
-    ) -> None: ...
+class RunStore(Protocol):
+    def create_run(self, lock: RunLock, request: bytes, event: RunEvent) -> None: ...
 
-    def load_campaign(
-        self, campaign_id: str
-    ) -> tuple[CampaignLock, list[CampaignEvent]]: ...
+    def load_run(self, run_id: str) -> tuple[RunLock, list[RunEvent]]: ...
 
-    def load_request(self, campaign_id: str) -> bytes: ...
+    def load_request(self, run_id: str) -> bytes: ...
 
-    def list_campaigns(self) -> list[str]: ...
+    def list_runs(self) -> list[str]: ...
 
-    def load_action_reservations(
-        self, campaign_id: str
-    ) -> list[dict[str, JsonValue]]: ...
+    def load_action_reservations(self, run_id: str) -> list[dict[str, JsonValue]]: ...
 
-    def append_event(self, campaign_id: str, event: CampaignEvent) -> None: ...
+    def append_event(self, run_id: str, event: RunEvent) -> None: ...
 
-    def ensure_event(self, campaign_id: str, event: CampaignEvent) -> bool: ...
+    def ensure_event(self, run_id: str, event: RunEvent) -> bool: ...
 
-    def ensure_events(self, campaign_id: str, events: list[CampaignEvent]) -> bool: ...
+    def ensure_events(self, run_id: str, events: list[RunEvent]) -> bool: ...
 
     def ensure_events_unless_cancelled(
-        self, campaign_id: str, events: list[CampaignEvent]
+        self, run_id: str, events: list[RunEvent]
     ) -> bool: ...
 
-    def load_snapshot(self, campaign_id: str) -> CampaignSnapshot: ...
+    def load_snapshot(self, run_id: str) -> RunSnapshot: ...
 
     def reserve_action(
-        self, campaign_id: str, action: Mapping[str, JsonValue], event: CampaignEvent
+        self, run_id: str, action: Mapping[str, JsonValue], event: RunEvent
     ) -> bool: ...
 
 
 @dataclass(frozen=True)
-class CampaignSnapshot:
-    lock: CampaignLock
-    events: list[CampaignEvent]
+class RunSnapshot:
+    lock: RunLock
+    events: list[RunEvent]
     request: bytes
     control_commit: str
 
 
-class HubCampaignStore:
-    def __init__(self, namespace: str, *, api: CampaignStoreApi | None = None) -> None:
+class HubRunStore:
+    def __init__(self, namespace: str, *, api: RunStoreApi | None = None) -> None:
         self.repository = coordination_repository(namespace)
-        self.api = api or cast(CampaignStoreApi, HfApi())
+        self.api = api or cast(RunStoreApi, HfApi())
 
-    def create_campaign(
-        self, lock: CampaignLock, request: bytes, event: CampaignEvent
-    ) -> None:
-        if event.kind != "campaign.submitted" or event.subject_id != lock.campaign_id:
-            raise ValueError("campaign creation requires its submission event")
-        lock_path = _campaign_lock_path(lock.campaign_id)
-        reservation_path = _campaign_reservation_path(lock.campaign_id)
+    def create_run(self, lock: RunLock, request: bytes, event: RunEvent) -> None:
+        if event.kind != "run.submitted" or event.subject_id != lock.run_id:
+            raise ValueError("run creation requires its submission event")
+        lock_path = _run_lock_path(lock.run_id)
+        reservation_path = _run_reservation_path(lock.run_id)
         operations: list[object] = [
             CommitOperationAdd(
-                path_in_repo=_campaign_request_path(lock.campaign_id),
+                path_in_repo=_run_request_path(lock.run_id),
                 path_or_fileobj=request,
             ),
             CommitOperationAdd(
@@ -649,38 +635,36 @@ class HubCampaignStore:
                 path_or_fileobj=_json_bytes(lock.model_dump(mode="json")),
             ),
             CommitOperationAdd(
-                path_in_repo=_event_path(lock.campaign_id, event.event_id),
+                path_in_repo=_event_path(lock.run_id, event.event_id),
                 path_or_fileobj=_json_bytes(event.model_dump(mode="json")),
             ),
             CommitOperationAdd(
                 path_in_repo=reservation_path,
                 path_or_fileobj=_json_bytes(
-                    {"campaign_id": lock.campaign_id, "plan_digest": lock.plan_digest}
+                    {"run_id": lock.run_id, "plan_digest": lock.plan_digest}
                 ),
             ),
         ]
         self._create_absent(
             lock_path,
             operations,
-            f"feat: submit campaign {lock.campaign_id}",
-            conflict=f"campaign already exists: {lock.campaign_id}",
+            f"feat: submit run {lock.run_id}",
+            conflict=f"run already exists: {lock.run_id}",
         )
 
-    def load_campaign(
-        self, campaign_id: str
-    ) -> tuple[CampaignLock, list[CampaignEvent]]:
-        snapshot = self.load_snapshot(campaign_id)
+    def load_run(self, run_id: str) -> tuple[RunLock, list[RunEvent]]:
+        snapshot = self.load_snapshot(run_id)
         return snapshot.lock, snapshot.events
 
-    def load_snapshot(self, campaign_id: str) -> CampaignSnapshot:
+    def load_snapshot(self, run_id: str) -> RunSnapshot:
         head = self._head()
-        lock_path = _campaign_lock_path(campaign_id)
-        lock = CampaignLock.model_validate(self._read_json(lock_path, head))
-        events = self._load_events_at(campaign_id, head)
-        return CampaignSnapshot(
+        lock_path = _run_lock_path(run_id)
+        lock = RunLock.model_validate(self._read_json(lock_path, head))
+        events = self._load_events_at(run_id, head)
+        return RunSnapshot(
             lock=lock,
             events=events,
-            request=self._read_bytes(_campaign_request_path(campaign_id), head),
+            request=self._read_bytes(_run_request_path(run_id), head),
             control_commit=head,
         )
 
@@ -704,46 +688,44 @@ class HubCampaignStore:
             and path.startswith(prefix)
         )
 
-    def _load_events_at(self, campaign_id: str, revision: str) -> list[CampaignEvent]:
-        prefix = f"campaigns/{campaign_id}/events/"
+    def _load_events_at(self, run_id: str, revision: str) -> list[RunEvent]:
+        prefix = f"runs/{run_id}/events/"
         paths = [
             path
             for path in self._paths_under(prefix, revision)
             if path.endswith(".json")
         ]
 
-        def load(path: str) -> CampaignEvent:
-            return CampaignEvent.model_validate(self._read_json(path, revision))
+        def load(path: str) -> RunEvent:
+            return RunEvent.model_validate(self._read_json(path, revision))
 
         with ThreadPoolExecutor(max_workers=_MAX_CONTROL_READ_WORKERS) as executor:
             return list(executor.map(load, paths))
 
-    def load_request(self, campaign_id: str) -> bytes:
+    def load_request(self, run_id: str) -> bytes:
         head = self._head()
-        return self._read_bytes(_campaign_request_path(campaign_id), head)
+        return self._read_bytes(_run_request_path(run_id), head)
 
-    def list_campaigns(self) -> list[str]:
+    def list_runs(self) -> list[str]:
         head = self._head()
-        suffix = "/campaign.lock.json"
-        campaign_ids = {
-            path.removeprefix("campaigns/").removesuffix(suffix)
+        suffix = "/run.lock.json"
+        run_ids = {
+            path.removeprefix("runs/").removesuffix(suffix)
             for path in self.api.list_repo_files(
                 self.repository,
                 repo_type="dataset",
                 revision=head,
             )
-            if path.startswith("campaigns/")
+            if path.startswith("runs/")
             and path.endswith(suffix)
-            and _CAMPAIGN_ID.fullmatch(
-                path.removeprefix("campaigns/").removesuffix(suffix)
-            )
+            and _RUN_ID.fullmatch(path.removeprefix("runs/").removesuffix(suffix))
             is not None
         }
-        return sorted(campaign_ids)
+        return sorted(run_ids)
 
-    def load_action_reservations(self, campaign_id: str) -> list[dict[str, JsonValue]]:
+    def load_action_reservations(self, run_id: str) -> list[dict[str, JsonValue]]:
         head = self._head()
-        prefix = f"campaigns/{campaign_id}/reservations/"
+        prefix = f"runs/{run_id}/reservations/"
         paths = [
             path for path in self._paths_under(prefix, head) if path.endswith(".json")
         ]
@@ -757,11 +739,11 @@ class HubCampaignStore:
             reservations.append(cast(dict[str, JsonValue], value))
         return reservations
 
-    def append_event(self, campaign_id: str, event: CampaignEvent) -> None:
-        _validate_event_scope(campaign_id, event)
-        if event.kind == "campaign.cancel-requested":
+    def append_event(self, run_id: str, event: RunEvent) -> None:
+        _validate_event_scope(run_id, event)
+        if event.kind == "run.cancel-requested":
             raise ValueError("cancellation events require an atomic marker")
-        path = _event_path(campaign_id, event.event_id)
+        path = _event_path(run_id, event.event_id)
         self._create_absent(
             path,
             [
@@ -774,21 +756,21 @@ class HubCampaignStore:
             conflict=f"event already exists: {event.event_id}",
         )
 
-    def ensure_event(self, campaign_id: str, event: CampaignEvent) -> bool:
+    def ensure_event(self, run_id: str, event: RunEvent) -> bool:
         """Append an event once, adopting an identical concurrent request."""
-        _validate_event_scope(campaign_id, event)
-        if event.kind == "campaign.cancel-requested":
-            return self._ensure_cancellation_event(campaign_id, event)
-        if event.kind == "campaign.manual-intervention-resolved":
-            return self._ensure_manual_resolution_event(campaign_id, event)
-        path = _event_path(campaign_id, event.event_id)
+        _validate_event_scope(run_id, event)
+        if event.kind == "run.cancel-requested":
+            return self._ensure_cancellation_event(run_id, event)
+        if event.kind == "run.manual-intervention-resolved":
+            return self._ensure_manual_resolution_event(run_id, event)
+        path = _event_path(run_id, event.event_id)
         expected = event.model_dump(mode="json")
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             if self._exists(path, head):
                 observed = self._read_json(path, head)
                 if not _same_event_request(observed, expected):
-                    raise CampaignConflict(f"event conflicts: {event.event_id}")
+                    raise RunConflict(f"event conflicts: {event.event_id}")
                 return False
             try:
                 self.api.create_commit(
@@ -810,9 +792,9 @@ class HubCampaignStore:
                     raise
         raise ControlError("control repository remained contended")
 
-    def ensure_events(self, campaign_id: str, events: list[CampaignEvent]) -> bool:
+    def ensure_events(self, run_id: str, events: list[RunEvent]) -> bool:
         """Append observed events in bounded control repository commits."""
-        expected_by_path = _event_payloads(campaign_id, events)
+        expected_by_path = _event_payloads(run_id, events)
         changed = False
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
@@ -832,7 +814,7 @@ class HubCampaignStore:
                             )
                             for path, expected in batch
                         ],
-                        commit_message="chore: record observed campaign events",
+                        commit_message="chore: record observed run events",
                         repo_type="dataset",
                         revision="main",
                         parent_commit=head,
@@ -850,21 +832,17 @@ class HubCampaignStore:
                     raise
         raise ControlError("control repository remained contended")
 
-    def _ensure_manual_resolution_event(
-        self, campaign_id: str, event: CampaignEvent
-    ) -> bool:
-        path = _event_path(campaign_id, event.event_id)
+    def _ensure_manual_resolution_event(self, run_id: str, event: RunEvent) -> bool:
+        path = _event_path(run_id, event.event_id)
         expected = event.model_dump(mode="json")
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             if self._exists(path, head):
                 observed = self._read_json(path, head)
                 if not _same_event_request(observed, expected):
-                    raise CampaignConflict(f"event conflicts: {event.event_id}")
+                    raise RunConflict(f"event conflicts: {event.event_id}")
                 return False
-            _validate_manual_resolution_basis(
-                event, self._load_events_at(campaign_id, head)
-            )
+            _validate_manual_resolution_basis(event, self._load_events_at(run_id, head))
             try:
                 self.api.create_commit(
                     self.repository,
@@ -885,26 +863,24 @@ class HubCampaignStore:
                     raise
         raise ControlError("control repository remained contended")
 
-    def _ensure_cancellation_event(
-        self, campaign_id: str, event: CampaignEvent
-    ) -> bool:
-        event_path = _event_path(campaign_id, event.event_id)
-        marker_path = _campaign_cancellation_path(campaign_id)
+    def _ensure_cancellation_event(self, run_id: str, event: RunEvent) -> bool:
+        event_path = _event_path(run_id, event.event_id)
+        marker_path = _run_cancellation_path(run_id)
         expected = event.model_dump(mode="json")
-        marker = {"campaign_id": campaign_id, "event_id": event.event_id}
+        marker = {"run_id": run_id, "event_id": event.event_id}
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             event_exists = self._exists(event_path, head)
             marker_exists = self._exists(marker_path, head)
             if event_exists != marker_exists:
-                raise ControlError("campaign cancellation state is incomplete")
+                raise ControlError("run cancellation state is incomplete")
             if event_exists:
                 observed = self._read_json(event_path, head)
                 observed_marker = self._read_json(marker_path, head)
                 if not _same_event_request(observed, expected):
-                    raise CampaignConflict(f"event conflicts: {event.event_id}")
+                    raise RunConflict(f"event conflicts: {event.event_id}")
                 if observed_marker != marker:
-                    raise CampaignConflict("campaign cancellation marker conflicts")
+                    raise RunConflict("run cancellation marker conflicts")
                 return False
             try:
                 self.api.create_commit(
@@ -919,7 +895,7 @@ class HubCampaignStore:
                             path_or_fileobj=_json_bytes(marker),
                         ),
                     ],
-                    commit_message="chore: request campaign cancellation",
+                    commit_message="chore: request run cancellation",
                     repo_type="dataset",
                     revision="main",
                     parent_commit=head,
@@ -931,19 +907,19 @@ class HubCampaignStore:
         raise ControlError("control repository remained contended")
 
     def ensure_events_unless_cancelled(
-        self, campaign_id: str, events: list[CampaignEvent]
+        self, run_id: str, events: list[RunEvent]
     ) -> bool:
         """Commit terminal events atomically unless cancellation won the race."""
-        expected_by_path = _guarded_event_payloads(campaign_id, events)
+        expected_by_path = _guarded_event_payloads(run_id, events)
 
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             missing = self._missing_events(expected_by_path, head)
             if not missing:
                 return False
-            if self._cancellation_requested(campaign_id, head):
-                raise CampaignCancellationWon(
-                    "campaign cancellation superseded guarded terminal events"
+            if self._cancellation_requested(run_id, head):
+                raise RunCancellationWon(
+                    "run cancellation superseded guarded terminal events"
                 )
             try:
                 self.api.create_commit(
@@ -983,7 +959,7 @@ class HubCampaignStore:
                 continue
             observed = self._read_json(path, head)
             if not _same_event_request(observed, expected):
-                raise CampaignConflict(f"event conflicts: {path}")
+                raise RunConflict(f"event conflicts: {path}")
         return missing
 
     def _missing_events(
@@ -996,28 +972,28 @@ class HubCampaignStore:
                 continue
             observed = self._read_json(path, head)
             if not _same_event_request(observed, expected):
-                raise CampaignConflict(f"event conflicts: {path}")
+                raise RunConflict(f"event conflicts: {path}")
         return missing
 
-    def _cancellation_requested(self, campaign_id: str, head: str) -> bool:
-        return self._exists(_campaign_cancellation_path(campaign_id), head)
+    def _cancellation_requested(self, run_id: str, head: str) -> bool:
+        return self._exists(_run_cancellation_path(run_id), head)
 
     def reserve_action(
         self,
-        campaign_id: str,
+        run_id: str,
         action: Mapping[str, JsonValue],
-        event: CampaignEvent,
+        event: RunEvent,
     ) -> bool:
-        if event.kind != "action.reserved" or event.subject_id != campaign_id:
+        if event.kind != "action.reserved" or event.subject_id != run_id:
             raise ValueError("action reservation requires its reservation event")
         payload = cast(ActionReservedPayload, event.payload)
-        path = _action_reservation_path(campaign_id, payload.action_id)
+        path = _action_reservation_path(run_id, payload.action_id)
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             if self._exists(path, head):
                 observed = self._read_json(path, head)
                 if observed != dict(action):
-                    raise CampaignConflict("action reservation content conflicts")
+                    raise RunConflict("action reservation content conflicts")
                 return False
             try:
                 self.api.create_commit(
@@ -1028,7 +1004,7 @@ class HubCampaignStore:
                             path_or_fileobj=_json_bytes(dict(action)),
                         ),
                         CommitOperationAdd(
-                            path_in_repo=_event_path(campaign_id, event.event_id),
+                            path_in_repo=_event_path(run_id, event.event_id),
                             path_or_fileobj=_json_bytes(event.model_dump(mode="json")),
                         ),
                     ],
@@ -1054,7 +1030,7 @@ class HubCampaignStore:
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             if self._exists(path, head):
-                raise CampaignConflict(conflict)
+                raise RunConflict(conflict)
             try:
                 self.api.create_commit(
                     self.repository,
@@ -1109,7 +1085,7 @@ class HubCampaignStore:
             raise ControlError(f"control record cannot be read: {path}") from error
 
 
-def same_event_request(observed: CampaignEvent, expected: CampaignEvent) -> bool:
+def same_event_request(observed: RunEvent, expected: RunEvent) -> bool:
     return _same_event_request(
         observed.model_dump(mode="json"), expected.model_dump(mode="json")
     )
@@ -1134,23 +1110,23 @@ def _same_event_request(observed: object, expected: dict[str, JsonValue]) -> boo
 
 
 def _validate_manual_resolution_basis(
-    resolution: CampaignEvent, events: list[CampaignEvent]
+    resolution: RunEvent, events: list[RunEvent]
 ) -> None:
     payload = cast(ManualInterventionResolutionPayload, resolution.payload)
     missing = _cleanup_failed_wave_ids(events) - set(payload.wave_ids)
     if missing:
         names = ", ".join(sorted(missing))
-        raise CampaignConflict(
+        raise RunConflict(
             f"cleanup state changed; verify these waves before resuming: {names}"
         )
 
 
-def _cleanup_failed_wave_ids(events: list[CampaignEvent]) -> set[str]:
+def _cleanup_failed_wave_ids(events: list[RunEvent]) -> set[str]:
     states: dict[str, str] = {}
     for event in ordered_events(events):
         if event.kind.startswith("wave."):
             states[event.subject_id] = event.kind
-        elif event.kind == "campaign.manual-intervention-resolved":
+        elif event.kind == "run.manual-intervention-resolved":
             payload = cast(ManualInterventionResolutionPayload, event.payload)
             for wave_id in payload.wave_ids:
                 if states.get(wave_id) == "wave.cleanup-failed":
@@ -1160,78 +1136,78 @@ def _cleanup_failed_wave_ids(events: list[CampaignEvent]) -> set[str]:
     }
 
 
-def _campaign_request_path(campaign_id: str) -> str:
-    return f"campaigns/{campaign_id}/request.yaml"
+def _run_request_path(run_id: str) -> str:
+    return f"runs/{run_id}/request.yaml"
 
 
-def _campaign_cancellation_path(campaign_id: str) -> str:
-    return f"campaigns/{campaign_id}/cancellation.json"
+def _run_cancellation_path(run_id: str) -> str:
+    return f"runs/{run_id}/cancellation.json"
 
 
-def _validate_event_scope(campaign_id: str, event: CampaignEvent) -> None:
-    if _CAMPAIGN_ID.fullmatch(campaign_id) is None:
-        raise ValueError("event campaign scope is invalid")
-    if event.subject_type == "campaign" and event.subject_id != campaign_id:
-        raise ValueError("campaign event subject does not match its scope")
+def _validate_event_scope(run_id: str, event: RunEvent) -> None:
+    if _RUN_ID.fullmatch(run_id) is None:
+        raise ValueError("event run scope is invalid")
+    if event.subject_type == "run" and event.subject_id != run_id:
+        raise ValueError("run event subject does not match its scope")
 
 
 def _event_payloads(
-    campaign_id: str, events: list[CampaignEvent]
+    run_id: str, events: list[RunEvent]
 ) -> dict[str, dict[str, JsonValue]]:
     if not events:
         raise ValueError("event commit requires at least one event")
     for event in events:
-        _validate_event_scope(campaign_id, event)
+        _validate_event_scope(run_id, event)
         if event.kind in {
-            "campaign.cancel-requested",
-            "campaign.manual-intervention-resolved",
+            "run.cancel-requested",
+            "run.manual-intervention-resolved",
         }:
             raise ValueError(f"{event.kind} requires its dedicated atomic operation")
     expected_by_path = {
-        _event_path(campaign_id, event.event_id): event.model_dump(mode="json")
+        _event_path(run_id, event.event_id): event.model_dump(mode="json")
         for event in events
     }
     if len(expected_by_path) != len(events):
-        raise CampaignConflict("events contain duplicate identities")
+        raise RunConflict("events contain duplicate identities")
     return expected_by_path
 
 
 def _guarded_event_payloads(
-    campaign_id: str, events: list[CampaignEvent]
+    run_id: str, events: list[RunEvent]
 ) -> dict[str, dict[str, JsonValue]]:
     if not events:
         raise ValueError("guarded event commit requires at least one event")
     for event in events:
-        _validate_event_scope(campaign_id, event)
+        _validate_event_scope(run_id, event)
         if event.subject_type != "trial" or event.kind not in {
             "trial.invalid",
             "trial.failed-infrastructure",
         }:
             raise ValueError("guarded batches require terminal trial events")
     expected_by_path = {
-        _event_path(campaign_id, event.event_id): event.model_dump(mode="json")
+        _event_path(run_id, event.event_id): event.model_dump(mode="json")
         for event in events
     }
     if len(expected_by_path) != len(events):
-        raise CampaignConflict("guarded events contain duplicate identities")
+        raise RunConflict("guarded events contain duplicate identities")
     return expected_by_path
 
 
-def _campaign_lock_path(campaign_id: str) -> str:
-    return f"campaigns/{campaign_id}/campaign.lock.json"
+def _run_lock_path(run_id: str) -> str:
+    return f"runs/{run_id}/run.lock.json"
 
 
-def _campaign_reservation_path(campaign_id: str) -> str:
-    identity = hashlib.sha256(campaign_id.encode()).hexdigest()
-    return f"campaign-reservations/{identity}.json"
+def _run_reservation_path(run_id: str) -> str:
+    identity = hashlib.sha256(run_id.encode()).hexdigest()
+    return f"run-reservations/{identity}.json"
 
 
-def _event_path(campaign_id: str, event_id: str) -> str:
-    return f"campaigns/{campaign_id}/events/{event_id}.json"
+def _event_path(run_id: str, event_id: str) -> str:
+    return f"runs/{run_id}/events/{event_id}.json"
 
 
-def _action_reservation_path(campaign_id: str, action_id: str) -> str:
-    return f"campaigns/{campaign_id}/reservations/{action_id}.json"
+def _action_reservation_path(run_id: str, action_id: str) -> str:
+    return f"runs/{run_id}/reservations/{action_id}.json"
 
 
 def _json_bytes(value: object) -> bytes:

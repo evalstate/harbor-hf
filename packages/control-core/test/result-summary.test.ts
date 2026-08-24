@@ -91,7 +91,7 @@ describe("result summary", () => {
     expect(summary.tasks[1]?.outcome).toBe("benchmark_timeout");
   });
 
-  it("uses catalog strict passes when no campaign tasks are projected", () => {
+  it("uses catalog strict passes when no run tasks are projected", () => {
     const summary = summarizePublishedResult({
       bucketId: "example-org/artifacts",
       publicationId: "publication-one",

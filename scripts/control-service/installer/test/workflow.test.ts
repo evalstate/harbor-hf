@@ -116,7 +116,7 @@ class FakeHttp implements HttpAdapter {
   readyRequestCount = 0;
   failReadyOnRequest: number | null = null;
   readyResponseGate: Promise<void> | undefined;
-  campaignItems: unknown[] = [];
+  runItems: unknown[] = [];
 
   constructor(
     private readonly currentWriteMode: () => "disabled" | "enabled" | "enabled" = () =>
@@ -143,8 +143,8 @@ class FakeHttp implements HttpAdapter {
         this.readyStatus === "ready" &&
         this.readyRequestCount !== this.failReadyOnRequest;
       return {
-        status: ready ? 200 : 503,
-        body: { status: ready ? "ready" : "rebuilding" },
+        status: 200,
+        body: { status: ready ? "ready" : "initializing" },
       };
     }
     if (url.pathname === "/api/v1/system") {
@@ -165,11 +165,11 @@ class FakeHttp implements HttpAdapter {
         },
       };
     }
-    if (url.pathname === "/api/v1/campaigns") {
+    if (url.pathname === "/api/v1/runs") {
       return {
         status: 200,
         body: {
-          items: this.campaignItems,
+          items: this.runItems,
           next_cursor: null,
         },
       };
@@ -673,15 +673,15 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls).not.toContain("setSecrets");
   });
 
-  it("reports runtime heartbeats and polls exact rebuilding readiness", async () => {
+  it("reports runtime heartbeats and polls exact initializing readiness", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     const waitGate = deferred();
     const progress: string[] = [];
     setupResult.hf.waitGate = waitGate.promise;
     setupResult.http.readyResponses.push(
-      { status: 503, body: { status: "rebuilding" } },
-      { status: 503, body: { status: "rebuilding" } },
+      { status: 200, body: { status: "initializing" } },
+      { status: 200, body: { status: "initializing" } },
     );
     setupResult.dependencies.configureStartupPolicy = {
       runtimeHeartbeatMilliseconds: 30,
@@ -733,7 +733,7 @@ describe("installer workflows", () => {
       "runtime_waiting:30",
       "runtime_wait_complete:30",
       "readiness_wait_started",
-      "readiness_rebuilding:15",
+      "readiness_initializing:15",
       "readiness_ready:30",
     ]);
     expect(setupResult.http.readyRequestCount).toBe(3);
@@ -774,11 +774,11 @@ describe("installer workflows", () => {
     expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
   });
 
-  it("times out rebuilding readiness and restores a safe paused bootstrap", async () => {
+  it("times out initializing readiness and restores a safe paused bootstrap", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     const progress: string[] = [];
-    setupResult.http.readyStatus = "rebuilding";
+    setupResult.http.readyStatus = "initializing";
     setupResult.dependencies.configureStartupPolicy = {
       runtimeHeartbeatMilliseconds: 30,
       readinessPollMilliseconds: 10,
@@ -855,12 +855,12 @@ describe("installer workflows", () => {
   });
 
   it.each([
-    ["extra rebuilding field", 503, { status: "rebuilding", detail: "unexpected" }],
+    ["extra initializing field", 200, { status: "initializing", detail: "unexpected" }],
     ["ready body on 503", 503, { status: "ready" }],
-    ["rebuilding body on 200", 200, { status: "rebuilding" }],
+    ["initializing body on 503", 503, { status: "initializing" }],
     ["extra ready field", 200, { status: "ready", detail: "unexpected" }],
-    ["rebuilding body on 500", 500, { status: "rebuilding" }],
-    ["non-object body", 503, "rebuilding"],
+    ["initializing body on 500", 500, { status: "initializing" }],
+    ["non-object body", 200, "initializing"],
   ])(
     "does not retry an inexact readiness response: %s",
     async (_name, status, body) => {
@@ -1033,13 +1033,13 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls).not.toContain("pause");
   });
 
-  it("does not activate enabled with an existing campaign projection", async () => {
+  it("does not activate enabled with an existing run projection", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
     await complete(setupResult, bootstrapResult.receipt);
     setupResult.hf.calls.length = 0;
     setupResult.http.readyRequestCount = 0;
-    setupResult.http.campaignItems = [{ campaign_id: "existing-campaign" }];
+    setupResult.http.runItems = [{ run_id: "existing-run" }];
     setupResult.dependencies.environment = {
       HARBOR_HF_CONTROL_BEARER_TOKEN: "operator-bearer-placeholder",
     };
@@ -1052,7 +1052,7 @@ describe("installer workflows", () => {
         },
         setupResult.dependencies,
       ),
-    ).rejects.toThrow("empty campaign projection");
+    ).rejects.toThrow("empty run projection");
     expect(setupResult.hf.calls).not.toContain("setVariables");
     expect(setupResult.hf.calls).not.toContain("pause");
   });
@@ -2453,7 +2453,7 @@ describe("installer workflows", () => {
   it("fails closed on unhealthy anonymous or authenticated projections", async () => {
     const anonymous = await setup(REVISION);
     alignInstalledStateWithPlan(anonymous);
-    anonymous.http.readyStatus = "rebuilding";
+    anonymous.http.readyStatus = "initializing";
     const progress: string[] = [];
     anonymous.dependencies.reportConfigureProgress = (event) => {
       progress.push(event.kind);

@@ -14,7 +14,7 @@
           "type": "string"
         },
         {
-          "name": "run_id",
+          "name": "execution_id",
           "nullable": false,
           "type": "string"
         },
@@ -34,12 +34,12 @@
           "type": "string"
         },
         {
-          "name": "run_lock_path",
+          "name": "execution_lock_path",
           "nullable": false,
           "type": "string"
         },
         {
-          "name": "run_lock_sha256",
+          "name": "execution_lock_sha256",
           "nullable": false,
           "type": "string"
         },
@@ -104,12 +104,12 @@
           "type": "string"
         },
         {
-          "name": "run_id",
+          "name": "execution_id",
           "nullable": false,
           "type": "string"
         },
         {
-          "name": "campaign_id",
+          "name": "run_id",
           "nullable": false,
           "type": "string"
         },
@@ -249,12 +249,12 @@
           "type": "int64"
         },
         {
-          "name": "execution_count",
+          "name": "attempt_count",
           "nullable": false,
           "type": "int64"
         },
         {
-          "name": "failed_executions",
+          "name": "failed_attempts",
           "nullable": false,
           "type": "int64"
         },
@@ -306,7 +306,7 @@
       ],
       "schema_version": "harbor-hf/results/catalog/v1"
     },
-    "executions": {
+    "attempts": {
       "fields": [
         {
           "name": "schema_version",
@@ -319,7 +319,7 @@
           "type": "string"
         },
         {
-          "name": "run_id",
+          "name": "execution_id",
           "nullable": false,
           "type": "string"
         },
@@ -339,12 +339,12 @@
           "type": "string"
         },
         {
-          "name": "run_lock_path",
+          "name": "execution_lock_path",
           "nullable": false,
           "type": "string"
         },
         {
-          "name": "run_lock_sha256",
+          "name": "execution_lock_sha256",
           "nullable": false,
           "type": "string"
         },
@@ -354,7 +354,7 @@
           "type": "string"
         },
         {
-          "name": "execution_id",
+          "name": "attempt_id",
           "nullable": false,
           "type": "string"
         },
@@ -404,7 +404,7 @@
           "type": "string"
         }
       ],
-      "schema_version": "harbor-hf/results/executions/v1"
+      "schema_version": "harbor-hf/results/attempts/v1"
     },
     "index": {
       "fields": [
@@ -419,12 +419,12 @@
           "type": "string"
         },
         {
-          "name": "run_id",
+          "name": "execution_id",
           "nullable": false,
           "type": "string"
         },
         {
-          "name": "campaign_id",
+          "name": "run_id",
           "nullable": false,
           "type": "string"
         },
@@ -524,7 +524,7 @@
           "type": "string"
         },
         {
-          "name": "run_id",
+          "name": "execution_id",
           "nullable": false,
           "type": "string"
         },
@@ -544,12 +544,12 @@
           "type": "string"
         },
         {
-          "name": "run_lock_path",
+          "name": "execution_lock_path",
           "nullable": false,
           "type": "string"
         },
         {
-          "name": "run_lock_sha256",
+          "name": "execution_lock_sha256",
           "nullable": false,
           "type": "string"
         },
@@ -596,7 +596,7 @@
       ],
       "schema_version": "harbor-hf/results/metrics/v1"
     },
-    "runs": {
+    "executions": {
       "fields": [
         {
           "name": "schema_version",
@@ -609,7 +609,7 @@
           "type": "string"
         },
         {
-          "name": "run_id",
+          "name": "execution_id",
           "nullable": false,
           "type": "string"
         },
@@ -629,12 +629,12 @@
           "type": "string"
         },
         {
-          "name": "run_lock_path",
+          "name": "execution_lock_path",
           "nullable": false,
           "type": "string"
         },
         {
-          "name": "run_lock_sha256",
+          "name": "execution_lock_sha256",
           "nullable": false,
           "type": "string"
         },
@@ -644,7 +644,7 @@
           "type": "string"
         },
         {
-          "name": "campaign_id",
+          "name": "run_id",
           "nullable": false,
           "type": "string"
         },
@@ -794,12 +794,12 @@
           "type": "int64"
         },
         {
-          "name": "execution_count",
+          "name": "attempt_count",
           "nullable": false,
           "type": "int64"
         }
       ],
-      "schema_version": "harbor-hf/results/runs/v1"
+      "schema_version": "harbor-hf/results/executions/v1"
     },
     "trials": {
       "fields": [
@@ -814,7 +814,7 @@
           "type": "string"
         },
         {
-          "name": "run_id",
+          "name": "execution_id",
           "nullable": false,
           "type": "string"
         },
@@ -834,12 +834,12 @@
           "type": "string"
         },
         {
-          "name": "run_lock_path",
+          "name": "execution_lock_path",
           "nullable": false,
           "type": "string"
         },
         {
-          "name": "run_lock_sha256",
+          "name": "execution_lock_sha256",
           "nullable": false,
           "type": "string"
         },
@@ -869,7 +869,7 @@
           "type": "int64"
         },
         {
-          "name": "selected_execution_id",
+          "name": "selected_attempt_id",
           "nullable": true,
           "type": "string"
         },

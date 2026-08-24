@@ -12,14 +12,9 @@ from harbor_hf.benchmark_source import (
     source_lock_bytes,
     source_lock_from_spec,
 )
-from harbor_hf.campaigns import (
-    WaveLock,
-    build_campaign_lock,
-    build_campaign_plan,
-    build_wave_lock,
-)
 from harbor_hf.config import HarborHFConfig, save_harbor_hf_config
-from harbor_hf.control import CampaignSubmittedPayload, new_event
+from harbor_hf.control import RunSubmittedPayload, new_event
+from harbor_hf.executions import build_execution_lock
 from harbor_hf.models import (
     BenchmarkJudgeSpec,
     BundleBenchmarkSource,
@@ -27,7 +22,12 @@ from harbor_hf.models import (
 )
 from harbor_hf.provider_models import ProviderTarget
 from harbor_hf.reconciler import plan_reconciliation
-from harbor_hf.runs import build_run_lock
+from harbor_hf.runs import (
+    WaveLock,
+    build_run_lock,
+    build_run_plan,
+    build_wave_lock,
+)
 from harbor_hf.submission import (
     bucket_id,
     bucket_uri,
@@ -133,14 +133,12 @@ def test_remote_job_secret_values_reuses_selected_harbor_hf_token(
     save_harbor_hf_config(
         HarborHFConfig(
             schema_version="harbor-hf/config/v1",
-            hf_job_token_name="campaign-job-token",
+            hf_job_token_name="run-job-token",
         ),
         config_path,
     )
     token_store_path = tmp_path / "stored_tokens"
-    save_harbor_hf_tokens(
-        {"campaign-job-token": "purpose-scoped-secret"}, token_store_path
-    )
+    save_harbor_hf_tokens({"run-job-token": "purpose-scoped-secret"}, token_store_path)
     monkeypatch.setenv("HARBOR_HF_CONFIG", str(config_path))
     monkeypatch.setenv("HARBOR_HF_TOKEN_STORE", str(token_store_path))
     monkeypatch.delenv("HARBOR_HF_JOB_TOKEN")
@@ -164,10 +162,10 @@ def test_remote_job_secret_values_never_falls_back_to_ambient_hf_login(
 def test_build_submit_command_contains_only_secret_name(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="run-1")
+    lock = build_execution_lock(remote_spec, execution_id="execution-1")
 
     command = build_submit_command(
-        lock, input_dir=tmp_path, bucket="example-org/benchmark-runs"
+        lock, input_dir=tmp_path, bucket="example-org/benchmark-executions"
     )
 
     assert command[:22] == [
@@ -184,13 +182,13 @@ def test_build_submit_command_contains_only_secret_name(
         "--secrets",
         "HF_TOKEN",
         "--label",
-        "harbor-hf-run=run-1",
+        "harbor-hf-execution=execution-1",
         "--label",
         f"harbor-hf-endpoint={endpoint_lease_label(lock)}",
         "--volume",
         f"{tmp_path}:/input:ro",
         "--volume",
-        "hf://buckets/example-org/benchmark-runs:/output:rw",
+        "hf://buckets/example-org/benchmark-executions:/output:rw",
         "--",
         "ghcr.io/astral-sh/uv@sha256:" + "0" * 64,
     ]
@@ -206,7 +204,7 @@ def test_build_submit_command_contains_only_secret_name(
         "harbor-hf",
         "worker",
         "/input/manifest.yaml",
-        "/input/run.lock.json",
+        "/input/execution.lock.json",
         "--output-root",
         "/output",
     ]
@@ -227,10 +225,10 @@ def test_bundle_submit_mounts_the_managed_prefix_without_git_secrets(
     )
     raw["benchmark"].pop("dataset_digest", None)
     spec = ExperimentSpec.model_validate(raw)
-    lock = build_run_lock(spec, run_id="bundle-run")
+    lock = build_execution_lock(spec, execution_id="bundle-run")
 
     command = build_submit_command(
-        lock, input_dir=tmp_path, bucket="example-org/benchmark-runs"
+        lock, input_dir=tmp_path, bucket="example-org/benchmark-executions"
     )
 
     assert (
@@ -253,10 +251,10 @@ def test_direct_submit_rejects_judge_required_run(
     spec = remote_spec.model_copy(
         update={"benchmark": remote_spec.benchmark.model_copy(update={"judge": judge})}
     )
-    lock = build_run_lock(spec)
-    with pytest.raises(ValueError, match="must use campaign execution"):
+    lock = build_execution_lock(spec)
+    with pytest.raises(ValueError, match="must use run-managed per-trial execution"):
         build_submit_command(
-            lock, input_dir=tmp_path, bucket="example-org/benchmark-runs"
+            lock, input_dir=tmp_path, bucket="example-org/benchmark-executions"
         )
 
 
@@ -271,7 +269,7 @@ def test_judged_wave_exposes_recorder_port(
         update={"benchmark": remote_spec.benchmark.model_copy(update={"judge": judge})}
     )
     command = build_submit_wave_command(
-        _wave_lock(spec), input_dir=tmp_path, bucket="example-org/benchmark-runs"
+        _wave_lock(spec), input_dir=tmp_path, bucket="example-org/benchmark-executions"
     )
     expose = command.index("--expose")
     assert command[expose : expose + 2] == ["--expose", "8001"]
@@ -283,7 +281,7 @@ def test_build_submit_wave_command_targets_hidden_worker(
     lock = _wave_lock(remote_spec)
 
     command = build_submit_wave_command(
-        lock, input_dir=tmp_path, bucket="example-org/benchmark-runs"
+        lock, input_dir=tmp_path, bucket="example-org/benchmark-executions"
     )
 
     job = lock.remote.job
@@ -308,7 +306,7 @@ def test_build_submit_wave_command_targets_hidden_worker(
         "--volume",
         f"{tmp_path}:/input:ro",
         "--volume",
-        "hf://buckets/example-org/benchmark-runs:/output:rw",
+        "hf://buckets/example-org/benchmark-executions:/output:rw",
         "--",
         job.image,
     ]
@@ -319,7 +317,7 @@ def test_build_submit_wave_command_targets_hidden_worker(
         "harbor-hf",
         "wave-worker",
         "/input/manifest.yaml",
-        "/input/campaign.lock.json",
+        "/input/run.lock.json",
         "/input/wave.lock.json",
         "--output-root",
         "/output",
@@ -399,9 +397,9 @@ def test_provider_wave_submission_is_rejected_before_creating_a_child_job(
     )
     lock = _wave_lock(with_provider_controller(spec))
 
-    with pytest.raises(ValueError, match="owning campaign controller"):
+    with pytest.raises(ValueError, match="owning run controller"):
         build_submit_wave_command(
-            lock, input_dir=tmp_path, bucket="example-org/benchmark-runs"
+            lock, input_dir=tmp_path, bucket="example-org/benchmark-executions"
         )
 
 
@@ -423,7 +421,10 @@ def test_submit_wave_parses_job_id_and_checks_private_stores(
 
     assert result.wave_id == lock.wave_id
     assert result.job_id == "0123456789abcdef01234567"
-    assert api.inspected == ["example-org/jobs-artifacts", "example/benchmark-runs"]
+    assert api.inspected == [
+        "example-org/jobs-artifacts",
+        "example/benchmark-runs",
+    ]
     assert len(api.bucket_batches) == 1
     input_bucket, additions, kwargs = api.bucket_batches[0]
     assert input_bucket == "example-org/jobs-artifacts"
@@ -439,22 +440,22 @@ def test_submit_wave_parses_job_id_and_checks_private_stores(
 
 
 def _wave_lock(spec: ExperimentSpec) -> WaveLock:
-    campaign = build_campaign_lock(build_campaign_plan(spec), "campaign-one")
+    run = build_run_lock(build_run_plan(spec), "run-one")
     submitted = new_event(
-        subject_type="campaign",
-        subject_id=campaign.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=run.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
+        payload=RunSubmittedPayload(plan_digest=run.plan_digest),
     )
-    action = plan_reconciliation(campaign, [submitted])[1].actions[0]
-    return build_wave_lock(campaign, spec, action)
+    action = plan_reconciliation(run, [submitted])[1].actions[0]
+    return build_wave_lock(run, spec, action)
 
 
 def test_endpoint_lease_label_is_stable_and_bounded(
     remote_spec: ExperimentSpec,
 ) -> None:
-    label = endpoint_lease_label(build_run_lock(remote_spec))
+    label = endpoint_lease_label(build_execution_lock(remote_spec))
 
     assert label == "a1750de84d2a4270eba446cbe83d6c05"
     assert len(label) == 32
@@ -472,12 +473,12 @@ def test_endpoint_lease_label_uses_complete_endpoint_identity() -> None:
 def test_endpoint_lease_label_requires_endpoint_binding(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     lock = lock.model_copy(
         update={"deployment": lock.deployment.model_copy(update={"endpoint": None})}
     )
 
-    with pytest.raises(ValueError, match="^run lock has no endpoint binding$"):
+    with pytest.raises(ValueError, match="^execution lock has no endpoint binding$"):
         endpoint_lease_label(lock)
 
 
@@ -498,9 +499,9 @@ def test_submit_rejects_a_source_lock_that_does_not_match_the_run(
 
     with pytest.raises(ValueError, match="changed before submission"):
         submit(
-            build_run_lock(remote_spec),
+            build_execution_lock(remote_spec),
             input_dir=tmp_path,
-            bucket="example-org/benchmark-runs",
+            bucket="example-org/benchmark-executions",
             runner=runner,
             source_lock=source_lock,
             bucket_api=FakeBucketApi(),
@@ -510,7 +511,7 @@ def test_submit_rejects_a_source_lock_that_does_not_match_the_run(
 
 
 def test_submit_parses_job_id(remote_spec: ExperimentSpec, tmp_path: Path) -> None:
-    lock = build_run_lock(remote_spec, run_id="run-1")
+    lock = build_execution_lock(remote_spec, execution_id="execution-1")
     runner = FakeRunner("Job started: 0123456789abcdef01234567\n")
     bucket_api = FakeBucketApi()
     (tmp_path / "manifest.yaml").write_text("kind: Experiment\n")
@@ -519,7 +520,7 @@ def test_submit_parses_job_id(remote_spec: ExperimentSpec, tmp_path: Path) -> No
     result = submit(
         lock,
         input_dir=tmp_path,
-        bucket="example-org/benchmark-runs",
+        bucket="example-org/benchmark-executions",
         runner=runner,
         source_lock=source_lock,
         bucket_api=bucket_api,
@@ -532,7 +533,7 @@ def test_submit_parses_job_id(remote_spec: ExperimentSpec, tmp_path: Path) -> No
     ]
     assert bucket_api.inspected == [
         "example-org/jobs-artifacts",
-        "example-org/benchmark-runs",
+        "example-org/benchmark-executions",
     ]
     assert bucket_api.created_repositories == [
         (
@@ -554,9 +555,9 @@ def test_submit_builds_default_bucket_api(
     source_lock = _write_source_lock(tmp_path, remote_spec)
 
     result = submit(
-        build_run_lock(remote_spec),
+        build_execution_lock(remote_spec),
         input_dir=tmp_path,
-        bucket="example-org/benchmark-runs",
+        bucket="example-org/benchmark-executions",
         runner=runner,
         source_lock=source_lock,
     )
@@ -570,14 +571,14 @@ def test_submit_builds_default_bucket_api(
     )
     assert api.inspected == [
         "example-org/jobs-artifacts",
-        "example-org/benchmark-runs",
+        "example-org/benchmark-executions",
     ]
 
 
 def test_submit_rejects_missing_job_id(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     (tmp_path / "manifest.yaml").write_text("kind: Experiment\n")
     source_lock = _write_source_lock(tmp_path, remote_spec)
 
@@ -587,7 +588,7 @@ def test_submit_rejects_missing_job_id(
         submit(
             lock,
             input_dir=tmp_path,
-            bucket="example-org/benchmark-runs",
+            bucket="example-org/benchmark-executions",
             runner=FakeRunner("submitted"),
             source_lock=source_lock,
             bucket_api=FakeBucketApi(),
@@ -598,7 +599,7 @@ def test_submit_rejects_missing_job_id(
 def test_submit_does_not_extract_job_id_from_longer_hex_digest(
     remote_spec: ExperimentSpec, tmp_path: Path, digest: str
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     (tmp_path / "manifest.yaml").write_text("kind: Experiment\n")
     source_lock = _write_source_lock(tmp_path, remote_spec)
 
@@ -606,7 +607,7 @@ def test_submit_does_not_extract_job_id_from_longer_hex_digest(
         submit(
             lock,
             input_dir=tmp_path,
-            bucket="example-org/benchmark-runs",
+            bucket="example-org/benchmark-executions",
             runner=FakeRunner(f"revision {digest}"),
             source_lock=source_lock,
             bucket_api=FakeBucketApi(),
@@ -773,23 +774,23 @@ def test_submit_ensures_private_job_input_bucket() -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        "example-org/benchmark-runs",
-        "buckets/example-org/benchmark-runs",
-        "hf://buckets/example-org/benchmark-runs",
+        "example-org/benchmark-executions",
+        "buckets/example-org/benchmark-executions",
+        "hf://buckets/example-org/benchmark-executions",
     ],
 )
 def test_bucket_id_normalizes_supported_references(value: str) -> None:
-    assert bucket_id(value) == "example-org/benchmark-runs"
+    assert bucket_id(value) == "example-org/benchmark-executions"
 
 
 def test_require_private_artifact_bucket_returns_normalized_id() -> None:
     api = FakeBucketApi()
 
     assert (
-        require_private_bucket("buckets/example-org/benchmark-runs", api=api)
-        == "example-org/benchmark-runs"
+        require_private_bucket("buckets/example-org/benchmark-executions", api=api)
+        == "example-org/benchmark-executions"
     )
-    assert api.inspected == ["example-org/benchmark-runs"]
+    assert api.inspected == ["example-org/benchmark-executions"]
 
 
 def test_submit_rejects_public_coordination_repository() -> None:
@@ -807,14 +808,15 @@ def test_submit_rejects_public_job_input_bucket() -> None:
 def test_submit_rejects_public_artifact_bucket() -> None:
     api = FakeBucketApi(
         privacy={
-            "example-org/benchmark-runs": False,
+            "example-org/benchmark-executions": False,
         }
     )
 
     with pytest.raises(
-        ValueError, match="^artifact bucket example-org/benchmark-runs must be private$"
+        ValueError,
+        match="^artifact bucket example-org/benchmark-executions must be private$",
     ):
-        require_private_bucket("hf://buckets/example-org/benchmark-runs", api=api)
+        require_private_bucket("hf://buckets/example-org/benchmark-executions", api=api)
 
 
 def test_source_and_bucket_normalization() -> None:

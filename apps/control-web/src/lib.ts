@@ -19,13 +19,7 @@ export function estimateLaunchReservationMicrousd(
   policy: Record<string, unknown> | undefined,
 ): number {
   const reservation = Number(policy?.reservation_microusd ?? 0);
-  const tasksPerJob = Number(deployment?.worker_max_tasks_per_job ?? 0);
-  const executionJobs =
-    taskCount === 0
-      ? 0
-      : Number.isSafeInteger(tasksPerJob) && tasksPerJob > 0
-        ? Math.ceil(taskCount / tasksPerJob)
-        : 1;
+  const executionJobs = taskCount;
   const preparationAttempts =
     deployment?.preparation === "required"
       ? Number(policy?.max_preparation_attempts ?? 1)
@@ -89,7 +83,7 @@ export const LOGICAL_OUTCOME_COPY = {
   },
   infrastructure: {
     label: "Infrastructure failure",
-    hint: "A retryable platform, sandbox, or network failure. Control may launch a replacement attempt.",
+    hint: "A retryable Job, platform, or network failure. Control may launch a replacement physical Job attempt.",
   },
   verifier: {
     label: "Verifier failed",

@@ -22,7 +22,7 @@ keeping `harbor-hf` responsible for Hugging Face execution, durable evidence,
 publication, and query infrastructure.
 
 The current publisher converts completed evidence into independent `runs`,
-`trials`, `executions`, `metrics`, and `artifacts` models. Those tables are
+`trials`, `attempts`, `metrics`, and `artifacts` models. Those tables are
 useful for querying, but some fields repeat Harbor-owned concepts such as trial
 identity, task identity, rewards, exceptions, timing, usage, and artifacts.
 The long-term design must preserve those values without maintaining a second
@@ -78,7 +78,7 @@ Harbor owns:
 
 `harbor-hf` owns:
 
-- experiment, campaign, run, shard, wave, and physical-execution identity;
+- experiment, run, run, shard, wave, and physical-execution identity;
 - model-weight revisions and resolved serving profiles;
 - inference engine, quantization, context, batching, and concurrency settings;
 - endpoint or provider, hardware, accelerator count, region, and HF Job IDs;
@@ -122,7 +122,7 @@ retained rather than overwritten:
 
 ```text
 runs/<run-id>/
-  trials/<trial-id>/executions/<execution-id>/
+  trials/<trial-id>/attempts/<execution-id>/
     artifacts.tar.gz
     harbor-native-bundle.json
   publication-envelope.v1.json
@@ -145,7 +145,7 @@ replace this temporary packaging contract without changing the HF envelope.
 `publication-envelope.v1.json` uses `harbor-hf/publication-envelope/v1`. Its smallest
 stable shape contains:
 
-- the run, campaign, and physical-execution IDs;
+- the run, run, and physical-execution IDs;
 - the Harbor source revision, package version, bundle schema, paths, and
   checksums for every physical execution bundle;
 - the resolved model and serving profile digests;
@@ -157,8 +157,8 @@ stable shape contains:
 The envelope references the Harbor bundle. It does not copy task names,
 rewards, trial timing, exceptions, trajectories, or artifact entries.
 
-Each physical execution records `bundle_status`. Successful executions use
-`verified` and must reference a bundle. Failed or cancelled executions without
+Each physical execution records `bundle_status`. Successful attempts use
+`verified` and must reference a bundle. Failed or cancelled attempts without
 a valid bundle use `not_available`. A successful execution without a verified
 bundle is invalid for canonical publication and must be rebuilt or rerun; there
 is no `legacy_unavailable` status or legacy catalog classification.
@@ -228,7 +228,7 @@ The upstream contract should:
 - emit a versioned manifest and deterministic allowlisted archive;
 - support completed and failed jobs without inventing HF lifecycle concepts;
 - expose structured artifact metadata and checksums;
-- avoid Supabase, Hugging Face, campaign, endpoint, and storage assumptions;
+- avoid Supabase, Hugging Face, run, endpoint, and storage assumptions;
 - round-trip through Harbor download and local viewer workflows.
 
 This is the only new benchmark-result contract to pursue. `harbor-hf` must not
@@ -297,7 +297,7 @@ publications and every row traces to one Harbor bundle and HF envelope.
 - Atomically switch the active Dataset pointer or configured revision to the
   rebuilt catalog.
 - Run hosted API checks, desktop and mobile browser checks, comparison views,
-  and one bounded fully remote campaign.
+  and one bounded fully remote run.
 - Verify all Inference Endpoints are paused with zero ready replicas.
 
 Exit criterion: new runs publish once, the production API has one read path,
@@ -348,12 +348,12 @@ Required local tests:
 
 Required remote test:
 
-- run one bounded campaign entirely on Hugging Face infrastructure;
+- run one bounded run entirely on Hugging Face infrastructure;
 - preserve the native Harbor bundle and v1 envelope in the private Bucket;
 - publish and browse sanitized projections;
 - download and validate the bundle with the pinned Harbor version;
 - verify all Inference Endpoints are paused with zero ready replicas before the
-  campaign is declared complete.
+  run is declared complete.
 
 No local model loading or inference is part of this migration.
 
@@ -391,7 +391,7 @@ The migration is complete when:
 ## Non-Goals
 
 - Replacing Harbor Hub or requiring its hosted Supabase backend.
-- Moving HF endpoint or campaign logic into Harbor.
+- Moving HF endpoint or run logic into Harbor.
 - Publishing raw sessions or task-sensitive evidence publicly.
 - Serving unverifiable historical rows from the active production catalog.
 - Preserving the temporary v2 or dual-publication contract for compatibility.

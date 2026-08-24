@@ -28,6 +28,8 @@ const upload = spawnSync(
     ".",
     "--type",
     "space",
+    "--delete",
+    "*",
     "--commit-message",
     `deploy: ${release.source_revision}`,
     "--format",

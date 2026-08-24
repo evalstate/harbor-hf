@@ -13,15 +13,15 @@ from pydantic import ValidationError
 from test_wave_worker import _provider_wave_inputs
 
 import harbor_hf.wave_worker as wave_worker
-from harbor_hf.campaigns import CampaignLock, CampaignTrialLock, WaveLock, WaveRunLock
 from harbor_hf.coordination import ClaimConflict
 from harbor_hf.evidence import verify_checksums, write_checksums
+from harbor_hf.executions import ExecutionLock
 from harbor_hf.models import ExperimentSpec, TrialEvidencePolicy
 from harbor_hf.provider_models import ProviderTarget
-from harbor_hf.runs import RunLock
+from harbor_hf.runs import RunLock, RunTrialLock, WaveExecutionLock, WaveLock
 from harbor_hf.trial_evidence import assemble_trial_evidence
 from harbor_hf.wave_worker import (
-    ExecutionLock,
+    AttemptLock,
     LockedSubmitWaveAction,
     WorkerError,
     _cleanup_wave_transport,
@@ -37,15 +37,15 @@ from harbor_hf.wave_worker import (
     _remaining_seconds,
     _trial_destination,
     _valid_terminal_trial,
-    _validate_execution_identity,
+    _validate_attempt_identity,
     _wait_for_provider_recorder,
     _wave_worker_lease,
 )
 
 IDENTITY = {
-    "campaign_id": "campaign-1",
-    "wave_id": "wave-1",
     "run_id": "run-1",
+    "wave_id": "wave-1",
+    "execution_id": "execution-1",
     "shard_id": "shard-1",
 }
 NOW = datetime(2026, 7, 14, 1, 2, 3, tzinfo=UTC)
@@ -66,8 +66,8 @@ class FakeClaims:
         self.release_calls.append((path, dict(owner)))
 
 
-def _expected_trial() -> CampaignTrialLock:
-    return CampaignTrialLock(
+def _expected_trial() -> RunTrialLock:
+    return RunTrialLock(
         trial_id="trial-1",
         trial_digest="d" * 64,
         task_name="task-a",
@@ -76,13 +76,13 @@ def _expected_trial() -> CampaignTrialLock:
     )
 
 
-def _execution_lock(expected: CampaignTrialLock, execution_id: str) -> ExecutionLock:
-    return ExecutionLock(
-        execution_id=execution_id,
+def _attempt_lock(expected: RunTrialLock, attempt_id: str) -> AttemptLock:
+    return AttemptLock(
+        attempt_id=attempt_id,
         created_at=datetime(2026, 7, 14, tzinfo=UTC),
-        campaign_id=IDENTITY["campaign_id"],
-        wave_id=IDENTITY["wave_id"],
         run_id=IDENTITY["run_id"],
+        wave_id=IDENTITY["wave_id"],
+        execution_id=IDENTITY["execution_id"],
         shard_id=IDENTITY["shard_id"],
         trial_id=expected.trial_id,
         task_name=expected.task_name,
@@ -108,7 +108,7 @@ def _trial_evidence_policy() -> TrialEvidencePolicy:
 
 
 def _write_trial_evidence(
-    execution: Path, expected: CampaignTrialLock, execution_id: str
+    execution: Path, expected: RunTrialLock, attempt_id: str
 ) -> None:
     native = execution / "harbor-jobs" / "job" / expected.task_name
     workspace = native / "artifacts" / "workspace" / "app"
@@ -124,9 +124,9 @@ def _write_trial_evidence(
     (verifier / "scorecard.json").write_text('{"passed":true}\n', encoding="utf-8")
     assemble_trial_evidence(
         native,
-        campaign_id=IDENTITY["campaign_id"],
         run_id=IDENTITY["run_id"],
-        execution_id=execution_id,
+        execution_id=IDENTITY["execution_id"],
+        attempt_id=attempt_id,
         trial_id=expected.trial_id,
         task_name=expected.task_name,
         task_digest=expected.task_digest,
@@ -138,17 +138,17 @@ def _write_trial_evidence(
     )
 
 
-def _terminal_trial(root: Path) -> tuple[Path, CampaignTrialLock, Path]:
+def _terminal_trial(root: Path) -> tuple[Path, RunTrialLock, Path]:
     expected = _expected_trial()
     trial = root / "trial"
-    execution_id = "exec-" + "0" * 32
-    execution = trial / "executions" / execution_id
+    attempt_id = "exec-" + "0" * 32
+    execution = trial / "attempts" / attempt_id
     execution.mkdir(parents=True)
-    (execution / "execution.lock.json").write_text(
-        _execution_lock(expected, execution_id).model_dump_json(), encoding="utf-8"
+    (execution / "attempt.lock.json").write_text(
+        _attempt_lock(expected, attempt_id).model_dump_json(), encoding="utf-8"
     )
     (execution / "harbor.log").write_text("completed\n", encoding="utf-8")
-    _write_trial_evidence(execution, expected, execution_id)
+    _write_trial_evidence(execution, expected, attempt_id)
     (execution / "_SUCCESS").write_text("\n", encoding="utf-8")
     write_checksums(execution)
     (trial / "trial.lock.json").write_text(
@@ -158,8 +158,8 @@ def _terminal_trial(root: Path) -> tuple[Path, CampaignTrialLock, Path]:
         json.dumps(
             {
                 "trial_id": expected.trial_id,
-                "execution_id": execution_id,
-                "execution_checksum": _file_digest(execution / "checksums.json"),
+                "attempt_id": attempt_id,
+                "attempt_checksum": _file_digest(execution / "checksums.json"),
             }
         ),
         encoding="utf-8",
@@ -223,7 +223,7 @@ def test_valid_terminal_trial_rejects_non_success_markers(
     assert str(captured.value) == "terminal trial evidence is not a valid success"
 
 
-@pytest.mark.parametrize("field", ["campaign_id", "wave_id", "run_id", "shard_id"])
+@pytest.mark.parametrize("field", ["run_id", "wave_id", "execution_id", "shard_id"])
 def test_valid_terminal_trial_rejects_each_identity_mismatch(
     tmp_path: Path, field: str
 ) -> None:
@@ -232,9 +232,7 @@ def test_valid_terminal_trial_rejects_each_identity_mismatch(
 
     with pytest.raises(WorkerError) as captured:
         _valid_terminal_trial(trial, expected, **identity)
-    assert str(captured.value) == (
-        "terminal execution identity does not match its trial"
-    )
+    assert str(captured.value) == ("terminal attempt identity does not match its trial")
 
 
 def test_valid_terminal_trial_rejects_mismatched_trial_lock(tmp_path: Path) -> None:
@@ -246,15 +244,15 @@ def test_valid_terminal_trial_rejects_mismatched_trial_lock(tmp_path: Path) -> N
     assert str(captured.value) == "terminal trial lock does not match the wave"
 
 
-def test_valid_terminal_trial_rejects_summary_without_execution_id(
+def test_valid_terminal_trial_rejects_summary_without_attempt_id(
     tmp_path: Path,
 ) -> None:
     trial, expected, _execution = _terminal_trial(tmp_path)
-    _rewrite_summary(trial, execution_id=5)
+    _rewrite_summary(trial, attempt_id=5)
 
     with pytest.raises(WorkerError) as captured:
         _valid_terminal_trial(trial, expected, **IDENTITY)
-    assert str(captured.value) == "terminal trial summary has no execution identity"
+    assert str(captured.value) == "terminal trial summary has no attempt identity"
 
 
 def test_valid_terminal_trial_rejects_wrong_summary_trial_id(tmp_path: Path) -> None:
@@ -268,18 +266,18 @@ def test_valid_terminal_trial_rejects_wrong_summary_trial_id(tmp_path: Path) -> 
     )
 
 
-def test_valid_terminal_trial_rejects_unsuccessful_execution(tmp_path: Path) -> None:
+def test_valid_terminal_trial_rejects_unsuccessful_attempt(tmp_path: Path) -> None:
     trial, expected, execution = _terminal_trial(tmp_path)
     (execution / "_SUCCESS").unlink()
 
     with pytest.raises(WorkerError) as captured:
         _valid_terminal_trial(trial, expected, **IDENTITY)
-    assert str(captured.value) == "terminal trial execution is not successful"
+    assert str(captured.value) == "terminal trial attempt is not successful"
 
 
 def test_valid_terminal_trial_rejects_wrong_child_checksum(tmp_path: Path) -> None:
     trial, expected, _execution = _terminal_trial(tmp_path)
-    _rewrite_summary(trial, execution_checksum="sha256:" + "0" * 64)
+    _rewrite_summary(trial, attempt_checksum="sha256:" + "0" * 64)
 
     with pytest.raises(WorkerError) as captured:
         _valid_terminal_trial(trial, expected, **IDENTITY)
@@ -309,10 +307,10 @@ def test_valid_terminal_trial_wraps_missing_summary(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "field",
     [
-        "execution_id",
-        "campaign_id",
-        "wave_id",
+        "attempt_id",
         "run_id",
+        "wave_id",
+        "execution_id",
         "shard_id",
         "trial_id",
         "task_name",
@@ -320,30 +318,28 @@ def test_valid_terminal_trial_wraps_missing_summary(tmp_path: Path) -> None:
         "logical_attempt",
     ],
 )
-def test_execution_identity_rejects_each_field_mismatch(field: str) -> None:
+def test_attempt_identity_rejects_each_field_mismatch(field: str) -> None:
     expected = _expected_trial()
-    execution_id = "exec-" + "1" * 32
-    lock = _execution_lock(expected, execution_id)
+    attempt_id = "exec-" + "1" * 32
+    lock = _attempt_lock(expected, attempt_id)
     tampered = lock.model_copy(
         update={field: 99 if field == "logical_attempt" else "other"}
     )
 
     with pytest.raises(WorkerError) as captured:
-        _validate_execution_identity(tampered, execution_id, expected, **IDENTITY)
-    assert str(captured.value) == (
-        "terminal execution identity does not match its trial"
-    )
+        _validate_attempt_identity(tampered, attempt_id, expected, **IDENTITY)
+    assert str(captured.value) == ("terminal attempt identity does not match its trial")
 
-    _validate_execution_identity(lock, execution_id, expected, **IDENTITY)
+    _validate_attempt_identity(lock, attempt_id, expected, **IDENTITY)
 
 
-def test_execution_identity_ignores_physical_attempt() -> None:
+def test_attempt_identity_ignores_physical_attempt() -> None:
     expected = _expected_trial()
-    execution_id = "exec-" + "1" * 32
-    lock = _execution_lock(expected, execution_id).model_copy(
+    attempt_id = "exec-" + "1" * 32
+    lock = _attempt_lock(expected, attempt_id).model_copy(
         update={"physical_attempt": 7}
     )
-    _validate_execution_identity(lock, execution_id, expected, **IDENTITY)
+    _validate_attempt_identity(lock, attempt_id, expected, **IDENTITY)
 
 
 def test_publish_immutable_file_copies_exact_bytes_once(tmp_path: Path) -> None:
@@ -396,7 +392,7 @@ def test_publish_immutable_file_avoids_hf_mount_reserved_prefix(
 def test_wave_worker_lease_serializes_the_complete_remote_job(
     remote_spec: ExperimentSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _spec, _campaign, wave, *_paths = _provider_wave_inputs(
+    _spec, _run, wave, *_paths = _provider_wave_inputs(
         remote_spec,
         tmp_path,
         attempts=1,
@@ -414,7 +410,7 @@ def test_wave_worker_lease_serializes_the_complete_remote_job(
     path, owner = claims.acquire_calls[0]
     assert path.startswith("wave-worker-leases/")
     assert owner == {
-        "campaign_id": wave.campaign_id,
+        "run_id": wave.run_id,
         "wave_id": wave.wave_id,
         "job_id": "job-one",
         "expires_at": (
@@ -426,7 +422,7 @@ def test_wave_worker_lease_serializes_the_complete_remote_job(
 def test_wave_worker_lease_fails_closed_without_job_identity(
     remote_spec: ExperimentSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _spec, _campaign, wave, *_paths = _provider_wave_inputs(
+    _spec, _run, wave, *_paths = _provider_wave_inputs(
         remote_spec,
         tmp_path,
         attempts=1,
@@ -445,7 +441,7 @@ def test_wave_worker_lease_fails_closed_without_job_identity(
 def test_wave_worker_lease_rejects_duplicate_job_before_execution(
     remote_spec: ExperimentSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _spec, _campaign, wave, *_paths = _provider_wave_inputs(
+    _spec, _run, wave, *_paths = _provider_wave_inputs(
         remote_spec,
         tmp_path,
         attempts=1,
@@ -467,18 +463,18 @@ def test_wave_worker_lease_rejects_duplicate_job_before_execution(
 
 
 def test_publish_digest_sidecar_writes_exact_digest_line(tmp_path: Path) -> None:
-    source = tmp_path / "campaign.lock.json"
+    source = tmp_path / "run.lock.json"
     source.write_bytes(b"wave-contract\n")
     destination = tmp_path / "published"
 
     _publish_digest_sidecar(source, destination)
 
-    sidecar = tmp_path / "campaign.lock.json.sha256"
+    sidecar = tmp_path / "run.lock.json.sha256"
     expected = (
         "sha256:8b6a391b539bf23c01dfed62246c6e04cb057e7bd5c119318589b64df6c1b413\n"
     )
     assert sidecar.read_text(encoding="utf-8") == expected
-    assert (destination / "campaign.lock.json.sha256").read_text(
+    assert (destination / "run.lock.json.sha256").read_text(
         encoding="utf-8"
     ) == expected
 
@@ -570,11 +566,11 @@ def test_publish_unit_verifies_destination_before_terminal_marker(
     assert not (destination / "_SUCCESS").exists()
 
 
-def _finalized_execution(root: Path, execution_id: str, marker: str) -> Path:
-    execution = root / "executions" / execution_id
+def _finalized_execution(root: Path, attempt_id: str, marker: str) -> Path:
+    execution = root / "attempts" / attempt_id
     execution.mkdir(parents=True)
     (execution / "events.jsonl").write_text(
-        f'{{"execution_id": "{execution_id}"}}\n', encoding="utf-8"
+        f'{{"attempt_id": "{attempt_id}"}}\n', encoding="utf-8"
     )
     write_checksums(execution)
     (execution / marker).write_text("\n", encoding="utf-8")
@@ -588,18 +584,18 @@ def test_publish_unit_recovers_trial_around_immutable_terminal_executions(
     prior_source = _finalized_execution(source, "exec-prior", "_FAILED")
     _finalized_execution(source, "exec-new", "_SUCCESS")
     (source / "trial-summary.json").write_text(
-        '{"execution_id": "exec-new"}\n', encoding="utf-8"
+        '{"attempt_id": "exec-new"}\n', encoding="utf-8"
     )
     write_checksums(source)
     (source / "_SUCCESS").write_text("\n", encoding="utf-8")
 
     destination = tmp_path / "published-trial"
     prior_destination = _finalized_execution(destination, "exec-prior", "_FAILED")
-    abandoned = destination / "executions" / "exec-abandoned"
+    abandoned = destination / "attempts" / "exec-abandoned"
     abandoned.mkdir()
     (abandoned / "events.jsonl").write_text("partial\n", encoding="utf-8")
     (destination / "trial-summary.json").write_text(
-        '{"execution_id": "exec-old"}\n', encoding="utf-8"
+        '{"attempt_id": "exec-old"}\n', encoding="utf-8"
     )
     prior_checksum = _file_digest(prior_destination / "events.jsonl")
 
@@ -608,7 +604,7 @@ def test_publish_unit_recovers_trial_around_immutable_terminal_executions(
     assert not abandoned.exists()
     assert _file_digest(prior_destination / "events.jsonl") == prior_checksum
     assert _trees_equal(prior_source, prior_destination)
-    assert (destination / "executions" / "exec-new" / "_SUCCESS").is_file()
+    assert (destination / "attempts" / "exec-new" / "_SUCCESS").is_file()
     assert (destination / "_SUCCESS").is_file()
     verify_checksums(destination)
 
@@ -617,9 +613,9 @@ def test_publish_unit_rejects_changed_terminal_nested_execution(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source-trial"
-    source_execution = _finalized_execution(source, "exec-prior", "_FAILED")
-    (source_execution / "events.jsonl").write_text("new\n", encoding="utf-8")
-    write_checksums(source_execution)
+    source_attempt = _finalized_execution(source, "exec-prior", "_FAILED")
+    (source_attempt / "events.jsonl").write_text("new\n", encoding="utf-8")
+    write_checksums(source_attempt)
     write_checksums(source)
     (source / "_SUCCESS").write_text("\n", encoding="utf-8")
     destination = tmp_path / "published-trial"
@@ -712,22 +708,22 @@ def test_prepare_trial_recovery_copies_terminal_prior_executions(
     tmp_path: Path,
 ) -> None:
     destination = tmp_path / "destination"
-    executions = destination / "executions" / "exec-prior"
-    executions.mkdir(parents=True)
-    (executions / "harbor.log").write_text("prior\n", encoding="utf-8")
-    write_checksums(executions)
-    (executions / "_FAILED").write_text("{}\n", encoding="utf-8")
+    attempts = destination / "attempts" / "exec-prior"
+    attempts.mkdir(parents=True)
+    (attempts / "harbor.log").write_text("prior\n", encoding="utf-8")
+    write_checksums(attempts)
+    (attempts / "_FAILED").write_text("{}\n", encoding="utf-8")
     trial_root = tmp_path / "trial"
 
     _prepare_trial_recovery(destination, trial_root)
 
-    assert (trial_root / "executions" / "exec-prior" / "harbor.log").read_text(
+    assert (trial_root / "attempts" / "exec-prior" / "harbor.log").read_text(
         encoding="utf-8"
     ) == "prior\n"
 
 
 def test_prepare_trial_recovery_removes_interrupted_execution(tmp_path: Path) -> None:
-    execution = tmp_path / "destination" / "executions" / "exec-abandoned"
+    execution = tmp_path / "destination" / "attempts" / "exec-abandoned"
     execution.mkdir(parents=True)
     (execution / "events.jsonl").write_text("partial\n", encoding="utf-8")
     trial_root = tmp_path / "trial"
@@ -735,13 +731,13 @@ def test_prepare_trial_recovery_removes_interrupted_execution(tmp_path: Path) ->
     _prepare_trial_recovery(tmp_path / "destination", trial_root)
 
     assert not execution.exists()
-    assert list((trial_root / "executions").iterdir()) == []
+    assert list((trial_root / "attempts").iterdir()) == []
 
 
 def test_prepare_trial_recovery_rejects_corrupt_terminal_execution(
     tmp_path: Path,
 ) -> None:
-    execution = tmp_path / "destination" / "executions" / "exec-corrupt"
+    execution = tmp_path / "destination" / "attempts" / "exec-corrupt"
     execution.mkdir(parents=True)
     (execution / "events.jsonl").write_text("original\n", encoding="utf-8")
     write_checksums(execution)
@@ -761,21 +757,21 @@ def test_prepare_trial_recovery_creates_empty_trial_root(tmp_path: Path) -> None
 
 
 def test_trial_destination_builds_exact_path(tmp_path: Path) -> None:
-    campaign = cast(CampaignLock, SimpleNamespace(artifact_prefix="campaigns/c1"))
-    run = cast(
-        WaveRunLock,
-        SimpleNamespace(configuration=SimpleNamespace(run_id="run-9")),
+    run = cast(RunLock, SimpleNamespace(artifact_prefix="runs/r1"))
+    execution = cast(
+        WaveExecutionLock,
+        SimpleNamespace(configuration=SimpleNamespace(execution_id="execution-9")),
     )
-    trial = cast(CampaignTrialLock, SimpleNamespace(trial_id="trial-9"))
+    trial = cast(RunTrialLock, SimpleNamespace(trial_id="trial-9"))
 
-    assert _trial_destination(tmp_path, campaign, run, trial) == (
-        tmp_path / "campaigns/c1" / "runs" / "run-9" / "trials" / "trial-9"
+    assert _trial_destination(tmp_path, run, execution, trial) == (
+        tmp_path / "runs/r1" / "executions" / "execution-9" / "trials" / "trial-9"
     )
 
 
 def test_expected_agent_version_uses_locked_revision_kind() -> None:
     package = cast(
-        RunLock,
+        ExecutionLock,
         SimpleNamespace(
             agent=SimpleNamespace(
                 revision_kind="package",
@@ -787,7 +783,7 @@ def test_expected_agent_version_uses_locked_revision_kind() -> None:
     assert _expected_agent_version(package) == "2026.7.2"
 
     source = cast(
-        RunLock,
+        ExecutionLock,
         SimpleNamespace(
             agent=SimpleNamespace(
                 revision_kind="harbor-source",
@@ -808,15 +804,15 @@ def test_remaining_seconds_rounds_up_and_enforces_floor() -> None:
     assert str(captured.value) == "deployment wave duration bound was reached"
 
 
-def test_execution_lock_schema_and_action_defaults() -> None:
+def test_attempt_lock_schema_and_action_defaults() -> None:
     expected = _expected_trial()
-    lock = _execution_lock(expected, "exec-" + "2" * 32)
-    assert lock.schema_version == "harbor-hf/execution-lock/v1alpha1"
+    lock = _attempt_lock(expected, "exec-" + "2" * 32)
+    assert lock.schema_version == "harbor-hf/attempt-lock/v1alpha1"
 
     action = LockedSubmitWaveAction(
         action_id="action-1",
         action_key="key-1",
-        campaign_id="campaign-1",
+        run_id="run-1",
         deployment_digest="digest-1",
         shard_ids=["shard-1"],
     )
@@ -826,7 +822,7 @@ def test_execution_lock_schema_and_action_defaults() -> None:
             {
                 "action_id": "action-1",
                 "action_key": "key-1",
-                "campaign_id": "campaign-1",
+                "run_id": "run-1",
                 "deployment_digest": "digest-1",
                 "shard_ids": ["shard-1"],
                 "unexpected": "extra",
@@ -837,7 +833,7 @@ def test_execution_lock_schema_and_action_defaults() -> None:
 def test_provider_transport_start_and_cleanup_are_exact(
     remote_spec: ExperimentSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _spec, _campaign, wave, *_paths = _provider_wave_inputs(
+    _spec, _run, wave, *_paths = _provider_wave_inputs(
         remote_spec,
         tmp_path,
         attempts=1,

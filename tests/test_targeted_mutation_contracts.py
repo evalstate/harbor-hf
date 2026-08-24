@@ -11,20 +11,14 @@ from typing import Any, cast
 import httpx
 import pytest
 from pydantic import JsonValue
-from test_campaign_terminal_evidence_mutation_contracts import (
-    _campaign,
-    _execution_lock_for_wave,
-    _wave,
-)
 from test_endpoints import FakePort, FakeTime, _desired, _snapshot
 from test_hf_endpoints import _http_error
-
-from harbor_hf.campaign_observer import (
-    _execution_control_events,
-    _legacy_failure_category,
-    _wave_events,
+from test_run_terminal_evidence_mutation_contracts import (
+    _attempt_lock_for_wave,
+    _run,
+    _wave,
 )
-from harbor_hf.campaigns import estimated_partial_wave_cost
+
 from harbor_hf.endpoints import (
     AmbiguousEndpointCreate,
     AmbiguousEndpointDelete,
@@ -82,7 +76,13 @@ from harbor_hf.results import (
     build_index_window_file,
     read_index_file,
 )
-from harbor_hf.wave_worker import ExecutionLock
+from harbor_hf.run_observer import (
+    _attempt_control_events,
+    _legacy_failure_category,
+    _wave_events,
+)
+from harbor_hf.runs import estimated_partial_wave_cost
+from harbor_hf.wave_worker import AttemptLock
 
 
 def _provider_target() -> ProviderTarget:
@@ -157,8 +157,8 @@ def test_legacy_failure_categories_preserve_historical_classification(
 def test_observer_wave_and_execution_event_projection_is_exact(
     remote_spec: ExperimentSpec,
 ) -> None:
-    campaign = _campaign(remote_spec)
-    wave = _wave(campaign, remote_spec).model_copy(
+    run = _run(remote_spec)
+    wave = _wave(run, remote_spec).model_copy(
         update={"estimated_cost_microusd": 765_432}
     )
     records: list[dict[str, object]] = [
@@ -167,7 +167,7 @@ def test_observer_wave_and_execution_event_projection_is_exact(
         {"event": "endpoint_pause_requested", "at": "2026-07-14T01:16:00+00:00"},
     ]
 
-    wave_events = _wave_events(campaign, wave, "_SUCCESS", records)
+    wave_events = _wave_events(run, wave, "_SUCCESS", records)
 
     assert [event.kind for event in wave_events] == [
         "wave.active",
@@ -188,37 +188,37 @@ def test_observer_wave_and_execution_event_projection_is_exact(
     assert wave_events[2].event_id == (
         "evt-"
         + hashlib.sha256(
-            f"{campaign.campaign_id}:{wave.wave_id}:closed:_SUCCESS".encode()
+            f"{run.run_id}:{wave.wave_id}:closed:_SUCCESS".encode()
         ).hexdigest()[:32]
     )
 
-    trial = campaign.runs[0].shards[0].trials[0]
-    execution = ExecutionLock.model_validate_json(
-        _execution_lock_for_wave(campaign, wave, trial.trial_id, "execution-contract")
+    trial = run.executions[0].shards[0].trials[0]
+    execution = AttemptLock.model_validate_json(
+        _attempt_lock_for_wave(run, wave, trial.trial_id, "execution-contract")
     )
-    execution_events = _execution_control_events(
-        campaign,
+    attempt_events = _attempt_control_events(
+        run,
         execution,
         "_FAILED",
         [
-            {"event": "execution_started", "at": "2026-07-14T01:11:00+00:00"},
-            {"event": "execution_failed", "at": "2026-07-14T01:12:00+00:00"},
+            {"event": "attempt_started", "at": "2026-07-14T01:11:00+00:00"},
+            {"event": "attempt_failed", "at": "2026-07-14T01:12:00+00:00"},
         ],
         "provider connection reset",
         "transient",
     )
-    assert [event.kind for event in execution_events] == [
-        "execution.started",
-        "execution.failed",
+    assert [event.kind for event in attempt_events] == [
+        "attempt.started",
+        "attempt.failed",
     ]
-    assert execution_events[0].payload.model_dump(mode="json") == {
+    assert attempt_events[0].payload.model_dump(mode="json") == {
         "trial_id": trial.trial_id,
         "shard_id": execution.shard_id,
         "physical_attempt": 1,
         "wave_id": wave.wave_id,
         "estimated_cost_microusd": 0,
     }
-    assert execution_events[1].payload.model_dump(mode="json") == {
+    assert attempt_events[1].payload.model_dump(mode="json") == {
         "trial_id": trial.trial_id,
         "physical_attempt": 1,
         "category": "transient",
@@ -231,9 +231,9 @@ def test_observer_wave_and_execution_event_projection_is_exact(
 def test_retry_wave_observation_records_prorated_cost(
     remote_spec: ExperimentSpec,
 ) -> None:
-    campaign = _campaign(remote_spec)
-    wave = _wave(campaign, remote_spec)
-    trial_id = campaign.runs[0].shards[0].trials[0].trial_id
+    run = _run(remote_spec)
+    wave = _wave(run, remote_spec)
+    trial_id = run.executions[0].shards[0].trials[0].trial_id
     retry = wave.model_copy(
         update={
             "action_kind": "retry-shard",
@@ -247,12 +247,12 @@ def test_retry_wave_observation_records_prorated_cost(
         {"event": "endpoint_pause_requested", "at": "2026-07-14T01:16:00+00:00"},
     ]
 
-    events = _wave_events(campaign, retry, "_SUCCESS", records)
+    events = _wave_events(run, retry, "_SUCCESS", records)
 
     assert events[0].payload.model_dump(mode="json")[
         "estimated_cost_microusd"
     ] == estimated_partial_wave_cost(
-        campaign, retry.deployment_digest, retry.estimated_cost_microusd, 1
+        run, retry.deployment_digest, retry.estimated_cost_microusd, 1
     )
 
 
@@ -1097,12 +1097,12 @@ def _index_row(
     completed_at: datetime,
     revision: str,
     *,
-    run_id: str | None = None,
+    execution_id: str | None = None,
 ) -> GlobalIndexRow:
     return GlobalIndexRow(
         publication_id=publication_id,
-        run_id=run_id or f"run-{publication_id}",
-        campaign_id="campaign-one",
+        execution_id=execution_id or f"run-{publication_id}",
+        run_id="run-one",
         evaluation_id="evaluation-one",
         publication_role="final",
         component_kind=None,
@@ -1132,13 +1132,13 @@ def test_result_index_windows_are_deduplicated_sorted_and_power_sized(
         "pub-prior-contract",
         now + timedelta(minutes=2),
         "3" * 40,
-        run_id="run-rotated",
+        execution_id="execution-rotated",
     )
     replacement = _index_row(
         "pub-new",
         now + timedelta(minutes=3),
         "4" * 40,
-        run_id="run-rotated",
+        execution_id="execution-rotated",
     )
     publisher = HubDatasetPublisher(
         publisher_id="publisher-one",
@@ -1235,16 +1235,16 @@ def test_publication_receipts_and_lease_identity_are_canonical() -> None:
     )
     result = ResultReceipt(
         publication_id="pub-receipt",
-        run_id="run-one",
+        execution_id="execution-one",
         source_checksum="sha256:" + "a" * 64,
-        files={"data/runs.parquet": "sha256:" + "b" * 64},
+        files={"data/executions.parquet": "sha256:" + "b" * 64},
     )
     assert json.loads(result.model_dump_json()) == {
         "schema_version": "harbor-hf/result-publication/v1",
         "publication_id": "pub-receipt",
-        "run_id": "run-one",
+        "execution_id": "execution-one",
         "source_checksum": "sha256:" + "a" * 64,
-        "files": {"data/runs.parquet": "sha256:" + "b" * 64},
+        "files": {"data/executions.parquet": "sha256:" + "b" * 64},
     }
 
 

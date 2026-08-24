@@ -81,9 +81,9 @@
           "title": "Logical Trials",
           "type": "integer"
         },
-        "physical_executions": {
+        "physical_attempts": {
           "minimum": 0,
-          "title": "Physical Executions",
+          "title": "Physical Attempts",
           "type": "integer"
         },
         "terminal_trials": {
@@ -96,7 +96,7 @@
         "logical_trials",
         "terminal_trials",
         "active_trials",
-        "physical_executions"
+        "physical_attempts"
       ],
       "title": "ControllerProjectionCounts",
       "type": "object"
@@ -121,10 +121,6 @@
       ],
       "default": null,
       "title": "Block Reason"
-    },
-    "campaign_id": {
-      "title": "Campaign Id",
-      "type": "string"
     },
     "capacity": {
       "anyOf": [
@@ -220,6 +216,10 @@
       "title": "Remaining Seconds",
       "type": "integer"
     },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
     "schema_version": {
       "const": "harbor-hf/controller-status/v1alpha1",
       "default": "harbor-hf/controller-status/v1alpha1",
@@ -249,7 +249,7 @@
     }
   },
   "required": [
-    "campaign_id",
+    "run_id",
     "plan_digest",
     "job_id",
     "attempt",

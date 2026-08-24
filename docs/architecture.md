@@ -11,9 +11,9 @@ The package must remain useful as an independent Harbor plugin and be shaped so
 that it could later move into a Harbor monorepo package without architectural
 changes.
 
-## Planned control service
+## Control service
 
-The current release stores live campaign events and claims in a private Hub
+The current release stores live run events and claims in a private Hub
 Dataset. The approved [control service
 plan](2026-08-16-harbor-hf-control-service-plan.md) replaces that new-write path
 with one publicly reachable, application-protected control Space and immutable objects in the configured
@@ -30,10 +30,7 @@ catalog. Real resource names remain in private deployment configuration.
 This is a hard new-write switch with no dual-write mode. Historical Dataset
 commits and Bucket evidence remain immutable. Python may remain in pinned remote
 benchmark workers, but it does not remain as a parallel shared control path.
-Until implementation and remote recovery canaries pass, the current production
-behavior described below remains authoritative.
-
-Hub resources are shared namespace infrastructure. A campaign, repair, profile,
+Hub resources are shared namespace infrastructure. A run, repair, profile,
 lease, status record, or result subset must not create its own repository,
 Bucket, Space, or schedule. New persistent resources require an explicit
 privacy, access, retention, or failure-domain reason that the canonical stores
@@ -56,7 +53,7 @@ protected public control Space
    +--> private Bucket
    |      control records, profiles, evidence, results, catalog
    |
-   +--> HF Jobs --> Harbor trials --> HF Sandboxes
+   +--> HF Jobs, one physical Harbor trial per Job
    |
    +--> HF Endpoints and Inference Providers
 ```
@@ -64,29 +61,6 @@ protected public control Space
 The browser never reads the Bucket or receives service credentials. API
 mutations write immutable intent before the reconciler performs a remote side
 effect. SQLite may be deleted and rebuilt from Bucket records.
-
-The current production path remains in place until the replacement gates pass:
-
-```text
-experiment.yaml
-      |
-      v
-planner -> campaign lock -> provider controller Job
-              |                       |            |
-              |                 HF Providers   HF Sandboxes
-              |                       |            |
-              +-> endpoint wave Job -> Harbor trials
-                          |
-                    HF Endpoints
-                                              |
-                                    private HF Bucket
-                                              |
-                                       publisher Job
-                                              |
-                                   versioned HF Datasets
-                                              |
-                                      results Space
-```
 
 ### Deployment Strategy
 
@@ -107,26 +81,19 @@ do not pretend that unreported runtime, hardware, or quantization details are
 known. Endpoint and provider profiles remain distinct in manifests, locks,
 metrics, and result tables.
 
-### Sandbox Gateway
+### Trial Job isolation
 
-The TypeScript control service is the only holder of broad Hugging Face Sandbox
-lifecycle authority. A signed worker capability may authorize a closed set of
-operations for one immutable campaign lock and task. The public Sandbox ID is the
-deterministic create-action ID. Remote Job IDs, proxy URLs, per-Sandbox tokens
-and inference topology remain server-side.
+The TypeScript control service launches one Hugging Face Job for each physical
+trial attempt. Every launch uses immutable intent, admission, dispatch,
+observation, receipt, and advancement records. A lost create response becomes
+adoption-only and cannot issue a second create request.
 
-Every lifecycle mutation uses intent, dispatch, result, receipt and advanced
-records. Create adopts only a Job with the exact deterministic label. An
-ambiguous command is never replayed automatically. File transfers are bounded,
-root-restricted and content-addressed. The immutable deployment policy reserves
-the maximum Sandbox cost before launch, records observed cost at close and
-releases the reservation only after remote cleanup.
-
-The Sandbox Job receives a derived `SBX_TOKEN`, never `HF_TOKEN` or
-`SBX_DL_TOKEN`. When inference is required, it also receives the distinct scoped
-inference credential. A reviewed root bootstrap starts the credential-holding
-loopback bridge and removes all inference credential and route variables before
-the Sandbox server accepts benchmark commands.
+The Job receives a short-lived capability scoped to its run, launch action, and
+task. It never receives `HF_TOKEN` or a writable Bucket mount. When inference is
+required, root bootstrap starts a credential-holding loopback bridge, removes
+the inference credential from the benchmark process environment, and drops
+privileges before Harbor starts. Evidence returns through content-addressed
+uploads and a verified manifest.
 
 ### Planner
 
@@ -145,19 +112,19 @@ planning.
 
 ### Controller
 
-A provider campaign runs inside one detached HF Job. Submission stages a
+A provider run runs inside one detached HF Job. Submission stages a
 content-addressed folder containing the requested manifest, resolved source
-lock, campaign lock, and input manifest. A local benchmark bundle has its own
+lock, run lock, and input manifest. A local benchmark bundle has its own
 shared content address and read-only mount. A parent-checked launch claim
 serializes the exact-label Job lookup and launch, and an immutable receipt binds
 the attempt to its physical Job. The controller verifies the input files and
-source, acquires the campaign claim, prepares pinned runtime sources, and runs
+source, acquires the run claim, prepares pinned runtime sources, and runs
 one internal wave at a time. Trial concurrency stays inside each wave.
 
 The controller records a heartbeat while a long trial runs. Its container
 wrapper records the physical start before pinned source checkout, so admission
 includes bootstrap time. Before billable work, it acquires a parent-checked
-namespace claim keyed by provider service, so two campaign Jobs cannot run
+namespace claim keyed by provider service, so two run Jobs cannot run
 internal waves against the same shared provider at once. Provider recorder setup
 draws from the locked wave reserve rather than the trial-work duration. The
 controller stops admitting work if ownership becomes uncertain, shared capacity
@@ -165,28 +132,28 @@ is occupied, the remaining Job time cannot fit the next wave, observed
 throughput breaks the locked duration bound, or policy blocks continuation.
 Completed trial evidence is committed before the next action.
 
-Endpoint-backed campaigns keep the existing wave Job and independent endpoint
+Endpoint-backed runs keep the existing wave Job and independent endpoint
 watchdog. A killed endpoint worker needs an outside process that can pause the
 endpoint, so endpoint execution does not use the provider controller.
 
-### Campaign reconciler
+### Run reconciler
 
-Campaigns are durable submissions of an immutable resolved plan. A campaign
+Runs are durable submissions of an immutable resolved plan. A run
 lock content-addresses its run cells, bounded shards, logical trials, controller
 policy, and initial wave durations. The same plan may be submitted more than
-once under distinct campaign IDs without overwriting an earlier measurement.
+once under distinct run IDs without overwriting an earlier measurement.
 
-The domain reconciler reads the campaign lock and append-only events, rebuilds
+The domain reconciler reads the run lock and append-only events, rebuilds
 the projection, and selects one deterministic action. It reserves that action
 before applying a side effect and records the outcome before selecting another.
 Cleanup and publication actions run before billable work.
 
-For provider campaigns, `submit-wave` means that the owning controller admits
+For provider runs, `submit-wave` means that the owning controller admits
 and executes the wave in process. It no longer submits an HF Job. The endpoint
 adapter keeps the older remote wave meaning because endpoint ownership and
 cleanup require separate resources. Read-only reconciliation remains useful for
-diagnosis. An applied pass is available only for endpoint campaigns. Historical
-provider campaigns remain bound to their pinned Harbor HF revision.
+diagnosis. An applied pass is available only for endpoint runs. Historical
+provider runs remain bound to their pinned Harbor HF revision.
 
 Endpoint-backed controller and watchdog Jobs carry a deterministic label
 derived from the endpoint namespace and name. They coordinate through one
@@ -210,26 +177,26 @@ verifies endpoint pause, and only then releases ownership.
 If a controller Job terminates after publishing successful trial evidence but
 before its wave marker, recovery closes the abandoned wave and may submit a
 replacement. The replacement accepts checksum-valid successful trial evidence
-from an earlier wave only when campaign, run, shard, trial, task, and logical
+from an earlier wave only when run, run, shard, trial, task, and logical
 attempt identities all match. This avoids rerunning completed work without
-allowing evidence from another campaign or task to cross the boundary.
+allowing evidence from another run or task to cross the boundary.
 
-Every endpoint wave Job acquires a second expiring lease keyed by campaign and
+Every endpoint wave Job acquires a second expiring lease keyed by run and
 wave before endpoint work begins. The provider controller instead holds one
-campaign claim and renews it throughout the physical Job. A duplicate
+run claim and renews it throughout the physical Job. A duplicate
 controller exits before source preparation or provider requests. Claim expiry
 allows investigation but does not authorize recovery until the prior Job is
 also terminal or absent. A separate provider-capacity claim serializes billable
 waves by provider service. It is released by exact ownership and has no
-cross-campaign expiry takeover. The owning campaign's watchdog releases an
+cross-run expiry takeover. The owning run's watchdog releases an
 abandoned capacity claim after proving its physical Job terminal or absent,
-even when policy blocks a replacement. Other campaigns can then acquire the
+even when policy blocks a replacement. Other runs can then acquire the
 provider normally.
 
 ### Endpoint Provisioner
 
 The [endpoint provisioning boundary](endpoint-provisioning.md) converts locked
-model and deployment profiles into deterministic campaign-scoped managed
+model and deployment profiles into deterministic run-scoped managed
 identities and exact effective Hugging Face Endpoint configuration. Its typed
 port supports create, inspect/adopt, pause, and explicit delete without
 depending on SDK response models. Adoption requires managed identity, complete
@@ -254,19 +221,19 @@ the pinned Harbor environment and selects the agent with
 installation, configuration, invocation, session export, and trajectory
 conversion live in separate external modules. Generic `harbor-hf` code performs
 a declarative registry lookup and never renders one agent's configuration for
-another. New provider campaigns have no built-in-agent fallback.
+another. New provider runs have no built-in-agent fallback.
 
 ### Artifact Store
 
 A private HF Storage Bucket is the complete evidence archive. Requested and
 resolved configuration, endpoint snapshots, Harbor output, trajectories,
 sessions, verifier records, logs, and checksums are written under an immutable
-run prefix. The separate managed `jobs-artifacts` Bucket stores campaign inputs
+run prefix. The separate managed `jobs-artifacts` Bucket stores run inputs
 and immutable benchmark bundles. Bundle payloads are published first and their
 validated manifests are written last as completion markers. Sanitized run
 evidence is published after validation and resource cleanup, and `_SUCCESS` is
 written only for a complete run. Each Harbor trial's task digest is read from
-its own `lock.json` and must match the pre-resolved task map in `run.lock.json`.
+its own `lock.json` and must match the pre-resolved task map in `execution.lock.json`.
 The worker first adds a permanent run reservation to the private coordination
 repository with the same parent-commit compare-and-swap protocol. Duplicate run
 IDs therefore fail before source preparation, endpoint work, or failure
@@ -300,7 +267,7 @@ The stable hierarchy is:
 4. An execution represents one physical invocation, including infrastructure
    retries.
 
-Retries never replace previous executions. Composite or manually selected
+Retries never replace previous attempts. Composite or manually selected
 results must be labeled explicitly and must not appear as single-run results.
 
 ## Reproducibility Boundary
@@ -341,6 +308,25 @@ root-owned inference bridge; a benchmark agent may not receive either
 credential. Credential display names and local aliases remain private. Rotate
 the inference credential only after every Job using the prior value is terminal.
 
+The reviewed, digest-pinned deployment Job image is the physical worker
+boundary. The prepared benchmark OCI image is separately digest-pinned task
+data. The worker verifies and unpacks that image, replaces its launch
+environment, strips setuid, setgid, and file capabilities, rejects special
+files, then maps the rootfs to one dedicated high host UID/GID. Task, agent,
+and verifier commands run with that real UID, empty supplementary groups, no
+Linux capabilities, and `no_new_privs`. PRoot supplies the task filesystem
+view and fake image-user semantics only. It is not a security boundary, and
+fake container UID 0 never becomes host root.
+
+The task rootfs does not bind host `/run`, `/tmp`, the root worker workspace,
+token files, or control capability material. It may bind host `/proc` for
+process metadata. Different real UIDs plus the absent `CAP_SYS_PTRACE` prevent
+the task from reading root process environments and file descriptors.
+Preflight proves those denials with the final task identity. If the required
+tools, UID separation, capability state, or denial probes are unavailable,
+preflight records replacement-eligible infrastructure instead of using a
+namespace or same-UID fallback.
+
 ### Canonical Configuration Artifacts
 
 Each run preserves four separate configuration records:
@@ -349,7 +335,7 @@ Each run preserves four separate configuration records:
 | --- | --- |
 | `manifest.yaml` | Immutable copy of what the user requested, including an operator-local path when a directory was selected. |
 | `source.lock.json` | Remote-safe anonymous Git, bundle, or package identity resolved before semantic planning. |
-| `run.lock.json` | Resolved revisions, matrix cell, policy, and reproducibility contract fixed before execution. |
+| `execution.lock.json` | Resolved revisions, matrix cell, policy, and reproducibility contract fixed before execution. |
 | `endpoint.snapshot.json` | Effective endpoint or provider configuration observed after readiness. |
 | `runtime-environment.json` | Versions and feature controls reported from inside the serving runtime. |
 
@@ -359,7 +345,7 @@ published as comparison fields.
 
 Before any remote work, the controller reconstructs the selected matrix cell
 from `manifest.yaml` and the verified `source.lock.json`, then compares the
-complete result with `run.lock.json`. Matching only the manifest digest is
+complete result with `execution.lock.json`. Matching only the manifest digest is
 insufficient because source and run lock fields can be modified independently.
 
 Runtime evidence uses a status alongside nullable values. `reported` means the
@@ -392,14 +378,12 @@ resources and record final usage and request state.
 
 The worker verifies `status.state = paused` and `readyReplica = 0` before it
 writes `_SUCCESS`. The final snapshot also records `targetReplica`, which may
-remain nonzero on a paused endpoint. HF Sandbox environments are closed through durable control actions before a
-campaign cancellation is sealed. Their idle timeout remains an independent
-fallback for a terminated worker or control process. The idle timeout must
-exceed the longest uninterrupted agent or verifier command because an active
-streaming command does not necessarily refresh the Sandbox idle timer. It must
-also remain at or below the locked Sandbox lifetime, which is the outer
-lifecycle bound. Restart recovery adopts a dispatched create by deterministic
-label and retries close until the remote Job is terminal.
+remain nonzero on a paused endpoint. Trial Jobs remain under observation until
+a documented terminal state. Cancellation prevents new Job admission, while
+already running Jobs may finish their assigned trial and evidence boundary.
+Restart recovery adopts a dispatched create by deterministic label and cannot
+launch a replacement until terminal observation and the receipt grace period
+complete.
 
 Endpoint pause requests and status reads retry transient provider failures until
 the bounded cleanup deadline. Each endpoint CLI call is limited to 60 seconds or
@@ -423,12 +407,12 @@ changing benchmark validity.
 - No secret values in manifests, logs, locks, or artifacts.
 - No state that exists only on the submitting machine.
 - No direct Bucket access or service credential in the browser.
-- No Python fallback for shared campaign control after the TypeScript service
+- No Python fallback for shared run control after the TypeScript service
   becomes authoritative.
 - No PostgreSQL, Redis, Node cluster, separate frontend service, or keep-awake
   schedule in the target runtime.
 - No direct writes from trial workers to shared Dataset Git repositories.
-- No per-campaign, per-profile, per-repair, per-lease, per-status, or
+- No per-run, per-profile, per-repair, per-lease, per-status, or
   per-result-subset Hub repository, Bucket, Space, or schedule.
 - No new persistent Hub resource without an inventory, an unmet privacy or
   failure-domain requirement, a lifecycle and cost record, and explicit

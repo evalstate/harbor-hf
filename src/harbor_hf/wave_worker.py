@@ -21,16 +21,6 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from harbor_hf.benchmark_source import prepare_benchmark_source, source_lock_bytes
-from harbor_hf.campaigns import (
-    CampaignLock,
-    CampaignTrialLock,
-    EndpointWaveTarget,
-    ProviderWaveTarget,
-    WaveLock,
-    WaveRunLock,
-    WaveShardLock,
-    build_wave_lock,
-)
 from harbor_hf.control import RetryCategory
 from harbor_hf.coordination import (
     ClaimConflict,
@@ -51,6 +41,11 @@ from harbor_hf.evidence import (
     write_checksums,
     write_json,
 )
+from harbor_hf.executions import (
+    ExecutionLock,
+    execution_secret_values,
+    harbor_process_environment,
+)
 from harbor_hf.harbor_adapter import (
     FilesystemHarborExecutionAdapter,
     HarborVerificationFailure,
@@ -70,7 +65,7 @@ from harbor_hf.models import BenchmarkJudgeSpec, EndpointRef, ExperimentSpec, So
 from harbor_hf.private_artifacts import (
     PrivateArtifactRequirementError,
     build_private_artifact_manifest,
-    openclaw_execution_started,
+    openclaw_attempt_started,
     openclaw_execution_was_attempted,
     sanitize_private_artifact_tree,
     write_private_artifact_manifest,
@@ -87,7 +82,16 @@ from harbor_hf.provider_models import (
 )
 from harbor_hf.provider_proxy import PROVIDER_RECORDER_PORT, ProviderEvidenceProxy
 from harbor_hf.providers import routed_provider_model
-from harbor_hf.runs import RunLock, harbor_process_environment, run_secret_values
+from harbor_hf.runs import (
+    EndpointWaveTarget,
+    ProviderWaveTarget,
+    RunLock,
+    RunTrialLock,
+    WaveExecutionLock,
+    WaveLock,
+    WaveShardLock,
+    build_wave_lock,
+)
 from harbor_hf.trial_evidence import (
     TrialEvidenceError,
     assemble_trial_evidence,
@@ -196,20 +200,22 @@ class LockedSubmitWaveAction(FrozenModel):
     action_id: str
     action_key: str
     kind: Literal["submit-wave", "retry-shard"] = "submit-wave"
-    campaign_id: str
+    run_id: str
     deployment_digest: str
     shard_ids: list[str]
     trial_ids: list[str] = Field(default_factory=list)
     estimated_cost_microusd: int | None = None
 
 
-class ExecutionLock(FrozenModel):
-    schema_version: str = "harbor-hf/execution-lock/v1alpha1"
-    execution_id: str
+class AttemptLock(FrozenModel):
+    schema_version: Literal["harbor-hf/attempt-lock/v1alpha1"] = (
+        "harbor-hf/attempt-lock/v1alpha1"
+    )
+    attempt_id: str
     created_at: datetime
-    campaign_id: str
-    wave_id: str
     run_id: str
+    wave_id: str
+    execution_id: str
     shard_id: str
     trial_id: str
     task_name: str
@@ -245,7 +251,7 @@ class _EndpointWaveLifecycle:
 
     def prepare(self, deadline: float, monotonic: Callable[[], float]) -> str:
         baseline = self.manager.describe()
-        for run in self.lock.runs:
+        for run in self.lock.executions:
             validate_endpoint_model(run.configuration, baseline)
         require_paused_endpoint(baseline)
         append_event(self.events, "endpoint_baseline_validated")
@@ -259,11 +265,13 @@ class _EndpointWaveLifecycle:
         return resume_and_probe_endpoint(
             self.wave_root,
             self.events,
-            self.lock.runs[0].configuration,
+            self.lock.executions[0].configuration,
             self.manager,
             self.token,
             readiness_timeout_seconds=readiness_timeout,
-            compatible_locks=tuple(run.configuration for run in self.lock.runs[1:]),
+            compatible_locks=tuple(
+                run.configuration for run in self.lock.executions[1:]
+            ),
         )
 
     def cleanup(self) -> Exception | None:
@@ -294,31 +302,37 @@ class _EndpointWaveLifecycle:
         return None
 
 
-def validate_wave_lock(
-    spec: ExperimentSpec, campaign: CampaignLock, lock: WaveLock
-) -> None:
-    if any(run.configuration.trial_evidence is None for run in lock.runs):
-        raise WorkerError("wave run locks require a complete trial evidence policy")
-    matching_runs = [
-        run for run in campaign.runs if run.deployment_digest == lock.deployment_digest
+def validate_wave_lock(spec: ExperimentSpec, run: RunLock, lock: WaveLock) -> None:
+    if any(
+        execution.configuration.trial_evidence is None for execution in lock.executions
+    ):
+        raise WorkerError(
+            "wave execution locks require a complete trial evidence policy"
+        )
+    matching_executions = [
+        execution
+        for execution in run.executions
+        if execution.deployment_digest == lock.deployment_digest
     ]
-    if not matching_runs:
+    if not matching_executions:
         raise WorkerError("wave lock references an unknown deployment")
-    estimates = {run.estimated_wave_cost_microusd for run in matching_runs}
+    estimates = {
+        execution.estimated_wave_cost_microusd for execution in matching_executions
+    }
     if len(estimates) != 1:
         raise WorkerError("wave deployment has inconsistent spend estimates")
     action = LockedSubmitWaveAction(
         action_id=lock.action_id,
         action_key=lock.action_key,
         kind=lock.action_kind,
-        campaign_id=lock.campaign_id,
+        run_id=lock.run_id,
         deployment_digest=lock.deployment_digest,
         shard_ids=lock.shard_ids,
         trial_ids=lock.trial_ids,
         estimated_cost_microusd=estimates.pop(),
     )
     try:
-        expected = build_wave_lock(campaign, spec, action, endpoint=lock.endpoint)
+        expected = build_wave_lock(run, spec, action, endpoint=lock.endpoint)
     except ValueError as error:
         raise WorkerError(f"wave lock cannot be resolved: {error}") from error
     if lock.recovery_parent_worker_revision is not None:
@@ -326,7 +340,7 @@ def validate_wave_lock(
             lock.recovery_parent_worker_revision != expected.remote.worker.revision
             or lock.remote.worker.repository != expected.remote.worker.repository
         ):
-            raise WorkerError("recovery worker does not descend from the campaign pin")
+            raise WorkerError("recovery worker does not descend from the run pin")
         expected = expected.model_copy(
             update={
                 "remote": expected.remote.model_copy(
@@ -336,23 +350,23 @@ def validate_wave_lock(
             }
         )
     if lock != expected:
-        raise WorkerError("wave lock fields do not match the campaign and manifest")
+        raise WorkerError("wave lock fields do not match the run and manifest")
 
 
 def run_standalone_wave_worker(
     manifest_path: Path,
-    campaign_lock_path: Path,
+    run_lock_path: Path,
     wave_lock_path: Path,
     output_root: Path,
 ) -> Path:
     lock = WaveLock.model_validate_json(wave_lock_path.read_text(encoding="utf-8"))
     if isinstance(lock.target, ProviderWaveTarget):
         raise WorkerError(
-            "provider wave locks must run inside their owning campaign controller"
+            "provider wave locks must run inside their owning run controller"
         )
     return run_wave_worker(
         manifest_path,
-        campaign_lock_path,
+        run_lock_path,
         wave_lock_path,
         output_root,
     )
@@ -360,7 +374,7 @@ def run_standalone_wave_worker(
 
 def run_wave_worker(
     manifest_path: Path,
-    campaign_lock_path: Path,
+    run_lock_path: Path,
     wave_lock_path: Path,
     output_root: Path,
     *,
@@ -374,11 +388,9 @@ def run_wave_worker(
     claim_store: ClaimStore | None = None,
 ) -> Path:
     spec = load_experiment(manifest_path)
-    campaign = CampaignLock.model_validate_json(
-        campaign_lock_path.read_text(encoding="utf-8")
-    )
+    run = RunLock.model_validate_json(run_lock_path.read_text(encoding="utf-8"))
     lock = WaveLock.model_validate_json(wave_lock_path.read_text(encoding="utf-8"))
-    validate_wave_lock(spec, campaign, lock)
+    validate_wave_lock(spec, run, lock)
     token = os.environ.get(lock.remote.job.token_secret_name, "")
     if not token:
         raise WorkerError(
@@ -391,17 +403,17 @@ def run_wave_worker(
         destination = output_root / lock.artifact_prefix
         _reject_terminal_wave(destination)
         with tempfile.TemporaryDirectory(prefix="harbor-hf-wave-") as staging_name:
-            staging = Path(staging_name) / campaign.artifact_prefix
-            _stage_campaign_records(
+            staging = Path(staging_name) / run.artifact_prefix
+            _stage_run_records(
                 staging,
-                campaign,
+                run,
                 lock,
                 _wave_secret_values(lock, token),
                 output_root,
             )
             return _run_staged_wave(
                 manifest_path,
-                campaign,
+                run,
                 lock,
                 staging,
                 output_root,
@@ -419,7 +431,7 @@ def run_wave_worker(
 
 def run_provider_wave_execution(
     manifest_path: Path,
-    campaign: CampaignLock,
+    run: RunLock,
     lock: WaveLock,
     output_root: Path,
     staging_root: Path,
@@ -432,11 +444,11 @@ def run_provider_wave_execution(
     clock: Clock = lambda: datetime.now(UTC),
     monotonic: Callable[[], float] = time.monotonic,
 ) -> Path:
-    """Execute one provider wave inside its owning campaign controller Job."""
+    """Execute one provider wave inside its owning run controller Job."""
     spec = load_experiment(manifest_path)
-    validate_wave_lock(spec, campaign, lock)
+    validate_wave_lock(spec, run, lock)
     if not isinstance(lock.target, ProviderWaveTarget):
-        raise WorkerError("in-process campaign execution requires a provider wave")
+        raise WorkerError("in-process execution requires a provider wave")
     token = os.environ.get(lock.remote.job.token_secret_name, "")
     if not token:
         raise WorkerError(
@@ -446,19 +458,19 @@ def run_provider_wave_execution(
     process_runner = runner or SubprocessRunner()
     destination = output_root / lock.artifact_prefix
     _reject_terminal_wave(destination)
-    campaign_root = staging_root / campaign.artifact_prefix
-    _stage_campaign_records(
-        campaign_root,
-        campaign,
+    run_root = staging_root / run.artifact_prefix
+    _stage_run_records(
+        run_root,
+        run,
         lock,
         _wave_secret_values(lock, token),
         output_root,
     )
     return _run_staged_wave(
         manifest_path,
-        campaign,
+        run,
         lock,
-        campaign_root,
+        run_root,
         output_root,
         token,
         process_runner,
@@ -488,14 +500,14 @@ def _wave_worker_lease(
         claims = HubClaimStore(lock.remote.job.namespace, token)
     now = clock().astimezone(UTC)
     owner = {
-        "campaign_id": lock.campaign_id,
+        "run_id": lock.run_id,
         "wave_id": lock.wave_id,
         "job_id": job_id,
         "expires_at": (
             now + timedelta(seconds=lock.remote.job.timeout_seconds)
         ).isoformat(),
     }
-    path = wave_worker_claim_path(lock.campaign_id, lock.wave_id)
+    path = wave_worker_claim_path(lock.run_id, lock.wave_id)
     try:
         claims.acquire(path, owner)
     except ClaimConflict as error:
@@ -509,9 +521,9 @@ def _wave_worker_lease(
 
 def _run_staged_wave(
     manifest_path: Path,
-    campaign: CampaignLock,
+    run: RunLock,
     lock: WaveLock,
-    campaign_root: Path,
+    run_root: Path,
     output_root: Path,
     token: str,
     runner: CommandRunner,
@@ -526,7 +538,7 @@ def _run_staged_wave(
     prepared_benchmark_root: Path | None = None,
     mounted_bundle_root: Path = Path("/benchmark-source"),
 ) -> Path:
-    wave_root = campaign_root / "waves" / lock.wave_id
+    wave_root = run_root / "waves" / lock.wave_id
     wave_root.mkdir(parents=True)
     write_json(wave_root / "wave.lock.json", lock.model_dump(mode="json"))
     events = wave_root / "events.jsonl"
@@ -553,9 +565,7 @@ def _run_staged_wave(
     try:
         require_executable("git")
         harbor_source = prepared_harbor_source or (
-            campaign_root.parent
-            / "sources"
-            / f"harbor-{lock.remote.harbor.source.revision}"
+            run_root.parent / "sources" / f"harbor-{lock.remote.harbor.source.revision}"
         )
         if prepared_harbor_source is None:
             source_preparer(lock.remote.harbor.source, harbor_source, runner)
@@ -568,11 +578,11 @@ def _run_staged_wave(
         benchmark_root = prepared_benchmark_root
         if benchmark_root is None:
             benchmark_root = prepare_benchmark_source(
-                campaign.source_lock,
+                run.source_lock,
                 mounted_bundle_root=mounted_bundle_root,
-                destination=campaign_root.parent / "sources" / "benchmark",
+                destination=run_root.parent / "sources" / "benchmark",
             )
-        overall_deadline = _overall_wave_deadline(campaign, lock, monotonic)
+        overall_deadline = _overall_wave_deadline(run, lock, monotonic)
         base_url, provider_proxy = _prepare_wave_transport(
             lock,
             wave_root,
@@ -588,9 +598,9 @@ def _run_staged_wave(
         trial_deadline = _trial_work_deadline(overall_deadline, lock, monotonic)
         shard_checksums = _execute_shards(
             manifest_path,
-            campaign,
+            run,
             lock,
-            campaign_root,
+            run_root,
             output_root,
             harbor_source,
             benchmark_root,
@@ -615,7 +625,7 @@ def _run_staged_wave(
     terminal_error = error or cleanup_error
     summary: dict[str, object] = {
         "wave_id": lock.wave_id,
-        "campaign_id": campaign.campaign_id,
+        "run_id": run.run_id,
         "shard_checksums": shard_checksums,
         "endpoint_cleanup_verified": (
             cleanup_error is None and lifecycle.owned
@@ -652,14 +662,14 @@ def _run_staged_wave(
 
 
 def _overall_wave_deadline(
-    campaign: CampaignLock,
+    run: RunLock,
     lock: WaveLock,
     monotonic: Callable[[], float],
 ) -> float:
     reserve_seconds = (
-        campaign.controller_policy.wave_reserve_seconds
+        run.controller_policy.wave_reserve_seconds
         if isinstance(lock.target, ProviderWaveTarget)
-        and campaign.controller_policy is not None
+        and run.controller_policy is not None
         else 0
     )
     return monotonic() + lock.duration_seconds + reserve_seconds
@@ -733,7 +743,7 @@ def _job_ingress_base_url(port: int, label: str) -> str:
 def _wave_judge_spec(lock: WaveLock) -> BenchmarkJudgeSpec | None:
     specs = [
         run.configuration.benchmark_judge
-        for run in lock.runs
+        for run in lock.executions
         if run.configuration.judge_required_tasks
     ]
     if not specs:
@@ -746,7 +756,7 @@ def _wave_judge_spec(lock: WaveLock) -> BenchmarkJudgeSpec | None:
         cast(BenchmarkJudgeSpec, spec).model_dump(mode="json") != selected_payload
         for spec in specs[1:]
     ):
-        raise WorkerError("all judge-required wave runs must use the same judge")
+        raise WorkerError("all judge-required wave executions must use the same judge")
     return selected
 
 
@@ -865,9 +875,9 @@ def _cleanup_wave_transport(
 
 def _execute_shards(
     manifest_path: Path,
-    campaign: CampaignLock,
+    run: RunLock,
     lock: WaveLock,
-    campaign_root: Path,
+    run_root: Path,
     output_root: Path,
     harbor_source: Path,
     benchmark_root: Path | None,
@@ -883,7 +893,11 @@ def _execute_shards(
     judge_recorder: JudgeEvidenceRecorder | None = None,
     judge_base_url: str | None = None,
 ) -> dict[str, str]:
-    shards = [(run, shard) for run in lock.runs for shard in run.shards]
+    shards = [
+        (execution, shard)
+        for execution in lock.executions
+        for shard in execution.shards
+    ]
     workers = min(lock.max_concurrent_shards, len(shards))
     results: dict[str, str] = {}
     failures: list[Exception] = []
@@ -895,11 +909,11 @@ def _execute_shards(
             shard_executor.submit(
                 _execute_shard,
                 manifest_path,
-                campaign,
-                lock,
                 run,
+                lock,
+                execution,
                 shard,
-                campaign_root,
+                run_root,
                 output_root,
                 harbor_source,
                 benchmark_root,
@@ -915,7 +929,7 @@ def _execute_shards(
                 judge_recorder=judge_recorder,
                 judge_base_url=judge_base_url,
             ): shard.shard.shard_id
-            for run, shard in shards
+            for execution, shard in shards
         }
         for future in as_completed(futures):
             shard_id = futures[future]
@@ -940,7 +954,7 @@ def _prepare_provider_target(
     write_json(
         wave_root / "runtime-environment.json",
         {
-            "controller": controller_environment(lock.runs[0].configuration),
+            "controller": controller_environment(lock.executions[0].configuration),
             "provider": {
                 "service": target.service,
                 "api": target.api,
@@ -981,11 +995,11 @@ def _prepare_provider_target(
 
 def _execute_shard(
     manifest_path: Path,
-    campaign: CampaignLock,
+    run: RunLock,
     wave: WaveLock,
-    run: WaveRunLock,
+    execution: WaveExecutionLock,
     locked_shard: WaveShardLock,
-    campaign_root: Path,
+    run_root: Path,
     output_root: Path,
     harbor_source: Path,
     benchmark_root: Path | None,
@@ -1007,11 +1021,11 @@ def _execute_shard(
     ) as selected_executor:
         return _execute_shard_with_executor(
             manifest_path,
-            campaign,
-            wave,
             run,
+            wave,
+            execution,
             locked_shard,
-            campaign_root,
+            run_root,
             output_root,
             harbor_source,
             benchmark_root,
@@ -1042,11 +1056,11 @@ def _trial_execution_pool(
 
 def _execute_shard_with_executor(
     manifest_path: Path,
-    campaign: CampaignLock,
+    run: RunLock,
     wave: WaveLock,
-    run: WaveRunLock,
+    execution: WaveExecutionLock,
     locked_shard: WaveShardLock,
-    campaign_root: Path,
+    run_root: Path,
     output_root: Path,
     harbor_source: Path,
     benchmark_root: Path | None,
@@ -1065,7 +1079,11 @@ def _execute_shard_with_executor(
 ) -> str | None:
     shard = locked_shard.shard
     shard_root = (
-        campaign_root / "runs" / run.configuration.run_id / "shards" / shard.shard_id
+        run_root
+        / "executions"
+        / execution.configuration.execution_id
+        / "shards"
+        / shard.shard_id
     )
     shard_root.mkdir(parents=True, exist_ok=True)
     write_json(shard_root / "shard.lock.json", shard.model_dump(mode="json"))
@@ -1073,21 +1091,19 @@ def _execute_shard_with_executor(
     append_event(events, "shard_started", shard_id=shard.shard_id)
     trial_checksums: dict[str, str] = {}
     failures: list[tuple[int, Exception]] = []
-    pending: dict[
-        Future[RetryCategory | None], tuple[int, CampaignTrialLock, Path]
-    ] = {}
+    pending: dict[Future[RetryCategory | None], tuple[int, RunTrialLock, Path]] = {}
     deferred = False
     task_local_failures = False
     selected_trial_ids = set(wave.trial_ids)
     for trial_index, trial in enumerate(shard.trials):
-        destination = _trial_destination(output_root, campaign, run, trial)
+        destination = _trial_destination(output_root, run, execution, trial)
         trial_root = shard_root.parent.parent / "trials" / trial.trial_id
         recovered = _valid_terminal_trial(
             destination,
             trial,
-            campaign_id=campaign.campaign_id,
+            run_id=run.run_id,
             wave_id=None,
-            run_id=run.configuration.run_id,
+            execution_id=execution.configuration.execution_id,
             shard_id=shard.shard_id,
         )
         if recovered:
@@ -1108,9 +1124,9 @@ def _execute_shard_with_executor(
             future = trial_executor.submit(
                 _execute_trial,
                 manifest_path,
-                campaign,
+                run,
                 wave,
-                run.configuration,
+                execution.configuration,
                 shard.shard_id,
                 trial,
                 trial_root,
@@ -1142,10 +1158,10 @@ def _execute_shard_with_executor(
             trial_checksums,
         )
         if provider_proxy is not None:
-            wave_root = campaign_root / "waves" / wave.wave_id
+            wave_root = run_root / "waves" / wave.wave_id
             progress_destination = (
                 output_root
-                / campaign.artifact_prefix
+                / run.artifact_prefix
                 / "waves"
                 / wave.wave_id
                 / "provider-progress.json"
@@ -1155,7 +1171,7 @@ def _execute_shard_with_executor(
                 wave_root / "provider-progress.json",
                 progress_destination,
                 metadata={
-                    "campaign_id": campaign.campaign_id,
+                    "run_id": run.run_id,
                     "wave_id": wave.wave_id,
                     "shard_id": shard.shard_id,
                     "last_terminal_trial_id": trial.trial_id,
@@ -1169,8 +1185,8 @@ def _execute_shard_with_executor(
         append_event(events, "shard_deferred")
         return None
     summary = {
-        "campaign_id": campaign.campaign_id,
-        "run_id": run.configuration.run_id,
+        "run_id": run.run_id,
+        "execution_id": execution.configuration.execution_id,
         "shard_id": shard.shard_id,
         "trial_checksums": dict(sorted(trial_checksums.items())),
     }
@@ -1185,7 +1201,7 @@ def _execute_shard_with_executor(
 def _record_trial_result(
     future: Future[RetryCategory | None],
     trial_index: int,
-    trial: CampaignTrialLock,
+    trial: RunTrialLock,
     trial_root: Path,
     events: Path,
     failures: list[tuple[int, Exception]],
@@ -1217,11 +1233,11 @@ def _record_trial_result(
 
 def _execute_trial(
     manifest_path: Path,
-    campaign: CampaignLock,
-    wave: WaveLock,
     run: RunLock,
+    wave: WaveLock,
+    configuration: ExecutionLock,
     shard_id: str,
-    trial: CampaignTrialLock,
+    trial: RunTrialLock,
     trial_root: Path,
     output_root: Path,
     harbor_source: Path,
@@ -1239,20 +1255,20 @@ def _execute_trial(
     judge_base_url: str | None = None,
 ) -> RetryCategory | None:
     trial_root.mkdir(parents=True, exist_ok=True)
-    executions = trial_root / "executions"
-    executions.mkdir(exist_ok=True)
-    execution_id = _execution_id(identifier)
-    execution_root = executions / execution_id
-    execution_root.mkdir()
-    jobs_dir = execution_root / "harbor-jobs"
+    attempts = trial_root / "attempts"
+    attempts.mkdir(exist_ok=True)
+    attempt_id = _attempt_id(identifier)
+    attempt_root = attempts / attempt_id
+    attempt_root.mkdir()
+    jobs_dir = attempt_root / "harbor-jobs"
     jobs_dir.mkdir()
-    physical_attempt = len([path for path in executions.iterdir() if path.is_dir()])
-    execution = ExecutionLock(
-        execution_id=execution_id,
+    physical_attempt = len([path for path in attempts.iterdir() if path.is_dir()])
+    attempt = AttemptLock(
+        attempt_id=attempt_id,
         created_at=clock().astimezone(UTC),
-        campaign_id=campaign.campaign_id,
-        wave_id=wave.wave_id,
         run_id=run.run_id,
+        wave_id=wave.wave_id,
+        execution_id=configuration.execution_id,
         shard_id=shard_id,
         trial_id=trial.trial_id,
         task_name=trial.task_name,
@@ -1261,12 +1277,10 @@ def _execute_trial(
         physical_attempt=physical_attempt,
         remote_job_id=os.environ.get("JOB_ID"),
     )
-    write_json(
-        execution_root / "execution.lock.json", execution.model_dump(mode="json")
-    )
-    shutil.copyfile(manifest_path, execution_root / "manifest.yaml")
-    events = execution_root / "events.jsonl"
-    append_event(events, "execution_started", execution_id=execution_id)
+    write_json(attempt_root / "attempt.lock.json", attempt.model_dump(mode="json"))
+    shutil.copyfile(manifest_path, attempt_root / "manifest.yaml")
+    events = attempt_root / "events.jsonl"
+    append_event(events, "attempt_started", attempt_id=attempt_id)
     error: Exception | None = None
     capability: str | None = None
     judge_capability: str | None = None
@@ -1280,25 +1294,25 @@ def _execute_trial(
             wave,
             provider_proxy,
             base_url,
-            execution_id,
-            execution_root,
+            attempt_id,
+            attempt_root,
             events,
         )
         judge_api_url, judge_capability = _register_trial_judge_route(
-            run,
+            configuration,
             judge_recorder,
             judge_base_url,
-            execution_id,
+            attempt_id,
             trial.trial_id,
             trial.task_name,
-            execution_root,
+            attempt_root,
             events,
             tuple(value for value in (token, capability) if value is not None),
         )
         adapter = FilesystemHarborExecutionAdapter()
         prepared = adapter.prepare(
-            run,
-            execution_root,
+            configuration,
+            attempt_root,
             jobs_dir,
             trial_base_url,
             harbor_source,
@@ -1314,13 +1328,13 @@ def _execute_trial(
         append_event(events, "harbor_started")
         blocked_secret_names = {
             candidate.configuration.benchmark_judge.api_key_secret_name
-            for candidate in wave.runs
+            for candidate in wave.executions
             if candidate.configuration.benchmark_judge is not None
             and candidate.configuration.benchmark_judge.api_key_secret_name
             not in {"HF_TOKEN", "OPENAI_API_KEY"}
         }
         with harbor_process_environment(
-            run,
+            configuration,
             token=token,
             inference_base_url=trial_base_url,
             agent_api_key=(
@@ -1337,7 +1351,7 @@ def _execute_trial(
                 prepared,
                 harbor_source,
                 jobs_dir,
-                execution_root / "harbor.log",
+                attempt_root / "harbor.log",
                 environment=environment,
                 timeout_seconds=timeout,
                 stream_runner=stream_runner,
@@ -1353,20 +1367,20 @@ def _execute_trial(
         if outcome.verification is None:
             raise WorkerError("Harbor produced no validated compatibility bundle")
         write_json(
-            execution_root / "verification.json",
+            attempt_root / "verification.json",
             outcome.verification.model_dump(mode="json"),
         )
-        evidence_secrets = _execution_secret_values(
+        evidence_secrets = _attempt_secret_values(
             wave, token, capability, judge_capability
         )
-        _assemble_execution_trial_evidence(
+        _assemble_attempt_trial_evidence(
             outcome.compatibility_path,
             jobs_dir,
+            configuration,
             run,
-            campaign,
             trial,
-            execution,
-            execution_root,
+            attempt,
+            attempt_root,
             (
                 (evidence_secrets,)
                 if isinstance(evidence_secrets, str)
@@ -1374,14 +1388,14 @@ def _execute_trial(
             ),
         )
         build_private_artifact_manifest(
-            execution_root,
+            attempt_root,
             strict_session=True,
-            session_required=_execution_session_required(execution_root, run),
+            session_required=_attempt_session_required(attempt_root, configuration),
         )
-        append_event(events, "execution_succeeded")
+        append_event(events, "attempt_succeeded")
     except Exception as caught:
         error = caught
-        append_event(events, "execution_failed", error_type=type(caught).__name__)
+        append_event(events, "attempt_failed", error_type=type(caught).__name__)
     finally:
         _revoke_trial_provider_route(provider_proxy, capability, events)
         error = _finish_trial_judge_route(
@@ -1393,39 +1407,39 @@ def _execute_trial(
         )
     failure_record: dict[str, object] | None = None
     failure_category: RetryCategory | None = None
-    secrets = _execution_secret_values(wave, token, capability, judge_capability)
+    secrets = _attempt_secret_values(wave, token, capability, judge_capability)
     if error is not None:
-        failure_category = _execution_failure_category(
-            error, failure_phase, evidence_root=execution_root
+        failure_category = _attempt_failure_category(
+            error, failure_phase, evidence_root=attempt_root
         )
         failure_record = {
             "category": failure_category,
             "error_type": type(error).__name__,
             "message": _redact_secret_values(str(error), secrets),
         }
-        write_json(execution_root / "failure.json", failure_record)
-    _finalize_execution(
-        execution_root,
+        write_json(attempt_root / "failure.json", failure_record)
+    _finalize_attempt(
+        attempt_root,
         secrets,
         strict_compatibility=error is None,
-        session_required=_execution_session_required(execution_root, run),
+        session_required=_attempt_session_required(attempt_root, configuration),
     )
     if error is None:
-        (execution_root / "_SUCCESS").write_text("\n", encoding="utf-8")
+        (attempt_root / "_SUCCESS").write_text("\n", encoding="utf-8")
     else:
         assert failure_record is not None
-        write_json(execution_root / "_FAILED", failure_record)
+        write_json(attempt_root / "_FAILED", failure_record)
     destination = (
         output_root
-        / campaign.artifact_prefix
-        / "runs"
-        / run.run_id
+        / run.artifact_prefix
+        / "executions"
+        / configuration.execution_id
         / "trials"
         / trial.trial_id
-        / "executions"
-        / execution_id
+        / "attempts"
+        / attempt_id
     )
-    _publish_unit(execution_root, destination)
+    _publish_unit(attempt_root, destination)
     if error is not None:
         if failure_category in {"agent", "benchmark"}:
             return failure_category
@@ -1436,8 +1450,8 @@ def _execute_trial(
         trial_root / "trial-summary.json",
         {
             "trial_id": trial.trial_id,
-            "execution_id": execution_id,
-            "execution_checksum": _file_digest(execution_root / "checksums.json"),
+            "attempt_id": attempt_id,
+            "attempt_checksum": _file_digest(attempt_root / "checksums.json"),
         },
     )
     append_event(trial_root / "events.jsonl", "trial_succeeded")
@@ -1446,9 +1460,9 @@ def _execute_trial(
     _publish_unit(
         trial_root,
         output_root
-        / campaign.artifact_prefix
-        / "runs"
-        / run.run_id
+        / run.artifact_prefix
+        / "executions"
+        / configuration.execution_id
         / "trials"
         / trial.trial_id,
     )
@@ -1487,13 +1501,13 @@ def _judge_environment_hosts(judge_api_url: str | None) -> tuple[str, ...]:
 
 
 def _register_trial_judge_route(
-    run: RunLock,
+    run: ExecutionLock,
     recorder: JudgeEvidenceRecorder | None,
     base_url: str | None,
-    execution_id: str,
+    attempt_id: str,
     trial_id: str,
     task_name: str,
-    execution_root: Path,
+    attempt_root: Path,
     events: Path,
     known_secrets: tuple[str, ...],
 ) -> tuple[str | None, str | None]:
@@ -1502,9 +1516,9 @@ def _register_trial_judge_route(
         return None, None
     if recorder is None or base_url is None or run.trial_evidence is None:
         raise WorkerError("judge-required run has no exact evidence recorder")
-    destination = execution_root / "judge-records"
+    destination = attempt_root / "judge-records"
     capability = recorder.register_scope(
-        execution_id=execution_id,
+        attempt_id=attempt_id,
         trial_id=trial_id,
         model=judge.model,
         destination=destination,
@@ -1531,71 +1545,75 @@ def _revoke_trial_judge_route(
     append_event(events, "judge_route_revoked", capability_digest=digest)
 
 
-def _assemble_execution_trial_evidence(
+def _assemble_attempt_trial_evidence(
     compatibility_path: Path | None,
     jobs_dir: Path,
+    configuration: ExecutionLock,
     run: RunLock,
-    campaign: CampaignLock,
-    trial: CampaignTrialLock,
-    execution: ExecutionLock,
-    execution_root: Path,
+    trial: RunTrialLock,
+    attempt: AttemptLock,
+    attempt_root: Path,
     known_secrets: tuple[str, ...],
 ) -> None:
-    if compatibility_path is None or run.trial_evidence is None:
+    if compatibility_path is None or configuration.trial_evidence is None:
         raise WorkerError("validated trial evidence inputs are missing")
     bundle = HarborCompatibilityBundle.model_validate_json(
         compatibility_path.read_text(encoding="utf-8")
     )
     if len(bundle.trials) != 1:
-        raise WorkerError("campaign physical execution must contain one Harbor trial")
+        raise WorkerError("physical attempt must contain one Harbor trial")
     native = bundle.trials[0]
     _validate_evidence_trial_identity(
         observed_name=native.task_name,
         observed_digest=native.task_digest,
         expected_name=trial.task_name,
         expected_digest=trial.task_digest,
-        events=execution_root / "events.jsonl",
+        events=attempt_root / "events.jsonl",
     )
     native_root = resolve_native_trial_root(jobs_dir, native.path)
     redacted = scrub_secret(native_root, known_secrets, allow_symlinks=True)
     if redacted:
         append_event(
-            execution_root / "events.jsonl",
+            attempt_root / "events.jsonl",
             "evidence_secrets_redacted",
             files=redacted,
         )
     assert_secret_absent(native_root, known_secrets, allow_symlinks=True)
-    if isinstance(run.deployment, ProviderTarget):
-        definition = provider_agent_definition(run.agent.name)
+    if isinstance(configuration.deployment, ProviderTarget):
+        definition = provider_agent_definition(configuration.agent.name)
         validate_provider_agent_evidence(
             native_root,
             definition=definition,
-            expected_agent_name=run.agent.name,
+            expected_agent_name=configuration.agent.name,
             expected_agent_version=(
-                run.agent.revision
-                if run.agent.revision_kind in {"package", "git"}
-                else str(run.agent.reported_version)
+                configuration.agent.revision
+                if configuration.agent.revision_kind in {"package", "git"}
+                else str(configuration.agent.reported_version)
             ),
-            expected_model_name=routed_provider_model(run.deployment),
+            expected_model_name=routed_provider_model(configuration.deployment),
         )
     assemble_trial_evidence(
         native_root,
-        campaign_id=campaign.campaign_id,
         run_id=run.run_id,
-        execution_id=execution.execution_id,
+        execution_id=configuration.execution_id,
+        attempt_id=attempt.attempt_id,
         trial_id=trial.trial_id,
         task_name=trial.task_name,
         task_digest=trial.task_digest,
         logical_attempt=trial.logical_attempt,
-        physical_attempt=execution.physical_attempt,
-        judge_expected=run.judge_required_for(trial.task_name),
-        judge_model=(run.benchmark_judge.model if run.benchmark_judge else None),
-        policy=run.trial_evidence,
-        judge_records_dir=execution_root / "judge-records",
+        physical_attempt=attempt.physical_attempt,
+        judge_expected=configuration.judge_required_for(trial.task_name),
+        judge_model=(
+            configuration.benchmark_judge.model
+            if configuration.benchmark_judge
+            else None
+        ),
+        policy=configuration.trial_evidence,
+        judge_records_dir=attempt_root / "judge-records",
         known_secrets=known_secrets,
     )
     append_event(
-        execution_root / "events.jsonl",
+        attempt_root / "events.jsonl",
         "trial_evidence_validated",
         trial_id=trial.trial_id,
     )
@@ -1605,18 +1623,18 @@ def _register_trial_provider_route(
     wave: WaveLock,
     provider_proxy: ProviderEvidenceProxy | None,
     base_url: str,
-    execution_id: str,
-    execution_root: Path,
+    attempt_id: str,
+    attempt_root: Path,
     events: Path,
 ) -> tuple[str, str | None]:
     if not isinstance(wave.target, ProviderWaveTarget):
         return base_url, None
     if provider_proxy is None:
         raise WorkerError("provider execution requires an evidence recorder")
-    capability = provider_proxy.register_scope(execution_id)
+    capability = provider_proxy.register_scope(attempt_id)
     capability_digest = provider_proxy.capability_digest(capability)
     write_json(
-        execution_root / "provider-route.json",
+        attempt_root / "provider-route.json",
         {
             "capability_digest": capability_digest,
             "transport": "hf-job-evidence-recorder",
@@ -1655,7 +1673,7 @@ def _validate_evidence_trial_identity(
     events: Path,
 ) -> None:
     if observed_digest != expected_digest:
-        raise WorkerError("Harbor evidence trial digest does not match campaign lock")
+        raise WorkerError("Harbor evidence trial digest does not match run lock")
     if observed_name != expected_name:
         append_event(
             events,
@@ -1665,7 +1683,7 @@ def _validate_evidence_trial_identity(
         )
 
 
-def _execution_failure_category(
+def _attempt_failure_category(
     error: Exception,
     phase: Literal["configuration", "execution", "verification"],
     *,
@@ -1679,9 +1697,9 @@ def _execution_failure_category(
         return "benchmark"
     if isinstance(error, HarborTrialFailure):
         return _harbor_trial_failure_category(error, evidence_root)
-    sandbox_category = _sandbox_failure_category(evidence_root)
-    if sandbox_category is not None:
-        return sandbox_category
+    runtime_category = _harbor_runtime_failure_category(evidence_root)
+    if runtime_category is not None:
+        return runtime_category
     if phase == "configuration":
         return "configuration"
     if phase == "execution":
@@ -1700,10 +1718,12 @@ def _harbor_trial_failure_category(
         return category
     if exception_type == "sandboxerror":
         if error.exception_message is not None:
-            category = _sandbox_exception_line_category(error.exception_message.lower())
+            category = _harbor_runtime_exception_category(
+                error.exception_message.lower()
+            )
             if category is not None:
                 return category
-        return _sandbox_failure_category(evidence_root) or "benchmark"
+        return _harbor_runtime_failure_category(evidence_root) or "benchmark"
     if exception_type == "nonzeroagentexitcodeerror":
         return _openclaw_transport_failure_category(evidence_root) or "agent"
     if "agent" in exception_type:
@@ -1711,21 +1731,23 @@ def _harbor_trial_failure_category(
     return "benchmark"
 
 
-def _sandbox_failure_category(evidence_root: Path | None) -> RetryCategory | None:
+def _harbor_runtime_failure_category(
+    evidence_root: Path | None,
+) -> RetryCategory | None:
     if evidence_root is None:
         return None
     resolved_root = evidence_root.resolve()
-    saw_sandbox_error = False
+    saw_runtime_error = False
     for result_path in sorted(evidence_root.glob("harbor-jobs/*/*/result.json")):
-        exception = _sandbox_result_exception(result_path, resolved_root)
+        exception = _harbor_result_exception(result_path, resolved_root)
         if exception is None or exception[0].lower() != "sandboxerror":
             continue
-        saw_sandbox_error = True
+        saw_runtime_error = True
         if exception[1] is not None:
-            category = _sandbox_exception_line_category(exception[1].lower())
+            category = _harbor_runtime_exception_category(exception[1].lower())
             if category is not None:
                 return category
-    if saw_sandbox_error:
+    if saw_runtime_error:
         return "benchmark"
     return _harbor_preflight_failure_category(evidence_root, resolved_root)
 
@@ -1749,7 +1771,7 @@ def _harbor_preflight_failure_category(
     return None
 
 
-def _sandbox_result_exception(
+def _harbor_result_exception(
     result_path: Path, resolved_root: Path
 ) -> tuple[str, str | None] | None:
     if not _safe_evidence_file(result_path, resolved_root):
@@ -1774,7 +1796,7 @@ def _sandbox_result_exception(
     return exception_type, message
 
 
-def _sandbox_exception_line_category(value: str) -> RetryCategory | None:
+def _harbor_runtime_exception_category(value: str) -> RetryCategory | None:
     if "did not become ready within" in value or "terminated during startup" in value:
         return "transient"
     if "sandbox api error (429)" in value:
@@ -1838,48 +1860,50 @@ def _wave_model_name(wave: WaveLock) -> str:
     return routed_provider_model(wave.target.provider)
 
 
-def _stage_campaign_records(
-    campaign_root: Path,
-    campaign: CampaignLock,
+def _stage_run_records(
+    run_root: Path,
+    run: RunLock,
     wave: WaveLock,
     secrets: SecretValues,
     output_root: Path,
 ) -> None:
-    campaign_root.mkdir(parents=True, exist_ok=True)
-    campaign_lock_path = campaign_root / "campaign.lock.json"
-    source_lock_path = campaign_root / "source.lock.json"
-    write_json(campaign_lock_path, campaign.model_dump(mode="json"))
-    source_lock_path.write_bytes(source_lock_bytes(campaign.source_lock))
-    assert_secret_absent(campaign_root, secrets)
-    campaign_destination = output_root / campaign.artifact_prefix
+    run_root.mkdir(parents=True, exist_ok=True)
+    run_lock_path = run_root / "run.lock.json"
+    source_lock_path = run_root / "source.lock.json"
+    write_json(run_lock_path, run.model_dump(mode="json"))
+    source_lock_path.write_bytes(source_lock_bytes(run.source_lock))
+    assert_secret_absent(run_root, secrets)
+    run_destination = output_root / run.artifact_prefix
     _publish_immutable_file(
-        campaign_lock_path,
-        campaign_destination / "campaign.lock.json",
+        run_lock_path,
+        run_destination / "run.lock.json",
     )
-    _publish_digest_sidecar(campaign_lock_path, campaign_destination)
+    _publish_digest_sidecar(run_lock_path, run_destination)
     _publish_immutable_file(
         source_lock_path,
-        campaign_destination / "source.lock.json",
+        run_destination / "source.lock.json",
     )
-    _publish_digest_sidecar(source_lock_path, campaign_destination)
-    for run in wave.runs:
-        run_root = campaign_root / "runs" / run.configuration.run_id
-        run_root.mkdir(parents=True, exist_ok=True)
-        run_lock_path = run_root / "run.lock.json"
-        write_json(run_lock_path, run.configuration.model_dump(mode="json"))
-        assert_secret_absent(run_root, secrets)
-        destination = output_root / run.artifact_prefix
-        _publish_immutable_file(run_lock_path, destination / "run.lock.json")
-        _publish_digest_sidecar(run_lock_path, destination)
+    _publish_digest_sidecar(source_lock_path, run_destination)
+    for execution in wave.executions:
+        execution_root = run_root / "executions" / execution.configuration.execution_id
+        execution_root.mkdir(parents=True, exist_ok=True)
+        execution_lock_path = execution_root / "execution.lock.json"
+        write_json(execution_lock_path, execution.configuration.model_dump(mode="json"))
+        assert_secret_absent(execution_root, secrets)
+        destination = output_root / execution.artifact_prefix
+        _publish_immutable_file(
+            execution_lock_path, destination / "execution.lock.json"
+        )
+        _publish_digest_sidecar(execution_lock_path, destination)
 
 
 def _valid_terminal_trial(
     path: Path,
-    expected: CampaignTrialLock,
+    expected: RunTrialLock,
     *,
-    campaign_id: str,
-    wave_id: str | None,
     run_id: str,
+    wave_id: str | None,
+    execution_id: str,
     shard_id: str,
 ) -> bool:
     if not path.exists():
@@ -1896,9 +1920,9 @@ def _valid_terminal_trial(
         _validate_terminal_trial(
             path,
             expected,
-            campaign_id=campaign_id,
-            wave_id=wave_id,
             run_id=run_id,
+            wave_id=wave_id,
+            execution_id=execution_id,
             shard_id=shard_id,
         )
         with tempfile.TemporaryDirectory(
@@ -1914,9 +1938,9 @@ def _valid_terminal_trial(
     _validate_terminal_trial(
         path,
         expected,
-        campaign_id=campaign_id,
-        wave_id=wave_id,
         run_id=run_id,
+        wave_id=wave_id,
+        execution_id=execution_id,
         shard_id=shard_id,
     )
     return True
@@ -1924,11 +1948,11 @@ def _valid_terminal_trial(
 
 def _validate_terminal_trial(
     path: Path,
-    expected: CampaignTrialLock,
+    expected: RunTrialLock,
     *,
-    campaign_id: str,
-    wave_id: str | None,
     run_id: str,
+    wave_id: str | None,
+    execution_id: str,
     shard_id: str,
 ) -> None:
     try:
@@ -1936,30 +1960,30 @@ def _validate_terminal_trial(
         if observed != expected.model_dump(mode="json"):
             raise WorkerError("terminal trial lock does not match the wave")
         summary = json.loads((path / "trial-summary.json").read_text(encoding="utf-8"))
-        execution_id = summary.get("execution_id")
-        execution_checksum = summary.get("execution_checksum")
-        if not isinstance(execution_id, str):
-            raise WorkerError("terminal trial summary has no execution identity")
+        attempt_id = summary.get("attempt_id")
+        attempt_checksum = summary.get("attempt_checksum")
+        if not isinstance(attempt_id, str):
+            raise WorkerError("terminal trial summary has no attempt identity")
         if summary.get("trial_id") != expected.trial_id:
             raise WorkerError("terminal trial summary has the wrong trial identity")
-        execution = path / "executions" / execution_id
-        if not (execution / "_SUCCESS").is_file():
-            raise WorkerError("terminal trial execution is not successful")
-        execution_lock = ExecutionLock.model_validate_json(
-            (execution / "execution.lock.json").read_text(encoding="utf-8")
+        attempt_root = path / "attempts" / attempt_id
+        if not (attempt_root / "_SUCCESS").is_file():
+            raise WorkerError("terminal trial attempt is not successful")
+        attempt_lock = AttemptLock.model_validate_json(
+            (attempt_root / "attempt.lock.json").read_text(encoding="utf-8")
         )
-        _validate_execution_identity(
-            execution_lock,
-            execution_id,
+        _validate_attempt_identity(
+            attempt_lock,
+            attempt_id,
             expected,
-            campaign_id=campaign_id,
-            wave_id=wave_id,
             run_id=run_id,
+            wave_id=wave_id,
+            execution_id=execution_id,
             shard_id=shard_id,
         )
-        _validate_recovered_trial_evidence(execution, execution_lock, expected)
-        verify_checksums(execution)
-        if execution_checksum != _file_digest(execution / "checksums.json"):
+        _validate_recovered_trial_evidence(attempt_root, attempt_lock, expected)
+        verify_checksums(attempt_root)
+        if attempt_checksum != _file_digest(attempt_root / "checksums.json"):
             raise WorkerError("terminal trial summary has the wrong child checksum")
         verify_checksums(path)
     except (OSError, ValueError, RuntimeError) as error:
@@ -1971,19 +1995,19 @@ def _validate_terminal_trial(
 
 
 def _validate_recovered_trial_evidence(
-    execution_root: Path,
-    execution: ExecutionLock,
-    expected: CampaignTrialLock,
+    attempt_root: Path,
+    attempt: AttemptLock,
+    expected: RunTrialLock,
 ) -> None:
-    manifests = list(execution_root.glob("harbor-jobs/*/*/evidence/manifest.json"))
+    manifests = list(attempt_root.glob("harbor-jobs/*/*/evidence/manifest.json"))
     if len(manifests) != 1:
-        raise WorkerError("terminal execution has no unique trial evidence manifest")
+        raise WorkerError("terminal attempt has no unique trial evidence manifest")
     try:
         evidence = verify_trial_evidence(manifests[0].parent.parent, deep=True)
     except TrialEvidenceError as error:
         raise WorkerError("terminal trial evidence is incomplete") from error
     observed = (
-        evidence.execution_id,
+        evidence.attempt_id,
         evidence.trial_id,
         evidence.task_name,
         evidence.task_digest,
@@ -1991,60 +2015,60 @@ def _validate_recovered_trial_evidence(
         evidence.physical_attempt,
     )
     locked = (
-        execution.execution_id,
+        attempt.attempt_id,
         expected.trial_id,
         expected.task_name,
         expected.task_digest,
         expected.logical_attempt,
-        execution.physical_attempt,
+        attempt.physical_attempt,
     )
     if observed != locked:
         raise WorkerError("terminal trial evidence identity does not match its lock")
 
 
-def _validate_execution_identity(
-    execution: ExecutionLock,
-    execution_id: str,
-    expected: CampaignTrialLock,
+def _validate_attempt_identity(
+    attempt: AttemptLock,
+    attempt_id: str,
+    expected: RunTrialLock,
     *,
-    campaign_id: str,
-    wave_id: str | None,
     run_id: str,
+    wave_id: str | None,
+    execution_id: str,
     shard_id: str,
 ) -> None:
     observed = (
-        execution.execution_id,
-        execution.campaign_id,
-        execution.run_id,
-        execution.shard_id,
-        execution.trial_id,
-        execution.task_name,
-        execution.task_digest,
-        execution.logical_attempt,
+        attempt.attempt_id,
+        attempt.run_id,
+        attempt.execution_id,
+        attempt.shard_id,
+        attempt.trial_id,
+        attempt.task_name,
+        attempt.task_digest,
+        attempt.logical_attempt,
     )
     locked = (
-        execution_id,
-        campaign_id,
+        attempt_id,
         run_id,
+        execution_id,
         shard_id,
         expected.trial_id,
         expected.task_name,
         expected.task_digest,
         expected.logical_attempt,
     )
-    if observed != locked or (wave_id is not None and execution.wave_id != wave_id):
-        raise WorkerError("terminal execution identity does not match its trial")
+    if observed != locked or (wave_id is not None and attempt.wave_id != wave_id):
+        raise WorkerError("terminal attempt identity does not match its trial")
 
 
 def _prepare_trial_recovery(destination: Path, trial_root: Path) -> None:
     if _terminal_markers(destination):
         raise WorkerError("terminal trial evidence cannot be overwritten")
     trial_root.mkdir(parents=True, exist_ok=True)
-    existing = destination / "executions"
+    existing = destination / "attempts"
     if not existing.exists():
         return
     terminal = _terminal_execution_directories(destination)
-    recovered = trial_root / "executions"
+    recovered = trial_root / "attempts"
     recovered.mkdir()
     for execution in sorted(existing.iterdir()):
         if execution.name in terminal:
@@ -2055,28 +2079,28 @@ def _prepare_trial_recovery(destination: Path, trial_root: Path) -> None:
 
 def _trial_destination(
     output_root: Path,
-    campaign: CampaignLock,
-    run: WaveRunLock,
-    trial: CampaignTrialLock,
+    run: RunLock,
+    execution: WaveExecutionLock,
+    trial: RunTrialLock,
 ) -> Path:
     return (
         output_root
-        / campaign.artifact_prefix
-        / "runs"
-        / run.configuration.run_id
+        / run.artifact_prefix
+        / "executions"
+        / execution.configuration.execution_id
         / "trials"
         / trial.trial_id
     )
 
 
-def _execution_session_required(root: Path, run: RunLock) -> bool:
+def _attempt_session_required(root: Path, run: ExecutionLock) -> bool:
     if isinstance(run.deployment, ProviderTarget):
         return provider_agent_definition(run.agent.name).session_required
     attempted = openclaw_execution_was_attempted(root)
-    return openclaw_execution_started(root, fallback_attempted=attempted)
+    return openclaw_attempt_started(root, fallback_attempted=attempted)
 
 
-def _finalize_execution(
+def _finalize_attempt(
     root: Path,
     secrets: SecretValues,
     *,
@@ -2148,14 +2172,14 @@ def _redact_unit(root: Path, secrets: SecretValues) -> None:
 
 def _wave_secret_values(lock: WaveLock, token: str) -> SecretValues:
     values = [token]
-    for run in lock.runs:
-        run_values = run_secret_values(run.configuration, token)
+    for run in lock.executions:
+        run_values = execution_secret_values(run.configuration, token)
         values.extend((run_values,) if isinstance(run_values, str) else run_values)
     unique = tuple(dict.fromkeys(value for value in values if value))
     return unique[0] if len(unique) == 1 else unique
 
 
-def _execution_secret_values(
+def _attempt_secret_values(
     wave: WaveLock,
     token: str,
     provider_capability: str | None,
@@ -2216,12 +2240,12 @@ def _publish_unit(source: Path, destination: Path) -> None:
 
 
 def _recover_partial_publication(source: Path, destination: Path) -> set[Path]:
-    """Remove interrupted content while preserving immutable child executions."""
+    """Remove interrupted content while preserving immutable child attempts."""
     terminal = _terminal_execution_directories(destination)
     protected: set[Path] = set()
     for name, (execution, marker) in terminal.items():
-        _require_matching_execution(source, name, execution, marker)
-        protected.add(Path("executions") / name)
+        _require_matching_attempt(source, name, execution, marker)
+        protected.add(Path("attempts") / name)
     _remove_unprotected_destination(destination, protected)
     return protected
 
@@ -2229,55 +2253,55 @@ def _recover_partial_publication(source: Path, destination: Path) -> set[Path]:
 def _terminal_execution_directories(
     root: Path,
 ) -> dict[str, tuple[Path, str]]:
-    executions = root / "executions"
-    if not executions.exists():
+    attempts = root / "attempts"
+    if not attempts.exists():
         return {}
-    if executions.is_symlink() or not executions.is_dir():
+    if attempts.is_symlink() or not attempts.is_dir():
         raise WorkerError("partial execution publication is invalid")
     terminal: dict[str, tuple[Path, str]] = {}
-    for execution in sorted(executions.iterdir()):
+    for execution in sorted(attempts.iterdir()):
         if execution.is_symlink() or not execution.is_dir():
             continue
         markers = _terminal_markers(execution)
         if markers:
-            _verify_terminal_execution(execution, markers)
+            _verify_terminal_attempt(execution, markers)
             terminal[execution.name] = (execution, markers[0])
     return terminal
 
 
-def _verify_terminal_execution(execution: Path, markers: list[str]) -> None:
+def _verify_terminal_attempt(attempt: Path, markers: list[str]) -> None:
     if len(markers) != 1:
-        raise WorkerError("terminal execution evidence has conflicting markers")
+        raise WorkerError("terminal attempt evidence has conflicting markers")
     try:
-        verify_checksums(execution)
+        verify_checksums(attempt)
     except RuntimeError as error:
         raise WorkerError(
-            "terminal execution evidence failed checksum validation"
+            "terminal attempt evidence failed checksum validation"
         ) from error
 
 
-def _require_matching_execution(
+def _require_matching_attempt(
     source: Path,
     name: str,
     observed: Path,
     marker: str,
 ) -> None:
-    expected = source / "executions" / name
+    expected = source / "attempts" / name
     if not expected.is_dir():
-        raise WorkerError("terminal execution evidence cannot be overwritten")
+        raise WorkerError("terminal attempt evidence cannot be overwritten")
     expected_markers = _terminal_markers(expected)
-    _verify_terminal_execution(expected, expected_markers)
+    _verify_terminal_attempt(expected, expected_markers)
     if expected_markers != [marker] or not _trees_match(observed, expected):
-        raise WorkerError("terminal execution evidence cannot be overwritten")
+        raise WorkerError("terminal attempt evidence cannot be overwritten")
 
 
 def _remove_unprotected_destination(destination: Path, protected: set[Path]) -> None:
     for path in sorted(destination.iterdir()):
-        if path.name != "executions":
+        if path.name != "attempts":
             _remove_path(path)
             continue
         for execution in sorted(path.iterdir()):
-            relative = Path("executions") / execution.name
+            relative = Path("attempts") / execution.name
             if relative not in protected:
                 _remove_path(execution)
         if not any(path.iterdir()):
@@ -2342,7 +2366,7 @@ def _launch_wave_watchdog(lock: WaveLock, endpoint: EndpointRef, token: str) -> 
     return launch_cleanup_watchdog_for(lock.remote, endpoint, lock.wave_id, token)
 
 
-def _execution_id(identifier: IdentifierFactory) -> str:
+def _attempt_id(identifier: IdentifierFactory) -> str:
     value = identifier()
     if len(value) != 32 or any(
         character not in "0123456789abcdef" for character in value
@@ -2360,7 +2384,7 @@ def _remaining_seconds(deadline: float, monotonic: Callable[[], float]) -> int:
     return max(1, math.ceil(remaining))
 
 
-def _expected_agent_version(lock: RunLock) -> str:
+def _expected_agent_version(lock: ExecutionLock) -> str:
     if lock.agent.revision_kind == "package":
         return lock.agent.revision
     assert lock.agent.reported_version is not None

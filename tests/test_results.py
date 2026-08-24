@@ -18,6 +18,7 @@ from harbor_hf.publication_envelope import (
 )
 from harbor_hf.results import (
     ArtifactRow,
+    AttemptRow,
     EvidenceSource,
     ExecutionRow,
     GlobalIndexRow,
@@ -28,7 +29,6 @@ from harbor_hf.results import (
     ResultEvidence,
     ResultPublicationError,
     ResultTables,
-    RunRow,
     TableName,
     TraceRow,
     TrialRow,
@@ -57,12 +57,12 @@ class MemoryEvidence:
 
     def list_files(self, *, bucket: str, prefix: str) -> list[str]:
         assert bucket == "hf://buckets/private-evidence"
-        assert prefix == "campaigns/campaign-one/runs/run-one"
+        assert prefix == "runs/run-one/executions/run-one"
         return list(reversed(self.files))
 
     def read_bytes(self, *, bucket: str, prefix: str, path: str) -> bytes:
         assert bucket == "hf://buckets/private-evidence"
-        assert prefix == "campaigns/campaign-one/runs/run-one"
+        assert prefix == "runs/run-one/executions/run-one"
         return self.files[path]
 
 
@@ -70,7 +70,7 @@ class MemoryEvidence:
 def source() -> EvidenceSource:
     return EvidenceSource(
         bucket="hf://buckets/private-evidence",
-        prefix="campaigns/campaign-one/runs/run-one",
+        prefix="runs/run-one/executions/run-one",
     )
 
 
@@ -83,9 +83,9 @@ def sample_summary() -> dict[str, object]:
     return {
         "schema_version": "harbor-hf/result-evidence/v1",
         "sanitized": True,
-        "run": {
+        "execution": {
+            "execution_id": "execution-one",
             "run_id": "run-one",
-            "campaign_id": "campaign-one",
             "experiment": "experiment-one",
             "evaluation_id": "evaluation-one",
             "publication_role": "component",
@@ -115,7 +115,7 @@ def sample_summary() -> dict[str, object]:
                 "task_name": "task-two",
                 "task_digest": "sha256:" + "2" * 64,
                 "logical_attempt": 1,
-                "selected_execution_id": "execution-three",
+                "selected_attempt_id": "attempt-three",
                 "outcome": "scored",
             },
             {
@@ -123,13 +123,13 @@ def sample_summary() -> dict[str, object]:
                 "task_name": "task-one",
                 "task_digest": "sha256:" + "1" * 64,
                 "logical_attempt": 1,
-                "selected_execution_id": "execution-two",
+                "selected_attempt_id": "attempt-two",
                 "outcome": "scored",
             },
         ],
-        "executions": [
+        "attempts": [
             {
-                "execution_id": "execution-three",
+                "attempt_id": "attempt-three",
                 "trial_id": "trial-two",
                 "physical_attempt": 1,
                 "runtime_kind": "provider",
@@ -141,7 +141,7 @@ def sample_summary() -> dict[str, object]:
                 "remote_job_id": None,
             },
             {
-                "execution_id": "execution-one",
+                "attempt_id": "attempt-one",
                 "trial_id": "trial-one",
                 "physical_attempt": 1,
                 "runtime_kind": "endpoint",
@@ -153,7 +153,7 @@ def sample_summary() -> dict[str, object]:
                 "remote_job_id": "job-one",
             },
             {
-                "execution_id": "execution-two",
+                "attempt_id": "attempt-two",
                 "trial_id": "trial-one",
                 "physical_attempt": 2,
                 "runtime_kind": "endpoint",
@@ -183,8 +183,8 @@ def sample_summary() -> dict[str, object]:
                 "aggregation": None,
             },
             {
-                "owner_type": "execution",
-                "owner_id": "execution-two",
+                "owner_type": "attempt",
+                "owner_id": "attempt-two",
                 "name": "request_latency",
                 "value": 1.25,
                 "unit": "seconds",
@@ -193,8 +193,8 @@ def sample_summary() -> dict[str, object]:
         ],
         "artifacts": [
             {
-                "owner_type": "run",
-                "owner_id": "run-one",
+                "owner_type": "execution",
+                "owner_id": "execution-one",
                 "kind": "verification",
                 "path": "verification.json",
                 "sha256": "sha256:" + "9" * 64,
@@ -216,9 +216,9 @@ def _evidence(summary: dict[str, object], marker: str = "_SUCCESS") -> MemoryEvi
     normalized["artifacts"][0]["sha256"] = _sha256(verification)
     normalized["artifacts"][0]["size_bytes"] = len(verification)
     files = {
-        "run.lock.json": _json_bytes(
+        "execution.lock.json": _json_bytes(
             {
-                "run_id": "run-one",
+                "execution_id": "execution-one",
                 "evaluation_id": "evaluation-one",
                 "publication_role": "component",
                 "component_kind": "base",
@@ -253,9 +253,9 @@ def _evidence(summary: dict[str, object], marker: str = "_SUCCESS") -> MemoryEvi
                 },
             }
         ),
-        "run-summary.json": _json_bytes(normalized),
+        "execution-summary.json": _json_bytes(normalized),
         "verification.json": verification,
-        "trials/trial-one/executions/execution-two/session.json": SECRET_SESSION,
+        "trials/trial-one/attempts/attempt-two/session.json": SECRET_SESSION,
         "trials/trial-one/task-source/instruction.md": SHELLBENCH_TASK,
     }
     checksums = {path: _sha256(value) for path, value in files.items()}
@@ -284,17 +284,17 @@ def _refresh_checksums(evidence: MemoryEvidence) -> None:
 
 
 def _add_envelope(evidence: MemoryEvidence) -> None:
-    summary = json.loads(evidence.files["run-summary.json"])
-    run_lock = evidence.files["run.lock.json"]
-    executions = []
-    for record in summary["executions"]:
+    summary = json.loads(evidence.files["execution-summary.json"])
+    execution_lock = evidence.files["execution.lock.json"]
+    attempts = []
+    for record in summary["attempts"]:
         bundle = None
         if record["status"] == "succeeded":
-            prefix = f"trials/{record['trial_id']}/executions/{record['execution_id']}"
+            prefix = f"trials/{record['trial_id']}/attempts/{record['attempt_id']}"
             manifest_path = f"{prefix}/harbor-native-bundle.json"
             archive_path = f"{prefix}/artifacts.tar.gz"
-            manifest = f"manifest for {record['execution_id']}".encode()
-            archive = f"archive for {record['execution_id']}".encode()
+            manifest = f"manifest for {record['attempt_id']}".encode()
+            archive = f"archive for {record['attempt_id']}".encode()
             evidence.files[manifest_path] = manifest
             evidence.files[archive_path] = archive
             bundle = {
@@ -314,9 +314,9 @@ def _add_envelope(evidence: MemoryEvidence) -> None:
                 "request_digest": "sha256:" + "a" * 64,
                 "document_count": 2,
             }
-        executions.append(
+        attempts.append(
             {
-                "execution_id": record["execution_id"],
+                "attempt_id": record["attempt_id"],
                 "trial_id": record["trial_id"],
                 "physical_attempt": record["physical_attempt"],
                 "status": record["status"],
@@ -331,16 +331,16 @@ def _add_envelope(evidence: MemoryEvidence) -> None:
         )
     envelope = {
         "schema_version": "harbor-hf/publication-envelope/v1",
-        "run_id": summary["run"]["run_id"],
-        "campaign_id": summary["run"]["campaign_id"],
-        "created_at": summary["run"]["created_at"],
-        "completed_at": summary["run"]["completed_at"],
+        "execution_id": summary["execution"]["execution_id"],
+        "run_id": summary["execution"]["run_id"],
+        "created_at": summary["execution"]["created_at"],
+        "completed_at": summary["execution"]["completed_at"],
         "evidence_bucket": "hf://buckets/private-evidence",
-        "evidence_prefix": "campaigns/campaign-one/runs/run-one",
-        "run_lock": {
-            "path": "run.lock.json",
-            "digest": _sha256(run_lock),
-            "size_bytes": len(run_lock),
+        "evidence_prefix": "runs/run-one/executions/run-one",
+        "execution_lock": {
+            "path": "execution.lock.json",
+            "digest": _sha256(execution_lock),
+            "size_bytes": len(execution_lock),
         },
         "profiles": {
             "experiment": "sha256:" + "1" * 64,
@@ -350,15 +350,15 @@ def _add_envelope(evidence: MemoryEvidence) -> None:
         },
         "runtime": {
             "kind": "endpoint",
-            "provider": summary["run"]["provider"],
-            "region": summary["run"]["region"],
-            "hardware": summary["run"]["hardware"],
-            "accelerator_count": summary["run"]["accelerator_count"],
+            "provider": summary["execution"]["provider"],
+            "region": summary["execution"]["region"],
+            "hardware": summary["execution"]["hardware"],
+            "accelerator_count": summary["execution"]["accelerator_count"],
         },
         "sanitizer_version": "harbor-hf/public-results/v1",
         "projection_version": "harbor-hf/results-projection/v1",
         "cleanup_outcome": "verified",
-        "executions": executions,
+        "attempts": attempts,
     }
     evidence.files["publication-envelope.v1.json"] = _json_bytes(envelope)
     _refresh_checksums(evidence)
@@ -375,23 +375,23 @@ def test_builds_deterministic_traceable_rows_and_parquet(
     assert first == second
     assert first_publication == second_publication
     assert [row.trial_id for row in first.trials] == ["trial-one", "trial-two"]
-    assert [row.execution_id for row in first.executions] == [
-        "execution-one",
-        "execution-three",
-        "execution-two",
+    assert [row.attempt_id for row in first.attempts] == [
+        "attempt-one",
+        "attempt-three",
+        "attempt-two",
     ]
     assert [row.value for row in first.metrics] == [1.25, 1.0, 0.0]
     trace = {
         (
             row.publication_id,
             row.source_checksum,
-            row.run_lock_sha256,
+            row.execution_lock_sha256,
             row.control_commit,
         )
         for rows in (
-            first.runs,
-            first.trials,
             first.executions,
+            first.trials,
+            first.attempts,
             first.metrics,
             first.artifacts,
         )
@@ -417,14 +417,14 @@ def test_exhausted_trial_failure_is_a_zero_score_result(
     assert isinstance(trials, list)
     failed_trial = cast(dict[str, object], trials[0])
     failed_trial["outcome"] = "benchmark_failed"
-    run = summary["run"]
-    assert isinstance(run, dict)
-    cast(dict[str, object], run)["quality"] = "degraded"
-    executions = summary["executions"]
-    assert isinstance(executions, list)
-    failed_execution = cast(dict[str, object], executions[0])
-    failed_execution["status"] = "failed"
-    failed_execution["failure_category"] = "benchmark"
+    execution = summary["execution"]
+    assert isinstance(execution, dict)
+    cast(dict[str, object], execution)["quality"] = "degraded"
+    attempts = summary["attempts"]
+    assert isinstance(attempts, list)
+    failed_attempt = cast(dict[str, object], attempts[0])
+    failed_attempt["status"] = "failed"
+    failed_attempt["failure_category"] = "benchmark"
 
     tables = build_result_tables(
         _evidence(summary), source, control_commit=CONTROL_COMMIT
@@ -442,12 +442,12 @@ def test_exhausted_trial_failure_is_a_zero_score_result(
 
 def test_rejects_task_outcome_that_conflicts_with_failure_category() -> None:
     summary = sample_summary()
-    cast(dict[str, object], summary["run"])["quality"] = "degraded"
+    cast(dict[str, object], summary["execution"])["quality"] = "degraded"
     trial = cast(list[dict[str, object]], summary["trials"])[0]
     trial["outcome"] = "agent_failed"
-    execution = cast(list[dict[str, object]], summary["executions"])[0]
-    execution["status"] = "failed"
-    execution["failure_category"] = "benchmark"
+    attempt = cast(list[dict[str, object]], summary["attempts"])[0]
+    attempt["status"] = "failed"
+    attempt["failure_category"] = "benchmark"
 
     with pytest.raises(ValidationError, match="conflicts with its outcome"):
         ResultEvidence.model_validate(summary)
@@ -468,11 +468,11 @@ def test_builds_projection_bound_to_native_envelope(
     )
     projection = json.loads(projection_file.content)
     assert projection["envelope_sha256"] == tables.provenance.envelope_sha256
-    assert projection["source_checksum"] == tables.runs[0].source_checksum
+    assert projection["source_checksum"] == tables.executions[0].source_checksum
     assert set(projection["tables"]) == {
-        "runs",
-        "trials",
         "executions",
+        "trials",
+        "attempts",
         "metrics",
         "artifacts",
     }
@@ -487,7 +487,7 @@ def test_rejects_envelope_with_unverified_bundle(
     _add_envelope(evidence)
     envelope = json.loads(evidence.files["publication-envelope.v1.json"])
     succeeded = next(
-        record for record in envelope["executions"] if record["harbor_bundle"]
+        record for record in envelope["attempts"] if record["harbor_bundle"]
     )
     succeeded["harbor_bundle"]["archive"]["digest"] = "sha256:" + "0" * 64
     evidence.files["publication-envelope.v1.json"] = _json_bytes(envelope)
@@ -503,7 +503,7 @@ def test_rejects_legacy_success_without_native_provenance(
     _add_envelope(evidence)
     envelope = json.loads(evidence.files["publication-envelope.v1.json"])
     succeeded = next(
-        record for record in envelope["executions"] if record["status"] == "succeeded"
+        record for record in envelope["attempts"] if record["status"] == "succeeded"
     )
     succeeded["bundle_status"] = "legacy_unavailable"
     succeeded["harbor_bundle"] = None
@@ -531,11 +531,11 @@ def test_rejects_envelope_execution_that_conflicts_with_summary(
 ) -> None:
     _add_envelope(evidence)
     envelope = json.loads(evidence.files["publication-envelope.v1.json"])
-    envelope["executions"][0]["trial_id"] = "trial-imposter"
+    envelope["attempts"][0]["trial_id"] = "trial-imposter"
     evidence.files["publication-envelope.v1.json"] = _json_bytes(envelope)
     _refresh_checksums(evidence)
 
-    with pytest.raises(ResultPublicationError, match="executions conflict"):
+    with pytest.raises(ResultPublicationError, match="attempts conflict"):
         build_result_tables(evidence, source, control_commit=CONTROL_COMMIT)
 
 
@@ -545,13 +545,13 @@ def test_rejects_envelope_failure_category_that_conflicts_with_summary(
     _add_envelope(evidence)
     envelope = json.loads(evidence.files["publication-envelope.v1.json"])
     failed = next(
-        record for record in envelope["executions"] if record["status"] == "failed"
+        record for record in envelope["attempts"] if record["status"] == "failed"
     )
     failed["failure_category"] = "benchmark"
     evidence.files["publication-envelope.v1.json"] = _json_bytes(envelope)
     _refresh_checksums(evidence)
 
-    with pytest.raises(ResultPublicationError, match="executions conflict"):
+    with pytest.raises(ResultPublicationError, match="attempts conflict"):
         build_result_tables(evidence, source, control_commit=CONTROL_COMMIT)
 
 
@@ -562,8 +562,8 @@ def test_publication_identity_is_stable_across_later_control_events(
     after = build_result_tables(evidence, source, control_commit="b" * 40)
 
     assert before.publication_id == after.publication_id
-    assert before.runs[0].control_commit == "a" * 40
-    assert after.runs[0].control_commit == "b" * 40
+    assert before.executions[0].control_commit == "a" * 40
+    assert after.executions[0].control_commit == "b" * 40
 
 
 def test_global_index_is_discovery_only(
@@ -602,16 +602,18 @@ def test_audit_and_rebuild_equal_canonical_rows(
 
     assert report.publication_id == tables.publication_id
     assert report.row_counts == {
-        "runs": 1,
+        "executions": 1,
         "trials": 2,
-        "executions": 3,
+        "attempts": 3,
         "metrics": 3,
         "artifacts": 1,
     }
     assert rebuilt == [tables]
     tampered = tables.model_copy(
         update={
-            "runs": [tables.runs[0].model_copy(update={"planned_trial_count": 999})]
+            "executions": [
+                tables.executions[0].model_copy(update={"planned_trial_count": 999})
+            ]
         }
     )
     with pytest.raises(ResultPublicationError, match="differ"):
@@ -653,7 +655,7 @@ def test_rejects_incomplete_or_tampered_raw_evidence(
     elif mutation == "unlisted":
         evidence.files["unlisted.json"] = b"{}"
     else:
-        evidence.files["run.lock.json"] = _json_bytes({"run_id": "other"})
+        evidence.files["execution.lock.json"] = _json_bytes({"execution_id": "other"})
         checksums = {
             path: _sha256(value)
             for path, value in evidence.files.items()
@@ -671,15 +673,15 @@ def test_rejects_summary_that_omits_a_locked_task(
     summary = json.loads(json.dumps(summary_value))
     summary["trials"] = summary["trials"][:1]
     selected_trial = summary["trials"][0]["trial_id"]
-    summary["executions"] = [
-        execution
-        for execution in summary["executions"]
-        if execution["trial_id"] == selected_trial
+    summary["attempts"] = [
+        attempt
+        for attempt in summary["attempts"]
+        if attempt["trial_id"] == selected_trial
     ]
     summary["metrics"] = [
         metric
         for metric in summary["metrics"]
-        if metric["owner_type"] == "run" or metric["owner_id"] == selected_trial
+        if metric["owner_type"] == "execution" or metric["owner_id"] == selected_trial
     ]
 
     with pytest.raises(ResultPublicationError, match="tasks do not match"):
@@ -718,10 +720,10 @@ def test_artifact_rows_must_match_checksummed_evidence(
     source: EvidenceSource,
     field: str,
 ) -> None:
-    summary = json.loads(evidence.files["run-summary.json"])
+    summary = json.loads(evidence.files["execution-summary.json"])
     artifact = summary["artifacts"][0]
     artifact[field] = "sha256:" + "0" * 64 if field == "sha256" else 999
-    evidence.files["run-summary.json"] = _json_bytes(summary)
+    evidence.files["execution-summary.json"] = _json_bytes(summary)
     _refresh_checksums(evidence)
 
     with pytest.raises(ResultPublicationError, match="artifact row"):
@@ -740,8 +742,8 @@ def test_rejects_invalid_control_commit_and_paths(
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        ("selected", "selected execution"),
-        ("execution-owner", "unknown trial"),
+        ("selected", "selected attempt"),
+        ("attempt-owner", "unknown trial"),
         ("metric-owner", "unknown owner"),
         ("duplicate-metric", "duplicate metric"),
         ("duplicate-artifact", "duplicate artifact"),
@@ -752,9 +754,9 @@ def test_rejects_inconsistent_summary_references(
 ) -> None:
     summary = json.loads(json.dumps(summary_value))
     if mutation == "selected":
-        summary["trials"][0]["selected_execution_id"] = "execution-one"
-    elif mutation == "execution-owner":
-        summary["executions"][1]["trial_id"] = "trial-missing"
+        summary["trials"][0]["selected_attempt_id"] = "attempt-one"
+    elif mutation == "attempt-owner":
+        summary["attempts"][1]["trial_id"] = "trial-missing"
     elif mutation == "metric-owner":
         summary["metrics"][0]["owner_id"] = "trial-missing"
     elif mutation == "duplicate-metric":
@@ -766,29 +768,29 @@ def test_rejects_inconsistent_summary_references(
         ResultEvidence.model_validate(summary)
 
 
-def test_unsupported_trial_has_no_execution(
+def test_unsupported_trial_has_no_attempt(
     summary_value: dict[str, object],
 ) -> None:
     summary = json.loads(json.dumps(summary_value))
     unsupported = summary["trials"][0]
-    unsupported["selected_execution_id"] = None
+    unsupported["selected_attempt_id"] = None
     unsupported["outcome"] = "unsupported"
-    summary["run"]["quality"] = "degraded"
+    summary["execution"]["quality"] = "degraded"
     unsupported_trial_id = unsupported["trial_id"]
-    summary["executions"] = [
-        execution
-        for execution in summary["executions"]
-        if execution["trial_id"] != unsupported_trial_id
+    summary["attempts"] = [
+        attempt
+        for attempt in summary["attempts"]
+        if attempt["trial_id"] != unsupported_trial_id
     ]
 
     assert ResultEvidence.model_validate(summary).trials[0].outcome == "unsupported"
 
-    summary_with_execution = json.loads(json.dumps(summary_value))
-    summary_with_execution["trials"][0]["selected_execution_id"] = None
-    summary_with_execution["trials"][0]["outcome"] = "unsupported"
-    summary_with_execution["run"]["quality"] = "degraded"
-    with pytest.raises(ValidationError, match="physical execution"):
-        ResultEvidence.model_validate(summary_with_execution)
+    summary_with_attempt = json.loads(json.dumps(summary_value))
+    summary_with_attempt["trials"][0]["selected_attempt_id"] = None
+    summary_with_attempt["trials"][0]["outcome"] = "unsupported"
+    summary_with_attempt["execution"]["quality"] = "degraded"
+    with pytest.raises(ValidationError, match="physical attempt"):
+        ResultEvidence.model_validate(summary_with_attempt)
 
 
 def test_composes_correction_and_unsupported_trials(
@@ -801,25 +803,25 @@ def test_composes_correction_and_unsupported_trials(
     repeated = compose_result_tables(manifest, sources, control_commit=CONTROL_COMMIT)
 
     assert result == repeated
-    run = result.tables.runs[0]
+    run = result.tables.executions[0]
     assert run.result_kind == "composed"
     assert run.planned_trial_count == 3
     assert run.scored_trial_count == 1
     assert run.benchmark_failed_count == 1
     assert run.unsupported_count == 1
-    assert run.execution_count == 2
+    assert run.attempt_count == 2
     trials = {trial.task_name: trial for trial in result.tables.trials}
     assert trials["task-one"].outcome == "benchmark_failed"
     assert trials["task-two"].outcome == "scored"
     assert trials["task-three"].outcome == "unsupported"
-    assert trials["task-three"].selected_execution_id is None
-    assert {row.execution_id for row in result.tables.executions} == {
-        "execution-three",
-        "execution-correction",
+    assert trials["task-three"].selected_attempt_id is None
+    assert {row.attempt_id for row in result.tables.attempts} == {
+        "attempt-three",
+        "attempt-correction",
     }
     assert all(
-        execution.bundle_status == "source_publication"
-        for execution in result.envelope.executions
+        attempt.bundle_status == "source_publication"
+        for attempt in result.envelope.attempts
     )
 
     publication = build_composed_result_publication(result)
@@ -838,14 +840,14 @@ def test_composition_accepts_different_profile_labels(
         item for item in manifest.sources if item.role == "correction"
     )
     correction = sources[correction_reference.publication_id]
-    relabeled_run = correction.runs[0].model_copy(
+    relabeled_run = correction.executions[0].model_copy(
         update={
             "model_id": "model-correction",
             "deployment_id": "deployment-correction",
             "agent_id": "agent-correction",
         }
     )
-    relabeled = correction.model_copy(update={"runs": [relabeled_run]})
+    relabeled = correction.model_copy(update={"executions": [relabeled_run]})
 
     result = compose_result_tables(
         manifest,
@@ -853,8 +855,8 @@ def test_composition_accepts_different_profile_labels(
         control_commit=CONTROL_COMMIT,
     )
 
-    base_run = sources[manifest.sources[0].publication_id].runs[0]
-    composed_run = result.tables.runs[0]
+    base_run = sources[manifest.sources[0].publication_id].executions[0]
+    composed_run = result.tables.executions[0]
     assert composed_run.model_id == base_run.model_id
     assert composed_run.deployment_id == base_run.deployment_id
     assert composed_run.agent_id == base_run.agent_id
@@ -965,10 +967,10 @@ def test_composition_rejects_incompatible_correction(
         item for item in manifest.sources if item.role == "correction"
     )
     correction = sources[correction_reference.publication_id]
-    incompatible_run = correction.runs[0].model_copy(
+    incompatible_run = correction.executions[0].model_copy(
         update={"model_revision": "d" * 40}
     )
-    incompatible = correction.model_copy(update={"runs": [incompatible_run]})
+    incompatible = correction.model_copy(update={"executions": [incompatible_run]})
 
     with pytest.raises(ResultPublicationError, match="incompatible"):
         compose_result_tables(
@@ -1012,10 +1014,10 @@ def test_composition_rejects_mixed_runtime_kinds(
         item for item in manifest.sources if item.role == "correction"
     )
     correction = sources[correction_reference.publication_id]
-    provider_execution = correction.executions[0].model_copy(
+    provider_execution = correction.attempts[0].model_copy(
         update={"runtime_kind": "provider"}
     )
-    mixed = correction.model_copy(update={"executions": [provider_execution]})
+    mixed = correction.model_copy(update={"attempts": [provider_execution]})
 
     with pytest.raises(ResultPublicationError, match="mixed runtime kinds"):
         compose_result_tables(
@@ -1032,36 +1034,36 @@ def _composition_inputs(
     base = build_result_tables(evidence, source, control_commit=CONTROL_COMMIT)
     base = base.model_copy(
         update={
-            "executions": [
+            "attempts": [
                 execution.model_copy(update={"runtime_kind": "endpoint"})
-                for execution in base.executions
+                for execution in base.attempts
             ]
         }
     )
-    base_run = base.runs[0]
+    base_run = base.executions[0]
     base_trial = next(trial for trial in base.trials if trial.task_name == "task-one")
     correction_trace = {
         "publication_id": "pub-correction",
-        "run_id": "run-correction",
+        "execution_id": "execution-correction",
         "source_bucket": base_run.source_bucket,
-        "source_prefix": "campaigns/campaign-correction/runs/run-correction",
+        "source_prefix": "runs/run-correction/executions/run-correction",
         "source_checksum": "sha256:" + "4" * 64,
-        "run_lock_path": "run.lock.json",
-        "run_lock_sha256": "sha256:" + "5" * 64,
+        "execution_lock_path": "execution.lock.json",
+        "execution_lock_sha256": "sha256:" + "5" * 64,
         "control_commit": CONTROL_COMMIT,
     }
-    correction_run = RunRow.model_validate(
+    correction_run = ExecutionRow.model_validate(
         {
             **base_run.model_dump(mode="python"),
             **correction_trace,
-            "campaign_id": "campaign-correction",
+            "run_id": "run-correction",
             "component_kind": "correction",
             "quality": "degraded",
             "completed_at": NOW + timedelta(minutes=7),
             "planned_trial_count": 1,
             "scored_trial_count": 0,
             "benchmark_failed_count": 1,
-            "execution_count": 1,
+            "attempt_count": 1,
         }
     )
     correction_trial = TrialRow.model_validate(
@@ -1069,14 +1071,14 @@ def _composition_inputs(
             **base_trial.model_dump(mode="python"),
             **correction_trace,
             "trial_id": "trial-correction",
-            "selected_execution_id": "execution-correction",
+            "selected_attempt_id": "attempt-correction",
             "outcome": "benchmark_failed",
         }
     )
-    correction_execution = ExecutionRow.model_validate(
+    correction_execution = AttemptRow.model_validate(
         {
             **correction_trace,
-            "execution_id": "execution-correction",
+            "attempt_id": "attempt-correction",
             "trial_id": correction_trial.trial_id,
             "physical_attempt": 1,
             "runtime_kind": "endpoint",
@@ -1102,9 +1104,9 @@ def _composition_inputs(
     )
     correction = ResultTables(
         publication_id=correction_trace["publication_id"],
-        runs=[correction_run],
+        executions=[correction_run],
         trials=[correction_trial],
-        executions=[correction_execution],
+        attempts=[correction_execution],
         metrics=[correction_metric],
         artifacts=[],
         provenance=PublicationProvenance.model_validate(base.provenance),
@@ -1112,7 +1114,7 @@ def _composition_inputs(
     base_reference = SourcePublicationReference(
         role="base",
         publication_id=base.publication_id,
-        run_id=base_run.run_id,
+        execution_id=base_run.execution_id,
         result_dataset="org/results",
         result_revision="a" * 40,
         source_checksum=base_run.source_checksum,
@@ -1121,15 +1123,15 @@ def _composition_inputs(
     correction_reference = SourcePublicationReference(
         role="correction",
         publication_id=correction.publication_id,
-        run_id=correction_run.run_id,
+        execution_id=correction_run.execution_id,
         result_dataset="org/results",
         result_revision="b" * 40,
         source_checksum=correction_run.source_checksum,
         selected_trials=[SourceTrialSelection(task_name="task-one", logical_attempt=1)],
     )
     manifest = ResultCompositionManifest(
+        execution_id="execution-composed",
         run_id="run-composed",
-        campaign_id="campaign-composed",
         experiment="experiment-composed",
         created_at=base_run.created_at,
         completed_at=correction_run.completed_at,
@@ -1154,9 +1156,9 @@ def test_frozen_parquet_schema_matches_golden() -> None:
 
     assert result_schema_manifest() == json.loads(golden.read_text(encoding="utf-8"))
     models: list[tuple[TableName, type[TraceRow]]] = [
-        ("runs", RunRow),
-        ("trials", TrialRow),
         ("executions", ExecutionRow),
+        ("trials", TrialRow),
+        ("attempts", AttemptRow),
         ("metrics", MetricRow),
         ("artifacts", ArtifactRow),
     ]

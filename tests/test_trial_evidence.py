@@ -215,9 +215,9 @@ def test_assemble_rejects_capability_in_any_trial_file(tmp_path: Path) -> None:
     with pytest.raises(TrialEvidenceError, match="known secret"):
         assemble_trial_evidence(
             root,
-            campaign_id="campaign",
             run_id="run",
-            execution_id="execution",
+            execution_id="run",
+            attempt_id="execution",
             trial_id="trial",
             task_name="task",
             task_digest="sha256:" + "a" * 64,
@@ -234,9 +234,9 @@ def test_assemble_and_deep_verify_trial(tmp_path: Path) -> None:
     root = _trial(tmp_path)
     manifest = assemble_trial_evidence(
         root,
-        campaign_id="campaign",
         run_id="run",
-        execution_id="execution",
+        execution_id="run",
+        attempt_id="execution",
         trial_id="trial",
         task_name="task",
         task_digest="sha256:" + "a" * 64,
@@ -259,9 +259,9 @@ def test_assemble_accepts_current_harbor_verifier_artifacts(tmp_path: Path) -> N
 
     manifest = assemble_trial_evidence(
         root,
-        campaign_id="campaign",
         run_id="run",
-        execution_id="execution",
+        execution_id="run",
+        attempt_id="execution",
         trial_id="trial",
         task_name="task",
         task_digest="sha256:" + "a" * 64,
@@ -284,9 +284,9 @@ def test_assemble_rejects_ambiguous_verifier_reward(tmp_path: Path) -> None:
     with pytest.raises(TrialEvidenceError, match="verifier reward is ambiguous"):
         assemble_trial_evidence(
             root,
-            campaign_id="campaign",
             run_id="run",
-            execution_id="execution",
+            execution_id="run",
+            attempt_id="execution",
             trial_id="trial",
             task_name="task",
             task_digest="sha256:" + "a" * 64,
@@ -303,9 +303,9 @@ def test_assemble_requires_judge_recorder_summary(tmp_path: Path) -> None:
     with pytest.raises(TrialEvidenceError, match="summary is invalid"):
         assemble_trial_evidence(
             root,
-            campaign_id=None,
-            run_id="run",
-            execution_id="execution",
+            run_id=None,
+            execution_id="run",
+            attempt_id="execution",
             trial_id="trial",
             task_name="task",
             task_digest="sha256:" + "a" * 64,
@@ -322,7 +322,7 @@ def test_assemble_rejects_judge_recorder_with_rejected_calls(tmp_path: Path) -> 
     records = tmp_path / "judge-records"
     recorder = JudgeEvidenceRecorder(token="token")
     capability = recorder.register_scope(
-        execution_id="execution",
+        attempt_id="execution",
         trial_id="trial",
         model="judge/model",
         destination=records,
@@ -337,9 +337,9 @@ def test_assemble_rejects_judge_recorder_with_rejected_calls(tmp_path: Path) -> 
     with pytest.raises(TrialEvidenceError, match="rejected one or more calls"):
         assemble_trial_evidence(
             root,
-            campaign_id=None,
-            run_id="run",
-            execution_id="execution",
+            run_id=None,
+            execution_id="run",
+            attempt_id="execution",
             trial_id="trial",
             task_name="task",
             task_digest="sha256:" + "a" * 64,
@@ -357,7 +357,7 @@ def test_assemble_accepts_judge_recorder_with_zero_calls(tmp_path: Path) -> None
     records = tmp_path / "judge-records"
     recorder = JudgeEvidenceRecorder(token="token")
     capability = recorder.register_scope(
-        execution_id="execution",
+        attempt_id="execution",
         trial_id="trial",
         model="judge/model",
         destination=records,
@@ -367,9 +367,9 @@ def test_assemble_accepts_judge_recorder_with_zero_calls(tmp_path: Path) -> None
     recorder.close()
     manifest = assemble_trial_evidence(
         root,
-        campaign_id=None,
-        run_id="run",
-        execution_id="execution",
+        run_id=None,
+        execution_id="run",
+        attempt_id="execution",
         trial_id="trial",
         task_name="task",
         task_digest="sha256:" + "a" * 64,

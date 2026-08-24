@@ -1,4 +1,9 @@
-import { downloadFile, listFiles, uploadFile } from "@huggingface/hub";
+import {
+  downloadFile,
+  type ListFileEntry,
+  listFiles,
+  uploadFile,
+} from "@huggingface/hub";
 import { sha256 } from "@harbor-hf/contracts";
 import {
   type CreateResult,
@@ -7,13 +12,12 @@ import {
   type ObjectEntry,
 } from "@harbor-hf/control-core";
 
-const defaultDownloadConcurrency = 8;
 const defaultRetryDelaysMs = [250, 1_000, 3_000] as const;
+const xetHashPattern = /^[0-9a-f]{64}$/i;
 
 export interface HuggingFaceBucketStoreOptions {
   bucketId: string;
   accessToken: string;
-  downloadConcurrency?: number;
   retryDelaysMs?: readonly number[];
 }
 
@@ -39,6 +43,14 @@ function transientDownloadError(error: unknown): boolean {
   return transientDownloadError(error.cause);
 }
 
+function sourceIdentity(entry: ListFileEntry): string {
+  if (!Number.isSafeInteger(entry.size) || entry.size < 0)
+    throw new Error(`invalid Bucket object size for ${entry.path}`);
+  if (entry.xetHash === undefined || !xetHashPattern.test(entry.xetHash))
+    throw new Error(`Bucket object has no valid xetHash: ${entry.path}`);
+  return `xet:${entry.xetHash.toLowerCase()}`;
+}
+
 async function sleep(milliseconds: number): Promise<void> {
   if (milliseconds <= 0) return;
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -47,53 +59,34 @@ async function sleep(milliseconds: number): Promise<void> {
 export class HuggingFaceBucketStore implements ImmutableObjectStore {
   private readonly repo: { type: "bucket"; name: string };
   private readonly credentials: { accessToken: string };
-  private readonly downloadConcurrency: number;
   private readonly retryDelaysMs: readonly number[];
   private readonly cache = new Map<string, Uint8Array>();
   private queue: Promise<void> = Promise.resolve();
 
   constructor(options: HuggingFaceBucketStoreOptions) {
-    const concurrency = options.downloadConcurrency ?? defaultDownloadConcurrency;
-    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32)
-      throw new Error("Bucket download concurrency must be between 1 and 32");
     this.repo = { type: "bucket", name: options.bucketId };
     this.credentials = { accessToken: options.accessToken };
-    this.downloadConcurrency = concurrency;
     this.retryDelaysMs = options.retryDelaysMs ?? defaultRetryDelaysMs;
   }
 
   async list(prefix: string): Promise<readonly ObjectEntry[]> {
-    const files: Array<{ key: string; size: number }> = [];
+    const files: ObjectEntry[] = [];
     for await (const entry of listFiles({
       repo: this.repo,
       path: prefix,
       recursive: true,
+      expand: true,
       ...this.credentials,
     })) {
-      if (entry.type === "file") files.push({ key: entry.path, size: entry.size });
+      if (entry.type === "file")
+        files.push({
+          key: entry.path,
+          size: entry.size,
+          source_identity: sourceIdentity(entry),
+        });
     }
     files.sort((left, right) => left.key.localeCompare(right.key));
-    const entries = new Array<ObjectEntry>(files.length);
-    let next = 0;
-    const workers = Array.from(
-      { length: Math.min(this.downloadConcurrency, files.length) },
-      async () => {
-        while (next < files.length) {
-          const index = next;
-          next += 1;
-          const file = files[index];
-          if (!file) continue;
-          const bytes = await this.read(file.key);
-          entries[index] = {
-            key: file.key,
-            size: file.size,
-            digest: sha256(bytes),
-          };
-        }
-      },
-    );
-    await Promise.all(workers);
-    return entries;
+    return files;
   }
 
   async read(key: string): Promise<Uint8Array> {
@@ -138,10 +131,15 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
     bytes: Uint8Array,
   ): Promise<CreateResult> {
     const digest = sha256(bytes);
+    this.cache.delete(key);
     const existing = await this.readIfPresent(key);
     if (existing) {
       if (sha256(existing) !== digest) throw new ImmutableConflictError(key);
-      return { created: false, digest };
+      return {
+        created: false,
+        digest,
+        source_identity: await this.stableSourceIdentity(key, digest),
+      };
     }
     await uploadFile({
       repo: this.repo,
@@ -149,10 +147,11 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
       commitTitle: `Create immutable control object ${key}`,
       ...this.credentials,
     });
-    this.cache.delete(key);
-    const observed = await this.read(key);
-    if (sha256(observed) !== digest) throw new ImmutableConflictError(key);
-    return { created: true, digest };
+    return {
+      created: true,
+      digest,
+      source_identity: await this.stableSourceIdentity(key, digest),
+    };
   }
 
   private async readIfPresent(key: string): Promise<Uint8Array | null> {
@@ -162,5 +161,42 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
+  }
+
+  private async objectMetadata(key: string): Promise<ObjectEntry> {
+    const entries: ObjectEntry[] = [];
+    for await (const entry of listFiles({
+      repo: this.repo,
+      path: key,
+      recursive: false,
+      expand: true,
+      ...this.credentials,
+    })) {
+      if (entry.type === "file" && entry.path === key)
+        entries.push({
+          key: entry.path,
+          size: entry.size,
+          source_identity: sourceIdentity(entry),
+        });
+    }
+    const entry = entries[0];
+    if (entries.length !== 1 || !entry)
+      throw new Error(`Bucket object metadata is unavailable or ambiguous: ${key}`);
+    return entry;
+  }
+
+  private async stableSourceIdentity(key: string, digest: string): Promise<string> {
+    const before = await this.objectMetadata(key);
+    this.cache.delete(key);
+    const observed = await this.read(key);
+    const after = await this.objectMetadata(key);
+    if (
+      before.size !== after.size ||
+      before.source_identity !== after.source_identity ||
+      observed.byteLength !== after.size ||
+      sha256(observed) !== digest
+    )
+      throw new ImmutableConflictError(key);
+    return after.source_identity;
   }
 }

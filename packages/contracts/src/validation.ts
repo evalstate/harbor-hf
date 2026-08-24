@@ -12,8 +12,8 @@ function load(name: string): object {
 export const schemas = {
   apiError: load("api-error-v1.schema.json"),
   attemptSubmission: load("attempt-submission-v1.schema.json"),
-  campaignAction: load("campaign-action-v1.schema.json"),
-  campaignSubmission: load("campaign-submission-v1.schema.json"),
+  runAction: load("run-action-v1.schema.json"),
+  runSubmission: load("run-submission-v1.schema.json"),
   controlRecord: load("control-record-v1.schema.json"),
   preparedJobSubmission: load("prepared-job-submission-v1.schema.json"),
   resultCatalog: load("result-catalog-v1.schema.json"),
@@ -29,8 +29,8 @@ ajv.addFormat("date-time", {
 
 const validators = {
   attemptSubmission: ajv.compile(schemas.attemptSubmission),
-  campaignAction: ajv.compile(schemas.campaignAction),
-  campaignSubmission: ajv.compile(schemas.campaignSubmission),
+  runAction: ajv.compile(schemas.runAction),
+  runSubmission: ajv.compile(schemas.runSubmission),
   controlRecord: ajv.compile(schemas.controlRecord),
   preparedJobSubmission: ajv.compile(schemas.preparedJobSubmission),
   resultCatalog: ajv.compile(schemas.resultCatalog),
@@ -63,12 +63,12 @@ export function validateControlRecord<T>(value: unknown): T {
   return validate<T>(validators.controlRecord, value, "control record");
 }
 
-export function validateCampaignSubmission<T>(value: unknown): T {
-  return validate<T>(validators.campaignSubmission, value, "campaign submission");
+export function validateRunSubmission<T>(value: unknown): T {
+  return validate<T>(validators.runSubmission, value, "run submission");
 }
 
-export function validateCampaignAction<T>(value: unknown): T {
-  return validate<T>(validators.campaignAction, value, "campaign action");
+export function validateRunAction<T>(value: unknown): T {
+  return validate<T>(validators.runAction, value, "run action");
 }
 
 export function validatePreparedJobSubmission<T>(value: unknown): T {

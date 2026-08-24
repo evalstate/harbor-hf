@@ -1,4 +1,4 @@
-import type { CampaignLock } from "@harbor-hf/contracts";
+import type { RunLock } from "@harbor-hf/contracts";
 import { describe, expect, it } from "vitest";
 import {
   attemptAdmissibility,
@@ -71,7 +71,7 @@ describe("attempt admissibility", () => {
           spec: { required_evidence: ["provider-usage"] },
         },
       ],
-    } as unknown as CampaignLock;
+    } as unknown as RunLock;
 
     expect(requiredPositiveMetrics(lock)).toEqual(["input_tokens", "output_tokens"]);
   });

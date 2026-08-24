@@ -99,7 +99,7 @@ class JudgeRecorderSummary(FrozenModel):
     schema_version: Literal["harbor-hf/judge-recorder-summary/v1"] = (
         "harbor-hf/judge-recorder-summary/v1"
     )
-    execution_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
     trial_id: str = Field(min_length=1)
     model: str = Field(min_length=1)
     exchange_count: int = Field(ge=0)
@@ -159,7 +159,7 @@ class JudgeExchange(FrozenModel):
         "harbor-hf/judge-exchange/v1"
     )
     exchange_id: str = Field(pattern=r"^judge-[0-9]{4}$")
-    execution_id: str
+    attempt_id: str
     trial_id: str
     attempt: int = Field(ge=1)
     provider: JudgeProvider = "hf-inference-provider"
@@ -241,7 +241,7 @@ class JudgeExchange(FrozenModel):
 
 @dataclass(frozen=True)
 class _Scope:
-    execution_id: str
+    attempt_id: str
     trial_id: str
     model: str
     destination: Path
@@ -347,7 +347,7 @@ class JudgeEvidenceRecorder:
     def register_scope(
         self,
         *,
-        execution_id: str,
+        attempt_id: str,
         trial_id: str,
         model: str,
         destination: Path,
@@ -355,7 +355,7 @@ class JudgeEvidenceRecorder:
         known_secrets: tuple[str, ...] = (),
         max_calls: int | None = None,
     ) -> str:
-        if not execution_id or not trial_id or not model:
+        if not attempt_id or not trial_id or not model:
             raise ValueError(
                 "judge scope requires execution, trial, and model identity"
             )
@@ -374,7 +374,7 @@ class JudgeEvidenceRecorder:
             with self._lock:
                 if capability not in self._scopes:
                     self._scopes[capability] = _Scope(
-                        execution_id=execution_id,
+                        attempt_id=attempt_id,
                         trial_id=trial_id,
                         model=model,
                         destination=destination,
@@ -384,10 +384,10 @@ class JudgeEvidenceRecorder:
                             dict.fromkeys((self._token, *known_secrets, capability))
                         ),
                     )
-                    self._counts[execution_id] = 0
-                    self._rejections[execution_id] = 0
-                    self._rejection_errors[execution_id] = []
-                    self._active_calls[execution_id] = 0
+                    self._counts[attempt_id] = 0
+                    self._rejections[attempt_id] = 0
+                    self._rejection_errors[attempt_id] = []
+                    self._active_calls[attempt_id] = 0
                     return capability
         raise JudgeRecorderError("judge capability generation collided")
 
@@ -397,19 +397,19 @@ class JudgeEvidenceRecorder:
             if scope is None:
                 return
             deadline = self._monotonic() + scope.policy.judge_timeout_seconds + 5
-            while self._active_calls.get(scope.execution_id, 0):
+            while self._active_calls.get(scope.attempt_id, 0):
                 remaining = deadline - self._monotonic()
                 if remaining <= 0:
                     raise JudgeRecorderError(
                         "judge scope remained active after deadline"
                     )
                 self._idle.wait(timeout=remaining)
-            self._active_calls.pop(scope.execution_id, None)
-            count = self._counts.pop(scope.execution_id, 0)
-            rejected = self._rejections.pop(scope.execution_id, 0)
-            rejected_errors = self._rejection_errors.pop(scope.execution_id, [])
+            self._active_calls.pop(scope.attempt_id, None)
+            count = self._counts.pop(scope.attempt_id, 0)
+            rejected = self._rejections.pop(scope.attempt_id, 0)
+            rejected_errors = self._rejection_errors.pop(scope.attempt_id, [])
         summary = JudgeRecorderSummary(
-            execution_id=scope.execution_id,
+            attempt_id=scope.attempt_id,
             trial_id=scope.trial_id,
             model=scope.model,
             exchange_count=count,
@@ -601,31 +601,31 @@ class JudgeEvidenceRecorder:
 
     def _begin_call(self, scope: _Scope) -> None:
         with self._idle:
-            self._active_calls[scope.execution_id] = (
-                self._active_calls.get(scope.execution_id, 0) + 1
+            self._active_calls[scope.attempt_id] = (
+                self._active_calls.get(scope.attempt_id, 0) + 1
             )
 
     def _finish_call(self, scope: _Scope) -> None:
         with self._idle:
-            active = self._active_calls.get(scope.execution_id, 0)
-            self._active_calls[scope.execution_id] = max(0, active - 1)
+            active = self._active_calls.get(scope.attempt_id, 0)
+            self._active_calls[scope.attempt_id] = max(0, active - 1)
             self._idle.notify_all()
 
     def _record_rejection(self, scope: _Scope, error: Exception) -> None:
         with self._lock:
-            self._rejections[scope.execution_id] = (
-                self._rejections.get(scope.execution_id, 0) + 1
+            self._rejections[scope.attempt_id] = (
+                self._rejections.get(scope.attempt_id, 0) + 1
             )
-            self._rejection_errors.setdefault(scope.execution_id, []).append(
+            self._rejection_errors.setdefault(scope.attempt_id, []).append(
                 type(error).__name__[:200]
             )
 
     def _allocate(self, scope: _Scope) -> tuple[str, int]:
         with self._lock:
-            attempt = self._counts.get(scope.execution_id, 0) + 1
+            attempt = self._counts.get(scope.attempt_id, 0) + 1
             if attempt > scope.max_calls:
                 raise JudgeRecorderError("judge call limit is exhausted")
-            self._counts[scope.execution_id] = attempt
+            self._counts[scope.attempt_id] = attempt
         return f"judge-{attempt:04d}", attempt
 
     def _upstream(self, body: bytes, scope: _Scope) -> httpx.Response:
@@ -716,7 +716,7 @@ class JudgeEvidenceRecorder:
             }
             exchange = JudgeExchange(
                 exchange_id=exchange_id,
-                execution_id=scope.execution_id,
+                attempt_id=scope.attempt_id,
                 trial_id=scope.trial_id,
                 attempt=attempt,
                 provider=self._provider,

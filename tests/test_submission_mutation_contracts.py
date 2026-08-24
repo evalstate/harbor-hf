@@ -7,9 +7,9 @@ import pytest
 from conftest import with_provider_controller
 from test_submission import FakeBucketApi, FakeRunner, _wave_lock, _write_source_lock
 
+from harbor_hf.executions import build_execution_lock
 from harbor_hf.models import ExperimentSpec
 from harbor_hf.provider_models import ProviderTarget
-from harbor_hf.runs import build_run_lock
 from harbor_hf.submission import (
     build_submit_wave_command,
     ensure_private_coordination_repository,
@@ -55,10 +55,10 @@ def test_stage_job_input_digest_is_sensitive_to_names_and_content(
     assert len(set(uris)) == 3
 
 
-def test_submit_stages_input_under_run_identity(
+def test_submit_stages_input_under_execution_identity(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="run-42")
+    lock = build_execution_lock(remote_spec, execution_id="execution-42")
     runner = FakeRunner("Job started: 0123456789abcdef01234567\n")
     api = FakeBucketApi()
     (tmp_path / "manifest.yaml").write_text("kind: Experiment\n")
@@ -67,20 +67,20 @@ def test_submit_stages_input_under_run_identity(
     result = submit(
         lock,
         input_dir=tmp_path,
-        bucket="example-org/benchmark-runs",
+        bucket="example-org/benchmark-executions",
         runner=runner,
         source_lock=source_lock,
         bucket_api=api,
     )
 
-    assert result.run_id == "run-42"
+    assert result.execution_id == "execution-42"
     assert result.artifact_prefix == lock.artifact_prefix
     assert runner.command is not None
     assert "--secrets" in result.command
     assert "--secrets-file" in runner.command
     assert "test-purpose-scoped-token" not in " ".join(result.command + runner.command)
     paths = [path for _content, path in api.bucket_batches[0][1]]
-    assert all(path.startswith("job-inputs/run-42/") for path in paths)
+    assert all(path.startswith("job-inputs/execution-42/") for path in paths)
 
 
 def test_provider_wave_submission_rejection_is_golden(
@@ -105,11 +105,11 @@ def test_provider_wave_submission_rejection_is_golden(
 
     with pytest.raises(ValueError) as caught:
         build_submit_wave_command(
-            lock, input_dir=tmp_path, bucket="example-org/benchmark-runs"
+            lock, input_dir=tmp_path, bucket="example-org/benchmark-executions"
         )
 
     assert str(caught.value) == (
-        "provider wave locks must run inside their owning campaign controller"
+        "provider wave locks must run inside their owning run controller"
     )
 
 

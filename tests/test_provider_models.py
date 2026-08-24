@@ -4,13 +4,8 @@ import pytest
 from conftest import with_provider_controller
 from pydantic import ValidationError
 
-from harbor_hf.campaigns import (
-    ProviderWaveTarget,
-    build_campaign_lock,
-    build_campaign_plan,
-    build_wave_lock,
-)
-from harbor_hf.control import CampaignSubmittedPayload, new_event
+from harbor_hf.control import RunSubmittedPayload, new_event
+from harbor_hf.executions import build_execution_lock
 from harbor_hf.models import DeploymentProfile, ExperimentSpec
 from harbor_hf.provider_models import (
     EvidenceValue,
@@ -26,7 +21,12 @@ from harbor_hf.provider_models import (
 from harbor_hf.reconciler import (
     plan_reconciliation,
 )
-from harbor_hf.runs import build_run_lock
+from harbor_hf.runs import (
+    ProviderWaveTarget,
+    build_run_lock,
+    build_run_plan,
+    build_wave_lock,
+)
 
 
 def test_provider_target_keeps_admission_and_routing_policy() -> None:
@@ -70,7 +70,7 @@ def test_provider_spend_admission_requires_a_bounded_estimate(
         ProviderLimits.model_validate(limits)
 
 
-def test_manifest_and_campaign_lock_provider_admission_separately_from_endpoints(
+def test_manifest_and_run_lock_provider_admission_separately_from_endpoints(
     remote_spec: ExperimentSpec,
 ) -> None:
     model = remote_spec.matrix.models[0]
@@ -108,28 +108,28 @@ def test_manifest_and_campaign_lock_provider_admission_separately_from_endpoints
 
     assert isinstance(remote_spec.matrix.deployments[0], DeploymentProfile)
     assert isinstance(spec.matrix.deployments[0], ProviderTarget)
-    with pytest.raises(ValueError, match="require campaign execution"):
-        build_run_lock(spec)
+    with pytest.raises(ValueError, match="require remote execution"):
+        build_execution_lock(spec)
 
     spec = with_provider_controller(spec)
-    campaign = build_campaign_lock(build_campaign_plan(spec), "provider-campaign")
-    run = campaign.runs[0]
-    assert run.provider == "hf-inference-providers"
-    assert run.max_concurrent_requests == 3
-    assert run.spend_cap_microusd == 1_250_000
-    assert run.estimated_wave_cost_microusd == 500_000
+    run = build_run_lock(build_run_plan(spec), "provider-run")
+    execution = run.executions[0]
+    assert execution.provider == "hf-inference-providers"
+    assert execution.max_concurrent_requests == 3
+    assert execution.spend_cap_microusd == 1_250_000
+    assert execution.estimated_wave_cost_microusd == 500_000
     submitted = new_event(
-        subject_type="campaign",
-        subject_id=campaign.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=run.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
+        payload=RunSubmittedPayload(plan_digest=run.plan_digest),
     )
 
-    _projection, admitted = plan_reconciliation(campaign, [submitted])
+    _projection, admitted = plan_reconciliation(run, [submitted])
     assert admitted.blocked == []
     assert admitted.actions[0].estimated_cost_microusd == 500_000
-    wave = build_wave_lock(campaign, spec, admitted.actions[0])
+    wave = build_wave_lock(run, spec, admitted.actions[0])
     assert isinstance(wave.target, ProviderWaveTarget)
     assert wave.target.provider == target
     assert wave.target.provider.api == "chat-completions"

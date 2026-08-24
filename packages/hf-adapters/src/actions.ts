@@ -14,7 +14,6 @@ import {
   runJob,
   type SpaceHardwareFlavor,
 } from "@huggingface/hub";
-import { HuggingFaceSandboxGateway } from "./sandbox.js";
 import { jobHardwareCostMicrousd } from "./job-cost.js";
 
 interface AdapterConfig {
@@ -76,22 +75,196 @@ function inferenceTokenPolicy(intent: ActionIntent): "forbidden" | "required" {
   return value;
 }
 
-function verifyJobSecretNames(
+type ApiJob = Awaited<ReturnType<typeof getJob>>;
+
+interface ExpectedJobSpec {
+  dockerImage: string;
+  command: string[];
+  flavor: string;
+  arch: "amd64";
+  timeoutSeconds: number;
+  labels: Record<string, string>;
+  environment: Record<string, string>;
+  secretNames: string[];
+}
+
+function launchActionId(intent: ActionIntent): string {
+  return intent.action_kind === "job.launch"
+    ? intent.action_id
+    : stringValue(intent, "launch_action_id");
+}
+
+function jobEnvironment(
   intent: ActionIntent,
-  secretNames: string[] | undefined,
-): void {
-  const policy = inferenceTokenPolicy(intent);
-  if (!secretNames) {
-    if (policy === "required")
-      throw new Error("required Job inference credential is not attested");
-    return;
-  }
-  const expected = policy === "required" ? ["HF_INFERENCE_TOKEN"] : [];
+  controlUrl: string,
+): Record<string, string> {
+  const role = workerRole(intent);
+  const taskIds = stringValues(intent, "task_ids");
+  const jobImage = stringValue(intent, "job_image");
+  const taskImage =
+    typeof intent.payload.task_image === "string"
+      ? intent.payload.task_image
+      : undefined;
+  const environment = {
+    HARBOR_HF_RUN_ID: intent.run_id,
+    HARBOR_HF_ACTION_ID: launchActionId(intent),
+    HARBOR_HF_TASK_IDS_JSON: JSON.stringify(taskIds),
+    HARBOR_HF_CONTROL_URL: controlUrl,
+    HARBOR_HF_WORKER_ROLE: role,
+    HARBOR_HF_JOB_IMAGE: jobImage,
+    ...(taskImage ? { HARBOR_HF_TASK_IMAGE: taskImage } : {}),
+    HARBOR_HF_RUN_LOCK_DIGEST: stringValue(intent, "run_lock_digest"),
+    PYTHONUNBUFFERED: "1",
+    ...(typeof intent.payload.worker_revision === "string"
+      ? { HARBOR_HF_WORKER_REVISION: intent.payload.worker_revision }
+      : {}),
+    ...(typeof intent.payload.prepared_job_digest === "string"
+      ? { HARBOR_HF_PREPARED_JOB_DIGEST: intent.payload.prepared_job_digest }
+      : {}),
+    ...(typeof intent.payload.max_image_bytes === "number"
+      ? { HARBOR_HF_MAX_IMAGE_BYTES: String(intent.payload.max_image_bytes) }
+      : {}),
+    ...(typeof intent.payload.max_image_entries === "number"
+      ? { HARBOR_HF_MAX_IMAGE_ENTRIES: String(intent.payload.max_image_entries) }
+      : {}),
+  };
+  if (inferenceTokenPolicy(intent) === "forbidden") return environment;
+  return {
+    ...environment,
+    HARBOR_HF_INFERENCE_UPSTREAM: stringValue(intent, "inference_upstream"),
+    HARBOR_HF_INFERENCE_ALLOWED_MODEL: stringValue(intent, "inference_model"),
+    HARBOR_HF_INFERENCE_API: stringValue(intent, "inference_api"),
+    HARBOR_HF_INFERENCE_MAX_REQUESTS: String(
+      numberValue(intent, "inference_max_requests"),
+    ),
+    HARBOR_HF_INFERENCE_MAX_CONCURRENCY: String(
+      numberValue(intent, "inference_max_concurrency"),
+    ),
+    HARBOR_HF_INFERENCE_TIMEOUT_SECONDS: String(
+      numberValue(intent, "inference_timeout_seconds"),
+    ),
+    HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS: String(
+      numberValue(intent, "inference_max_output_tokens"),
+    ),
+  };
+}
+
+function expectedJobSpec(intent: ActionIntent, controlUrl: string): ExpectedJobSpec {
+  const actionId = launchActionId(intent);
+  return {
+    dockerImage: stringValue(intent, "job_image"),
+    command: stringValues(intent, "job_command"),
+    flavor: stringValue(intent, "hardware"),
+    arch: "amd64",
+    timeoutSeconds: numberValue(intent, "timeout_seconds"),
+    labels: {
+      harbor_hf_action_id: actionId,
+      harbor_hf_run_id: intent.run_id,
+      harbor_hf_worker_role: workerRole(intent),
+    },
+    environment: jobEnvironment(intent, controlUrl),
+    secretNames:
+      inferenceTokenPolicy(intent) === "required"
+        ? ["HARBOR_HF_WORKER_CAPABILITY", "HF_INFERENCE_TOKEN"]
+        : ["HARBOR_HF_WORKER_CAPABILITY"],
+  };
+}
+
+function arraysEqual<T>(left: readonly T[], right: readonly T[]): boolean {
+  return (
+    left.length === right.length && left.every((value, index) => value === right[index])
+  );
+}
+
+function recordsEqual(
+  left: Record<string, string> | null | undefined,
+  right: Record<string, string>,
+): boolean {
+  if (!left) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return (
+    arraysEqual(leftKeys, rightKeys) &&
+    rightKeys.every((key) => left[key] === right[key])
+  );
+}
+
+function normalizedJobNumber(
+  sdkValue: unknown,
+  stockValue: unknown,
+  label: string,
+): number {
+  const values = [sdkValue, stockValue].filter(
+    (value) => value !== undefined && value !== null,
+  );
   if (
-    secretNames.length !== expected.length ||
-    !secretNames.every((name, index) => name === expected[index])
+    values.length === 0 ||
+    values.some((value) => typeof value !== "number" || !Number.isInteger(value))
+  )
+    throw new Error(`Job ${label} is not attested`);
+  const value = values[0] as number;
+  if (values.some((candidate) => candidate !== value))
+    throw new Error(`Job ${label} fields disagree`);
+  return value;
+}
+
+function normalizedJobAttempts(sdkValue: unknown, stockRetry: unknown): number {
+  const stockAttempts =
+    typeof stockRetry === "number" && Number.isInteger(stockRetry)
+      ? stockRetry + 1
+      : stockRetry;
+  return normalizedJobNumber(sdkValue, stockAttempts, "attempt count");
+}
+
+function verifyNoJobIngress(job: ApiJob): void {
+  const status = job.status as ApiJob["status"] & {
+    exposeUrls?: unknown;
+    sshUrl?: unknown;
+  };
+  if (status.sshUrl !== undefined && status.sshUrl !== null)
+    throw new Error("Job SSH access is enabled");
+  if (
+    status.exposeUrls !== undefined &&
+    status.exposeUrls !== null &&
+    (!Array.isArray(status.exposeUrls) || status.exposeUrls.length !== 0)
+  )
+    throw new Error("Job exposes network ports");
+}
+
+function verifyJobSpec(intent: ActionIntent, job: ApiJob, controlUrl: string): void {
+  const expected = expectedJobSpec(intent, controlUrl);
+  const stockJob = job as ApiJob & {
+    retry?: unknown;
+    timeout?: unknown;
+  };
+  if (
+    job.dockerImage !== expected.dockerImage ||
+    !job.command ||
+    !arraysEqual(job.command, expected.command) ||
+    job.flavor !== expected.flavor ||
+    job.arch !== expected.arch ||
+    normalizedJobNumber(job.timeoutSeconds, stockJob.timeout, "timeout") !==
+      expected.timeoutSeconds ||
+    normalizedJobAttempts(job.attempts, stockJob.retry) !== 1 ||
+    !recordsEqual(job.labels, expected.labels) ||
+    !recordsEqual(job.environment, expected.environment)
+  )
+    throw new Error("Job specification does not match the locked launch intent");
+  if (job.spaceId !== undefined && job.spaceId !== null)
+    throw new Error("Job unexpectedly uses a Space image");
+  if (
+    !job.secrets ||
+    !arraysEqual([...job.secrets].sort(), [...expected.secretNames].sort())
   )
     throw new Error("Job secret names do not match the locked deployment");
+  if (
+    (job.arguments !== undefined &&
+      job.arguments !== null &&
+      job.arguments.length !== 0) ||
+    (job.volumes !== undefined && job.volumes !== null && job.volumes.length !== 0)
+  )
+    throw new Error("Job arguments and volumes are not attested as empty");
+  verifyNoJobIngress(job);
 }
 
 function cleanFailure(error: unknown): string {
@@ -147,14 +320,12 @@ function endpointStatus(raw: unknown): {
 
 export class HuggingFaceActions implements ExternalActionPort {
   private readonly endpointsUrl: string;
-  readonly sandboxes: HuggingFaceSandboxGateway;
 
   constructor(private readonly config: AdapterConfig) {
     if (config.inferenceToken && config.inferenceToken === config.accessToken)
       throw new Error("control and inference credentials must be distinct");
     this.endpointsUrl =
       config.endpointsUrl ?? "https://api.endpoints.huggingface.cloud/v2";
-    this.sandboxes = new HuggingFaceSandboxGateway(config);
   }
 
   async execute(
@@ -163,7 +334,7 @@ export class HuggingFaceActions implements ExternalActionPort {
   ): Promise<ExternalActionResult> {
     try {
       switch (intent.action_kind) {
-        case "campaign.admit":
+        case "run.admit":
           return { outcome: "completed", observed_state: "admitted" };
         case "job.launch":
           return await this.launchJob(intent, context);
@@ -175,19 +346,10 @@ export class HuggingFaceActions implements ExternalActionPort {
           return await this.endpointMutation(intent, "pause");
         case "endpoint.resume":
           return await this.endpointMutation(intent, "resume");
-        case "sandbox.create":
-        case "sandbox.observe":
-        case "sandbox.close":
-          return await this.sandboxes.lifecycle(intent, context);
-        case "sandbox.exec":
-        case "sandbox.write":
-        case "sandbox.read":
-          throw new AmbiguousExternalActionError(
-            "Sandbox data action requires an idempotent worker retry",
-          );
-        case "campaign.cancel":
-        case "campaign.pause":
-        case "campaign.resume":
+        case "run.cancel":
+        case "run.pause":
+        case "run.resume":
+        case "run.retry-infrastructure":
         case "publication.publish":
         case "publication.supersede":
           return { outcome: "completed", observed_state: "handled_locally" };
@@ -204,7 +366,7 @@ export class HuggingFaceActions implements ExternalActionPort {
         });
       return {
         outcome: "failed",
-        observed_state: "ERROR",
+        observed_state: intent.action_kind === "job.cancel" ? "UNKNOWN" : "ERROR",
         error_code: cleanFailure(error),
       };
     }
@@ -216,25 +378,19 @@ export class HuggingFaceActions implements ExternalActionPort {
   ): Promise<ExternalActionResult> {
     const tokenPolicy = inferenceTokenPolicy(intent);
     const role = workerRole(intent);
+    const taskIds = stringValues(intent, "task_ids");
+    if (taskIds.length === 0)
+      throw new Error("Job launch requires at least one assigned task");
+    if (
+      role === "execution" &&
+      (taskIds.length !== 1 || intent.payload.task_id !== taskIds[0])
+    )
+      throw new Error("execution Job launch requires exactly one task");
     if (tokenPolicy === "required" && !this.config.inferenceToken)
       throw new Error("required worker inference credential is unavailable");
-    const inferenceEnvironment =
-      tokenPolicy === "required"
-        ? {
-            HARBOR_HF_INFERENCE_MAX_REQUESTS: String(
-              numberValue(intent, "inference_max_requests"),
-            ),
-            HARBOR_HF_INFERENCE_MAX_CONCURRENCY: String(
-              numberValue(intent, "inference_max_concurrency"),
-            ),
-            HARBOR_HF_INFERENCE_TIMEOUT_SECONDS: String(
-              numberValue(intent, "inference_timeout_seconds"),
-            ),
-            HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS: String(
-              numberValue(intent, "inference_max_output_tokens"),
-            ),
-          }
-        : {};
+    if (!this.config.controlUrl)
+      throw new Error("Job launch requires the control service URL");
+    const spec = expectedJobSpec(intent, this.config.controlUrl);
     const jobs = await listJobs({
       namespace: this.config.namespace,
       accessToken: this.config.accessToken,
@@ -244,13 +400,20 @@ export class HuggingFaceActions implements ExternalActionPort {
       (job) => job.labels?.harbor_hf_action_id === intent.action_id,
     );
     if (matches.length > 1)
-      throw new Error("multiple Jobs have the same deterministic action ID");
+      throw new AmbiguousExternalActionError(
+        "multiple Jobs have the same deterministic action ID",
+      );
     if (matches.length === 1) {
       const job = matches[0];
       if (!job) throw new Error("matching Job disappeared");
-      verifyJobSecretNames(intent, job.secrets);
-      if (job.labels?.harbor_hf_worker_role !== role)
-        throw new Error("adopted Job worker role does not match the launch intent");
+      try {
+        verifyJobSpec(intent, job, this.config.controlUrl);
+      } catch (error) {
+        throw new AmbiguousExternalActionError(
+          "adopted Job failed locked specification validation",
+          { cause: error },
+        );
+      }
       return {
         outcome: "adopted",
         observed_state: job.status.stage,
@@ -263,92 +426,57 @@ export class HuggingFaceActions implements ExternalActionPort {
       );
     if (!booleanValue(intent, "trusted_worker"))
       throw new Error("Job launch requires a trusted worker profile");
-    if (!this.config.controlUrl)
-      throw new Error("Job launch requires the control service URL");
-    const timeoutSeconds = numberValue(intent, "timeout_seconds");
-    const taskIds = stringValues(intent, "task_ids");
+    const timeoutSeconds = spec.timeoutSeconds;
     if (role === "preparation" && tokenPolicy !== "forbidden")
       throw new Error("preparation Jobs cannot receive an inference credential");
-    if (
-      role === "execution" &&
-      intent.payload.prepared_job_digest &&
-      tokenPolicy !== "forbidden"
-    )
-      throw new Error("prepared execution Jobs cannot receive an inference credential");
-    const sandboxAuthorized =
-      role === "execution" &&
-      (Boolean(intent.payload.sandbox) ||
-        booleanValue(intent, "sandbox_authorized", false));
-    const sandboxOperations = sandboxAuthorized
-      ? ([
-          "sandbox.create",
-          "sandbox.observe",
-          "sandbox.exec",
-          "sandbox.write",
-          "sandbox.read",
-          "sandbox.close",
-        ] as const)
-      : [];
     const capability = mintWorkerCapability(this.config.accessToken, {
       namespace: this.config.namespace,
-      campaign_id: intent.campaign_id,
-      campaign_lock_digest: stringValue(intent, "campaign_lock_digest"),
+      run_id: intent.run_id,
+      run_lock_digest: stringValue(intent, "run_lock_digest"),
       action_id: intent.action_id,
       task_ids: taskIds,
       operations:
         role === "preparation"
-          ? ["campaign.read", "preparation.submit"]
-          : ["campaign.read", "attempt.submit", "evidence.write", ...sandboxOperations],
-      expires_at:
-        Math.floor(Date.now() / 1000) +
-        Math.max(
-          timeoutSeconds,
-          intent.payload.sandbox?.timeout_seconds ?? 0,
-          typeof intent.payload.sandbox_timeout_seconds === "number"
-            ? intent.payload.sandbox_timeout_seconds
-            : 0,
-        ) +
-        3_600,
+          ? ["run.read", "preparation.submit"]
+          : ["run.read", "attempt.submit", "evidence.write"],
+      expires_at: Math.floor(Date.now() / 1000) + timeoutSeconds + 3_600,
     });
+    const jobImage = spec.dockerImage;
+    const taskImage =
+      typeof intent.payload.task_image === "string"
+        ? intent.payload.task_image
+        : undefined;
+    if (
+      role === "execution" &&
+      typeof intent.payload.prepared_job_digest === "string" &&
+      !taskImage
+    )
+      throw new Error("prepared execution Job requires a locked task image");
+    if (taskImage === jobImage)
+      throw new Error("physical Job image cannot be the benchmark task image");
     let job: Awaited<ReturnType<typeof runJob>>;
     try {
       job = await runJob({
         namespace: this.config.namespace,
         accessToken: this.config.accessToken,
         ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
-        dockerImage: stringValue(intent, "job_image"),
-        command: stringValues(intent, "job_command"),
-        flavor: stringValue(intent, "hardware") as SpaceHardwareFlavor,
+        dockerImage: spec.dockerImage,
+        command: spec.command,
+        arguments: [],
+        flavor: spec.flavor as SpaceHardwareFlavor,
+        arch: spec.arch,
         timeoutSeconds,
         attempts: 1,
-        labels: {
-          harbor_hf_action_id: intent.action_id,
-          harbor_hf_campaign_id: intent.campaign_id,
-          harbor_hf_worker_role: role,
-        },
-        environment: {
-          HARBOR_HF_CAMPAIGN_ID: intent.campaign_id,
-          HARBOR_HF_ACTION_ID: intent.action_id,
-          HARBOR_HF_TASK_IDS_JSON: JSON.stringify(taskIds),
-          HARBOR_HF_CONTROL_URL: this.config.controlUrl,
+        labels: spec.labels,
+        environment: spec.environment,
+        secrets: {
           HARBOR_HF_WORKER_CAPABILITY: capability,
-          HARBOR_HF_WORKER_ROLE: role,
-          PYTHONUNBUFFERED: "1",
-          ...(typeof intent.payload.worker_revision === "string"
-            ? { HARBOR_HF_WORKER_REVISION: intent.payload.worker_revision }
+          ...(tokenPolicy === "required"
+            ? { HF_INFERENCE_TOKEN: this.config.inferenceToken as string }
             : {}),
-          ...(typeof intent.payload.prepared_job_digest === "string"
-            ? { HARBOR_HF_PREPARED_JOB_DIGEST: intent.payload.prepared_job_digest }
-            : {}),
-          ...inferenceEnvironment,
         },
-        ...(tokenPolicy === "required"
-          ? { secrets: { HF_INFERENCE_TOKEN: this.config.inferenceToken as string } }
-          : {}),
       });
-      verifyJobSecretNames(intent, job.secrets);
-      if (job.labels?.harbor_hf_worker_role !== role)
-        throw new Error("created Job worker role does not match the launch intent");
+      verifyJobSpec(intent, job, this.config.controlUrl);
     } catch (error) {
       throw new AmbiguousExternalActionError("Job launch outcome is ambiguous", {
         cause: error,
@@ -362,6 +490,8 @@ export class HuggingFaceActions implements ExternalActionPort {
   }
 
   private async observeJob(intent: ActionIntent): Promise<ExternalActionResult> {
+    if (!this.config.controlUrl)
+      throw new Error("Job observation requires the control service URL");
     const remoteId = stringValue(intent, "resource_id");
     const job = await getJob({
       namespace: this.config.namespace,
@@ -369,11 +499,7 @@ export class HuggingFaceActions implements ExternalActionPort {
       accessToken: this.config.accessToken,
       ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
     });
-    verifyJobSecretNames(intent, job.secrets);
-    if (job.labels?.harbor_hf_action_id !== intent.payload.launch_action_id)
-      throw new Error("observed Job action label does not match the launch intent");
-    if (job.labels?.harbor_hf_worker_role !== workerRole(intent))
-      throw new Error("observed Job worker role does not match the launch intent");
+    verifyJobSpec(intent, job, this.config.controlUrl);
     const hourly = payloadHourlyCost(intent);
     return {
       outcome: "completed",
@@ -385,6 +511,8 @@ export class HuggingFaceActions implements ExternalActionPort {
   }
 
   private async cancelJob(intent: ActionIntent): Promise<ExternalActionResult> {
+    if (!this.config.controlUrl)
+      throw new Error("Job cancellation requires the control service URL");
     const remoteId = stringValue(intent, "resource_id");
     const options = {
       namespace: this.config.namespace,
@@ -392,15 +520,27 @@ export class HuggingFaceActions implements ExternalActionPort {
       accessToken: this.config.accessToken,
       ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
     };
+    const current = await getJob(options);
+    verifyJobSpec(intent, current, this.config.controlUrl);
     let job: Awaited<ReturnType<typeof getJob>>;
     try {
       job = await cancelHfJob(options);
     } catch (error) {
       job = await getJob(options);
-      if (!jobStateIsTerminal(job.status.stage)) throw error;
+      verifyJobSpec(intent, job, this.config.controlUrl);
+      if (!jobStateIsTerminal(job.status.stage)) {
+        const hourly = payloadHourlyCost(intent);
+        return {
+          outcome: "failed",
+          observed_state: job.status.stage,
+          resource_id: job.id,
+          error_code: cleanFailure(error),
+          active_hourly_cost_microusd: hourly,
+          cost_microusd: jobHardwareCostMicrousd(job, hourly),
+        };
+      }
     }
-    if (job.labels?.harbor_hf_action_id !== intent.payload.launch_action_id)
-      throw new Error("cancelled Job action label does not match the launch intent");
+    verifyJobSpec(intent, job, this.config.controlUrl);
     const hourly = payloadHourlyCost(intent);
     return {
       outcome: "completed",

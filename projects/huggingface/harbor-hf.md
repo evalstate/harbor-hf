@@ -54,6 +54,7 @@ Harbor-from-source amendment approved at: 2026-08-23T07:20:00Z
 FX harness amendment approved at: 2026-08-23T07:40:00Z
 Harness full-run repair amendment approved at: 2026-08-23T08:21:00Z
 Sandbox-parallelism amendment approved at: 2026-08-23T09:01:00Z
+Run-native reset amendment approved at: 2026-08-24T09:08:00Z
 Upstream integration-and-push amendment approved at: 2026-08-24T09:14:01Z
 Installer clean-start inspection amendment approved at: 2026-08-24T14:05:13Z
 Installer clean-reset amendment approved at: 2026-08-24T14:45:53Z
@@ -120,6 +121,11 @@ Slophammer mutation-declaration amendment approved at: 2026-08-24T18:24:12Z
 - Add FX as a Harbor agent plugin and promoted harness plus gpt-oss Together deployment so it appears in the launch list. Deploy the reviewed revision. Do not launch a campaign.
 - Finish one successful full Terminal-Bench 2.1 single-trial diagnostic for each existing gpt-oss Chat Completions 89-task run by inspecting that run and its Jobs, fixing the shared defects those Jobs expose, deploying the reviewed revision, and retrying only eligible infrastructure failures or unresolved tasks on those same campaigns. The existing FX 89-task row may be finished. Do not add a second 89-task campaign for a harness that already has one. Do not launch Codex or Claude Code.
 - Make the namespace Sandbox cap an operator setting with default 16, then set the live service to 128 so the existing 89-task diagnostics can start more Sandboxes at once. Campaign ceilings stay unchanged. Existing campaign locks keep their per-run `max_sandboxes` and worker concurrency.
+- Replace the Campaign concept with Run throughout source, contracts, durable records, API routes, CLI, web UI, tests, profiles, and documentation. Do not retain Campaign aliases or a compatibility API.
+- Replace nested Sandboxes with one Hugging Face Job per physical trial attempt. A trial records the ordered list of Jobs that attempted it and selects a result only from a valid attempt receipt. A failed Job may create a replacement only for an eligible infrastructure failure within the locked attempt and budget limits.
+- Remove logical-task pagination from the run detail and fix general control-Space responsiveness as part of the Run-native redesign.
+- Delete every run-derived object from the canonical Bucket, including run locks, actions, tasks, attempts, evidence, publications, normalized results, catalogs, and leaderboard snapshots. Preserve ACLs, profiles, promotions, capacity policy, canonical resources, and credentials.
+- After the redesigned service passes an unpaid control canary and a bounded paid task canary, launch fresh Terminal-Bench 2.1 single-trial runs for the Chat Completions harnesses with explicit launch authorization.
 
 ### Limits
 
@@ -183,6 +189,10 @@ Slophammer mutation-declaration amendment approved at: 2026-08-24T18:24:12Z
 - The 2026-08-23 FX harness amendment does not authorize a canary, 89-task diagnostic, official five-trial run, new persistent resource, or credential. It only adds the harness to the existing campaign path and deploys the reviewed revision.
 - The later 2026-08-23 harness full-run repair amendment does not raise any campaign ceiling and does not add a persistent resource or credential. Retries stay inside each existing campaign's locked ceiling. The seven-campaign combined cap remains USD 74.20. The existing FX 89-task row stays inside its locked ceiling. Do not reopen sealed semantic, agent, verifier, policy, refusal, cancelled, or benchmark-timeout outcomes. Do not launch a second 89-task campaign for a harness that already has one.
 - The 2026-08-23 Sandbox-parallelism amendment raises only the shared namespace Sandbox cap from 16 to 128. It does not raise a campaign ceiling, add a persistent resource, or change a locked campaign. Sandbox hardware cost still counts against each campaign's existing ceiling.
+- The 2026-08-24 Run-native reset amendment authorizes irreversible deletion only for run-derived objects under a reviewed exact-prefix allowlist. It does not authorize deleting ACLs, profiles, promotions, capacity policy, the canonical Space or Bucket, credentials, or unrelated objects.
+- The Run-native path has no Sandbox lifecycle and no Campaign compatibility writer, reader, route, field, alias, or UI label. Existing run data is deleted instead of migrated.
+- Replacement Jobs remain limited to explicit infrastructure failures, the locked physical-attempt count, the run ceiling, and the previously approved aggregate ceilings. Semantic, agent, verifier, policy, refusal, cancelled, benchmark-timeout, and scored outcomes remain terminal.
+- Fresh runs start only after the exact deployed revision passes the unpaid control canary and bounded paid task canary. FX, Codex, and Claude Code remain excluded from fresh launch without a separate amendment.
 
 ### Remaining gates
 
@@ -266,6 +276,9 @@ No project-scope amendment remains pending. Operational gates still apply:
 
 ### 2026-08-24
 
+- At 2026-08-24T09:08:00Z, approved replacing Campaign with Run everywhere without compatibility aliases, replacing nested Sandboxes with one Hugging Face Job per physical trial attempt, removing logical-task pagination, and improving control-Space responsiveness.
+- Approved deleting all run-derived Bucket data and starting over while preserving ACLs, profiles, promotions, capacity policy, canonical resources, and credentials.
+- Approved bounded infrastructure-only replacement Jobs. After the new path passes its unpaid and bounded paid canaries, approved fresh single-trial runs for explicitly authorized Chat Completions harnesses. FX, Codex, and Claude Code remain excluded.
 - At 2026-08-24T09:14:01Z, approved merging the fetched canonical upstream default branch into `tweaks`, resolving conflicts without discarding the installer or reviewed security behavior, running full validation and privacy checks, and pushing only the verified result to the tracked public `origin/tweaks` branch. No pull request, upstream-default-branch update, hosted mutation, credential handling, inference, or spend is authorized.
 - At 2026-08-24T14:05:13Z, approved a clean-start inspection for the exact installer-test Space supplied privately, its default-derived Bucket, and matching local installer state. If both remote resources are absent, stale local state may be quarantined before a fresh non-mutating plan. An existing Space, non-empty Bucket, or lone empty Bucket remains a stop condition pending review or separate deletion approval. No credential-value access, provisioning, configuration, activation, spend, push, or pull request is authorized.
 - At 2026-08-24T14:45:53Z, approved deleting the exact private, paused, secret-free, `source_staged` installer-test Space after its receipt binding and absent default Bucket are revalidated, touching no other remote resource. After verified deletion, quarantine the matching owner-only local state and run a fresh non-mutating plan using only the Space ID. Stop after reporting the plan; do not provision, configure, transfer credentials, activate writes, spend, push, or open a pull request.

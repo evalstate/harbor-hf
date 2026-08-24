@@ -53,17 +53,30 @@ describe("DataTable", () => {
     expect(screen.getByText("3 rows")).toBeVisible();
   });
 
-  it("renders header tooltips in a portal outside the scrolling table", async () => {
+  it("opens a portaled header tooltip on keyboard focus without breaking sort", async () => {
     const user = userEvent.setup();
     render(
-      <DataTable columns={columns} data={[{ name: "alpha", state: "running" }]} />,
+      <DataTable
+        columns={columns}
+        data={[
+          { name: "beta", state: "running" },
+          { name: "alpha", state: "completed" },
+        ]}
+      />,
     );
 
-    await user.hover(screen.getByText("Name"));
+    await user.tab();
+    const sortButton = screen.getByRole("button", { name: "Name" });
+    expect(sortButton).toHaveFocus();
+    expect(sortButton.querySelector("[tabindex]")).toBeNull();
     const tooltip = screen.getByRole("tooltip");
     expect(tooltip).toBeVisible();
     expect(tooltip).toHaveTextContent("Stable record name");
     expect(tooltip).toHaveClass("fixed");
     expect(tooltip.parentElement).toBe(document.body);
+    expect(sortButton).toHaveAttribute("aria-describedby", tooltip.id);
+
+    await user.keyboard("{Enter}");
+    expect(screen.getAllByRole("row")[1]).toHaveTextContent("alpha");
   });
 });

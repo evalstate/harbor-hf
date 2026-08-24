@@ -33,7 +33,14 @@ def test_embedded_bridge_allows_bounded_streaming_overhead() -> None:
 
     assert "max_output_tokens * 1024" in source
     assert "64 * 1024 * 1024" in source
+    assert "request_body[field] = max_output_tokens" in source
+    assert 'self.send_header("Content-Length", str(len(response_body)))' in source
     assert "inference bridge response limit exceeded" in source
+    assert "BoundedThreadingHTTPServer" in source
+    assert "BoundedSemaphore(max_concurrency)" in source
+    assert "header_timeout_seconds = 10" in source
+    assert "body_timeout_seconds = 30" in source
+    assert "socket_timeout_seconds = 30" in source
 
 
 @pytest.mark.parametrize(
@@ -202,8 +209,8 @@ async def test_bridge_isolates_inference_token_from_agent_environment() -> None:
         "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS": "32768",
     }
     assert len(agent.agent_calls) == 1
-    assert "bridge_environment_readable" in agent.agent_calls[0][1]
-    assert "hf-inference-isolation.json" in agent.agent_calls[0][1]
+    assert "harbor-hf-inference.token" in agent.agent_calls[0][1]
+    assert "harbor-hf-inference-bridge.pid" in agent.agent_calls[0][1]
 
 
 @pytest.mark.asyncio

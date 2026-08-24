@@ -21,6 +21,11 @@
       "title": "Agent Revision",
       "type": "string"
     },
+    "attempt_count": {
+      "minimum": 0,
+      "title": "Attempt Count",
+      "type": "integer"
+    },
     "benchmark": {
       "minLength": 1,
       "title": "Benchmark",
@@ -34,11 +39,6 @@
     "benchmark_revision": {
       "minLength": 1,
       "title": "Benchmark Revision",
-      "type": "string"
-    },
-    "campaign_id": {
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-      "title": "Campaign Id",
       "type": "string"
     },
     "completed_at": {
@@ -86,14 +86,14 @@
       "title": "Evaluation Id",
       "type": "string"
     },
-    "execution_count": {
-      "minimum": 0,
-      "title": "Execution Count",
-      "type": "integer"
+    "execution_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "title": "Execution Id",
+      "type": "string"
     },
-    "failed_executions": {
+    "failed_attempts": {
       "minimum": 0,
-      "title": "Failed Executions",
+      "title": "Failed Attempts",
       "type": "integer"
     },
     "harbor_bundle_count": {
@@ -237,8 +237,8 @@
   },
   "required": [
     "publication_id",
+    "execution_id",
     "run_id",
-    "campaign_id",
     "evaluation_id",
     "publication_role",
     "component_kind",
@@ -266,8 +266,8 @@
     "benchmark_failed_count",
     "infrastructure_exhausted_count",
     "unsupported_count",
-    "execution_count",
-    "failed_executions",
+    "attempt_count",
+    "failed_attempts",
     "duration_seconds",
     "result_dataset",
     "result_revision",

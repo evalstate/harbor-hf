@@ -6,10 +6,6 @@
       "title": "Attempt",
       "type": "integer"
     },
-    "campaign_id": {
-      "title": "Campaign Id",
-      "type": "string"
-    },
     "input_digest": {
       "title": "Input Digest",
       "type": "string"
@@ -33,6 +29,10 @@
       "title": "Reserved At",
       "type": "string"
     },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
     "schema_version": {
       "const": "harbor-hf/controller-attempt/v1alpha1",
       "default": "harbor-hf/controller-attempt/v1alpha1",
@@ -46,7 +46,7 @@
     }
   },
   "required": [
-    "campaign_id",
+    "run_id",
     "plan_digest",
     "input_digest",
     "input_uri",

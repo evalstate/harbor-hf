@@ -81,7 +81,7 @@ class FakeControllerApi:
 
 def _claim(job_id: str = "job-one", attempt: int = 1) -> ControllerClaim:
     return ControllerClaim(
-        campaign_id="campaign-one",
+        run_id="run-one",
         job_id=job_id,
         plan_digest="sha256:" + "1" * 64,
         attempt=attempt,
@@ -93,7 +93,7 @@ def _claim(job_id: str = "job-one", attempt: int = 1) -> ControllerClaim:
 
 def _status(claim: ControllerClaim, heartbeat: datetime = NOW) -> ControllerStatus:
     return ControllerStatus(
-        campaign_id=claim.campaign_id,
+        run_id=claim.run_id,
         plan_digest=claim.plan_digest,
         job_id=claim.job_id,
         attempt=claim.attempt,
@@ -106,7 +106,7 @@ def _status(claim: ControllerClaim, heartbeat: datetime = NOW) -> ControllerStat
             logical_trials=690,
             terminal_trials=2,
             active_trials=1,
-            physical_executions=3,
+            physical_attempts=3,
         ),
     )
 
@@ -117,7 +117,7 @@ def test_controller_claim_is_exclusive_renewable_and_reversible(tmp_path: Path) 
     first = _claim()
 
     store.acquire(first, prior_job_terminal=False)
-    assert store.read_claim(first.campaign_id) == first
+    assert store.read_claim(first.run_id) == first
     with pytest.raises(ControllerOwnershipConflict):
         store.acquire(_claim("job-two"), prior_job_terminal=False)
 
@@ -128,9 +128,9 @@ def test_controller_claim_is_exclusive_renewable_and_reversible(tmp_path: Path) 
         }
     )
     store.heartbeat(first, renewed)
-    assert store.read_claim(first.campaign_id) == renewed
+    assert store.read_claim(first.run_id) == renewed
     store.release(renewed)
-    assert store.read_claim(first.campaign_id) is None
+    assert store.read_claim(first.run_id) is None
 
 
 def test_expired_claim_still_requires_terminal_job_proof(tmp_path: Path) -> None:
@@ -138,7 +138,7 @@ def test_expired_claim_still_requires_terminal_job_proof(tmp_path: Path) -> None
     first = _claim().model_copy(update={"expires_at": NOW + timedelta(seconds=1)})
     store.acquire(first, prior_job_terminal=False)
     replacement = ControllerClaim(
-        campaign_id=first.campaign_id,
+        run_id=first.run_id,
         job_id="job-two",
         plan_digest=first.plan_digest,
         attempt=2,
@@ -150,7 +150,7 @@ def test_expired_claim_still_requires_terminal_job_proof(tmp_path: Path) -> None
     with pytest.raises(ControllerOwnershipConflict):
         store.acquire(replacement, prior_job_terminal=False)
     store.acquire(replacement, prior_job_terminal=True)
-    assert store.read_claim(first.campaign_id) == replacement
+    assert store.read_claim(first.run_id) == replacement
 
 
 def test_controller_launch_is_serialized_and_has_an_immutable_receipt(
@@ -158,7 +158,7 @@ def test_controller_launch_is_serialized_and_has_an_immutable_receipt(
 ) -> None:
     store = HubControllerStateStore("org", "token", api=FakeControllerApi(tmp_path))
     first = ControllerLaunchClaim(
-        campaign_id="campaign-one",
+        run_id="run-one",
         plan_digest="sha256:" + "1" * 64,
         attempt=1,
         launcher_id="launcher-one",
@@ -176,7 +176,7 @@ def test_controller_launch_is_serialized_and_has_an_immutable_receipt(
     store.acquire_launch(first)
     with pytest.raises(ControllerLaunchUnavailable, match="in progress"):
         store.acquire_launch(competing)
-    assert store.read_launch_claim(first.campaign_id, first.attempt) == first
+    assert store.read_launch_claim(first.run_id, first.attempt) == first
 
     takeover = competing.model_copy(
         update={
@@ -186,7 +186,7 @@ def test_controller_launch_is_serialized_and_has_an_immutable_receipt(
     )
     store.acquire_launch(takeover)
     receipt = ControllerLaunchReceipt(
-        campaign_id=first.campaign_id,
+        run_id=first.run_id,
         plan_digest=first.plan_digest,
         input_digest="sha256:" + "2" * 64,
         attempt=1,
@@ -194,27 +194,25 @@ def test_controller_launch_is_serialized_and_has_an_immutable_receipt(
     )
     store.write_launch(receipt)
     store.write_launch(receipt)
-    assert store.read_launch(first.campaign_id, 1) == receipt
+    assert store.read_launch(first.run_id, 1) == receipt
     with pytest.raises(ControllerStatusError, match="immutable"):
         store.write_launch(receipt.model_copy(update={"job_id": "b" * 24}))
     store.release_launch(takeover)
-    assert store.read_launch_claim(first.campaign_id, 1) is None
+    assert store.read_launch_claim(first.run_id, 1) is None
 
 
 def test_provider_capacity_is_exclusive_and_released_exactly(tmp_path: Path) -> None:
     store = HubControllerStateStore("org", "token", api=FakeControllerApi(tmp_path))
     first = ProviderCapacityClaim(
         provider="hf-inference-providers",
-        campaign_id="campaign-one",
+        run_id="run-one",
         plan_digest="sha256:" + "1" * 64,
         job_id="job-one",
         attempt=1,
         action_id="act-one",
         acquired_at=NOW,
     )
-    competing = first.model_copy(
-        update={"campaign_id": "campaign-two", "job_id": "job-two"}
-    )
+    competing = first.model_copy(update={"run_id": "run-two", "job_id": "job-two"})
 
     store.acquire_provider_capacity(first)
     store.acquire_provider_capacity(first)
@@ -237,7 +235,7 @@ def test_replacement_recovers_only_its_terminal_predecessor_provider_claim(
     store = HubControllerStateStore("org", "token", api=FakeControllerApi(tmp_path))
     capacity = ProviderCapacityClaim(
         provider="hf-inference-providers",
-        campaign_id="campaign-one",
+        run_id="run-one",
         plan_digest="sha256:" + "1" * 64,
         job_id="job-one",
         attempt=1,
@@ -273,12 +271,12 @@ def test_controller_status_and_receipts_reject_backward_or_conflicting_writes(
 
     store.write_status(status)
     store.write_status(status)
-    assert store.read_status(claim.campaign_id) == status
+    assert store.read_status(claim.run_id) == status
     with pytest.raises(ControllerStatusError, match="moved backwards"):
         store.write_status(_status(claim, NOW - timedelta(seconds=1)))
 
     started = ControllerStartedReceipt(
-        campaign_id=claim.campaign_id,
+        run_id=claim.run_id,
         plan_digest=claim.plan_digest,
         input_digest="sha256:" + "2" * 64,
         worker_revision="3" * 40,
@@ -287,7 +285,7 @@ def test_controller_status_and_receipts_reject_backward_or_conflicting_writes(
         started_at=NOW,
     )
     ended = ControllerEndedReceipt(
-        campaign_id=claim.campaign_id,
+        run_id=claim.run_id,
         plan_digest=claim.plan_digest,
         job_id=claim.job_id,
         attempt=1,
@@ -308,7 +306,7 @@ def test_controller_attempt_reservations_are_sequential_and_immutable(
 ) -> None:
     store = HubControllerStateStore("org", "token", api=FakeControllerApi(tmp_path))
     first = ControllerAttemptReservation(
-        campaign_id="campaign-one",
+        run_id="run-one",
         plan_digest="sha256:" + "1" * 64,
         input_digest="sha256:" + "2" * 64,
         input_uri="hf://buckets/org/input/path",
@@ -318,7 +316,7 @@ def test_controller_attempt_reservations_are_sequential_and_immutable(
         reserved_at=NOW,
     )
     store.reserve_attempt(first)
-    assert store.read_attempt(first.campaign_id, 1) == first
+    assert store.read_attempt(first.run_id, 1) == first
 
     third = first.model_copy(update={"attempt": 3})
     with pytest.raises(ControllerStatusError, match="predecessor"):
@@ -328,10 +326,10 @@ def test_controller_attempt_reservations_are_sequential_and_immutable(
         update={"attempt": 2, "reserved_at": NOW + timedelta(minutes=1)}
     )
     store.reserve_attempt(second)
-    assert store.read_attempt(first.campaign_id, 2) == second
+    assert store.read_attempt(first.run_id, 2) == second
 
     recovery = ControllerRecoveryDecision(
-        campaign_id=first.campaign_id,
+        run_id=first.run_id,
         plan_digest=first.plan_digest,
         prior_job_id="job-one",
         prior_attempt=1,
@@ -341,4 +339,4 @@ def test_controller_attempt_reservations_are_sequential_and_immutable(
         decided_at=second.reserved_at,
     )
     store.write_recovery(recovery)
-    assert store.read_recovery(first.campaign_id, 2) == recovery
+    assert store.read_recovery(first.run_id, 2) == recovery

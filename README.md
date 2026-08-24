@@ -2,7 +2,7 @@
   <img alt="harbor-hf" src="assets/harbor-hf-logo.svg" width="440">
 </p>
 
-`harbor-hf` is a Harbor control plane for running benchmark campaigns on Hugging Face infrastructure. It submits pinned work to HF Jobs, tracks retries and Endpoints, preserves evidence in an HF Bucket, and publishes queryable results without running the benchmark on your machine.
+`harbor-hf` is a Harbor control plane for running benchmark runs on Hugging Face infrastructure. It submits pinned work to HF Jobs, tracks retries and Endpoints, preserves evidence in an HF Bucket, and publishes queryable results without running the benchmark on your machine.
 
 A hosted installation uses two persistent resources: one publicly reachable, application-protected control Space and one private Bucket. The Space serves the API and web console while its single control process reconciles immutable records stored in the Bucket.
 
@@ -16,7 +16,7 @@ Harbor-HF has two local command-line layers with different responsibilities:
   and exits after each phase.
 - `harbor-hf` is the separately installed Python operator CLI. It is a thin
   HTTPS client for the control API. It does not read the Bucket, call Hugging
-  Face infrastructure APIs, run Harbor, load a model, or reconcile campaigns
+  Face infrastructure APIs, run Harbor, load a model, or reconcile runs
   locally.
 
 The long-running authority is the single Node.js process in the control Space:
@@ -32,18 +32,18 @@ flowchart LR
     C --> P[Disposable SQLite projection]
     C --> R[Background reconciler]
     R -->|bounded actions| H
-    H --> W[Remote Jobs or Sandboxes]
+    H --> W[Remote Jobs]
     W -->|scoped receipts and evidence| API
 ```
 
 A mutating `harbor-hf` command submits one authenticated and confirmed request.
 The control service validates it, writes durable intent, and returns. The local
 CLI then exits; preparation, execution, observation, cleanup, and publication
-continue asynchronously in the Space. Campaign submission is repeat-safe when
-the caller supplies and retains a stable `--idempotency-key`. Campaign action
+continue asynchronously in the Space. Run submission is repeat-safe when
+the caller supplies and retains a stable `--idempotency-key`. Run action
 commands generate and print a new key for each invocation; after an ambiguous
-response, inspect campaign and audit state instead of blindly repeating the
-action. Use `harbor-hf campaign status`, `harbor-hf jobs`,
+response, inspect run and audit state instead of blindly repeating the
+action. Use `harbor-hf run status`, `harbor-hf jobs`,
 `harbor-hf endpoints`, and `harbor-hf results` to observe the resulting
 projections.
 
@@ -162,12 +162,12 @@ Phase two:
 6. sets the complete installed configuration with writes disabled;
 7. starts the Space and reports periodic sanitized runtime-start progress;
 8. verifies the exact uploaded revision and anonymous liveness, then polls
-   application readiness while the exact `503 {"status":"rebuilding"}`
+   application readiness while the exact `200 {"status":"initializing"}`
    startup response is observed.
 
 Runtime-start progress is reported every 30 seconds while the provider wait is
 active. Once the runtime is available, configure polls readiness every 15
-seconds and reports rebuilding progress at most once per minute. Readiness is
+seconds and reports initialization progress at most once per minute. Readiness is
 bounded to 90 minutes because a full durable projection rebuild can exceed 30
 minutes. Any other status or response body fails immediately. A timeout or
 unexpected readiness response follows the same fail-closed recovery path that
@@ -187,8 +187,8 @@ organization namespace. Its required grants are `repo.content.read` and
 currently enables `inference.endpoints.infer.write` whenever Endpoint
 management is enabled, so the installer accepts that provider-coupled grant
 without treating it as overscoping. Harbor-HF never uses the control credential
-for inference and never passes it to a worker. The Job permission also covers
-Sandbox lifecycle operations.
+for inference and never passes it to a worker. The Job permission covers the
+physical trial Job lifecycle.
 
 A token for another namespace, a non-fine-grained token, or a token missing a
 required permission is rejected before either Space secret is written. Global
@@ -243,7 +243,7 @@ again, to upload and attest the exact current plan.
 
 Activation uses the same explicit operator bearer used for authenticated
 verification. It requires the target-bound saved plan, the saved upload
-attestation, an empty campaign projection, and unchanged inspected bindings:
+attestation, an empty run projection, and unchanged inspected bindings:
 
 ```bash
 npm run install:activate -- \
@@ -277,8 +277,8 @@ An automation agent must stop rather than improvise when:
   to the wrong namespace, or has an unapproved source-to-destination transfer;
 - authenticated system verification, anonymous health, or rollback
   verification fails;
-- a campaign or action request has an ambiguous outcome; inspect durable
-  campaign and audit state before deciding whether another request is safe;
+- a run or action request has an ambiguous outcome; inspect durable
+  run and audit state before deciding whether another request is safe;
 - the command requests manual deletion, paid hardware, an unapproved
   activation, or any resource outside the approved Space and Bucket.
 
@@ -319,14 +319,22 @@ also present in the service access list.
 
 ## Start a run
 
-The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. Dashboard harnesses that speak Chat Completions (OpenCode, Qwen Code, mini-swe-agent, Pi, Kimi Code, Hermes, OpenHands, OpenClaw, FX, and DeepSeek Harness) call the locked sandbox inference route. They do not read a Job-level API key. Codex and Claude Code stay off that route because they need a native API the router path cannot preserve. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
+The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. Dashboard harnesses that speak Chat Completions (OpenCode, Qwen Code, mini-swe-agent, Pi, Kimi Code, Hermes, OpenHands, OpenClaw, FX, and DeepSeek Harness) call the inference bridge inside their physical trial Job. The Job receives only the dedicated inference credential required by its immutable deployment profile. Codex and Claude Code stay off that route because they need a native API the router path cannot preserve. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
 
-Console tables keep their headers visible while scrolling and provide a text filter under every column. Filters apply to the loaded page; clear them together with **Clear filters**. A run detail fetches every Job page and reports its physical HF Job count separately from logical benchmark tasks. One Job is a remote worker process and may execute many tasks through several Sandboxes.
+Console tables keep their headers visible while scrolling and provide a text filter under every column. Filters apply to the loaded page; clear them together with **Clear filters**. Run detail loads the complete logical benchmark task list in one request. Task detail shows every attempt's `job.launch` action and projected HF Job status, while marking the one valid selected result. Preparation uses one trusted Job for the Run. Execution launches one physical Job for each logical trial attempt, so an infrastructure replacement adds another Job for the same task.
+
+The trusted, digest-pinned deployment Job image is the worker boundary. The
+digest-pinned benchmark image remains task data and never supplies the physical
+Job bootstrap. Each worker validates the scoped Run and action identity, fetches
+only its assigned projection-validated prepared trial, checks its Python-origin
+Harbor lock digest and image binding, and executes Harbor once. It rejects
+separate verifier images and uploads a canonical evidence manifest for
+failures; the controller alone decides whether to launch a replacement Job.
 
 The CLI submits the same lock through promoted profile aliases:
 
 ```bash
-harbor-hf campaign submit \
+harbor-hf run submit \
   --benchmark <benchmark-profile> \
   --model <model-profile> \
   --harness <harness-profile> \
@@ -336,10 +344,10 @@ harbor-hf campaign submit \
   --yes
 ```
 
-`5000000` micro-USD is a $5 campaign ceiling. Use an idempotency key when a caller may repeat the same request:
+`5000000` micro-USD is a $5 run ceiling. Use an idempotency key when a caller may repeat the same request:
 
 ```bash
-harbor-hf campaign submit \
+harbor-hf run submit \
   --benchmark <benchmark-profile> \
   --model <model-profile> \
   --harness <harness-profile> \
@@ -348,15 +356,15 @@ harbor-hf campaign submit \
   --yes
 ```
 
-Repeating that command with the same actor and key adopts the existing campaign. It does not create a second logical run.
+Repeating that command with the same actor and key adopts the existing run. It does not create a second logical run.
 
-Harbor `harbor_job` fields on a benchmark profile are forwarded into the preparation lock. Diagnostic canary and replacement profiles set `agent_timeout_multiplier` to 4 so the agent gets one hour on the 900-second Terminal-Bench tasks. Official five-trial profiles keep Harbor's published timeouts. A sealed `benchmark_timeout` cannot be retried; submit a new campaign with a new idempotency key.
+Harbor `harbor_job` fields on a benchmark profile are forwarded into the preparation lock. Diagnostic canary and replacement profiles set `agent_timeout_multiplier` to 4 so the agent gets one hour on the 900-second Terminal-Bench tasks. Official five-trial profiles keep Harbor's published timeouts. A sealed `benchmark_timeout` cannot be retried; submit a new run with a new idempotency key.
 
 ## Monitor work and results
 
 ```bash
-harbor-hf campaign list
-harbor-hf campaign status <campaign-id>
+harbor-hf run list
+harbor-hf run status <run-id>
 harbor-hf jobs
 harbor-hf endpoints
 harbor-hf results
@@ -364,52 +372,154 @@ harbor-hf audit
 harbor-hf capacity
 ```
 
-The shared namespace Sandbox cap limits how many Sandboxes can run at once across campaigns. It defaults to 16. Raise it without changing a locked campaign's per-run `max_sandboxes` or worker concurrency:
+The shared namespace Job cap limits how many physical Jobs can run at once across runs. It defaults to 16. Update it through the control API without changing a locked run's per-run `max_jobs`. The idempotency key is durable: the same key and payload adopt the first update, while a different payload conflicts.
 
 ```bash
-harbor-hf capacity set --max-sandboxes 128 --yes
+curl -X POST "$HARBOR_HF_CONTROL_URL/api/v1/capacity" \
+  -H "content-type: application/json" \
+  -H "idempotency-key: <stable-request-key>" \
+  -d '{"max_active_jobs":128,"confirmed":true}'
 ```
 
-The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. Logical task outcomes use full phrases (scored success, provider rejected the request, agent ended without a score) instead of the raw `complete`, `policy`, and `agent` tokens. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Execution Job logs stream Harbor trial stdout as the trial runs. Execution workers install Harbor from a pinned git commit so new harnesses can be evaluated before a PyPI release. They preserve a successful exact durable trial result if Harbor exits nonzero only after writing that result; a missing or exceptional trial result remains a failure. The Results list shows pass rate, primary metric, and token cost. Open a result for the Wilson 95% CI, publication identity, and the Hub link to the Bucket prefix that holds the generated objects. Eligible final, clean, fully scored catalogs are also written as a SQLite snapshot under `results/schema=v1/leaderboard/` in the Bucket. Diagnostic and incomplete catalogs stay off that snapshot. The Space home page is that public leaderboard: it ranks configurations by score then cost and plots the Pareto frontier of observed spend versus primary metric. One left navigation lists Leaderboard and Admin. Admin contains Overview, Runs, Jobs, Endpoints, Results, Profiles, and Audit. Clicking an Admin view starts Hugging Face login when there is no session; the sidebar has no persistent sign-in or account-details prompt. Login waits for the projected operator ACL to be ready so an in-progress rebuild cannot misreport an authorized identity as denied. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
+The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. Logical task outcomes use full phrases (scored success, provider rejected the request, agent ended without a score) instead of the raw `complete`, `policy`, and `agent` tokens. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Execution Job logs stream Harbor trial stdout as the trial runs. Execution workers install Harbor from a pinned git commit so new harnesses can be evaluated before a PyPI release. They preserve a successful exact durable trial result if Harbor exits nonzero only after writing that result; a missing or exceptional trial result remains a failure. The Results list shows pass rate, primary metric, and token cost. Open a result for the Wilson 95% CI, publication identity, and the Hub link to the Bucket prefix that holds the generated objects. Eligible final, clean, fully scored catalogs are also written as a SQLite snapshot under `results/schema=v1/leaderboard/` in the Bucket. Diagnostic and incomplete catalogs stay off that snapshot. The Space home page is that public leaderboard: it ranks configurations by score then cost and plots the Pareto frontier of observed spend versus primary metric. One left navigation lists Leaderboard and Admin. Admin contains Overview, Runs, Jobs, Endpoints, Results, Profiles, and Audit. Clicking an Admin view starts Hugging Face login when there is no session; the sidebar has no persistent sign-in or account-details prompt. Login waits for runtime initialization, including the projected operator ACL, so a partial startup cannot misreport an authorized identity as denied. `/health/ready` stays reachable during a long rebuild and reports `initializing` until the complete runtime is ready. Run and task pages list the Jobs launched for that run. Observed run spend is the sum of recorded attempt receipts and Job hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
 
 ## Repair infrastructure failures
 
 Terminal benchmark outcomes stay sealed. Only a task recorded as an eligible infrastructure failure can receive a bounded replacement:
 
 ```bash
-harbor-hf campaign retry-infrastructure <campaign-id> \
+harbor-hf run retry-infrastructure <run-id> \
   --task <task-id> \
   --reason "transient infrastructure failure" \
   --yes
 
-harbor-hf campaign retry-infrastructure <campaign-id> \
+harbor-hf run retry-infrastructure <run-id> \
   --all-eligible \
   --reason "retry eligible infrastructure failures" \
   --yes
 ```
 
-The run page has the same control: **Retry infrastructure failures**. It only queues replacement Jobs for eligible infrastructure outcomes, including an infrastructure seal that should not have closed the logical task. Scored misses and other sealed outcomes stay sealed. A retry is a Job on the existing run. The run list does not add a second row. While that Job is running, the run page shows assigned tasks, replacement receipts, and the live sandbox window. The task list still shows selected seals.
+The run page has the same control: **Retry infrastructure failures**. It only queues replacement Jobs for eligible infrastructure outcomes, including an infrastructure seal that should not have closed the logical task. Scored misses and other sealed outcomes stay sealed. A retry is a Job on the existing run. The run list does not add a second row. Each replacement receipt names the `job.launch` action that produced it.
 
-If an execution Job is later terminal with assigned tasks still open, the control service launches one follow-up Job for those tasks. An earlier COMPLETED observe does not block that follow-up. Job observation runs ahead of leftover Sandbox I/O so a finished Job cannot sit forever as SCHEDULING. If the last observe receipted a non-terminal state and the next observe was never written, control queues that observe again. Leftover Sandbox I/O from the dead Job is then closed so it cannot block the next launch. Sealed outcomes stay sealed, and tasks that were never assigned to that Job stay waiting.
+If a trial Job ends without a valid result, the control service records an infrastructure attempt and may launch one replacement Job for that task. The deployment profile's `max_infrastructure_attempts`, per-Run `max_jobs`, namespace Job capacity, start-rate policy, and cost ceiling bound replacements. A failed reconciliation cycle writes a structured error log and retries on the next cycle instead of stalling silently.
+
+Pausing stops preparation and execution dispatch without discarding terminal Job evidence. A resume task limit selects the first unresolved tasks in locked order and carries that selection through preparation into execution. Resume preserves the failed Job as `prior_attempt`, and bulk infrastructure retry adopts one durable ordered command when the same idempotency key is replayed. Actual receipts remain durable if observed spend crosses the ceiling; the Run becomes budget-exceeded and cannot reserve more work or publish.
 
 Cancellation also preserves existing evidence:
 
 ```bash
-harbor-hf campaign cancel <run-id> --yes
+harbor-hf run cancel <run-id> --yes
 ```
+
+A cancelling Run stays active until its selected physical Jobs have stopped and its open target tasks are sealed. A failed cancellation or a nonterminal remote observation remains pending and is retried without releasing Job capacity or budget. Task-scoped cancellation leaves unrelated tasks and Jobs running. Cancellation is rejected after publication starts.
 
 Publication is independent of execution. A publication retry rebuilds deterministic result objects from sealed task receipts and does not rerun model work.
 
 ## Safety model
 
-- Campaign locks contain exact profile identities, task IDs, and input digests.
+- Run locks contain exact profile identities, task IDs, and input digests.
 - Worker receipts identify the durable action that authorized the attempt.
 - Mutations require an authenticated operator, explicit confirmation, and an idempotency key.
 - Browser mutations also require same-origin requests and a CSRF token.
-- The Bucket is append-only at the application boundary. A local SQLite database is only a disposable projection rebuilt from Bucket records.
+- The Bucket is append-only at the application boundary. The disposable SQLite projection records each object's verified SHA-256 digest and Bucket listing identity, so later syncs detect same-key replacements without downloading unchanged objects.
+- A prepared execution Job starts from the reviewed digest-pinned worker image, not the benchmark image. The root worker verifies and unpacks the locked benchmark OCI image, strips privilege-bearing filesystem metadata, and maps the rootfs to one dedicated high host UID/GID.
+- The self-contained worker image includes pinned Python, Harbor, and Harbor-HF agent code. `setpriv` gives every task, agent, and shared verifier command real UID/GID 60000, empty supplementary groups, no capabilities, and `no_new_privs`. PRoot supplies only the unpacked filesystem view and fake task-image user identity. It is not the security boundary.
+- Preflight requires `git`, `proot`, `setpriv`, `skopeo`, and `umoci`, an unused task UID/GID, no effective `CAP_SYS_PTRACE`, and successful root-file and root-process-environment denial probes. Unsupported isolation is replacement-eligible infrastructure.
+- Only the root-owned bridge can read `HF_INFERENCE_TOKEN`. Task processes receive a loopback inference URL, and the bridge enforces the locked model, request size, output token, and concurrency limits.
+- The worker repeatedly enumerates the dedicated UID, stops every matching process until the set is stable, kills all of them, and verifies none remain. This includes processes that call `setsid` or fork during cleanup. Root-owned direct file copies reject traversal, links, and special files while enforcing total-byte, per-file-byte, entry-count, and path-depth limits.
 - A terminal logical task cannot run again. Infrastructure repair creates a new physical attempt only for the failed task.
 - Endpoint cleanup is complete only after a pause record reports zero ready replicas.
 - Result catalogs retain outcome, quality, role, task counts, metric units, and source digests.
+
+## Reset Run data during cutover
+
+The one-time reset tool deletes only reviewed Run-derived Bucket prefixes and
+fails on every unknown path. It preserves benchmark bundles, profiles,
+promotions, capacity policy, operator ACLs, and migration records. The default
+mode only writes a local, secret-free manifest:
+
+```bash
+uv run python scripts/reset_run_data.py \
+  --bucket "<namespace>/<artifact-bucket>" \
+  --manifest run-data-reset-dry-run.json
+```
+
+Review the counts, byte totals, prefix histogram, unknown count,
+`delete_key_digest`, and `preserve_identity_digest`. Preserved objects use their
+Bucket Xet hash when available; dry-run downloads only preserved configuration
+objects that need a SHA-256 fallback. Immediately before applying, confirm that
+the control Space reports `write_mode=disabled` and that no HF Job is active.
+Then use the delete digest from that fresh manifest:
+
+```bash
+uv run python -m json.tool run-data-reset-dry-run.json
+```
+
+```bash
+uv run python scripts/reset_run_data.py \
+  --bucket "<namespace>/<artifact-bucket>" \
+  --apply \
+  --yes \
+  --expected-delete-digest "sha256:<delete-key-digest>" \
+  --dry-run-manifest run-data-reset-dry-run.json \
+  --verification-manifest run-data-reset-verification.json
+```
+
+Apply re-lists the whole Bucket immediately before deletion, deletes in bounded
+batches, and re-lists again. Success requires every reviewed delete prefix to
+be empty and every preserved key, size, and content identity to remain unchanged.
+The final verification manifest stays local.
+
+```bash
+uv run python -m json.tool run-data-reset-verification.json
+```
+
+## Migrate preserved profiles during Run-native cutover
+
+The one-time profile migration inventories only
+`control/schema=v1/profiles/`. It converts legacy capacity limits from
+Sandboxes to Jobs and converts legacy deployment Sandbox templates to
+digest-pinned trial Job templates. It renames legacy Run-ceiling policy fields
+and creates replacement promotions for changed profile identities.
+Current-schema profiles and unrelated promotions keep their original bytes. The
+tool does not access ACLs, Run data, Space configuration, credentials, or any
+other Bucket prefix.
+
+Keep control writes disabled and confirm that no HF Job is active. Create a
+fresh local manifest with the reviewed worker image digest and source revision:
+
+```bash
+uv run python scripts/migrate_run_native_profiles.py \
+  --bucket "<namespace>/<artifact-bucket>" \
+  --job-image "<worker-image>@sha256:<digest>" \
+  --worker-revision "<full-git-commit>" \
+  --manifest run-native-profile-migration-dry-run.json
+```
+
+The manifest contains counts, content digests, and a one-way digest binding it
+to the destination Bucket. It contains no Bucket ID, profile name, alias, or
+record ID. Review its `plan_digest`, then apply that exact plan:
+
+```bash
+uv run python scripts/migrate_run_native_profiles.py \
+  --bucket "<namespace>/<artifact-bucket>" \
+  --job-image "<worker-image>@sha256:<digest>" \
+  --worker-revision "<full-git-commit>" \
+  --apply \
+  --yes \
+  --expected-plan-digest "sha256:<plan-digest>" \
+  --dry-run-manifest run-native-profile-migration-dry-run.json \
+  --verification-manifest run-native-profile-migration-verification.json
+```
+
+The installed Bucket API is not transactional. Apply therefore adds and verifies
+replacement profile objects, active promotions, and historical promotions in
+three separate phases before deleting superseded records. An interrupted partial
+batch leaves a resumable state. Rerun the same apply command. Before any write,
+the tool verifies every downloaded Xet identity and checks both complete
+operation counts against the reviewed limit. Any destination mismatch,
+unreviewed content, path collision, concurrent inventory change, or malformed
+record aborts the migration.
 
 The [control service specification](docs/CONTROL_SERVICE.md) defines the durable record protocol, authentication boundary, recovery behavior, and deployment contract.
 

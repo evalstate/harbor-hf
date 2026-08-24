@@ -1,6 +1,6 @@
 ---
 name: harbor-hf
-description: "Plan and profile Harbor benchmark campaigns, then launch and monitor them. Repair and verify results before publishing through the hosted Harbor-HF control service and Hugging Face infrastructure."
+description: "Plan and profile Harbor benchmark runs, then launch and monitor them. Repair and verify results before publishing through the hosted Harbor-HF control service and Hugging Face infrastructure."
 ---
 
 # Harbor-HF operations
@@ -9,9 +9,9 @@ Use this skill for Harbor benchmark work on Hugging Face Jobs, Inference Provide
 
 The steady-state service has two persistent resources: one publicly reachable, application-protected control Space and one private `<artifact-bucket>` Bucket. The Space runs the TypeScript API, reconciler, disposable SQLite projection, and React console. The Bucket stores immutable control records, profiles, evidence, normalized results, and catalogs. Anonymous callers can reach static, login, callback, health, and the official `GET /api/v1/leaderboard` snapshot. Control access requires an access-listed identity or a short-lived worker capability.
 
-Do not create a campaign-specific repository, Space, Bucket, Dataset, schedule, lease store, status store, backup store, or result service. A new persistent resource needs an explicit failure-domain or access reason and operator approval.
+Do not create a run-specific repository, Space, Bucket, Dataset, schedule, lease store, status store, backup store, or result service. A new persistent resource needs an explicit failure-domain or access reason and operator approval.
 
-The control Space has two operator-managed persistent secrets. `HF_TOKEN` is the control credential; keep it private and never forward it to a Job, Harbor Sandbox, benchmark agent, model server, browser, log, action payload, or evidence object. `HF_INFERENCE_TOKEN` is a separate inference-only credential. Pass it only to a reviewed worker whose locked deployment profile marks inference as required, then isolate it in the root-owned inference bridge. Workers also receive a short-lived signed capability scoped to their campaign, launch action, and tasks, and they never receive a writable mount of the canonical control Bucket.
+The control Space has two operator-managed persistent secrets. `HF_TOKEN` is the control credential; keep it private and never forward it to a Job, benchmark agent, model server, browser, log, action payload, or evidence object. `HF_INFERENCE_TOKEN` is a separate inference-only credential. Pass it only to a reviewed worker whose locked deployment profile marks inference as required, then isolate it in the root-owned inference bridge. Workers also receive a short-lived signed capability scoped to their Run, launch action, and tasks, and they never receive a writable mount of the canonical control Bucket.
 
 ## Read before operating
 
@@ -31,10 +31,10 @@ Read the relevant complete documents:
 
 Use the paid-compute-launch skill before launching, scaling, retrying, or automatically continuing paid accelerator work.
 
-## Keep one campaign path
+## Keep one run path
 
 Harbor-HF must treat benchmark and model names as data. The same rule applies
-to harness names. Reject any campaign design that adds name-based branches,
+to harness names. Reject any run design that adds name-based branches,
 per-benchmark or per-model scripts, source parsers, profile generators,
 workers, API routes, or schema fields to the core service.
 
@@ -44,7 +44,7 @@ The control service validates and stores that lock before execution. Every
 retry and recovery action uses the same lock and never resolves the benchmark
 source again.
 
-A supported benchmark or model must use the existing campaign path through
+A supported benchmark or model must use the existing run path through
 configuration and immutable records. The same rule applies to supported
 harnesses. New harness implementation code belongs in a Harbor agent plugin
 behind the common agent interface. If work needs a missing feature, add a
@@ -61,16 +61,16 @@ script. Apply the same check to harness support.
 
 1. Confirm the repository state and current commit.
 2. Confirm the control service is ready.
-3. Inspect promoted profiles and every campaign or Job. Check the Endpoint and result views plus the audit view.
-4. Check for an existing campaign or physical action before creating anything.
-5. Classify the request as a new campaign, infrastructure repair, audit, publication recovery, or migration.
+3. Inspect promoted profiles and every run or Job. Check the Endpoint and result views plus the audit view.
+4. Check for an existing run or physical action before creating anything.
+5. Classify the request as a new run, infrastructure repair, audit, publication recovery, or migration.
 
 ```bash
 export HARBOR_HF_CONTROL_URL=https://<control-space>.hf.space
 uv run harbor-hf status
 uv run harbor-hf profiles
 uv run harbor-hf capacity
-uv run harbor-hf campaign list
+uv run harbor-hf run list
 uv run harbor-hf jobs
 uv run harbor-hf endpoints
 ```
@@ -86,7 +86,7 @@ Resolve and record:
 - deployment hardware and route, timeout, plus credential boundary
 - launch policy with its physical-attempt limit and reservation plus ceiling and publication role
 
-Aliases are only submission conveniences. The campaign lock must contain exact resolved profile identities and task digests.
+Aliases are only submission conveniences. The run lock must contain exact resolved profile identities and task digests.
 
 ### Apply the cost and capacity gates
 
@@ -97,7 +97,7 @@ Stop when cost, hardware, model, route, method, or checkpoint assumptions differ
 ### Launch once
 
 ```bash
-uv run harbor-hf campaign submit \
+uv run harbor-hf run submit \
   --benchmark <benchmark-profile> \
   --model <model-profile> \
   --harness <harness-profile> \
@@ -108,12 +108,12 @@ uv run harbor-hf campaign submit \
   --yes
 ```
 
-Preserve the returned campaign ID and action ID. Repeating the same actor and idempotency key must adopt the existing request.
+Preserve the returned run ID and action ID. Repeating the same actor and idempotency key must adopt the existing request.
 
 ### Monitor logical and physical state
 
 ```bash
-uv run harbor-hf campaign status <campaign-id>
+uv run harbor-hf run status <run-id>
 uv run harbor-hf jobs
 uv run harbor-hf endpoints
 uv run harbor-hf results
@@ -127,12 +127,12 @@ Do not run benchmark tasks, model servers, or provider agents on the operator ma
 ### Repair only infrastructure failures
 
 ```bash
-uv run harbor-hf campaign retry-infrastructure <campaign-id> \
+uv run harbor-hf run retry-infrastructure <run-id> \
   --task <task-id> \
   --reason "<infrastructure reason>" \
   --yes
 
-uv run harbor-hf campaign retry-infrastructure <campaign-id> \
+uv run harbor-hf run retry-infrastructure <run-id> \
   --all-eligible \
   --reason "<infrastructure reason>" \
   --yes
@@ -144,7 +144,7 @@ Never rerun a valid logical task. Never turn publication recovery into inference
 
 ### Verify cleanup and publication
 
-A campaign is complete only when:
+A run is complete only when:
 
 - every logical task is sealed
 - no control action is pending

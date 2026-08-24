@@ -37,7 +37,6 @@ COPY packages packages
 COPY profiles profiles
 COPY scripts/control-service/installer scripts/control-service/installer
 COPY scripts/control-service/control-smoke-worker.cjs scripts/control-service/control-smoke-worker.cjs
-COPY scripts/control-service/sandbox-smoke-worker.cjs scripts/control-service/sandbox-smoke-worker.cjs
 # Tests and schema generation run in CI. The image compiles the committed
 # sources so a Space rebuild is not blocked on the Vitest suite.
 RUN npm run typecheck:space \

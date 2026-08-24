@@ -21,6 +21,7 @@ from harbor_hf.result_publisher import (
 )
 from harbor_hf.results import (
     ArtifactRow,
+    AttemptRow,
     CatalogRow,
     DatasetFile,
     Digest,
@@ -33,7 +34,6 @@ from harbor_hf.results import (
     ResultProjection,
     ResultPublication,
     ResultTables,
-    RunRow,
     TrialRow,
     build_catalog_lookup_file,
     build_catalog_publication_lookup_file,
@@ -395,7 +395,7 @@ class HubCatalogCutover:
             table: self._parquet_rows(dataset, reference, revision)
             for table, reference in projection.tables.items()
         }
-        run_value = rows["runs"][0]
+        run_value = rows["executions"][0]
         run_value.update(
             {
                 "evaluation_id": classification.evaluation_id,
@@ -410,11 +410,9 @@ class HubCatalogCutover:
         )
         tables = ResultTables(
             publication_id=classification.publication_id,
-            runs=[RunRow.model_validate(run_value)],
+            executions=[ExecutionRow.model_validate(run_value)],
             trials=[TrialRow.model_validate(value) for value in rows["trials"]],
-            executions=[
-                ExecutionRow.model_validate(value) for value in rows["executions"]
-            ],
+            attempts=[AttemptRow.model_validate(value) for value in rows["attempts"]],
             metrics=[MetricRow.model_validate(value) for value in rows["metrics"]],
             artifacts=[
                 ArtifactRow.model_validate(value) for value in rows["artifacts"]
@@ -431,7 +429,7 @@ class HubCatalogCutover:
             ),
         )
         extras: list[DatasetFile] = []
-        if tables.runs[0].result_kind == "composed":
+        if tables.executions[0].result_kind == "composed":
             path = f"compositions/{classification.publication_id}.json"
             manifest_bytes = self._read(dataset, path, revision)
             manifest = ResultCompositionManifest.model_validate_json(manifest_bytes)

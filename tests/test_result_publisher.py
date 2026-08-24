@@ -24,10 +24,10 @@ from harbor_hf.result_publisher import (
 )
 from harbor_hf.results import (
     CatalogDecision,
+    ExecutionRow,
     PublicationProvenance,
     ResultPublication,
     ResultTables,
-    RunRow,
     build_catalog_lookup_file,
     build_catalog_publication_lookup_file,
     build_catalog_window_file,
@@ -138,18 +138,18 @@ def test_regular_blob_rejects_oversized_generated_files() -> None:
 def publication() -> ResultPublication:
     trace = {
         "publication_id": "pub-" + "1" * 32,
-        "run_id": "run-one",
+        "execution_id": "execution-one",
         "source_bucket": "hf://buckets/private-evidence",
-        "source_prefix": "campaigns/campaign-one/runs/run-one",
+        "source_prefix": "runs/run-one/executions/run-one",
         "source_checksum": "sha256:" + "2" * 64,
-        "run_lock_path": "run.lock.json",
-        "run_lock_sha256": "sha256:" + "3" * 64,
+        "execution_lock_path": "execution.lock.json",
+        "execution_lock_sha256": "sha256:" + "3" * 64,
         "control_commit": "4" * 40,
     }
-    run = RunRow.model_validate(
+    run = ExecutionRow.model_validate(
         {
             **trace,
-            "campaign_id": "campaign-one",
+            "run_id": "run-one",
             "experiment": "experiment-one",
             "evaluation_id": "evaluation-one",
             "publication_role": "final",
@@ -179,14 +179,14 @@ def publication() -> ResultPublication:
             "benchmark_failed_count": 0,
             "infrastructure_exhausted_count": 0,
             "unsupported_count": 0,
-            "execution_count": 0,
+            "attempt_count": 0,
         }
     )
     tables = ResultTables(
         publication_id=trace["publication_id"],
-        runs=[run],
+        executions=[run],
         trials=[],
-        executions=[],
+        attempts=[],
         metrics=[],
         artifacts=[],
         provenance=PublicationProvenance(
@@ -252,7 +252,7 @@ def test_serializes_result_and_index_with_parent_checked_leases(
     ] == [publication.tables.publication_id]
     catalog_path = "data/catalog/schema=v1/primary/windows/2048.parquet"
     catalog = read_catalog_file(api.files["org/index"][catalog_path])
-    assert catalog[0].run_id == publication.tables.runs[0].run_id
+    assert catalog[0].execution_id == publication.tables.executions[0].execution_id
     assert catalog[0].score == 0.0
     lookup = build_catalog_lookup_file(catalog[0])
     assert read_catalog_file(api.files["org/index"][lookup.path]) == catalog
@@ -280,9 +280,9 @@ def test_publishes_canonical_projection_and_catalog(
     projection = json.loads(api.files["org/results"][projection_path])
     assert projection["schema_version"] == "harbor-hf/result-projection/v1"
     assert set(projection["tables"]) == {
-        "runs",
-        "trials",
         "executions",
+        "trials",
+        "attempts",
         "metrics",
         "artifacts",
     }
@@ -303,11 +303,11 @@ def test_nonfinal_publications_only_enter_audit_catalog(
     role: str,
     component_kind: str | None,
 ) -> None:
-    run = publication.tables.runs[0].model_copy(
+    run = publication.tables.executions[0].model_copy(
         update={"publication_role": role, "component_kind": component_kind}
     )
     candidate = build_result_publication(
-        publication.tables.model_copy(update={"runs": [run]})
+        publication.tables.model_copy(update={"executions": [run]})
     )
     api = FakeDatasetApi(tmp_path)
 
@@ -380,11 +380,11 @@ def test_catalog_decisions_withdraw_and_restore_final_publication(
 def test_catalog_decision_rejects_component_promotion(
     publication: ResultPublication, tmp_path: Path
 ) -> None:
-    run = publication.tables.runs[0].model_copy(
+    run = publication.tables.executions[0].model_copy(
         update={"publication_role": "component", "component_kind": "base"}
     )
     component = build_result_publication(
-        publication.tables.model_copy(update={"runs": [run]})
+        publication.tables.model_copy(update={"executions": [run]})
     )
     api = FakeDatasetApi(tmp_path)
     publisher = HubDatasetPublisher(
@@ -468,11 +468,11 @@ def test_duplicate_publication_rejects_different_canonical_result_bytes(
         result_dataset="org/results",
         index_dataset="org/index",
     )
-    moved_run = publication.tables.runs[0].model_copy(
+    moved_run = publication.tables.executions[0].model_copy(
         update={"control_commit": "7" * 40}
     )
     moved_publication = build_result_publication(
-        publication.tables.model_copy(update={"runs": [moved_run]})
+        publication.tables.model_copy(update={"executions": [moved_run]})
     )
 
     assert moved_publication.tables.publication_id == publication.tables.publication_id
@@ -501,11 +501,11 @@ def test_duplicate_publication_rejects_different_canonical_index_row(
     receipt_path = f"publications/{publication.tables.publication_id}.json"
     receipt = json.loads(api.files["org/index"][receipt_path])
     index_path = receipt["index_path"]
-    stale_run = publication.tables.runs[0].model_copy(
+    stale_run = publication.tables.executions[0].model_copy(
         update={"agent_revision": "stale"}
     )
     stale_row = build_global_index_row(
-        publication.tables.model_copy(update={"runs": [stale_run]}),
+        publication.tables.model_copy(update={"executions": [stale_run]}),
         result_dataset="org/results",
         result_revision=receipt["result_revision"],
     )

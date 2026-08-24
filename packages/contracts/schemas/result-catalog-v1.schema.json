@@ -52,7 +52,6 @@
       "additionalProperties": false,
       "required": [
         "publication_id",
-        "campaign_id",
         "run_id",
         "published_at",
         "benchmark",
@@ -70,10 +69,7 @@
       ],
       "properties": {
         "publication_id": { "$ref": "#/$defs/ResultCatalogId" },
-        "campaign_id": { "$ref": "#/$defs/ResultCatalogId" },
-        "run_id": {
-          "oneOf": [{ "$ref": "#/$defs/ResultCatalogId" }, { "type": "null" }]
-        },
+        "run_id": { "$ref": "#/$defs/ResultCatalogId" },
         "published_at": { "type": "string", "format": "date-time" },
         "benchmark": { "$ref": "#/$defs/NullableString" },
         "model": { "$ref": "#/$defs/NullableString" },

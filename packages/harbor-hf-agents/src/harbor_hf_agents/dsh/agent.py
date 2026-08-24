@@ -27,11 +27,11 @@ from harbor.utils.trajectory_utils import format_trajectory_json
 
 from harbor_hf_agents.support.hf_inference_bridge import (
     prepare_hf_inference_bridge,
-    stop_hf_inference_bridge,
 )
 from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
-from harbor_hf_agents.support.sandbox_inference_route import (
-    use_sandbox_inference_route,
+from harbor_hf_agents.support.job_inference_route import (
+    use_job_inference_route,
+    with_job_inference_bridge_cleanup,
 )
 
 _PACKAGE = "@deepseek-ai/dsh"
@@ -147,7 +147,7 @@ class DshAgent(IsolatedProviderAgent):
             if value:
                 env[key] = value
         allowed_model = self._model_id()
-        bridged = await use_sandbox_inference_route(
+        bridged = await use_job_inference_route(
             self,
             environment,
             env,
@@ -213,6 +213,7 @@ class DshAgent(IsolatedProviderAgent):
 
     @override
     @with_prompt_template
+    @with_job_inference_bridge_cleanup
     async def run(
         self,
         instruction: str,
@@ -233,18 +234,15 @@ class DshAgent(IsolatedProviderAgent):
             filename="settings.yaml",
         )
         log_path = (self.logs_dir / "dsh.txt").as_posix()
-        try:
-            await self.exec_as_agent(
-                environment,
-                command=(
-                    f"{_NVM}"
-                    f"dsh --profile headless {shlex.quote(instruction)} "
-                    f"< /dev/null 2>&1 | stdbuf -oL tee {shlex.quote(log_path)}"
-                ),
-                env=env,
-            )
-        finally:
-            await stop_hf_inference_bridge(self, environment)
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"{_NVM}"
+                f"dsh --profile headless {shlex.quote(instruction)} "
+                f"< /dev/null 2>&1 | stdbuf -oL tee {shlex.quote(log_path)}"
+            ),
+            env=env,
+        )
         self._write_trajectory(context)
 
     def _find_session_log(self) -> Path | None:

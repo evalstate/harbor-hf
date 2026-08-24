@@ -815,10 +815,12 @@ dependencies = [
 name = "harbor-hf-agents"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "harbor" },
+]
 
 [package.dev-dependencies]
 dev = [
-    { name = "harbor" },
     { name = "mutmut" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -827,10 +829,12 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "harbor", git = "https://github.com/harbor-framework/harbor.git?rev=b37833221e27435a18d7acdd41d875cdc2831893" },
+]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "harbor", git = "https://github.com/harbor-framework/harbor.git?rev=b37833221e27435a18d7acdd41d875cdc2831893" },
     { name = "mutmut", specifier = "==3.7.0" },
     { name = "pytest", specifier = ">=8.4.0" },
     { name = "pytest-asyncio", specifier = ">=1.2.0" },

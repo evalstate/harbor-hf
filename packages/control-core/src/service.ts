@@ -1,17 +1,16 @@
 import type {
   ActionAdvanced,
   ActionDispatch,
-  ActionDisposition,
   ActionIntent,
   ActionReceipt,
   Actor,
   AttemptReceipt,
   BenchmarkProfileSpec,
   BudgetEvent,
-  CampaignActionV1,
-  CampaignLock,
-  CampaignRequest,
-  CampaignSubmissionV1,
+  RunActionV1,
+  RunLock,
+  RunRequest,
+  RunSubmissionV1,
   CapacityProfileObject,
   CapacityProfileSpec,
   DeploymentProfileSpec,
@@ -26,8 +25,9 @@ import type {
   PublicationReceipt,
   PublicationSupersession,
   ResolvedProfile,
-  SandboxAdmissionGrant,
-  SandboxCapacityRelease,
+  JobAdmissionGrant,
+  JobCapacityRelease,
+  TaskCancellation,
   TaskExhaustion,
   TerminalSelection,
 } from "@harbor-hf/contracts";
@@ -35,10 +35,9 @@ import {
   canonicalJson,
   controlRecordPath,
   deterministicId,
-  sandboxActionResultPath,
   sha256,
-  validateCampaignAction,
-  validateCampaignSubmission,
+  validateRunAction,
+  validateRunSubmission,
   validateControlRecord,
   validatePreparedJobSubmission,
   workerEvidenceObjectPath,
@@ -47,8 +46,7 @@ import {
   attemptAdmissibility,
   requiredPositiveMetrics,
 } from "./attempt-admissibility.js";
-import { historicalDispositionResourceMatches } from "./disposition-policy.js";
-import { EventBus, eventCursor } from "./events.js";
+import { EventBus } from "./events.js";
 import {
   EvidenceIntegrityError,
   verifyEvidenceReference,
@@ -60,15 +58,15 @@ import {
   ProfileResolver,
   preparationRequired,
   profileSpec,
-  validatePreparedCampaignProfiles,
+  validatePreparedRunProfiles,
 } from "./profiles.js";
 import type { Projection } from "./projection.js";
 import { runIdentity, runtimeKind, runUnique } from "./run-id.js";
 import {
-  decideSandboxAdmission,
-  type SandboxAdmissionDecision,
-  type SandboxLimitingFactor,
-} from "./sandbox-admission.js";
+  decideJobAdmission,
+  type JobAdmissionDecision,
+  type JobLimitingFactor,
+} from "./job-admission.js";
 import {
   createJson,
   ImmutableConflictError,
@@ -89,7 +87,7 @@ function isImmutableConflict(error: unknown): error is ImmutableConflictError {
 }
 
 export interface AttemptInput {
-  campaign_id: string;
+  run_id: string;
   task_id: string;
   attempt_id: string;
   action_id: string;
@@ -110,7 +108,7 @@ export interface EvidenceUploadResult {
 }
 
 export interface SubmissionResult {
-  campaign_id: string;
+  run_id: string;
   action_id: string;
   status_url: string;
   adopted: boolean;
@@ -123,21 +121,21 @@ export interface PreparedJobSubmissionResult {
   adopted: boolean;
 }
 
-export interface SandboxAdmissionResult {
+export interface JobAdmissionResult {
   status: "admitted" | "deferred" | "rejected";
   dispatch_created: boolean;
   action_id: string;
-  limiting_factor: SandboxLimitingFactor | null;
+  limiting_factor: JobLimitingFactor | "run_cancelled" | null;
   not_before: string | null;
 }
 
-export interface SandboxCapacityView {
+export interface JobCapacityView {
   configured: boolean;
   profile_id: string | null;
   namespace_limit: number | null;
   namespace_active: number;
-  campaign_limit: number;
-  campaign_active: number;
+  run_limit: number;
+  run_active: number;
   hardware_limit: number | null;
   hardware_active: number;
   provider_limit: number;
@@ -145,42 +143,19 @@ export interface SandboxCapacityView {
   start_tokens: number | null;
   start_burst: number | null;
   queued: number;
-  cleanup_held: number;
-  limiting_factor: SandboxLimitingFactor | null;
+  limiting_factor: JobLimitingFactor | "run_cancelled" | null;
   not_before: string | null;
 }
 
-export interface ActionDispositionCorrectionInput {
-  action_ids: string[];
-  reason: string;
-  confirmed: boolean;
-}
-
-export interface ActionDispositionCorrectionResult {
-  batch_id: string;
-  batch_digest: string;
-  items: Array<{
-    action_id: string;
-    disposition_record_id: string;
-    created: boolean;
-  }>;
+interface RunActionIdempotency {
+  key_digest: string;
+  payload_digest: string;
 }
 
 export class ControlNotReadyError extends Error {}
 export class ConfirmationRequiredError extends Error {}
 export class IdempotencyConflictError extends Error {}
 export class PolicyError extends Error {}
-export class SandboxActionAmbiguousError extends Error {}
-
-const terminalSandboxStates = new Set([
-  "CANCELED",
-  "CANCELLED",
-  "COMPLETED",
-  "DELETED",
-  "ERROR",
-  "STOPPED",
-]);
-
 function serviceActor(): Actor {
   return { subject: "harbor-hf-control", role: "service" };
 }
@@ -195,6 +170,17 @@ function stringArrayValue(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
     throw new PolicyError(`${label} must be a string array`);
   return value as string[];
+}
+
+function withoutRunActionIdempotency(
+  payload: ActionIntent["payload"],
+): ActionIntent["payload"] {
+  const {
+    idempotency_key_digest: _keyDigest,
+    idempotency_payload_digest: _payloadDigest,
+    ...rest
+  } = payload;
+  return rest;
 }
 
 function subsetMatches(expected: unknown, actual: unknown): boolean {
@@ -297,31 +283,6 @@ function preparedTaskSourceMatches(
   });
 }
 
-function validatePreparedEnvironment(
-  value: unknown,
-  taskId: string,
-  maxCommandSeconds: number,
-  keepaliveSeconds: number,
-): void {
-  const environment = objectValue(value, "prepared Harbor environment lock");
-  const kwargs = objectValue(environment.kwargs, "prepared Harbor environment kwargs");
-  const configuredKeepalive = kwargs.control_keepalive_seconds;
-  if (
-    environment.import_path !==
-      "harbor_hf_agents.support.control_sandbox_environment:ControlSandboxEnvironment" ||
-    environment.delete !== true ||
-    kwargs.control_task_id !== taskId ||
-    kwargs.control_max_command_seconds !== maxCommandSeconds ||
-    (configuredKeepalive !== undefined && configuredKeepalive !== keepaliveSeconds) ||
-    Object.keys(kwargs).length !== (configuredKeepalive === undefined ? 2 : 3) ||
-    (Array.isArray(environment.mounts) && environment.mounts.length > 0) ||
-    (environment.env &&
-      objectValue(environment.env, "prepared Harbor environment variables") &&
-      Object.keys(environment.env as Record<string, unknown>).length > 0)
-  )
-    throw new PolicyError("prepared Harbor environment does not match control policy");
-}
-
 export interface JobBudgetReservation {
   category: string;
   generation: number;
@@ -329,21 +290,33 @@ export interface JobBudgetReservation {
   amount_microusd: number;
 }
 
-export function executionTaskBatches(
-  taskIds: readonly string[],
-  maximumTasks: number,
-): string[][] {
-  if (!Number.isInteger(maximumTasks) || maximumTasks <= 0)
-    throw new PolicyError("execution Job capacity must be a positive integer");
-  const batches: string[][] = [];
-  for (let offset = 0; offset < taskIds.length; offset += maximumTasks)
-    batches.push(taskIds.slice(offset, offset + maximumTasks));
-  return batches;
-}
-
 export function executionReservationCategory(taskIds: readonly string[]): string {
   const batchKey = sha256(canonicalJson(taskIds)).slice(7, 23);
   return `execution-${batchKey}`;
+}
+
+function validateJobLaunchAssignment(intent: ActionIntent): void {
+  if (intent.action_kind !== "job.launch") return;
+  const role = intent.payload.worker_role ?? "execution";
+  const taskIds = stringArrayValue(intent.payload.task_ids, "Job action task IDs");
+  if (taskIds.length === 0) throw new PolicyError("Job launch has no assigned tasks");
+  if (role === "preparation") return;
+  if (role !== "execution" || taskIds.length !== 1)
+    throw new PolicyError("execution Job launch requires exactly one task");
+  const taskId = taskIds[0] as string;
+  if (intent.payload.task_id !== taskId)
+    throw new PolicyError("execution Job task assignment is inconsistent");
+}
+
+const terminalRunStatuses = new Set([
+  "cancelled",
+  "completed",
+  "completed-invalid",
+  "failed",
+]);
+
+function runStatusIsTerminal(status: string): boolean {
+  return terminalRunStatuses.has(status);
 }
 
 const terminalJobStates = new Set([
@@ -367,12 +340,12 @@ export class ControlService {
   private appendQueue: Promise<void> = Promise.resolve();
   private budgetQueue: Promise<void> = Promise.resolve();
   private retryAdmissionQueue: Promise<void> = Promise.resolve();
+  private readonly runMutationQueues = new Map<string, Promise<void>>();
   private submitQueue: Promise<void> = Promise.resolve();
   private preparationQueue: Promise<void> = Promise.resolve();
-  private sandboxAdmissionQueue: Promise<void> = Promise.resolve();
-  private dispositionQueue: Promise<void> = Promise.resolve();
+  private jobAdmissionQueue: Promise<void> = Promise.resolve();
+  private capacityUpdateQueue: Promise<void> = Promise.resolve();
   private capacityProfileAlias: string | null = null;
-  private sandboxActionFinalizationQueues = new Map<string, Promise<void>>();
 
   constructor(
     readonly namespace: string,
@@ -431,7 +404,7 @@ export class ControlService {
   namespaceCapacityPolicy(): {
     alias: string | null;
     configured: boolean;
-    max_active_sandboxes: number | null;
+    max_active_jobs: number | null;
     start_burst: number | null;
     start_refill_tokens: number | null;
     start_refill_period_seconds: number | null;
@@ -441,7 +414,7 @@ export class ControlService {
     return {
       alias: this.capacityProfileAlias,
       configured: selected !== null,
-      max_active_sandboxes: selected ? selected.spec.max_active_sandboxes : null,
+      max_active_jobs: selected ? selected.spec.max_active_jobs : null,
       start_burst: selected ? selected.spec.start_burst : null,
       start_refill_tokens: selected ? selected.spec.start_refill_tokens : null,
       start_refill_period_seconds: selected
@@ -452,86 +425,144 @@ export class ControlService {
   }
 
   /**
-   * Replace the promoted namespace Sandbox cap. The start burst and refill
+   * Replace the promoted namespace Job cap. The start burst and refill
    * match the cap so the new limit can actually admit work.
    */
-  async setMaxActiveSandboxes(maxActiveSandboxes: number): Promise<{
+  async setMaxActiveJobs(
+    maxActiveJobs: number,
+    idempotencyKey: string,
+  ): Promise<{
     alias: string;
-    max_active_sandboxes: number;
+    max_active_jobs: number;
     start_burst: number;
     profile_id: string;
   }> {
-    if (
-      !Number.isInteger(maxActiveSandboxes) ||
-      maxActiveSandboxes < 1 ||
-      maxActiveSandboxes > 1024
-    )
-      throw new PolicyError("namespace Sandbox cap must be an integer from 1 to 1024");
+    const operation = this.capacityUpdateQueue.then(() =>
+      this.setMaxActiveJobsSerialized(maxActiveJobs, idempotencyKey),
+    );
+    this.capacityUpdateQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async setMaxActiveJobsSerialized(
+    maxActiveJobs: number,
+    idempotencyKey: string,
+  ): Promise<{
+    alias: string;
+    max_active_jobs: number;
+    start_burst: number;
+    profile_id: string;
+  }> {
+    if (!Number.isInteger(maxActiveJobs) || maxActiveJobs < 1 || maxActiveJobs > 1024)
+      throw new PolicyError("namespace Job cap must be an integer from 1 to 1024");
+    if (!idempotencyKey || idempotencyKey.length > 256)
+      throw new IdempotencyConflictError(
+        "a bounded capacity idempotency key is required",
+      );
     const alias = this.capacityProfileAlias ?? "current";
     this.configureCapacityProfile(alias);
+    const keyDigest = sha256(idempotencyKey);
+    const requestDigest = sha256(canonicalJson({ max_active_jobs: maxActiveJobs }));
+    const promotionRecordId = deterministicId(
+      "promotion",
+      "capacity",
+      alias,
+      keyDigest,
+    );
+    const existingPromotion = await this.readRecord<ProfilePromotion>({
+      kind: "profile.promotion",
+      record_id: promotionRecordId,
+      profile_kind: "capacity",
+      alias,
+    });
+    if (existingPromotion) {
+      if (
+        existingPromotion.evidence[0] !== keyDigest ||
+        existingPromotion.evidence[1] !== requestDigest
+      )
+        throw new IdempotencyConflictError(
+          "idempotency key already belongs to a different capacity policy request",
+        );
+      return {
+        alias,
+        max_active_jobs: maxActiveJobs,
+        start_burst: maxActiveJobs,
+        profile_id: existingPromotion.profile_id,
+      };
+    }
     const current = this.capacityProfileOrNull();
     const hardwareLimits = (
       current
         ? current.spec.hardware_limits
         : [
-            { hardware: "cpu-basic", max_active_sandboxes: maxActiveSandboxes },
-            { hardware: "cpu-upgrade", max_active_sandboxes: maxActiveSandboxes },
+            { hardware: "cpu-basic", max_active_jobs: maxActiveJobs },
+            { hardware: "cpu-upgrade", max_active_jobs: maxActiveJobs },
           ]
     ).map((limit) => ({
       hardware: limit.hardware,
-      max_active_sandboxes: maxActiveSandboxes,
+      max_active_jobs: maxActiveJobs,
     }));
     const spec: CapacityProfileSpec = {
       namespace: this.namespace,
-      max_active_sandboxes: maxActiveSandboxes,
+      max_active_jobs: maxActiveJobs,
       hardware_limits: hardwareLimits,
-      start_burst: maxActiveSandboxes,
-      start_refill_tokens: maxActiveSandboxes,
+      start_burst: maxActiveJobs,
+      start_refill_tokens: maxActiveJobs,
       start_refill_period_seconds: current
         ? current.spec.start_refill_period_seconds
         : 60,
     };
-    if (current && canonicalJson(current.spec) === canonicalJson(spec))
-      return {
-        alias,
-        max_active_sandboxes: spec.max_active_sandboxes,
-        start_burst: spec.start_burst,
-        profile_id: current.profile_id,
+    const createdAt = this.clock.now().toISOString();
+    let profileId: string;
+    if (!current || canonicalJson(current.spec) !== canonicalJson(spec)) {
+      const profile: CapacityProfileObject = {
+        schema_version: "v1",
+        kind: "profile.object",
+        record_id: deterministicId(
+          "profile",
+          "capacity",
+          alias,
+          sha256(canonicalJson(spec)),
+        ),
+        created_at: createdAt,
+        actor: serviceActor(),
+        profile_kind: "capacity",
+        name: alias,
+        spec,
       };
-    const profile: CapacityProfileObject = {
-      schema_version: "v1",
-      kind: "profile.object",
-      record_id: deterministicId(
-        "profile",
-        "capacity",
-        alias,
-        sha256(canonicalJson(spec)),
-      ),
-      created_at: this.clock.now().toISOString(),
-      actor: serviceActor(),
-      profile_kind: "capacity",
-      name: alias,
-      spec,
-    };
-    const profileId = sha256(canonicalJson(profile));
+      const recordedProfile = (
+        await this.appendAdopting(profile, (recorded) => {
+          const { created_at: _recordedAt, ...recordedValue } = recorded;
+          const { created_at: _candidateAt, ...candidateValue } = profile;
+          return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+        })
+      ).record;
+      profileId = sha256(canonicalJson(recordedProfile));
+    } else profileId = current.profile_id;
     const promotion: ProfilePromotion = {
       schema_version: "v1",
       kind: "profile.promotion",
-      record_id: deterministicId("promotion", "capacity", alias, profileId, "approved"),
-      created_at: this.clock.now().toISOString(),
+      record_id: promotionRecordId,
+      created_at: createdAt,
       actor: serviceActor(),
       profile_kind: "capacity",
       alias,
       profile_id: profileId,
-      reason: `set namespace Sandbox cap to ${maxActiveSandboxes}`,
-      evidence: [sha256(canonicalJson({ max_active_sandboxes: maxActiveSandboxes }))],
+      reason: `set namespace Job cap to ${maxActiveJobs}`,
+      evidence: [keyDigest, requestDigest],
       promotion_state: "approved",
     };
-    await this.append(profile);
-    await this.append(promotion);
+    await this.appendAdopting(promotion, (recorded) => {
+      const { created_at: _recordedAt, ...recordedValue } = recorded;
+      const { created_at: _candidateAt, ...candidateValue } = promotion;
+      return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+    });
     return {
       alias,
-      max_active_sandboxes: spec.max_active_sandboxes,
+      max_active_jobs: spec.max_active_jobs,
       start_burst: spec.start_burst,
       profile_id: profileId,
     };
@@ -577,31 +608,13 @@ export class ControlService {
     if (projected && projected !== result.digest)
       throw new IdempotencyConflictError(`projection digest conflict at ${key}`);
     if (!projected) {
-      await this.projection.ingest(key, result.digest, record, this.store);
-      const eventData: Record<string, unknown> = {
+      const event = await this.projection.ingest(
         key,
-        digest: result.digest,
-        record_id: record.record_id,
-      };
-      for (const field of [
-        "campaign_id",
-        "task_id",
-        "attempt_id",
-        "action_id",
-        "action_kind",
-        "publication_id",
-        "profile_kind",
-        "alias",
-      ] as const) {
-        if (field in record)
-          eventData[field] = (record as unknown as Record<string, unknown>)[field];
-      }
-      this.events.publish({
-        id: eventCursor(record.created_at, key),
-        type: record.kind,
-        occurred_at: record.created_at,
-        data: eventData,
-      });
+        result.digest,
+        result.source_identity,
+        record,
+      );
+      this.events.publish(event);
       if (record.kind === "profile.object" || record.kind === "profile.promotion")
         await this.refreshProfileResolver();
     }
@@ -610,9 +623,10 @@ export class ControlService {
 
   async syncProjection(): Promise<number> {
     const operation = this.appendQueue.then(async () => {
-      const ingested = await this.projection.sync(this.store);
-      if (ingested > 0) await this.refreshProfileResolver();
-      return ingested;
+      const events = await this.projection.sync(this.store);
+      for (const event of events) this.events.publish(event);
+      if (events.length > 0) await this.refreshProfileResolver();
+      return events.length;
     });
     this.appendQueue = operation.then(
       () => undefined,
@@ -658,33 +672,30 @@ export class ControlService {
     }
   }
 
-  async preparedTrial(
-    campaignId: string,
-    taskId: string,
-  ): Promise<PreparedTrial | null> {
+  async preparedTrial(runId: string, taskId: string): Promise<PreparedTrial | null> {
     return this.readRecord<PreparedTrial>({
       kind: "prepared.trial",
-      record_id: deterministicId("prepared-trial", campaignId, taskId),
-      campaign_id: campaignId,
+      record_id: deterministicId("prepared-trial", runId, taskId),
+      run_id: runId,
       task_id: taskId,
     });
   }
 
-  async preparedJob(campaignId: string): Promise<PreparedJob | null> {
+  async preparedJob(runId: string): Promise<PreparedJob | null> {
     return this.readRecord<PreparedJob>({
       kind: "prepared.job",
-      record_id: deterministicId("prepared-job", campaignId),
-      campaign_id: campaignId,
+      record_id: deterministicId("prepared-job", runId),
+      run_id: runId,
     });
   }
 
   async submitPreparedJob(
-    campaignId: string,
+    runId: string,
     launchActionId: string,
     raw: unknown,
   ): Promise<PreparedJobSubmissionResult> {
     const operation = this.preparationQueue.then(() =>
-      this.submitPreparedJobSerialized(campaignId, launchActionId, raw),
+      this.submitPreparedJobSerialized(runId, launchActionId, raw),
     );
     this.preparationQueue = operation.then(
       () => undefined,
@@ -694,15 +705,11 @@ export class ControlService {
   }
 
   private async assertPreparationAction(
-    campaignId: string,
+    runId: string,
     launchActionId: string,
   ): Promise<void> {
     const action = await this.projection.action(launchActionId);
-    if (
-      !action ||
-      action.campaign_id !== campaignId ||
-      action.action_kind !== "job.launch"
-    )
+    if (!action || action.run_id !== runId || action.action_kind !== "job.launch")
       throw new PolicyError("prepared job submission has no matching launch action");
     const intent = JSON.parse(action.intent_body) as ActionIntent;
     if (intent.payload.worker_role !== "preparation")
@@ -710,33 +717,30 @@ export class ControlService {
   }
 
   private async submitPreparedJobSerialized(
-    campaignId: string,
+    runId: string,
     launchActionId: string,
     raw: unknown,
   ): Promise<PreparedJobSubmissionResult> {
     this.assertReady();
-    await this.assertPreparationAction(campaignId, launchActionId);
+    await this.assertPreparationAction(runId, launchActionId);
     const input = validatePreparedJobSubmission<PreparedJobSubmissionV1>(raw);
-    const lock = await this.projection.campaignLock(campaignId);
-    if (!lock) throw new PolicyError("prepared job campaign lock does not exist");
+    const lock = await this.projection.runLock(runId);
+    if (!lock) throw new PolicyError("prepared job run lock does not exist");
     const lockDigest = sha256(canonicalJson(lock));
-    const preparationId = deterministicId("preparation", campaignId);
+    const preparationId = deterministicId("preparation", runId);
     if (input.phase === "trial") {
       const expected = lock.tasks.find((task) => task.task_id === input.task_id);
-      if (!expected) throw new PolicyError("prepared trial is outside the campaign");
+      if (!expected) throw new PolicyError("prepared trial is outside the run");
       if (
         expected.input_digest !== input.input_digest ||
         expected.source_task_id !== input.source_task_id ||
         expected.trial_index !== input.trial_index
       )
-        throw new PolicyError("prepared trial does not match the campaign task lock");
-      const trialLockDigest = sha256(canonicalJson(input.trial_lock));
+        throw new PolicyError("prepared trial does not match the run task lock");
       const trialLock = objectValue(input.trial_lock, "prepared Harbor trial lock");
       const harborTask = objectValue(trialLock.task, "prepared Harbor task lock");
       if (harborTask.digest !== input.input_digest)
-        throw new PolicyError(
-          "prepared Harbor task digest does not match the campaign",
-        );
+        throw new PolicyError("prepared Harbor task digest does not match the run");
       const benchmark = this.resolvedProfile<BenchmarkProfileSpec>(lock, "benchmark");
       if (
         !preparedTaskSourceMatches(harborTask, benchmark.harbor_job) ||
@@ -756,49 +760,37 @@ export class ControlService {
         !subsetMatches(harness.harbor_agent, agent)
       )
         throw new PolicyError("prepared Harbor agent does not match selected profiles");
-      const phaseTimeouts = [
-        input.agent_timeout_seconds,
-        input.verifier_timeout_seconds,
-        input.environment_build_timeout_seconds,
-        input.agent_setup_timeout_seconds,
-      ];
-      const maxCommandSeconds = Math.max(...phaseTimeouts);
       const deployment = this.resolvedProfile<DeploymentProfileSpec>(
         lock,
         "deployment",
       );
-      if (deployment.route !== "hf_job" || !deployment.sandbox_template)
-        throw new PolicyError("prepared campaign has no Sandbox deployment");
+      if (deployment.route !== "hf_job" || !deployment.trial_job_template)
+        throw new PolicyError("prepared run has no trial Job deployment");
       const timeoutSeconds =
-        phaseTimeouts.reduce((total, value) => total + value, 0) +
-        deployment.sandbox_template.lifetime_overhead_seconds;
-      const idleTimeoutSeconds = Math.min(
-        timeoutSeconds,
-        maxCommandSeconds + deployment.sandbox_template.idle_timeout_overhead_seconds,
-      );
-      validatePreparedEnvironment(
-        trialLock.environment,
-        input.task_id,
-        maxCommandSeconds,
-        Math.max(1, Math.min(300, Math.floor(idleTimeoutSeconds / 2))),
-      );
-      const existing = await this.preparedTrial(campaignId, input.task_id);
+        input.agent_timeout_seconds +
+        input.verifier_timeout_seconds +
+        input.environment_build_timeout_seconds +
+        input.agent_setup_timeout_seconds +
+        deployment.trial_job_template.lifetime_overhead_seconds;
+      if (timeoutSeconds > deployment.trial_job_template.max_timeout_seconds)
+        throw new PolicyError("prepared task time limits exceed deployment limits");
+      const existing = await this.preparedTrial(runId, input.task_id);
       const createdAt = existing?.created_at ?? this.clock.now().toISOString();
       const record: PreparedTrial = {
         schema_version: "v1",
         kind: "prepared.trial",
-        record_id: deterministicId("prepared-trial", campaignId, input.task_id),
+        record_id: deterministicId("prepared-trial", runId, input.task_id),
         created_at: createdAt,
         actor: serviceActor(),
-        campaign_id: campaignId,
+        run_id: runId,
         preparation_id: preparationId,
-        campaign_lock_digest: lockDigest,
+        run_lock_digest: lockDigest,
         task_id: input.task_id,
         source_task_id: input.source_task_id,
         trial_index: input.trial_index,
         input_digest: input.input_digest,
         trial_lock: input.trial_lock,
-        trial_lock_digest: trialLockDigest,
+        trial_lock_digest: input.trial_lock_digest,
         declared_image: input.declared_image,
         image: input.image,
         cpus: input.cpus,
@@ -823,14 +815,14 @@ export class ControlService {
       };
     }
 
-    const existing = await this.preparedJob(campaignId);
+    const existing = await this.preparedJob(runId);
     const preparedTrials: PreparedTrial[] = [];
     for (const task of lock.tasks) {
-      const trial = await this.preparedTrial(campaignId, task.task_id);
+      const trial = await this.preparedTrial(runId, task.task_id);
       if (!trial) throw new PolicyError(`prepared trial is missing: ${task.task_id}`);
       if (
         trial.preparation_id !== preparationId ||
-        trial.campaign_lock_digest !== lockDigest
+        trial.run_lock_digest !== lockDigest
       )
         throw new PolicyError(`prepared trial binding is invalid: ${task.task_id}`);
       preparedTrials.push(trial);
@@ -876,12 +868,12 @@ export class ControlService {
     const record: PreparedJob = {
       schema_version: "v1",
       kind: "prepared.job",
-      record_id: deterministicId("prepared-job", campaignId),
+      record_id: deterministicId("prepared-job", runId),
       created_at: createdAt,
       actor: serviceActor(),
-      campaign_id: campaignId,
+      run_id: runId,
       preparation_id: preparationId,
-      campaign_lock_digest: lockDigest,
+      run_lock_digest: lockDigest,
       harbor_version: input.harbor_version,
       job_config: input.job_config,
       job_lock_header: input.job_lock_header,
@@ -890,7 +882,7 @@ export class ControlService {
     };
     if (existing && canonicalJson(existing) !== canonicalJson(record))
       throw new IdempotencyConflictError(
-        "prepared job conflicts with durable campaign state",
+        "prepared job conflicts with durable run state",
       );
     const result = await this.append(record);
     return {
@@ -901,66 +893,75 @@ export class ControlService {
     };
   }
 
-  async admitSandboxCreate(
-    intent: ActionIntent,
-    maximumSandboxes: number,
-  ): Promise<SandboxAdmissionResult> {
-    const operation = this.sandboxAdmissionQueue.then(() =>
-      this.admitSandboxCreateSerialized(intent, maximumSandboxes),
+  async admitJobLaunch(intent: ActionIntent): Promise<JobAdmissionResult> {
+    const operation = this.jobAdmissionQueue.then(() =>
+      this.admitJobLaunchSerialized(intent),
     );
-    this.sandboxAdmissionQueue = operation.then(
+    this.jobAdmissionQueue = operation.then(
       () => undefined,
       () => undefined,
     );
     return operation;
   }
 
-  private activeLegacySandboxCreates(
-    actions: Awaited<ReturnType<Projection["actions"]>>,
-    grantedActionIds: ReadonlySet<string>,
-    dispatchedActionIds: ReadonlySet<string>,
-  ): Array<(typeof actions)[number]> {
-    const closedCreates = new Set(
-      actions
-        .filter(
-          (row) =>
-            row.action_kind === "sandbox.close" &&
-            row.receipt_body !== null &&
-            row.outcome === "completed" &&
-            terminalSandboxStates.has((row.observed_state ?? "").toUpperCase()),
-        )
-        .map((row) => {
-          const recorded = JSON.parse(row.intent_body) as ActionIntent;
-          return recorded.payload.sandbox_create_action_id;
-        })
-        .filter((value): value is string => typeof value === "string"),
-    );
-    return actions.filter(
-      (row) =>
-        row.action_kind === "sandbox.create" &&
-        dispatchedActionIds.has(row.action_id) &&
-        !grantedActionIds.has(row.action_id) &&
-        !(row.receipt_body && !row.resource_id) &&
-        !closedCreates.has(row.action_id),
-    );
+  private async ensureJobLaunchReservation(intent: ActionIntent): Promise<boolean> {
+    const amount = intent.payload.reservation_microusd;
+    if (typeof amount !== "number" || amount <= 0) return true;
+    const priorAttemptId = intent.payload.prior_attempt_id;
+    if (typeof priorAttemptId === "string")
+      return this.reserveReplacement(
+        intent.run_id,
+        priorAttemptId,
+        intent.created_at,
+        amount,
+      );
+    const taskIds = stringArrayValue(intent.payload.task_ids, "Job action task IDs");
+    const category =
+      intent.payload.worker_role === "preparation"
+        ? "preparation"
+        : executionReservationCategory(taskIds);
+    return this.reserveJobActions(intent.run_id, [
+      {
+        category,
+        generation: intent.generation,
+        created_at: intent.created_at,
+        amount_microusd: amount,
+      },
+    ]);
   }
 
-  private async appendSandboxGrant(
+  private async launchCancellationRequested(intent: ActionIntent): Promise<boolean> {
+    for (const action of await this.projection.runActions(intent.run_id)) {
+      if (action.action_kind !== "run.cancel") continue;
+      const cancellation = JSON.parse(action.intent_body) as ActionIntent;
+      const taskId = cancellation.payload.task_id;
+      if (typeof taskId !== "string") return true;
+      if (
+        intent.payload.worker_role !== "preparation" &&
+        Array.isArray(intent.payload.task_ids) &&
+        intent.payload.task_ids.includes(taskId)
+      )
+        return true;
+    }
+    return false;
+  }
+
+  private async appendJobGrant(
     intent: ActionIntent,
     profileId: string,
     hardware: string,
     reservedProviderRequests: number,
     previousGrantId: string | null,
-    decision: Extract<SandboxAdmissionDecision, { outcome: "admitted" }>,
-  ): Promise<SandboxAdmissionGrant> {
-    const grant: SandboxAdmissionGrant = {
+    decision: JobAdmissionDecision,
+  ): Promise<JobAdmissionGrant> {
+    const grant: JobAdmissionGrant = {
       schema_version: "v1",
-      kind: "sandbox.admission",
-      record_id: deterministicId("sandbox-admission", intent.action_id),
+      kind: "job.admission",
+      record_id: deterministicId("job-admission", intent.action_id),
       created_at: this.clock.now().toISOString(),
       actor: serviceActor(),
       action_id: intent.action_id,
-      campaign_id: intent.campaign_id,
+      run_id: intent.run_id,
       namespace: this.namespace,
       capacity_profile_id: profileId,
       hardware,
@@ -978,25 +979,15 @@ export class ControlService {
     ).record;
   }
 
-  private async admitSandboxCreateSerialized(
+  private async admitJobLaunchSerialized(
     intent: ActionIntent,
-    maximumSandboxes: number,
-  ): Promise<SandboxAdmissionResult> {
-    if (intent.action_kind !== "sandbox.create" || maximumSandboxes < 1)
-      throw new PolicyError("Sandbox create admission is invalid");
-    const taskId = intent.payload.task_id;
-    const policy = intent.payload.sandbox;
-    if (typeof taskId !== "string" || !policy)
-      throw new PolicyError("Sandbox create has no immutable task policy");
-    const capacity = this.capacityProfile();
-    const existingBeforeWrite = await this.projection.action(intent.action_id);
-    if (!capacity && !existingBeforeWrite) {
-      const actions = await this.projection.campaignActions(intent.campaign_id);
-      const dispatched = await this.projection.dispatchedSandboxCreateActionIds();
-      const active = this.activeLegacySandboxCreates(actions, new Set(), dispatched);
-      if (active.length >= maximumSandboxes)
-        throw new PolicyError("Sandbox count exceeds immutable policy");
-    }
+  ): Promise<JobAdmissionResult> {
+    if (intent.action_kind !== "job.launch")
+      throw new PolicyError("Job launch admission requires a job.launch intent");
+    const hardware = intent.payload.hardware;
+    const runMaxJobs = intent.payload.max_jobs;
+    if (typeof hardware !== "string" || typeof runMaxJobs !== "number")
+      throw new PolicyError("Job launch is missing immutable capacity policy");
     await this.writeAction(intent);
     const existing = await this.projection.action(intent.action_id);
     if (existing?.receipt_body)
@@ -1009,152 +1000,87 @@ export class ControlService {
         limiting_factor: null,
         not_before: null,
       };
-    if (existing?.observed_state === "budget-rejected")
-      return {
-        status: "rejected",
-        dispatch_created: false,
-        action_id: intent.action_id,
-        limiting_factor: "campaign_budget",
-        not_before: null,
-      };
-    if (
-      !(await this.reserveSandbox(
-        intent.campaign_id,
-        intent.action_id,
-        intent.created_at,
-        policy.reservation_microusd,
-      ))
-    ) {
+    if (!(await this.ensureJobLaunchReservation(intent)))
+      throw new PolicyError(
+        `Job launch has no active budget reservation: ${intent.action_id}`,
+      );
+    if (await this.launchCancellationRequested(intent)) {
       const receipt = await this.receipt(intent, {
-        outcome: "failed",
-        observed_state: "budget-rejected",
-        error_code: "campaign_ceiling_exceeded",
+        outcome: "completed",
+        observed_state: "suppressed-cancelled",
+        error_code: "run_cancelled",
       });
+      await this.releaseJobAction(intent, receipt.created_at);
       await this.markAdvanced(intent, receipt);
       return {
         status: "rejected",
         dispatch_created: false,
         action_id: intent.action_id,
-        limiting_factor: "campaign_budget",
+        limiting_factor: "run_cancelled",
         not_before: null,
       };
     }
-    const existingGrant = await this.projection.sandboxAdmission(intent.action_id);
-    if (
-      capacity &&
-      existingGrant &&
-      !(await this.projection.actionDispatch(intent.action_id)) &&
-      (await this.projection.hasCampaignAction(intent.campaign_id, "campaign.cancel"))
-    ) {
-      const receipt = await this.receipt(intent, {
-        outcome: "failed",
-        observed_state: "admission-rejected",
-        error_code: "campaign_cancelled",
-      });
-      await this.markAdvanced(intent, receipt);
-      return {
-        status: "rejected",
-        dispatch_created: false,
-        action_id: intent.action_id,
-        limiting_factor: "campaign_cancelled",
-        not_before: null,
-      };
-    }
-    if (capacity && !existingGrant) {
-      const activeGrants = await this.projection.activeSandboxAdmissions(
-        this.namespace,
-      );
-      const allActions = await this.projection.sandboxLifecycleActions();
-      const grantedIds = new Set(activeGrants.map((grant) => grant.action_id));
-      const dispatched = await this.projection.dispatchedSandboxCreateActionIds();
-      const legacy = this.activeLegacySandboxCreates(
-        allActions,
-        grantedIds,
-        dispatched,
-      ).filter((row) => row.action_id !== intent.action_id);
-      const campaignLegacy = legacy.filter(
-        (row) => row.campaign_id === intent.campaign_id,
-      );
-      const hardwareLegacy = legacy.filter((row) => {
-        const recorded = JSON.parse(row.intent_body) as ActionIntent;
-        return recorded.payload.sandbox?.hardware === policy.hardware;
-      });
-      const providerUnits = policy.inference_max_concurrency ?? 0;
-      const providerLimit =
-        policy.inference_max_total_concurrency ?? maximumSandboxes * providerUnits;
-      const latest = await this.projection.latestSandboxAdmission(this.namespace);
-      const decision = decideSandboxAdmission(
-        {
-          now: this.clock.now().toISOString(),
-          campaign_max_sandboxes: maximumSandboxes,
-          hardware: policy.hardware,
-          reserved_provider_requests: providerUnits,
-          campaign_max_provider_requests: providerLimit,
-          capacity: capacity.spec,
-        },
-        {
-          campaign_active_sandboxes:
-            activeGrants.filter((grant) => grant.campaign_id === intent.campaign_id)
-              .length + campaignLegacy.length,
-          namespace_active_sandboxes: activeGrants.length + legacy.length,
-          hardware_active_sandboxes:
-            activeGrants.filter((grant) => grant.hardware === policy.hardware).length +
-            hardwareLegacy.length,
-          campaign_reserved_provider_requests:
-            activeGrants
-              .filter((grant) => grant.campaign_id === intent.campaign_id)
-              .reduce((total, grant) => total + grant.reserved_provider_requests, 0) +
-            campaignLegacy.reduce((total, row) => {
-              const recorded = JSON.parse(row.intent_body) as ActionIntent;
-              return total + (recorded.payload.sandbox?.inference_max_concurrency ?? 0);
-            }, 0),
-          tokens_remaining: latest?.tokens_remaining ?? null,
-          refill_cursor_at: latest?.refill_cursor_at ?? null,
-          cancellation_requested: await this.projection.hasCampaignAction(
-            intent.campaign_id,
-            "campaign.cancel",
-          ),
-          budget_available: true,
-        },
-      );
-      if (decision.outcome !== "admitted") {
-        if (decision.outcome === "rejected") {
-          const receipt = await this.receipt(intent, {
-            outcome: "failed",
-            observed_state: "admission-rejected",
-            error_code: decision.limiting_factor,
-          });
-          await this.markAdvanced(intent, receipt);
-        }
-        return {
-          status: decision.outcome,
-          dispatch_created: false,
-          action_id: intent.action_id,
-          limiting_factor: decision.limiting_factor,
-          not_before: decision.outcome === "deferred" ? decision.not_before : null,
-        };
-      }
-      await this.appendSandboxGrant(
-        intent,
-        capacity.profile_id,
-        policy.hardware,
-        providerUnits,
-        latest?.record_id ?? null,
-        decision,
-      );
-    }
+    const capacity = this.capacityProfile();
     if (!capacity) {
-      const dispatch = await this.dispatchAction(
-        intent,
-        new Date(this.clock.now().getTime() + 30_000).toISOString(),
-      );
       return {
         status: "admitted",
-        dispatch_created: dispatch.created,
+        dispatch_created: Boolean(
+          await this.projection.actionDispatch(intent.action_id),
+        ),
         action_id: intent.action_id,
         limiting_factor: null,
         not_before: null,
       };
+    }
+    const existingGrant = await this.projection.jobAdmission(intent.action_id);
+    if (!existingGrant) {
+      const active = await this.projection.activeJobAdmissions(this.namespace);
+      const latest = await this.projection.latestJobAdmission(this.namespace);
+      const providerRequests = intent.payload.inference_max_concurrency ?? 0;
+      const providerLimit =
+        intent.payload.inference_max_total_concurrency ??
+        Math.max(providerRequests, runMaxJobs * providerRequests);
+      const decision = decideJobAdmission(
+        capacity.spec,
+        {
+          active_jobs: active.length,
+          active_hardware: active.filter((grant) => grant.hardware === hardware).length,
+          active_provider_requests: active
+            .filter((grant) => grant.run_id === intent.run_id)
+            .reduce((total, grant) => total + grant.reserved_provider_requests, 0),
+          tokens: latest?.tokens_remaining ?? capacity.spec.start_burst,
+          refill_cursor_at: latest?.refill_cursor_at ?? this.clock.now().toISOString(),
+        },
+        hardware,
+        providerRequests,
+        providerLimit,
+        runMaxJobs,
+        active.filter((grant) => grant.run_id === intent.run_id).length,
+        this.clock.now(),
+      );
+      if (decision.status === "deferred")
+        return {
+          status: "deferred",
+          dispatch_created: false,
+          action_id: intent.action_id,
+          limiting_factor: decision.limiting_factor,
+          not_before: decision.not_before,
+        };
+      if (
+        decision.tokens_remaining < 0 ||
+        decision.tokens_remaining > capacity.spec.start_burst
+      )
+        throw new PolicyError(
+          "Job admission token state violates the selected capacity profile",
+        );
+      await this.appendJobGrant(
+        intent,
+        capacity.profile_id,
+        hardware,
+        providerRequests,
+        latest?.record_id ?? null,
+        decision,
+      );
     }
     return {
       status: "admitted",
@@ -1165,132 +1091,87 @@ export class ControlService {
     };
   }
 
-  async sandboxCapacityView(campaignId: string): Promise<SandboxCapacityView> {
-    const lock = await this.projection.campaignLock(campaignId);
-    if (!lock) throw new PolicyError("campaign lock is missing");
+  async jobCapacityView(runId: string): Promise<JobCapacityView> {
+    const lock = await this.projection.runLock(runId);
+    if (!lock) throw new PolicyError("run lock is missing");
     const deployment = profileSpec<DeploymentProfileSpec>(lock.profiles, "deployment");
     const capacity = this.capacityProfile();
-    const activeGrants = await this.projection.activeSandboxAdmissions(this.namespace);
-    const allActions = await this.projection.sandboxLifecycleActions();
-    const grantedIds = new Set(activeGrants.map((grant) => grant.action_id));
-    const dispatched = await this.projection.dispatchedSandboxCreateActionIds();
-    const legacy = this.activeLegacySandboxCreates(allActions, grantedIds, dispatched);
-    const campaignGrants = activeGrants.filter(
-      (grant) => grant.campaign_id === campaignId,
+    const active = await this.projection.activeJobAdmissions(this.namespace);
+    const runActive = active.filter((grant) => grant.run_id === runId);
+    const latest = await this.projection.latestJobAdmission(this.namespace);
+    const actions = await this.projection.runActions(runId);
+    const queuedActions = actions.filter(
+      (action) => action.action_kind === "job.launch" && action.receipt_body === null,
     );
-    const campaignLegacy = legacy.filter((row) => row.campaign_id === campaignId);
-    const latest = await this.projection.latestSandboxAdmission(this.namespace);
-    const queued = await this.projection.campaignPendingSandboxCreateCount(campaignId);
-    const pendingCreate =
-      await this.projection.campaignPendingSandboxCreate(campaignId);
+    const queued = queuedActions.length;
     const template =
-      deployment.route === "hf_job"
-        ? (deployment.sandbox_template ?? deployment.sandbox)
-        : null;
-    if (!template)
-      return {
-        configured: Boolean(capacity),
-        profile_id: capacity?.profile_id ?? null,
-        namespace_limit: capacity?.spec.max_active_sandboxes ?? null,
-        namespace_active: activeGrants.length + legacy.length,
-        campaign_limit: 0,
-        campaign_active: campaignGrants.length + campaignLegacy.length,
-        hardware_limit: null,
-        hardware_active: 0,
-        provider_limit: 0,
-        provider_reserved: 0,
-        start_tokens: capacity
-          ? (latest?.tokens_remaining ?? capacity.spec.start_burst)
-          : null,
-        start_burst: capacity?.spec.start_burst ?? null,
-        queued,
-        cleanup_held: 0,
-        limiting_factor: null,
-        not_before: null,
-      };
-    const providerReserved =
-      campaignGrants.reduce(
-        (total, grant) => total + grant.reserved_provider_requests,
-        0,
-      ) +
-      campaignLegacy.reduce((total, row) => {
-        const intent = JSON.parse(row.intent_body) as ActionIntent;
-        return total + (intent.payload.sandbox?.inference_max_concurrency ?? 0);
-      }, 0);
+      deployment.route === "hf_job" ? deployment.trial_job_template : undefined;
+    const runLimit = template?.max_jobs ?? 1;
+    const queuedIntent = queuedActions[0]
+      ? (JSON.parse(queuedActions[0].intent_body) as ActionIntent)
+      : null;
+    const hardware =
+      runActive[0]?.hardware ??
+      (typeof queuedIntent?.payload.hardware === "string"
+        ? queuedIntent.payload.hardware
+        : undefined);
+    const hardwareLimit = hardware
+      ? (capacity?.spec.hardware_limits.find((limit) => limit.hardware === hardware)
+          ?.max_active_jobs ?? null)
+      : null;
+    const hardwareActive = hardware
+      ? active.filter((grant) => grant.hardware === hardware).length
+      : 0;
+    const providerReserved = runActive.reduce(
+      (total, grant) => total + grant.reserved_provider_requests,
+      0,
+    );
+    const providerLimit =
+      template?.inference_max_total_concurrency ??
+      runLimit * (template?.inference_max_concurrency ?? 0);
     let startTokens: number | null = null;
-    let startNotBefore: string | null = null;
+    let notBefore: string | null = null;
     if (capacity) {
-      const now = this.clock.now().getTime();
+      const cursor = latest
+        ? Date.parse(latest.refill_cursor_at)
+        : this.clock.now().getTime();
       const periodMs = capacity.spec.start_refill_period_seconds * 1000;
-      const previousCursor = latest ? Date.parse(latest.refill_cursor_at) : now;
-      const cursor = previousCursor;
-      const periods = Math.max(0, Math.floor((now - cursor) / periodMs));
+      const periods = Math.max(
+        0,
+        Math.floor((this.clock.now().getTime() - cursor) / periodMs),
+      );
       startTokens = Math.min(
         capacity.spec.start_burst,
         (latest?.tokens_remaining ?? capacity.spec.start_burst) +
           periods * capacity.spec.start_refill_tokens,
       );
-      if (startTokens < 1) startNotBefore = new Date(cursor + periodMs).toISOString();
+      if (startTokens < 1) notBefore = new Date(cursor + periodMs).toISOString();
     }
-    const campaignActive = campaignGrants.length + campaignLegacy.length;
-    const namespaceActive = activeGrants.length + legacy.length;
-    const providerLimit =
-      template.inference_max_total_concurrency ??
-      template.max_sandboxes * (template.inference_max_concurrency ?? 0);
-    const hardware =
-      campaignGrants[0]?.hardware ??
-      (campaignLegacy[0]
-        ? (JSON.parse(campaignLegacy[0].intent_body) as ActionIntent).payload.sandbox
-            ?.hardware
-        : undefined) ??
-      pendingCreate?.payload.sandbox?.hardware;
-    const hardwareLimit = hardware
-      ? (capacity?.spec.hardware_limits.find((limit) => limit.hardware === hardware)
-          ?.max_active_sandboxes ?? null)
-      : null;
-    const hardwareActive = hardware
-      ? activeGrants.filter((grant) => grant.hardware === hardware).length +
-        legacy.filter((row) => {
-          const intent = JSON.parse(row.intent_body) as ActionIntent;
-          return intent.payload.sandbox?.hardware === hardware;
-        }).length
-      : 0;
-    let limitingFactor: SandboxLimitingFactor | null = null;
-    if (await this.projection.hasCampaignAction(campaignId, "campaign.cancel"))
-      limitingFactor = "campaign_cancelled";
-    else if (campaignActive >= template.max_sandboxes)
-      limitingFactor = "campaign_sandbox_capacity";
-    else if (capacity && namespaceActive >= capacity.spec.max_active_sandboxes)
-      limitingFactor = "namespace_sandbox_capacity";
+    let limitingFactor: JobCapacityView["limiting_factor"] = null;
+    const globallyCancelled = (await this.projection.runActions(runId)).some(
+      (action) => {
+        if (action.action_kind !== "run.cancel") return false;
+        const cancellation = JSON.parse(action.intent_body) as ActionIntent;
+        return typeof cancellation.payload.task_id !== "string";
+      },
+    );
+    if (globallyCancelled) limitingFactor = "run_cancelled";
+    else if (runActive.length >= runLimit) limitingFactor = "namespace_job_capacity";
+    else if (capacity && active.length >= capacity.spec.max_active_jobs)
+      limitingFactor = "namespace_job_capacity";
     else if (hardwareLimit !== null && hardwareActive >= hardwareLimit)
-      limitingFactor = "hardware_sandbox_capacity";
-    else if (providerReserved >= providerLimit && providerLimit > 0)
+      limitingFactor = "hardware_job_capacity";
+    else if (providerLimit > 0 && providerReserved >= providerLimit)
       limitingFactor = "provider_request_capacity";
     else if (capacity && startTokens !== null && startTokens < 1)
-      limitingFactor = "sandbox_start_rate";
-    const cleanupHeld = [
-      ...campaignGrants.map((grant) => grant.action_id),
-      ...campaignLegacy.map((row) => row.action_id),
-    ].filter((createActionId) => {
-      const create = allActions.find((row) => row.action_id === createActionId);
-      if (!create?.resource_id) return false;
-      return allActions.some((row) => {
-        if (row.action_kind !== "sandbox.close") return false;
-        const intent = JSON.parse(row.intent_body) as ActionIntent;
-        if (intent.payload.sandbox_create_action_id !== createActionId) return false;
-        return !(
-          row.outcome === "completed" &&
-          terminalSandboxStates.has((row.observed_state ?? "").toUpperCase())
-        );
-      });
-    }).length;
+      limitingFactor = "start_rate";
     return {
       configured: Boolean(capacity),
       profile_id: capacity?.profile_id ?? null,
-      namespace_limit: capacity?.spec.max_active_sandboxes ?? null,
-      namespace_active: namespaceActive,
-      campaign_limit: template.max_sandboxes,
-      campaign_active: campaignActive,
+      namespace_limit: capacity?.spec.max_active_jobs ?? null,
+      namespace_active: active.length,
+      run_limit: runLimit,
+      run_active: runActive.length,
       hardware_limit: hardwareLimit,
       hardware_active: hardwareActive,
       provider_limit: providerLimit,
@@ -1298,55 +1179,9 @@ export class ControlService {
       start_tokens: startTokens,
       start_burst: capacity?.spec.start_burst ?? null,
       queued,
-      cleanup_held: cleanupHeld,
       limiting_factor: limitingFactor,
-      not_before: startNotBefore,
+      not_before: notBefore,
     };
-  }
-
-  async admitSandboxCommand(
-    intent: ActionIntent,
-    maximumCommands: number,
-  ): Promise<void> {
-    const operation = this.sandboxAdmissionQueue.then(() =>
-      this.admitSandboxCommandSerialized(intent, maximumCommands),
-    );
-    this.sandboxAdmissionQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
-  }
-
-  private async admitSandboxCommandSerialized(
-    intent: ActionIntent,
-    maximumCommands: number,
-  ): Promise<void> {
-    const sandboxId = intent.payload.sandbox_create_action_id;
-    if (
-      intent.action_kind !== "sandbox.exec" ||
-      maximumCommands < 1 ||
-      typeof sandboxId !== "string"
-    )
-      throw new PolicyError("Sandbox command admission is invalid");
-    const existing = await this.projection.action(intent.action_id);
-    const commands = (await this.projection.campaignActions(intent.campaign_id)).filter(
-      (row) => {
-        if (row.action_kind !== "sandbox.exec" || row.action_id === intent.action_id)
-          return false;
-        if (row.outcome === "failed") {
-          const receipt = row.receipt_body
-            ? (JSON.parse(row.receipt_body) as ActionReceipt)
-            : null;
-          if (receipt?.observed_state !== "AMBIGUOUS") return false;
-        }
-        const recorded = JSON.parse(row.intent_body) as ActionIntent;
-        return recorded.payload.sandbox_create_action_id === sandboxId;
-      },
-    );
-    if (!existing && commands.length >= maximumCommands)
-      throw new PolicyError("Sandbox command count exceeds immutable policy");
-    await this.writeAction(intent);
   }
 
   async submit(
@@ -1372,40 +1207,32 @@ export class ControlService {
     this.assertReady();
     if (!idempotencyKey || idempotencyKey.length > 256)
       throw new IdempotencyConflictError("a bounded idempotency key is required");
-    const input = validateCampaignSubmission<CampaignSubmissionV1>(raw);
+    const input = validateRunSubmission<RunSubmissionV1>(raw);
     if (!input.confirmed)
       throw new ConfirmationRequiredError(
-        "campaign submission requires explicit confirmation",
+        "run submission requires explicit confirmation",
       );
     const keyDigest = sha256(idempotencyKey);
-    const existingId = await this.projection.campaignIdForIdempotency(keyDigest);
-    const campaignId = existingId ?? this.newRunId(input, actor, keyDigest);
-    const actionId = deterministicId(
-      "action",
-      campaignId,
-      "campaign.admit",
-      "campaign",
-      "0",
-    );
-    const existingRequest = await this.projection.campaignRequest(campaignId);
-    const existingLock = await this.projection.campaignLock(campaignId);
+    const existingId = await this.projection.runIdForIdempotency(keyDigest);
+    const runId = existingId ?? this.newRunId(input, actor, keyDigest);
+    const actionId = deterministicId("action", runId, "run.admit", "run", "0");
+    const existingRequest = await this.projection.runRequest(runId);
+    const existingLock = await this.projection.runLock(runId);
     if (existingRequest) this.assertMatchingRequest(existingRequest, input, actor);
     if (existingLock) this.assertMatchingSubmission(existingLock, input);
 
     const profiles = existingLock?.profiles ?? this.resolver.resolve(input);
     const deployment = profileSpec<DeploymentProfileSpec>(profiles, "deployment");
     if (deployment.route !== "hf_job")
-      throw new PolicyError("imported deployment profiles cannot launch campaigns");
+      throw new PolicyError("imported deployment profiles cannot launch runs");
     const launchPolicy = profileSpec<LaunchPolicySpec>(profiles, "launch_policy");
     if (
-      launchPolicy.max_campaign_ceiling_microusd !== undefined &&
-      input.ceiling_microusd > launchPolicy.max_campaign_ceiling_microusd
+      launchPolicy.max_run_ceiling_microusd !== undefined &&
+      input.ceiling_microusd > launchPolicy.max_run_ceiling_microusd
     )
-      throw new PolicyError("campaign ceiling exceeds the launch policy maximum");
+      throw new PolicyError("run ceiling exceeds the launch policy maximum");
     const tasks = existingLock?.tasks ?? this.resolver.tasks(input.benchmark);
-    const executionJobs = deployment.worker_max_tasks_per_job
-      ? Math.ceil(tasks.length / deployment.worker_max_tasks_per_job)
-      : 1;
+    const executionJobs = tasks.length;
     const initialReservation =
       launchPolicy.reservation_microusd * executionJobs +
       (preparationRequired(deployment)
@@ -1413,15 +1240,15 @@ export class ControlService {
           (launchPolicy.max_preparation_attempts ?? 1)
         : 0);
     if (initialReservation > input.ceiling_microusd)
-      throw new PolicyError("launch reservation exceeds the campaign ceiling");
+      throw new PolicyError("launch reservation exceeds the run ceiling");
     const benchmark = profileSpec<BenchmarkProfileSpec>(profiles, "benchmark");
     const model = profileSpec<ModelProfileSpec>(profiles, "model");
     const harness = profileSpec<HarnessProfileSpec>(profiles, "harness");
     try {
-      validatePreparedCampaignProfiles(deployment, benchmark, model, harness, tasks);
+      validatePreparedRunProfiles(deployment, benchmark, model, harness, tasks);
     } catch (error) {
       throw new PolicyError(
-        error instanceof Error ? error.message : "prepared campaign profile is invalid",
+        error instanceof Error ? error.message : "prepared run profile is invalid",
       );
     }
     const timestamp =
@@ -1433,49 +1260,49 @@ export class ControlService {
       kind: profile.kind,
       alias: profile.name,
     }));
-    const request: CampaignRequest =
+    const request: RunRequest =
       existingRequest ??
       ({
         schema_version: "v1",
-        kind: "campaign.request",
-        record_id: deterministicId("request", campaignId),
+        kind: "run.request",
+        record_id: deterministicId("request", runId),
         created_at: timestamp,
         actor: recordActor,
-        campaign_id: campaignId,
+        run_id: runId,
         idempotency_key_digest: keyDigest,
-        profiles: refs as CampaignRequest["profiles"],
+        profiles: refs as RunRequest["profiles"],
         ceiling_microusd: input.ceiling_microusd,
         start_paused: input.start_paused ?? false,
-      } satisfies CampaignRequest);
-    const lock: CampaignLock =
+      } satisfies RunRequest);
+    const lock: RunLock =
       existingLock ??
       ({
         schema_version: "v1",
-        kind: "campaign.lock",
-        record_id: deterministicId("lock", campaignId),
+        kind: "run.lock",
+        record_id: deterministicId("lock", runId),
         created_at: timestamp,
         actor: recordActor,
-        campaign_id: campaignId,
-        profiles: profiles as CampaignLock["profiles"],
-        tasks: tasks as CampaignLock["tasks"],
+        run_id: runId,
+        profiles: profiles as RunLock["profiles"],
+        tasks: tasks as RunLock["tasks"],
         ceiling_microusd: input.ceiling_microusd,
         source_revision: this.resolver.sourceRevision(),
         start_paused: input.start_paused ?? false,
-      } satisfies CampaignLock);
+      } satisfies RunLock);
     const budget: BudgetEvent = {
       schema_version: "v1",
       kind: "budget.event",
-      record_id: deterministicId("budget", campaignId, "ceiling"),
+      record_id: deterministicId("budget", runId, "ceiling"),
       created_at: timestamp,
       actor: recordActor,
-      campaign_id: campaignId,
+      run_id: runId,
       event_kind: "ceiling",
       amount_microusd: input.ceiling_microusd,
     };
     const intent = this.actionIntent(
-      campaignId,
-      "campaign.admit",
-      "campaign",
+      runId,
+      "run.admit",
+      "run",
       0,
       {},
       recordActor,
@@ -1490,20 +1317,20 @@ export class ControlService {
       const pausedAt = new Date(Date.parse(timestamp) + 1).toISOString();
       await this.writeAction(
         this.actionIntent(
-          campaignId,
-          "campaign.pause",
-          "campaign",
+          runId,
+          "run.pause",
+          "run",
           0,
-          { reason: "campaign submitted in paused state" },
+          { reason: "run submitted in paused state" },
           recordActor,
           pausedAt,
         ),
       );
     }
     return {
-      campaign_id: campaignId,
+      run_id: runId,
       action_id: actionId,
-      status_url: `/api/v1/campaigns/${campaignId}`,
+      status_url: `/api/v1/runs/${runId}`,
       adopted: Boolean(existingRequest || existingLock),
     };
   }
@@ -1514,11 +1341,7 @@ export class ControlService {
    * The unique suffix is derived from the namespace, actor, and idempotency
    * key so a repeated request adopts the same identity.
    */
-  private newRunId(
-    input: CampaignSubmissionV1,
-    actor: Actor,
-    keyDigest: string,
-  ): string {
+  private newRunId(input: RunSubmissionV1, actor: Actor, keyDigest: string): string {
     const profiles = this.resolver.resolve(input);
     const harness = profileSpec<HarnessProfileSpec>(profiles, "harness");
     const deployment = profileSpec<DeploymentProfileSpec>(profiles, "deployment");
@@ -1532,8 +1355,8 @@ export class ControlService {
   }
 
   private assertMatchingRequest(
-    request: CampaignRequest,
-    input: CampaignSubmissionV1,
+    request: RunRequest,
+    input: RunSubmissionV1,
     actor: Actor,
   ): void {
     const selected = Object.fromEntries(
@@ -1554,14 +1377,11 @@ export class ControlService {
       (request.start_paused ?? false) === (input.start_paused ?? false);
     if (!matches)
       throw new IdempotencyConflictError(
-        "idempotency key already belongs to a different campaign request",
+        "idempotency key already belongs to a different run request",
       );
   }
 
-  private assertMatchingSubmission(
-    lock: CampaignLock,
-    input: CampaignSubmissionV1,
-  ): void {
+  private assertMatchingSubmission(lock: RunLock, input: RunSubmissionV1): void {
     const selected = Object.fromEntries(
       lock.profiles.map((profile) => [profile.kind, profile.name]),
     );
@@ -1579,12 +1399,12 @@ export class ControlService {
       (lock.start_paused ?? false) === (input.start_paused ?? false);
     if (!matches)
       throw new IdempotencyConflictError(
-        "idempotency key already belongs to a different campaign request",
+        "idempotency key already belongs to a different run request",
       );
   }
 
   actionIntent(
-    campaignId: string,
+    runId: string,
     actionKind: ActionIntent["action_kind"],
     target: string,
     generation: number,
@@ -1594,7 +1414,7 @@ export class ControlService {
   ): ActionIntent {
     const actionId = deterministicId(
       "action",
-      campaignId,
+      runId,
       actionKind,
       target,
       String(generation),
@@ -1606,7 +1426,7 @@ export class ControlService {
       created_at: timestamp,
       actor,
       action_id: actionId,
-      campaign_id: campaignId,
+      run_id: runId,
       action_kind: actionKind,
       generation,
       target,
@@ -1615,11 +1435,12 @@ export class ControlService {
   }
 
   async writeAction(intent: ActionIntent): Promise<void> {
+    validateJobLaunchAssignment(intent);
     const existing = await this.projection.action(intent.action_id);
     if (existing) {
       const recorded = JSON.parse(existing.intent_body) as ActionIntent;
       const same =
-        recorded.campaign_id === intent.campaign_id &&
+        recorded.run_id === intent.run_id &&
         recorded.action_kind === intent.action_kind &&
         recorded.generation === intent.generation &&
         recorded.target === intent.target &&
@@ -1633,17 +1454,16 @@ export class ControlService {
     const taskId =
       typeof intent.payload.task_id === "string" ? intent.payload.task_id : null;
     if (taskId) {
-      const task = await this.projection.task(intent.campaign_id, taskId);
+      const task = await this.projection.task(intent.run_id, taskId);
       if (
         task?.task.terminal_outcome &&
-        intent.action_kind !== "sandbox.close" &&
         !infrastructureSealReplaceable(task.task.terminal_outcome)
       )
         throw new PolicyError(`terminal task cannot receive action: ${taskId}`);
     }
     await this.appendAdopting(intent, (recorded) => {
       return (
-        recorded.campaign_id === intent.campaign_id &&
+        recorded.run_id === intent.run_id &&
         recorded.action_kind === intent.action_kind &&
         recorded.generation === intent.generation &&
         recorded.target === intent.target &&
@@ -1657,18 +1477,9 @@ export class ControlService {
     intent: ActionIntent,
     adoptionNotBefore: string,
   ): Promise<{ record: ActionDispatch; created: boolean }> {
-    const operationByKind = {
-      "job.launch": "create",
-      "sandbox.create": "create",
-      "sandbox.observe": "observe",
-      "sandbox.exec": "execute",
-      "sandbox.write": "write",
-      "sandbox.read": "read",
-      "sandbox.close": "close",
-    } as const;
-    const operation =
-      operationByKind[intent.action_kind as keyof typeof operationByKind];
-    if (!operation) throw new PolicyError("action does not support a dispatch fence");
+    if (intent.action_kind !== "job.launch")
+      throw new PolicyError("only job.launch supports a dispatch fence");
+    const operation = "create" as const;
     const existing = await this.projection.actionDispatch(intent.action_id);
     if (existing)
       return {
@@ -1682,14 +1493,14 @@ export class ControlService {
       created_at: this.clock.now().toISOString(),
       actor: serviceActor(),
       action_id: intent.action_id,
-      campaign_id: intent.campaign_id,
+      run_id: intent.run_id,
       operation,
       adoption_not_before: adoptionNotBefore,
     };
     const result = await this.appendAdopting(record, (recorded) => {
       return (
         recorded.action_id === record.action_id &&
-        recorded.campaign_id === record.campaign_id &&
+        recorded.run_id === record.run_id &&
         recorded.operation === record.operation &&
         canonicalJson(recorded.actor) === canonicalJson(record.actor)
       );
@@ -1716,7 +1527,7 @@ export class ControlService {
       created_at: this.clock.now().toISOString(),
       actor: serviceActor(),
       action_id: intent.action_id,
-      campaign_id: intent.campaign_id,
+      run_id: intent.run_id,
       outcome: result.outcome,
       resource_id: result.resource_id ?? null,
       observed_state: result.observed_state,
@@ -1733,132 +1544,71 @@ export class ControlService {
     return appended.record;
   }
 
-  async ambiguousSandboxReceipt(
-    intent: ActionIntent,
-    actor: Actor,
-  ): Promise<ActionReceipt> {
-    if (
-      intent.action_kind !== "sandbox.exec" &&
-      intent.action_kind !== "sandbox.write" &&
-      intent.action_kind !== "sandbox.read"
-    )
-      throw new PolicyError("only Sandbox I/O actions can be marked ambiguous");
-    const resourceId = intent.payload.resource_id;
-    if (typeof resourceId !== "string")
-      throw new PolicyError("ambiguous Sandbox I/O action has no resource identity");
-    const receipt: ActionReceipt = {
-      schema_version: "v1",
-      kind: "action.receipt",
-      record_id: deterministicId("receipt", intent.action_id),
-      created_at: this.clock.now().toISOString(),
-      actor,
-      action_id: intent.action_id,
-      campaign_id: intent.campaign_id,
-      outcome: "failed",
-      resource_id: resourceId,
-      observed_state: "AMBIGUOUS",
-      error_code: "sandbox_external_outcome_unknown",
-      ready_replicas: null,
-      active_hourly_cost_microusd: null,
-      cost_microusd: null,
-    };
-    const appended = await this.appendAdopting(receipt, (recorded) => {
-      const {
-        created_at: _recordedAt,
-        actor: _recordedActor,
-        ...recordedResult
-      } = recorded;
-      const {
-        created_at: _candidateAt,
-        actor: _candidateActor,
-        ...candidateResult
-      } = receipt;
-      return canonicalJson(recordedResult) === canonicalJson(candidateResult);
-    });
-    return appended.record;
-  }
-
-  private async releaseSandboxCapacity(
-    campaignId: string,
-    createActionId: string,
+  private async releaseJobCapacity(
+    launchActionId: string,
     receipt: ActionReceipt,
-    reason: SandboxCapacityRelease["release_reason"],
-  ): Promise<void> {
-    const grant = await this.projection.sandboxAdmission(createActionId);
-    if (!grant || (await this.projection.sandboxCapacityRelease(createActionId)))
-      return;
-    const release: SandboxCapacityRelease = {
+    reason: JobCapacityRelease["release_reason"],
+  ): Promise<boolean> {
+    const grant = await this.projection.jobAdmission(launchActionId);
+    if (!grant || (await this.projection.jobCapacityRelease(launchActionId)))
+      return false;
+    const release: JobCapacityRelease = {
       schema_version: "v1",
-      kind: "sandbox.capacity-release",
-      record_id: deterministicId("sandbox-capacity-release", createActionId),
+      kind: "job.capacity-release",
+      record_id: deterministicId("job-capacity-release", launchActionId),
       created_at: receipt.created_at,
       actor: serviceActor(),
-      action_id: createActionId,
-      campaign_id: campaignId,
+      action_id: launchActionId,
+      run_id: receipt.run_id,
       grant_id: grant.record_id,
       release_reason: reason,
       evidence_record_id: receipt.record_id,
     };
-    await this.appendAdopting(release, (recorded) => {
-      const { created_at: _recordedAt, ...recordedValue } = recorded;
-      const { created_at: _candidateAt, ...candidateValue } = release;
-      return canonicalJson(recordedValue) === canonicalJson(candidateValue);
-    });
+    return (
+      await this.appendAdopting(release, (recorded) => {
+        const { created_at: _recordedAt, ...recordedValue } = recorded;
+        const { created_at: _candidateAt, ...candidateValue } = release;
+        return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+      })
+    ).created;
   }
 
   async markAdvanced(
     intent: ActionIntent,
     receipt: ActionReceipt,
   ): Promise<ActionAdvanced> {
+    if (intent.action_kind === "job.launch") {
+      if (receipt.outcome === "failed")
+        await this.releaseJobCapacity(intent.action_id, receipt, "launch_failed");
+      else if (receipt.observed_state.startsWith("suppressed-"))
+        await this.releaseJobCapacity(intent.action_id, receipt, "launch_suppressed");
+    }
     if (
-      receipt.action_id !== intent.action_id ||
-      receipt.campaign_id !== intent.campaign_id
+      intent.action_kind === "job.observe" &&
+      jobStateIsTerminal(receipt.observed_state) &&
+      typeof intent.payload.launch_action_id === "string"
     )
-      throw new PolicyError("advanced action receipt does not match its intent");
-    if (intent.action_kind === "sandbox.create" && !receipt.resource_id) {
-      await this.releaseSandboxCapacity(
-        intent.campaign_id,
-        intent.action_id,
+      await this.releaseJobCapacity(
+        intent.payload.launch_action_id,
         receipt,
-        "create_failed",
+        "job_terminal",
       );
-      const policy = intent.payload.sandbox;
-      if (!policy)
-        throw new PolicyError("failed Sandbox create is missing budget identity");
-      const reservation = await this.projection.budget(
-        deterministicId("budget", intent.campaign_id, "sandbox", intent.action_id),
-      );
-      if (reservation)
-        await this.finalizeSandboxBudget(
-          intent.campaign_id,
-          intent.action_id,
-          receipt.created_at,
-          policy.reservation_microusd,
-          receipt.cost_microusd ?? 0,
-        );
-    } else if (
-      intent.action_kind === "sandbox.close" &&
-      receipt.outcome === "completed" &&
-      ["CANCELED", "CANCELLED", "COMPLETED", "DELETED", "ERROR", "STOPPED"].includes(
-        receipt.observed_state.toUpperCase(),
-      )
+    if (
+      intent.action_kind === "job.cancel" &&
+      jobStateIsTerminal(receipt.observed_state) &&
+      typeof intent.payload.launch_action_id === "string"
     ) {
-      const policy = intent.payload.sandbox;
-      const createActionId = intent.payload.sandbox_create_action_id;
-      if (!policy || typeof createActionId !== "string")
-        throw new PolicyError("Sandbox close action is missing budget identity");
-      await this.finalizeSandboxBudget(
-        intent.campaign_id,
-        createActionId,
+      const launch = await this.projection.action(intent.payload.launch_action_id);
+      if (launch?.action_kind !== "job.launch")
+        throw new PolicyError("Job cancellation has no launch action");
+      await this.releaseJobAction(
+        JSON.parse(launch.intent_body) as ActionIntent,
         receipt.created_at,
-        policy.reservation_microusd,
-        receipt.cost_microusd ?? policy.reservation_microusd,
       );
-      await this.releaseSandboxCapacity(
-        intent.campaign_id,
-        createActionId,
+      await this.releaseJobCapacity(
+        intent.payload.launch_action_id,
         receipt,
-        "sandbox_closed",
+        "job_terminal",
       );
     }
     const record: ActionAdvanced = {
@@ -1868,368 +1618,25 @@ export class ControlService {
       created_at: receipt.created_at,
       actor: serviceActor(),
       action_id: intent.action_id,
-      campaign_id: intent.campaign_id,
+      run_id: intent.run_id,
     };
     const appended = await this.appendAdopting(record, (recorded) => {
       const { created_at: _recordedAt, ...recordedResult } = recorded;
       const { created_at: _candidateAt, ...candidateResult } = record;
       return canonicalJson(recordedResult) === canonicalJson(candidateResult);
     });
-    if (
-      intent.action_kind === "sandbox.close" &&
-      receipt.outcome === "completed" &&
-      terminalSandboxStates.has(receipt.observed_state.toUpperCase()) &&
-      typeof intent.payload.task_id === "string"
-    )
-      await this.settleClosedSandboxAmbiguities(
-        intent.campaign_id,
-        intent.payload.task_id,
-        intent.actor,
-      );
     return appended.record;
   }
 
-  async withSandboxActionFinalization<T>(
-    actionId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const previous =
-      this.sandboxActionFinalizationQueues.get(actionId) ?? Promise.resolve();
-    const current = previous.then(operation);
-    const tail = current.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.sandboxActionFinalizationQueues.set(actionId, tail);
-    try {
-      return await current;
-    } finally {
-      if (this.sandboxActionFinalizationQueues.get(actionId) === tail)
-        this.sandboxActionFinalizationQueues.delete(actionId);
-    }
-  }
-
-  private async hasSandboxResult(
-    campaignId: string,
-    actionId: string,
-  ): Promise<boolean> {
-    const path = sandboxActionResultPath(campaignId, actionId);
-    const prefix = path.slice(0, -"/result.json".length);
-    return (await this.store.list(prefix)).some((entry) => entry.key === path);
-  }
-
-  private async withSandboxActionFinalizations<T>(
-    actionIds: readonly string[],
-    operation: () => Promise<T>,
-    index = 0,
-  ): Promise<T> {
-    const actionId = actionIds[index];
-    if (!actionId) return operation();
-    return this.withSandboxActionFinalization(actionId, () =>
-      this.withSandboxActionFinalizations(actionIds, operation, index + 1),
-    );
-  }
-
-  async correctHistoricalSandboxAmbiguities(
-    campaignId: string,
-    taskId: string,
-    input: ActionDispositionCorrectionInput,
-    idempotencyKey: string,
-    actor: Actor,
-  ): Promise<ActionDispositionCorrectionResult> {
-    this.assertReady();
-    if (!input.confirmed)
-      throw new ConfirmationRequiredError(
-        "action disposition correction requires explicit confirmation",
-      );
-    if (actor.role !== "operator")
-      throw new PolicyError("action disposition correction requires an operator");
-    if (
-      input.reason.length < 1 ||
-      input.reason.length > 1_000 ||
-      input.reason.trim() !== input.reason
-    )
-      throw new PolicyError("action disposition correction reason is invalid");
-    if (idempotencyKey.length < 1 || idempotencyKey.length > 512)
-      throw new PolicyError("action disposition idempotency key is invalid");
-    if (
-      input.action_ids.length < 1 ||
-      input.action_ids.length > 100 ||
-      !input.action_ids.every((actionId) => typeof actionId === "string")
-    )
-      throw new PolicyError("action disposition batch size is invalid");
-    const actionIds = [...input.action_ids].sort();
-    if (new Set(actionIds).size !== actionIds.length)
-      throw new PolicyError("action disposition action IDs must be unique");
-    const operation = this.dispositionQueue.then(() =>
-      this.withSandboxActionFinalizations(actionIds, () =>
-        this.correctHistoricalSandboxAmbiguitiesSerialized(
-          campaignId,
-          taskId,
-          actionIds,
-          input.reason,
-          idempotencyKey,
-          actor,
-        ),
-      ),
-    );
-    this.dispositionQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
-  }
-
-  private async correctHistoricalSandboxAmbiguitiesSerialized(
-    campaignId: string,
-    taskId: string,
-    actionIds: readonly string[],
-    reason: string,
-    idempotencyKey: string,
-    actor: Actor,
-  ): Promise<ActionDispositionCorrectionResult> {
-    if (!(await this.projection.campaign(campaignId)))
-      throw new PolicyError("action disposition campaign does not exist");
-    if (!(await this.projection.task(campaignId, taskId)))
-      throw new PolicyError("action disposition task does not exist");
-    const reasonCode = "historical_non_replay_safe_command_ambiguity" as const;
-    const batchId = deterministicId(
-      "disposition-batch",
-      campaignId,
-      taskId,
-      sha256(idempotencyKey),
-    );
-    const batchDigest = sha256(
-      canonicalJson({ action_ids: actionIds, reason_code: reasonCode, reason }),
-    );
-    const existingBatch = await this.projection.actionDispositionsByBatch(batchId);
-    if (
-      existingBatch.some(
-        (record) =>
-          record.campaign_id !== campaignId ||
-          record.task_id !== taskId ||
-          record.batch_digest !== batchDigest ||
-          record.batch_size !== actionIds.length,
-      )
-    )
-      throw new IdempotencyConflictError("action disposition batch identity conflict");
-    const campaignActions = await this.projection.campaignActions(campaignId);
-    const candidates: ActionDisposition[] = [];
-    for (const actionId of actionIds) {
-      const action = await this.projection.action(actionId);
-      if (
-        !action ||
-        action.campaign_id !== campaignId ||
-        action.action_kind !== "sandbox.exec" ||
-        !action.receipt_body
-      )
-        throw new PolicyError("action disposition target is not eligible");
-      const intent = JSON.parse(action.intent_body) as ActionIntent;
-      const sourceReceipt = JSON.parse(action.receipt_body) as ActionReceipt;
-      if (
-        intent.payload.task_id !== taskId ||
-        sourceReceipt.outcome !== "completed" ||
-        sourceReceipt.observed_state !== "suppressed-sandbox-cleanup-ambiguous" ||
-        (sourceReceipt.error_code ?? null) !== null
-      )
-        throw new PolicyError("action disposition source receipt is not eligible");
-      const dispatch = await this.projection.actionDispatch(actionId);
-      if (dispatch?.operation !== "execute")
-        throw new PolicyError("action disposition target has no execute dispatch");
-      if (!(await this.projection.actionAdvanced(actionId)))
-        throw new PolicyError("action disposition target is not advanced");
-      if (await this.hasSandboxResult(campaignId, actionId))
-        throw new PolicyError("action disposition target has a durable result");
-      const createActionId = intent.payload.sandbox_create_action_id;
-      const resourceId = intent.payload.resource_id;
-      if (typeof createActionId !== "string" || typeof resourceId !== "string")
-        throw new PolicyError("action disposition ownership is incomplete");
-      if (!historicalDispositionResourceMatches(sourceReceipt.resource_id, resourceId))
-        throw new PolicyError("action disposition source resource does not match");
-      const create = await this.projection.action(createActionId);
-      if (
-        !create ||
-        create.campaign_id !== campaignId ||
-        create.action_kind !== "sandbox.create" ||
-        create.resource_id !== resourceId
-      )
-        throw new PolicyError("action disposition create action does not match");
-      const createIntent = JSON.parse(create.intent_body) as ActionIntent;
-      if (createIntent.payload.task_id !== taskId)
-        throw new PolicyError("action disposition create task does not match");
-      const eligibleCloses: Array<{
-        actionId: string;
-        receipt: ActionReceipt;
-      }> = [];
-      for (const close of campaignActions) {
-        if (close.action_kind !== "sandbox.close" || !close.receipt_body) continue;
-        const closeIntent = JSON.parse(close.intent_body) as ActionIntent;
-        const closeReceipt = JSON.parse(close.receipt_body) as ActionReceipt;
-        if (
-          closeIntent.payload.task_id !== taskId ||
-          closeIntent.payload.sandbox_create_action_id !== createActionId ||
-          closeIntent.payload.resource_id !== resourceId ||
-          closeReceipt.resource_id !== resourceId ||
-          closeReceipt.outcome !== "completed" ||
-          !terminalSandboxStates.has(closeReceipt.observed_state.toUpperCase()) ||
-          !(await this.projection.actionAdvanced(close.action_id))
-        )
-          continue;
-        eligibleCloses.push({ actionId: close.action_id, receipt: closeReceipt });
-      }
-      eligibleCloses.sort(
-        (left, right) =>
-          left.receipt.created_at.localeCompare(right.receipt.created_at) ||
-          left.actionId.localeCompare(right.actionId),
-      );
-      const selectedClose = eligibleCloses[0];
-      if (!selectedClose)
-        throw new PolicyError("action disposition has no terminal Sandbox close");
-      const candidate: ActionDisposition = {
-        schema_version: "v1",
-        kind: "action.disposition",
-        record_id: deterministicId("disposition", actionId),
-        created_at: this.clock.now().toISOString(),
-        actor: { ...actor, role: "operator" },
-        campaign_id: campaignId,
-        task_id: taskId,
-        action_id: actionId,
-        source_receipt_id: sourceReceipt.record_id,
-        source_receipt_digest: sha256(canonicalJson(sourceReceipt)),
-        close_action_id: selectedClose.actionId,
-        close_receipt_id: selectedClose.receipt.record_id,
-        close_receipt_digest: sha256(canonicalJson(selectedClose.receipt)),
-        batch_id: batchId,
-        batch_digest: batchDigest,
-        batch_size: actionIds.length,
-        effective_outcome: "failed",
-        effective_observed_state: "AMBIGUOUS",
-        effective_error_code: "sandbox_external_outcome_unknown",
-        reason_code: reasonCode,
-        reason,
-      };
-      const existing = await this.projection.actionDisposition(actionId);
-      if (existing) {
-        const {
-          created_at: _existingAt,
-          actor: _existingActor,
-          ...existingSemantics
-        } = existing;
-        const {
-          created_at: _candidateAt,
-          actor: _candidateActor,
-          ...candidateSemantics
-        } = candidate;
-        if (canonicalJson(existingSemantics) !== canonicalJson(candidateSemantics))
-          throw new IdempotencyConflictError("action disposition identity conflict");
-      }
-      candidates.push(candidate);
-    }
-    const items: ActionDispositionCorrectionResult["items"] = [];
-    for (const candidate of candidates) {
-      const appended = await this.appendAdopting(candidate, (recorded) => {
-        const {
-          created_at: _recordedAt,
-          actor: _recordedActor,
-          ...recordedSemantics
-        } = recorded;
-        const {
-          created_at: _candidateAt,
-          actor: _candidateActor,
-          ...candidateSemantics
-        } = candidate;
-        return canonicalJson(recordedSemantics) === canonicalJson(candidateSemantics);
-      });
-      items.push({
-        action_id: candidate.action_id,
-        disposition_record_id: appended.record.record_id,
-        created: appended.created,
-      });
-    }
-    return { batch_id: batchId, batch_digest: batchDigest, items };
-  }
-
-  async settleClosedSandboxAmbiguities(
-    campaignId: string,
-    taskId: string,
-    actor: Actor = serviceActor(),
-  ): Promise<{ settled: number; unresolved: number }> {
-    const candidates = await this.projection.pendingDispatchedSandboxCommandActions(
-      campaignId,
-      taskId,
-    );
-    if (candidates.length >= 1_025)
-      throw new PolicyError("too many ambiguous Sandbox I/O actions for one task");
-    const campaignActions = await this.projection.campaignActions(campaignId);
-    let settled = 0;
-    let unresolved = 0;
-    for (const intent of candidates) {
-      const disposition = await this.withSandboxActionFinalization(
-        intent.action_id,
-        async (): Promise<"settled" | "resolved" | "unresolved"> => {
-          const current = await this.projection.action(intent.action_id);
-          if (!current || current.receipt_body) return "resolved";
-          if (await this.hasSandboxResult(campaignId, intent.action_id))
-            return "unresolved";
-          const createActionId = intent.payload.sandbox_create_action_id;
-          const resourceId = intent.payload.resource_id;
-          if (typeof createActionId !== "string" || typeof resourceId !== "string")
-            throw new PolicyError("ambiguous Sandbox I/O action has invalid ownership");
-          const create = await this.projection.action(createActionId);
-          if (
-            !create ||
-            create.campaign_id !== campaignId ||
-            create.action_kind !== "sandbox.create" ||
-            create.resource_id !== resourceId
-          )
-            throw new PolicyError(
-              "ambiguous Sandbox I/O action has invalid create action",
-            );
-          const createIntent = JSON.parse(create.intent_body) as ActionIntent;
-          if (createIntent.payload.task_id !== taskId)
-            throw new PolicyError(
-              "ambiguous Sandbox I/O action belongs to another task",
-            );
-          const close = campaignActions.find((action) => {
-            if (action.action_kind !== "sandbox.close" || !action.receipt_body)
-              return false;
-            const closeIntent = JSON.parse(action.intent_body) as ActionIntent;
-            const closeReceipt = JSON.parse(action.receipt_body) as ActionReceipt;
-            return (
-              closeIntent.payload.task_id === taskId &&
-              closeIntent.payload.sandbox_create_action_id === createActionId &&
-              closeIntent.payload.resource_id === resourceId &&
-              closeReceipt.resource_id === resourceId &&
-              closeReceipt.outcome === "completed" &&
-              terminalSandboxStates.has(closeReceipt.observed_state.toUpperCase())
-            );
-          });
-          if (!close || !(await this.projection.actionAdvanced(close.action_id)))
-            return "unresolved";
-          const receipt = await this.ambiguousSandboxReceipt(intent, actor);
-          await this.markAdvanced(intent, receipt);
-          return "settled";
-        },
-      );
-      if (disposition === "settled") settled += 1;
-      else if (disposition === "unresolved") unresolved += 1;
-    }
-    return { settled, unresolved };
-  }
-
   async uploadEvidenceObject(
-    campaignId: string,
+    runId: string,
     actionId: string,
     taskId: string,
     expectedDigest: string,
     bytes: Uint8Array,
   ): Promise<EvidenceUploadResult> {
     const action = await this.projection.action(actionId);
-    if (
-      !action ||
-      action.campaign_id !== campaignId ||
-      action.action_kind !== "job.launch"
-    )
+    if (!action || action.run_id !== runId || action.action_kind !== "job.launch")
       throw new PolicyError("evidence upload has no eligible Job launch");
     const intent = JSON.parse(action.intent_body) as ActionIntent;
     if (
@@ -2237,12 +1644,12 @@ export class ControlService {
       !intent.payload.task_ids.includes(taskId)
     )
       throw new PolicyError("evidence upload task is outside the Job launch");
-    if (!(await this.projection.task(campaignId, taskId)))
+    if (!(await this.projection.task(runId, taskId)))
       throw new PolicyError("evidence upload task does not exist");
     const observedDigest = sha256(bytes);
     if (observedDigest !== expectedDigest)
       throw new PolicyError("evidence upload digest does not match its content");
-    const path = workerEvidenceObjectPath(campaignId, actionId, taskId, observedDigest);
+    const path = workerEvidenceObjectPath(runId, actionId, taskId, observedDigest);
     const result = await this.store.create(path, bytes);
     return {
       path,
@@ -2303,11 +1710,25 @@ export class ControlService {
     const action = await this.projection.action(input.action_id);
     if (
       !action ||
-      action.campaign_id !== input.campaign_id ||
-      !["job.launch", "campaign.cancel"].includes(action.action_kind)
+      action.run_id !== input.run_id ||
+      action.action_kind !== "job.launch"
     )
       throw new PolicyError(
-        `attempt does not reference an eligible campaign action: ${input.action_id}`,
+        `attempt does not reference an eligible run action: ${input.action_id}`,
+      );
+    const launch = JSON.parse(action.intent_body) as ActionIntent;
+    const launchTasks = stringArrayValue(
+      launch.payload.task_ids,
+      "attempt Job action task IDs",
+    );
+    if (
+      (launch.payload.worker_role ?? "execution") !== "execution" ||
+      launchTasks.length !== 1 ||
+      launch.payload.task_id !== input.task_id ||
+      launchTasks[0] !== input.task_id
+    )
+      throw new PolicyError(
+        `attempt task is outside its execution Job: ${input.action_id}/${input.task_id}`,
       );
     const priorActionAttempt = await this.projection.attemptForActionTask(
       input.action_id,
@@ -2321,19 +1742,12 @@ export class ControlService {
         `action already has an attempt for task: ${input.action_id}/${input.task_id}`,
       );
     }
-    const task = await this.projection.task(input.campaign_id, input.task_id);
+    const task = await this.projection.task(input.run_id, input.task_id);
     if (!task) throw new PolicyError(`task does not exist: ${input.task_id}`);
     if (!infrastructureSealReplaceable(task.task.terminal_outcome))
       throw new PolicyError(`terminal task cannot receive attempt: ${input.task_id}`);
-    const campaign = await this.projection.campaign(input.campaign_id);
-    if (!campaign)
-      throw new PolicyError(`campaign does not exist: ${input.campaign_id}`);
-    const projectedObserved = campaign.observed_microusd + input.cost_microusd;
-    if (
-      Math.max(campaign.reserved_microusd, projectedObserved) >
-      campaign.ceiling_microusd
-    )
-      throw new PolicyError("worker attempt cost exceeds the campaign ceiling");
+    const run = await this.projection.run(input.run_id);
+    if (!run) throw new PolicyError(`run does not exist: ${input.run_id}`);
     await this.append(candidate);
     return { receipt: candidate, adopted: false };
   }
@@ -2342,8 +1756,8 @@ export class ControlService {
     attempt: AttemptReceipt,
     reason: string,
   ): Promise<TerminalSelection> {
-    const lock = await this.projection.campaignLock(attempt.campaign_id);
-    if (!lock) throw new PolicyError("terminal selection has no campaign lock");
+    const lock = await this.projection.runLock(attempt.run_id);
+    if (!lock) throw new PolicyError("terminal selection has no run lock");
     const validity = attemptAdmissibility(attempt, requiredPositiveMetrics(lock));
     if (!validity.admissible && attempt.outcome !== "cancelled")
       throw new PolicyError(`attempt is not selectable: ${validity.reason}`);
@@ -2352,13 +1766,13 @@ export class ControlService {
       kind: "terminal.selection",
       record_id: deterministicId(
         "terminal",
-        attempt.campaign_id,
+        attempt.run_id,
         attempt.task_id,
         attempt.attempt_id,
       ),
       created_at: this.clock.now().toISOString(),
       actor: serviceActor(),
-      campaign_id: attempt.campaign_id,
+      run_id: attempt.run_id,
       task_id: attempt.task_id,
       attempt_id: attempt.attempt_id,
       outcome: attempt.outcome,
@@ -2378,16 +1792,70 @@ export class ControlService {
       kind: "task.exhaustion",
       record_id: deterministicId(
         "task-exhaustion",
-        attempt.campaign_id,
+        attempt.run_id,
         attempt.task_id,
         attempt.attempt_id,
       ),
       created_at: this.clock.now().toISOString(),
       actor: serviceActor(),
-      campaign_id: attempt.campaign_id,
+      run_id: attempt.run_id,
       task_id: attempt.task_id,
+      source_action_id: attempt.action_id,
       last_attempt_id: attempt.attempt_id,
       attempt_count: attemptCount,
+      reason,
+    };
+    await this.append(record);
+    return record;
+  }
+
+  async exhaustTaskFromPreparation(
+    runId: string,
+    taskId: string,
+    sourceActionId: string,
+    createdAt: string,
+    reason: string,
+    attemptCount: number,
+  ): Promise<TaskExhaustion> {
+    const record: TaskExhaustion = {
+      schema_version: "v1",
+      kind: "task.exhaustion",
+      record_id: deterministicId("task-exhaustion", runId, taskId, sourceActionId),
+      created_at: createdAt,
+      actor: serviceActor(),
+      run_id: runId,
+      task_id: taskId,
+      source_action_id: sourceActionId,
+      last_attempt_id: null,
+      attempt_count: attemptCount,
+      reason,
+    };
+    await this.append(record);
+    return record;
+  }
+
+  async cancelTask(
+    runId: string,
+    taskId: string,
+    sourceActionId: string,
+    createdAt: string,
+    reason: string,
+  ): Promise<TaskCancellation> {
+    const source = await this.projection.action(sourceActionId);
+    if (!source || source.run_id !== runId || source.action_kind !== "run.cancel")
+      throw new PolicyError("task cancellation has no matching Run cancellation");
+    const intent = JSON.parse(source.intent_body) as ActionIntent;
+    if (typeof intent.payload.task_id === "string" && intent.payload.task_id !== taskId)
+      throw new PolicyError("task cancellation is outside the requested scope");
+    const record: TaskCancellation = {
+      schema_version: "v1",
+      kind: "task.cancellation",
+      record_id: deterministicId("task-cancellation", runId, taskId, sourceActionId),
+      created_at: createdAt,
+      actor: serviceActor(),
+      run_id: runId,
+      task_id: taskId,
+      source_action_id: sourceActionId,
       reason,
     };
     await this.append(record);
@@ -2399,9 +1867,9 @@ export class ControlService {
   }
 
   async writePublicationSupersession(
-    campaignId: string,
+    runId: string,
     publicationId: string,
-    supersededCampaignId: string,
+    supersededRunId: string,
     supersededPublicationId: string,
     reason: string,
   ): Promise<PublicationSupersession> {
@@ -2411,9 +1879,9 @@ export class ControlService {
     if (existing) {
       const record = JSON.parse(existing.body) as PublicationSupersession;
       if (
-        record.campaign_id !== campaignId ||
+        record.run_id !== runId ||
         record.publication_id !== publicationId ||
-        record.superseded_campaign_id !== supersededCampaignId ||
+        record.superseded_run_id !== supersededRunId ||
         record.reason !== reason
       )
         throw new IdempotencyConflictError(
@@ -2422,7 +1890,7 @@ export class ControlService {
       return record;
     }
     const publication = await this.projection.publication(publicationId);
-    if (publication?.campaign_id !== campaignId)
+    if (publication?.run_id !== runId)
       throw new PolicyError("replacement publication does not exist");
     const record: PublicationSupersession = {
       schema_version: "v1",
@@ -2434,9 +1902,9 @@ export class ControlService {
       ),
       created_at: publication.created_at,
       actor: serviceActor(),
-      campaign_id: campaignId,
+      run_id: runId,
       publication_id: publicationId,
-      superseded_campaign_id: supersededCampaignId,
+      superseded_run_id: supersededRunId,
       superseded_publication_id: supersededPublicationId,
       reason,
     };
@@ -2445,12 +1913,12 @@ export class ControlService {
   }
 
   async reserveJobActions(
-    campaignId: string,
+    runId: string,
     reservations: readonly JobBudgetReservation[],
   ): Promise<boolean> {
-    await this.reconcileTerminalJobReservations(campaignId);
+    await this.reconcileTerminalJobReservations(runId);
     const operation = this.budgetQueue.then(() =>
-      this.reserveJobActionsSerialized(campaignId, reservations),
+      this.reserveJobActionsSerialized(runId, reservations),
     );
     this.budgetQueue = operation.then(
       () => undefined,
@@ -2460,7 +1928,7 @@ export class ControlService {
   }
 
   private async reserveJobActionsSerialized(
-    campaignId: string,
+    runId: string,
     reservations: readonly JobBudgetReservation[],
   ): Promise<boolean> {
     const pending: Array<JobBudgetReservation & { recordId: string }> = [];
@@ -2468,56 +1936,51 @@ export class ControlService {
       if (reservation.amount_microusd <= 0) continue;
       const recordId = deterministicId(
         "budget",
-        campaignId,
+        runId,
         reservation.category,
         String(reservation.generation),
       );
       const existing = await this.projection.budget(recordId);
       if (existing) {
         if (
-          existing.campaign_id !== campaignId ||
+          existing.run_id !== runId ||
           existing.event_kind !== "reserve" ||
           existing.amount_microusd !== reservation.amount_microusd
         )
           throw new IdempotencyConflictError(
             "Job budget reservation conflicts with durable state",
           );
+        const releaseId = deterministicId("budget", runId, "job-release", recordId);
+        if (await this.projection.budget(releaseId)) return false;
         continue;
       }
       pending.push({ ...reservation, recordId });
     }
     if (pending.length === 0) return true;
 
-    const campaign = await this.projection.campaign(campaignId);
-    if (!campaign) throw new PolicyError("campaign does not exist");
+    const run = await this.projection.run(runId);
+    if (!run) throw new PolicyError("run does not exist");
     const additionalMicrousd = pending.reduce(
       (sum, reservation) => sum + reservation.amount_microusd,
       0,
     );
-    const committedMicrousd = Math.max(
-      campaign.reserved_microusd,
-      campaign.observed_microusd,
-    );
-    if (committedMicrousd + additionalMicrousd > campaign.ceiling_microusd)
-      return false;
+    const committedMicrousd = Math.max(run.reserved_microusd, run.observed_microusd);
+    if (committedMicrousd + additionalMicrousd > run.ceiling_microusd) return false;
 
-    const observedOverage = Math.max(
-      0,
-      campaign.observed_microusd - campaign.reserved_microusd,
-    );
+    const observedOverage = Math.max(0, run.observed_microusd - run.reserved_microusd);
     if (observedOverage > 0) {
       await this.append({
         schema_version: "v1",
         kind: "budget.event",
         record_id: deterministicId(
           "budget",
-          campaignId,
+          runId,
           "job-observed-overage",
           pending.map((reservation) => reservation.recordId).join(","),
         ),
         created_at: pending[0]?.created_at ?? this.clock.now().toISOString(),
         actor: serviceActor(),
-        campaign_id: campaignId,
+        run_id: runId,
         event_kind: "reserve",
         amount_microusd: observedOverage,
       });
@@ -2529,7 +1992,7 @@ export class ControlService {
         record_id: reservation.recordId,
         created_at: reservation.created_at,
         actor: serviceActor(),
-        campaign_id: campaignId,
+        run_id: runId,
         event_kind: "reserve",
         amount_microusd: reservation.amount_microusd,
       });
@@ -2538,7 +2001,7 @@ export class ControlService {
   }
 
   private async releaseBudgetReservationSerialized(
-    campaignId: string,
+    runId: string,
     reserveId: string,
     createdAt: string,
     amountMicrousd: number,
@@ -2546,14 +2009,14 @@ export class ControlService {
     const existingReserve = await this.projection.budget(reserveId);
     if (!existingReserve) return false;
     if (
-      existingReserve.campaign_id !== campaignId ||
+      existingReserve.run_id !== runId ||
       existingReserve.event_kind !== "reserve" ||
       existingReserve.amount_microusd !== amountMicrousd
     )
       throw new IdempotencyConflictError(
         "Job budget release does not match its reservation",
       );
-    const releaseId = deterministicId("budget", campaignId, "job-release", reserveId);
+    const releaseId = deterministicId("budget", runId, "job-release", reserveId);
     const existingRelease = await this.projection.budget(releaseId);
     if (existingRelease) {
       if (
@@ -2571,7 +2034,7 @@ export class ControlService {
       record_id: releaseId,
       created_at: createdAt,
       actor: serviceActor(),
-      campaign_id: campaignId,
+      run_id: runId,
       event_kind: "release",
       amount_microusd: amountMicrousd,
     });
@@ -2588,17 +2051,19 @@ export class ControlService {
     const priorAttemptId = intent.payload.prior_attempt_id;
     const reserveId =
       typeof priorAttemptId === "string"
-        ? deterministicId("budget", intent.campaign_id, "replacement", priorAttemptId)
+        ? deterministicId("budget", intent.run_id, "replacement", priorAttemptId)
         : deterministicId(
             "budget",
-            intent.campaign_id,
-            executionReservationCategory(
-              stringArrayValue(intent.payload.task_ids, "Job action task IDs"),
-            ),
+            intent.run_id,
+            intent.payload.worker_role === "preparation"
+              ? "preparation"
+              : executionReservationCategory(
+                  stringArrayValue(intent.payload.task_ids, "Job action task IDs"),
+                ),
             String(intent.generation),
           );
     return this.releaseBudgetReservationSerialized(
-      intent.campaign_id,
+      intent.run_id,
       reserveId,
       createdAt,
       amountMicrousd,
@@ -2606,7 +2071,7 @@ export class ControlService {
   }
 
   async releaseJobActions(
-    campaignId: string,
+    runId: string,
     reservations: readonly JobBudgetReservation[],
   ): Promise<void> {
     const operation = this.budgetQueue.then(async () => {
@@ -2614,12 +2079,12 @@ export class ControlService {
         if (reservation.amount_microusd <= 0) continue;
         const reserveId = deterministicId(
           "budget",
-          campaignId,
+          runId,
           reservation.category,
           String(reservation.generation),
         );
         await this.releaseBudgetReservationSerialized(
-          campaignId,
+          runId,
           reserveId,
           reservation.created_at,
           reservation.amount_microusd,
@@ -2644,67 +2109,58 @@ export class ControlService {
     await operation;
   }
 
-  async reconcileTerminalJobReservations(campaignId: string): Promise<number> {
+  async reconcileTerminalJobReservations(runId: string): Promise<number> {
     const operation = this.budgetQueue.then(async () => {
-      const actions = await this.projection.campaignActions(campaignId);
-      const terminalLaunchIds = new Set<string>();
+      const actions = await this.projection.runActions(runId);
+      const terminalReceipts = new Map<string, ActionReceipt>();
       for (const action of actions) {
-        if (action.action_kind !== "job.observe" || action.receipt_body === null)
+        if (
+          !["job.observe", "job.cancel"].includes(action.action_kind) ||
+          action.receipt_body === null
+        )
           continue;
         const intent = JSON.parse(action.intent_body) as ActionIntent;
         const receipt = JSON.parse(action.receipt_body) as ActionReceipt;
         const launchActionId = intent.payload.launch_action_id;
         if (
           typeof launchActionId === "string" &&
-          jobStateIsTerminal(receipt.observed_state)
+          jobStateIsTerminal(receipt.observed_state) &&
+          !terminalReceipts.has(launchActionId)
         )
-          terminalLaunchIds.add(launchActionId);
+          terminalReceipts.set(launchActionId, receipt);
       }
 
       let released = 0;
-      const replacementActions = new Set<string>();
       for (const action of actions) {
         if (action.action_kind !== "job.launch") continue;
         const intent = JSON.parse(action.intent_body) as ActionIntent;
-        if (intent.payload.worker_role !== "execution") continue;
-        const priorAttemptId = intent.payload.prior_attempt_id;
-        if (typeof priorAttemptId === "string") replacementActions.add(priorAttemptId);
         const receipt =
           action.receipt_body === null
             ? null
             : (JSON.parse(action.receipt_body) as ActionReceipt);
-        const terminal =
-          receipt !== null &&
+        const terminalReceipt =
+          receipt &&
           (receipt.outcome === "failed" ||
-            receipt.observed_state.startsWith("suppressed-") ||
-            terminalLaunchIds.has(action.action_id));
-        if (
-          terminal &&
-          (await this.releaseJobActionSerialized(intent, receipt.created_at))
-        )
-          released += 1;
+            receipt.observed_state.startsWith("suppressed-"))
+            ? receipt
+            : terminalReceipts.get(action.action_id);
+        if (!terminalReceipt) continue;
+        const budgetReleased = await this.releaseJobActionSerialized(
+          intent,
+          terminalReceipt.created_at,
+        );
+        const capacityReleased = await this.releaseJobCapacity(
+          action.action_id,
+          terminalReceipt,
+          receipt?.observed_state.startsWith("suppressed-")
+            ? "launch_suppressed"
+            : receipt?.outcome === "failed"
+              ? "launch_failed"
+              : "job_terminal",
+        );
+        if (budgetReleased || capacityReleased) released += 1;
       }
 
-      for (const attempt of await this.projection.campaignAttempts(campaignId)) {
-        if (replacementActions.has(attempt.attempt_id)) continue;
-        const reserveId = deterministicId(
-          "budget",
-          campaignId,
-          "replacement",
-          attempt.attempt_id,
-        );
-        const reserve = await this.projection.budget(reserveId);
-        if (
-          reserve?.event_kind === "reserve" &&
-          (await this.releaseBudgetReservationSerialized(
-            campaignId,
-            reserveId,
-            attempt.created_at,
-            reserve.amount_microusd,
-          ))
-        )
-          released += 1;
-      }
       return released;
     });
     this.budgetQueue = operation.then(
@@ -2715,15 +2171,15 @@ export class ControlService {
   }
 
   async reserveReplacement(
-    campaignId: string,
+    runId: string,
     priorAttemptId: string,
     priorAttemptCompletedAt: string,
     amountMicrousd: number,
   ): Promise<boolean> {
-    await this.reconcileTerminalJobReservations(campaignId);
+    await this.reconcileTerminalJobReservations(runId);
     const operation = this.budgetQueue.then(() =>
       this.reserveReplacementSerialized(
-        campaignId,
+        runId,
         priorAttemptId,
         priorAttemptCompletedAt,
         amountMicrousd,
@@ -2737,54 +2193,40 @@ export class ControlService {
   }
 
   private async reserveReplacementSerialized(
-    campaignId: string,
+    runId: string,
     priorAttemptId: string,
     priorAttemptCompletedAt: string,
     amountMicrousd: number,
   ): Promise<boolean> {
     if (amountMicrousd <= 0) return true;
-    const recordId = deterministicId(
-      "budget",
-      campaignId,
-      "replacement",
-      priorAttemptId,
-    );
+    const recordId = deterministicId("budget", runId, "replacement", priorAttemptId);
     const existing = await this.projection.budget(recordId);
     if (existing) {
       if (
-        existing.campaign_id !== campaignId ||
+        existing.run_id !== runId ||
         existing.event_kind !== "reserve" ||
         existing.amount_microusd !== amountMicrousd
       )
         throw new IdempotencyConflictError(
           "replacement budget reservation conflicts with durable state",
         );
+      const releaseId = deterministicId("budget", runId, "job-release", recordId);
+      if (await this.projection.budget(releaseId)) return false;
       return true;
     }
-    const campaign = await this.projection.campaign(campaignId);
-    if (!campaign) throw new PolicyError("campaign does not exist");
-    const committedMicrousd = Math.max(
-      campaign.reserved_microusd,
-      campaign.observed_microusd,
-    );
-    if (committedMicrousd + amountMicrousd > campaign.ceiling_microusd) return false;
-    const observedOverage = Math.max(
-      0,
-      campaign.observed_microusd - campaign.reserved_microusd,
-    );
+    const run = await this.projection.run(runId);
+    if (!run) throw new PolicyError("run does not exist");
+    const committedMicrousd = Math.max(run.reserved_microusd, run.observed_microusd);
+    if (committedMicrousd + amountMicrousd > run.ceiling_microusd) return false;
+    const observedOverage = Math.max(0, run.observed_microusd - run.reserved_microusd);
     if (observedOverage > 0) {
       const catchUp: BudgetEvent = {
         schema_version: "v1",
         kind: "budget.event",
-        record_id: deterministicId(
-          "budget",
-          campaignId,
-          "observed-overage",
-          priorAttemptId,
-        ),
+        record_id: deterministicId("budget", runId, "observed-overage", priorAttemptId),
         created_at: priorAttemptCompletedAt,
         actor: serviceActor(),
-        campaign_id: campaignId,
+        run_id: runId,
         event_kind: "reserve",
         amount_microusd: observedOverage,
       };
@@ -2796,157 +2238,12 @@ export class ControlService {
       record_id: recordId,
       created_at: priorAttemptCompletedAt,
       actor: serviceActor(),
-      campaign_id: campaignId,
+      run_id: runId,
       event_kind: "reserve",
       amount_microusd: amountMicrousd,
     };
     await this.append(reservation);
     return true;
-  }
-
-  async reserveSandbox(
-    campaignId: string,
-    createActionId: string,
-    createdAt: string,
-    amountMicrousd: number,
-  ): Promise<boolean> {
-    const operation = this.budgetQueue.then(() =>
-      this.reserveSandboxSerialized(
-        campaignId,
-        createActionId,
-        createdAt,
-        amountMicrousd,
-      ),
-    );
-    this.budgetQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
-  }
-
-  private async reserveSandboxSerialized(
-    campaignId: string,
-    createActionId: string,
-    createdAt: string,
-    amountMicrousd: number,
-  ): Promise<boolean> {
-    const recordId = deterministicId("budget", campaignId, "sandbox", createActionId);
-    const existing = await this.projection.budget(recordId);
-    if (existing) {
-      if (
-        existing.campaign_id !== campaignId ||
-        existing.event_kind !== "reserve" ||
-        existing.amount_microusd !== amountMicrousd
-      )
-        throw new IdempotencyConflictError(
-          "Sandbox budget reservation conflicts with durable state",
-        );
-      return true;
-    }
-    const campaign = await this.projection.campaign(campaignId);
-    if (!campaign) throw new PolicyError("campaign does not exist");
-    const committedMicrousd = Math.max(
-      campaign.reserved_microusd,
-      campaign.observed_microusd,
-    );
-    if (committedMicrousd + amountMicrousd > campaign.ceiling_microusd) return false;
-    const observedOverage = Math.max(
-      0,
-      campaign.observed_microusd - campaign.reserved_microusd,
-    );
-    if (observedOverage > 0) {
-      const catchUp: BudgetEvent = {
-        schema_version: "v1",
-        kind: "budget.event",
-        record_id: deterministicId(
-          "budget",
-          campaignId,
-          "sandbox-observed-overage",
-          createActionId,
-        ),
-        created_at: createdAt,
-        actor: serviceActor(),
-        campaign_id: campaignId,
-        event_kind: "reserve",
-        amount_microusd: observedOverage,
-      };
-      await this.append(catchUp);
-    }
-    const reservation: BudgetEvent = {
-      schema_version: "v1",
-      kind: "budget.event",
-      record_id: recordId,
-      created_at: createdAt,
-      actor: serviceActor(),
-      campaign_id: campaignId,
-      event_kind: "reserve",
-      amount_microusd: amountMicrousd,
-    };
-    await this.append(reservation);
-    return true;
-  }
-
-  private async finalizeSandboxBudget(
-    campaignId: string,
-    createActionId: string,
-    completedAt: string,
-    reservationMicrousd: number,
-    observedMicrousd: number,
-  ): Promise<void> {
-    const operation = this.budgetQueue.then(async () => {
-      const releaseId = deterministicId(
-        "budget",
-        campaignId,
-        "sandbox-release",
-        createActionId,
-      );
-      const existing = await this.projection.budget(releaseId);
-      if (existing) {
-        if (
-          existing.event_kind !== "release" ||
-          existing.amount_microusd !== reservationMicrousd
-        )
-          throw new IdempotencyConflictError(
-            "Sandbox budget release conflicts with durable state",
-          );
-        return;
-      }
-      const campaign = await this.projection.campaign(campaignId);
-      if (!campaign) throw new PolicyError("campaign does not exist");
-      const reconcile: BudgetEvent = {
-        schema_version: "v1",
-        kind: "budget.event",
-        record_id: deterministicId(
-          "budget",
-          campaignId,
-          "sandbox-observed",
-          createActionId,
-        ),
-        created_at: completedAt,
-        actor: serviceActor(),
-        campaign_id: campaignId,
-        event_kind: "reconcile",
-        amount_microusd: campaign.observed_microusd + observedMicrousd,
-      };
-      const release: BudgetEvent = {
-        schema_version: "v1",
-        kind: "budget.event",
-        record_id: releaseId,
-        created_at: completedAt,
-        actor: serviceActor(),
-        campaign_id: campaignId,
-        event_kind: "release",
-        amount_microusd: reservationMicrousd,
-      };
-      await this.append(reconcile);
-      await this.append(release);
-    });
-    this.budgetQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    await operation;
   }
 
   async withInfrastructureRetryAdmission<T>(operation: () => Promise<T>): Promise<T> {
@@ -2955,6 +2252,31 @@ export class ControlService {
       () => undefined,
       () => undefined,
     );
+    return queued;
+  }
+
+  /**
+   * Serialize admission decisions that can create intents for one Run.
+   *
+   * The immutable append queue protects individual records. This queue also
+   * keeps each read-check-write admission atomic with respect to other Run
+   * mutations, including reconciler-generated publication.
+   */
+  async withRunMutationAdmission<T>(
+    runId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.runMutationQueues.get(runId) ?? Promise.resolve();
+    const queued = previous.then(operation);
+    const settled = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.runMutationQueues.set(runId, settled);
+    void settled.then(() => {
+      if (this.runMutationQueues.get(runId) === settled)
+        this.runMutationQueues.delete(runId);
+    });
     return queued;
   }
 
@@ -2973,11 +2295,7 @@ export class ControlService {
       (attempt) => attempt.attempt_id === detail.task.selected_attempt_id,
     );
     const prior = selected ?? detail.attempts.at(-1);
-    if (
-      !prior ||
-      prior.outcome !== "infrastructure" ||
-      prior.replacement_eligible !== 1
-    )
+    if (prior?.outcome !== "infrastructure" || prior.replacement_eligible !== 1)
       return null;
     return prior;
   }
@@ -3021,12 +2339,12 @@ export class ControlService {
   }
 
   async laterExecutionLaunchExists(
-    campaignId: string,
+    runId: string,
     taskId: string,
     sourceActionId: string,
   ): Promise<boolean> {
-    const detail = await this.projection.task(campaignId, taskId);
-    const actions = await this.projection.campaignActions(campaignId);
+    const detail = await this.projection.task(runId, taskId);
+    const actions = await this.projection.runActions(runId);
     for (const action of actions) {
       if (action.action_kind !== "job.launch" || action.action_id === sourceActionId)
         continue;
@@ -3053,259 +2371,282 @@ export class ControlService {
   }
 
   private async queueEligibleInfrastructureRetries(
-    campaignId: string,
-    lock: CampaignLock,
-    input: CampaignActionV1,
+    runId: string,
+    lock: RunLock,
+    input: RunActionV1,
     generation: number,
     actor: Actor,
+    idempotency: RunActionIdempotency,
   ): Promise<SubmissionResult> {
-    const expectedActionId = deterministicId(
-      "action",
-      campaignId,
-      "job.launch",
-      "eligible",
-      String(generation),
+    const parent = this.actionIntent(
+      runId,
+      "run.retry-infrastructure",
+      "run",
+      generation,
+      {
+        idempotency_key_digest: idempotency.key_digest,
+        idempotency_payload_digest: idempotency.payload_digest,
+      },
+      actor,
     );
-    const existing = await this.projection.action(expectedActionId);
-    if (existing)
-      return {
-        campaign_id: campaignId,
-        action_id: expectedActionId,
-        status_url: `/api/v1/campaigns/${campaignId}`,
-        adopted: true,
-      };
     const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
-    const deployment = this.resolvedProfile<DeploymentProfileSpec>(lock, "deployment");
-    if (deployment.route !== "hf_job")
-      throw new PolicyError("imported deployment profiles cannot launch retries");
-    const eligibleTaskIds: string[] = [];
-    for (const task of await this.projection.tasks(campaignId)) {
-      const detail = await this.projection.task(campaignId, task.task_id);
+    const eligible: Array<{
+      taskId: string;
+      attemptId: string;
+    }> = [];
+    for (const task of await this.projection.tasks(runId)) {
+      const detail = await this.projection.task(runId, task.task_id);
       if (!detail) continue;
-      const priorAttempt = this.selectedInfrastructureAttempt(detail);
-      const settlement = await this.settleClosedSandboxAmbiguities(
-        campaignId,
-        task.task_id,
-        actor,
-      );
-      const unresolved = await this.projection.pendingDispatchedSandboxCommandActions(
-        campaignId,
-        task.task_id,
-      );
+      const prior = this.selectedInfrastructureAttempt(detail);
       if (
-        !priorAttempt ||
+        !prior ||
         this.consumedInfrastructureAttempts(detail.attempts) >=
           policy.max_infrastructure_attempts ||
-        settlement.unresolved > 0 ||
-        unresolved.length > 0 ||
-        (await this.projection.retryActionForAttempt(
-          campaignId,
-          priorAttempt.attempt_id,
-        )) ||
-        (await this.laterExecutionLaunchExists(
-          campaignId,
-          task.task_id,
-          priorAttempt.action_id,
-        ))
+        (await this.projection.retryActionForAttempt(runId, prior.attempt_id)) ||
+        (await this.laterExecutionLaunchExists(runId, task.task_id, prior.action_id))
       )
         continue;
-      eligibleTaskIds.push(task.task_id);
+      const sourceRow = await this.projection.action(prior.action_id);
+      if (sourceRow?.action_kind !== "job.launch")
+        throw new PolicyError("infrastructure attempt has no physical Job launch");
+      eligible.push({
+        taskId: task.task_id,
+        attemptId: prior.attempt_id,
+      });
     }
-    if (eligibleTaskIds.length === 0)
+    if (eligible.length === 0)
       throw new PolicyError("no eligible infrastructure failures");
-    const prepared = preparationRequired(deployment)
-      ? await this.preparedJob(campaignId)
-      : null;
-    if (preparationRequired(deployment) && !prepared)
-      throw new PolicyError("campaign preparation is incomplete");
-    const maximumTasks = deployment.worker_max_tasks_per_job ?? eligibleTaskIds.length;
-    const batches = executionTaskBatches(eligibleTaskIds, maximumTasks);
-    const createdAt = this.clock.now().toISOString();
-    if (
-      !(await this.reserveJobActions(
-        campaignId,
-        batches.map((taskIds) => ({
-          category: executionReservationCategory(taskIds),
-          generation,
-          created_at: createdAt,
-          amount_microusd: policy.reservation_microusd,
-        })),
-      ))
-    )
-      throw new PolicyError("replacement Job would exceed the campaign ceiling");
-    const sandboxAuthorized = Boolean(
-      deployment.sandbox || deployment.sandbox_template,
-    );
-    const sandboxTimeout =
-      deployment.sandbox_template?.max_timeout_seconds ??
-      deployment.sandbox?.timeout_seconds;
-    let firstActionId: string | null = null;
-    for (const [index, taskIds] of batches.entries()) {
-      const intent = this.actionIntent(
-        campaignId,
-        "job.launch",
-        index === 0 ? "eligible" : `eligible-${index}`,
-        generation,
-        {
-          worker_role: "execution",
-          task_ids: taskIds,
-          job_image: deployment.job_image,
-          job_command: deployment.job_command,
-          hardware: deployment.hardware,
-          timeout_seconds: deployment.timeout_seconds,
-          success_without_worker_receipt: policy.success_without_worker_receipt,
-          max_infrastructure_attempts: policy.max_infrastructure_attempts,
-          required_positive_metrics: policy.required_positive_metrics ?? [],
-          reservation_microusd: policy.reservation_microusd,
-          trusted_worker: deployment.trusted_worker,
-          ...(deployment.route === "hf_job" &&
-          typeof deployment.active_hourly_cost_microusd === "number"
-            ? { active_hourly_cost_microusd: deployment.active_hourly_cost_microusd }
-            : {}),
-          ...(deployment.worker_revision
-            ? { worker_revision: deployment.worker_revision }
-            : {}),
-          inference_token: deployment.inference_token ?? "forbidden",
-          ...(deployment.inference_token === "required"
-            ? {
-                inference_max_requests: deployment.inference_max_requests,
-                inference_max_concurrency: deployment.inference_max_concurrency,
-                inference_timeout_seconds: deployment.inference_timeout_seconds,
-                inference_max_output_tokens: deployment.inference_max_output_tokens,
-              }
-            : {}),
-          campaign_lock_digest: sha256(canonicalJson(lock)),
-          ...(prepared ? { prepared_job_digest: sha256(canonicalJson(prepared)) } : {}),
-          ...(deployment.sandbox ? { sandbox: deployment.sandbox } : {}),
-          ...(sandboxAuthorized ? { sandbox_authorized: true } : {}),
-          ...(sandboxTimeout ? { sandbox_timeout_seconds: sandboxTimeout } : {}),
-          reason: input.reason ?? null,
-        },
-        actor,
-      );
-      await this.writeAction(intent);
-      firstActionId ??= intent.action_id;
-    }
-    if (!firstActionId) throw new PolicyError("no eligible infrastructure failures");
+    const [first, ...remaining] = eligible;
+    if (!first) throw new PolicyError("no eligible infrastructure failures");
+    const command = {
+      ...parent,
+      payload: {
+        task_ids: [first.taskId, ...remaining.map((item) => item.taskId)],
+        prior_attempt_ids: [
+          first.attemptId,
+          ...remaining.map((item) => item.attemptId),
+        ],
+        reason: input.reason ?? null,
+        reservation_microusd: policy.reservation_microusd,
+        idempotency_key_digest: idempotency.key_digest,
+        idempotency_payload_digest: idempotency.payload_digest,
+      },
+    } satisfies ActionIntent;
+    await this.writeAction(command);
     return {
-      campaign_id: campaignId,
-      action_id: firstActionId,
-      status_url: `/api/v1/campaigns/${campaignId}`,
+      run_id: runId,
+      action_id: deterministicId(
+        "action",
+        runId,
+        "job.launch",
+        first.taskId,
+        String(generation),
+      ),
+      status_url: `/api/v1/runs/${runId}`,
       adopted: false,
     };
   }
 
-  async campaignAction(
-    campaignId: string,
+  async materializeInfrastructureRetryCommand(
+    command: ActionIntent,
+  ): Promise<{ actionIds: string[]; complete: boolean }> {
+    if (command.action_kind !== "run.retry-infrastructure")
+      throw new PolicyError("bulk retry materialization requires its parent command");
+    const taskIds = stringArrayValue(command.payload.task_ids, "bulk retry task IDs");
+    const attemptIds = stringArrayValue(
+      command.payload.prior_attempt_ids,
+      "bulk retry prior attempt IDs",
+    );
+    if (taskIds.length === 0 || taskIds.length !== attemptIds.length)
+      throw new PolicyError("bulk retry command assignments are invalid");
+    const reservation = command.payload.reservation_microusd;
+    if (typeof reservation !== "number")
+      throw new PolicyError("bulk retry command has no reservation");
+    const actionIds: string[] = [];
+    for (const [index, taskId] of taskIds.entries()) {
+      const attemptId = attemptIds[index];
+      if (!attemptId) throw new PolicyError("bulk retry prior attempt is missing");
+      const attemptRow = await this.projection.attemptById(attemptId);
+      if (!attemptRow)
+        throw new PolicyError(`bulk retry attempt does not exist: ${attemptId}`);
+      const attempt = JSON.parse(attemptRow.body) as AttemptReceipt;
+      if (
+        attempt.run_id !== command.run_id ||
+        attempt.task_id !== taskId ||
+        attempt.outcome !== "infrastructure" ||
+        !attempt.replacement_eligible
+      )
+        throw new PolicyError(`bulk retry attempt is ineligible: ${attemptId}`);
+      const sourceRow = await this.projection.action(attempt.action_id);
+      if (sourceRow?.action_kind !== "job.launch")
+        throw new PolicyError("bulk retry attempt has no physical Job launch");
+      const source = JSON.parse(sourceRow.intent_body) as ActionIntent;
+      const child = this.actionIntent(
+        command.run_id,
+        "job.launch",
+        taskId,
+        command.generation,
+        {
+          ...withoutRunActionIdempotency(source.payload),
+          task_id: taskId,
+          task_ids: [taskId],
+          prior_attempt_id: attemptId,
+          reason: command.payload.reason ?? null,
+        },
+        command.actor,
+        command.created_at,
+      );
+      actionIds.push(child.action_id);
+      if (
+        !(await this.reserveReplacement(
+          command.run_id,
+          attemptId,
+          attempt.created_at,
+          reservation,
+        ))
+      )
+        return { actionIds, complete: false };
+      await this.writeAction(child);
+    }
+    return { actionIds, complete: true };
+  }
+
+  async runAction(
+    runId: string,
     raw: unknown,
     idempotencyKey: string,
     actor: Actor,
   ): Promise<SubmissionResult> {
     this.assertReady();
-    const input = validateCampaignAction<CampaignActionV1>(raw);
+    const input = validateRunAction<RunActionV1>(raw);
     if (!input.confirmed)
-      throw new ConfirmationRequiredError(
-        "campaign action requires explicit confirmation",
-      );
-    const operation = () =>
-      this.campaignActionValidated(campaignId, input, idempotencyKey, actor);
-    return input.action === "retry_infrastructure"
-      ? this.withInfrastructureRetryAdmission(operation)
-      : operation();
+      throw new ConfirmationRequiredError("run action requires explicit confirmation");
+    return this.withRunMutationAdmission(runId, () => {
+      const operation = () =>
+        this.runActionValidated(runId, input, idempotencyKey, actor);
+      return input.action === "retry_infrastructure"
+        ? this.withInfrastructureRetryAdmission(operation)
+        : operation();
+    });
   }
 
-  private async campaignActionValidated(
-    campaignId: string,
-    input: CampaignActionV1,
+  private async adoptRunAction(
+    runId: string,
+    input: RunActionV1,
+    idempotency: RunActionIdempotency,
+    actor: Actor,
+  ): Promise<SubmissionResult | null> {
+    const actions = await this.projection.runActions(runId);
+    const candidates = actions.filter((action) => {
+      const intent = JSON.parse(action.intent_body) as ActionIntent;
+      return intent.payload.idempotency_key_digest === idempotency.key_digest;
+    });
+    if (candidates.length > 1)
+      throw new IdempotencyConflictError(
+        "idempotency key has multiple durable Run actions",
+      );
+    const candidate = candidates[0];
+    if (!candidate) return null;
+
+    const recorded = JSON.parse(candidate.intent_body) as ActionIntent;
+    const sameActor = canonicalJson(recorded.actor) === canonicalJson(actor);
+    const sameRequest =
+      recorded.payload.idempotency_payload_digest === idempotency.payload_digest;
+    const sameReason = recorded.payload.reason === (input.reason ?? null);
+    const expectedKinds: Record<RunActionV1["action"], ActionIntent["action_kind"]> = {
+      cancel: "run.cancel",
+      retry_infrastructure: input.task_id ? "job.launch" : "run.retry-infrastructure",
+      publish: "publication.publish",
+      pause_endpoint: "endpoint.pause",
+      pause: "run.pause",
+      resume: "run.resume",
+      supersede: "publication.supersede",
+    };
+    const actionTypeMatches = candidate.action_kind === expectedKinds[input.action];
+    let payloadMatches = actionTypeMatches && sameReason;
+    if (input.action === "cancel")
+      payloadMatches =
+        payloadMatches && recorded.payload.task_id === (input.task_id ?? null);
+    else if (input.action === "retry_infrastructure")
+      payloadMatches =
+        payloadMatches &&
+        (input.task_id
+          ? recorded.payload.task_id === input.task_id
+          : Array.isArray(recorded.payload.task_ids) &&
+            recorded.payload.task_ids.length > 0);
+    else if (input.action === "resume")
+      payloadMatches =
+        payloadMatches &&
+        (recorded.payload.task_limit ?? null) === (input.task_limit ?? null);
+    else if (input.action === "supersede")
+      payloadMatches =
+        payloadMatches && recorded.payload.publication_id === input.publication_id;
+    else if (input.action === "publish" || input.action === "pause_endpoint")
+      payloadMatches = actionTypeMatches;
+
+    if (!sameActor || !sameRequest || !payloadMatches)
+      throw new IdempotencyConflictError(
+        `idempotency key belongs to a different ${input.action} action`,
+      );
+
+    let actionId = candidate.action_id;
+    if (input.action === "retry_infrastructure" && !input.task_id) {
+      const taskIds = stringArrayValue(
+        recorded.payload.task_ids,
+        "bulk retry task IDs",
+      );
+      const firstTaskId = taskIds[0];
+      if (!firstTaskId)
+        throw new IdempotencyConflictError("bulk retry command has no tasks");
+      actionId = deterministicId(
+        "action",
+        runId,
+        "job.launch",
+        firstTaskId,
+        String(candidate.generation),
+      );
+    }
+    return {
+      run_id: runId,
+      action_id: actionId,
+      status_url: `/api/v1/runs/${runId}`,
+      adopted: true,
+    };
+  }
+
+  private async runActionGeneration(runId: string, keyDigest: string): Promise<number> {
+    const initial = Number.parseInt(keyDigest.slice(-8), 16) % 1_000_001;
+    const used = new Set(
+      (await this.projection.runActions(runId)).map((action) => action.generation),
+    );
+    for (let offset = 0; offset <= 1_000_000; offset += 1) {
+      const generation = (initial + offset) % 1_000_001;
+      if (!used.has(generation)) return generation;
+    }
+    throw new PolicyError("Run action generation space is exhausted");
+  }
+
+  private async runActionValidated(
+    runId: string,
+    input: RunActionV1,
     idempotencyKey: string,
     actor: Actor,
   ): Promise<SubmissionResult> {
-    const campaign = await this.projection.campaign(campaignId);
-    if (!campaign) throw new PolicyError("campaign does not exist");
-    const lock = await this.projection.campaignLock(campaignId);
-    if (!lock) throw new PolicyError("campaign lock does not exist");
-    const generation =
-      Number.parseInt(sha256(idempotencyKey).slice(-8), 16) % 1_000_001;
-    if (
-      input.action === "pause" ||
-      input.action === "resume" ||
-      (input.action === "supersede" && input.publication_id)
-    ) {
-      const actionKind =
-        input.action === "pause"
-          ? "campaign.pause"
-          : input.action === "resume"
-            ? "campaign.resume"
-            : "publication.supersede";
-      const actionTarget =
-        input.action === "supersede" ? (input.publication_id as string) : "campaign";
-      const expectedActionId = deterministicId(
-        "action",
-        campaignId,
-        actionKind,
-        actionTarget,
-        String(generation),
-      );
-      const existing = await this.projection.action(expectedActionId);
-      if (existing) {
-        const recorded = JSON.parse(existing.intent_body) as ActionIntent;
-        const expectedPayload: ActionIntent["payload"] =
-          input.action === "pause"
-            ? { reason: input.reason ?? null }
-            : input.action === "resume"
-              ? {
-                  reason: input.reason ?? null,
-                  ...(input.task_limit ? { task_limit: input.task_limit } : {}),
-                }
-              : {
-                  publication_id: actionTarget,
-                  reason: input.reason ?? null,
-                };
-        if (
-          recorded.action_kind !== actionKind ||
-          recorded.target !== actionTarget ||
-          canonicalJson(recorded.payload) !== canonicalJson(expectedPayload)
-        )
-          throw new IdempotencyConflictError(
-            `idempotency key belongs to a different ${input.action} action`,
-          );
-        return {
-          campaign_id: campaignId,
-          action_id: expectedActionId,
-          status_url: `/api/v1/campaigns/${campaignId}`,
-          adopted: true,
-        };
-      }
-    }
-    if (input.action === "retry_infrastructure" && input.task_id) {
-      const expectedActionId = deterministicId(
-        "action",
-        campaignId,
-        "job.launch",
-        input.task_id,
-        String(generation),
-      );
-      const existing = await this.projection.action(expectedActionId);
-      if (existing) {
-        const recorded = JSON.parse(existing.intent_body) as ActionIntent;
-        if (
-          recorded.action_kind !== "job.launch" ||
-          recorded.target !== input.task_id ||
-          recorded.payload.reason !== (input.reason ?? null)
-        )
-          throw new IdempotencyConflictError(
-            "idempotency key belongs to a different infrastructure retry",
-          );
-        return {
-          campaign_id: campaignId,
-          action_id: expectedActionId,
-          status_url: `/api/v1/campaigns/${campaignId}`,
-          adopted: true,
-        };
-      }
-    }
+    const run = await this.projection.run(runId);
+    if (!run) throw new PolicyError("run does not exist");
+    const lock = await this.projection.runLock(runId);
+    if (!lock) throw new PolicyError("run lock does not exist");
+    if (!idempotencyKey || idempotencyKey.length > 256)
+      throw new IdempotencyConflictError("a bounded idempotency key is required");
+    const idempotency = {
+      key_digest: sha256(idempotencyKey),
+      payload_digest: sha256(canonicalJson(input)),
+    };
+    const existingAction = await this.adoptRunAction(runId, input, idempotency, actor);
+    if (existingAction) return existingAction;
+    const generation = await this.runActionGeneration(runId, idempotency.key_digest);
     let kind: ActionIntent["action_kind"];
-    let target = input.task_id ?? "campaign";
+    let target = input.task_id ?? "run";
     let payload: ActionIntent["payload"];
     let retryReservation: {
       attemptId: string;
@@ -3313,91 +2654,127 @@ export class ControlService {
       amountMicrousd: number;
     } | null = null;
     if (input.action === "cancel") {
-      const taskIds = input.task_id
-        ? [input.task_id]
-        : lock.tasks.map((task) => task.task_id);
-      for (const taskId of taskIds)
-        await this.settleClosedSandboxAmbiguities(campaignId, taskId, actor);
-      kind = "campaign.cancel";
+      if (runStatusIsTerminal(run.status))
+        throw new PolicyError("terminal run cannot be cancelled");
+      if (
+        run.status === "publishing" ||
+        (await this.projection.runActions(runId)).some((action) =>
+          action.action_kind.startsWith("publication."),
+        )
+      )
+        throw new PolicyError("run cannot be cancelled after publication starts");
+      if (input.task_id) {
+        const task = await this.projection.task(runId, input.task_id);
+        if (!task) throw new PolicyError("cancellation task does not exist");
+        if (task.task.terminal_outcome)
+          throw new PolicyError("terminal task cannot be cancelled");
+      }
+      kind = "run.cancel";
       payload = { task_id: input.task_id ?? null, reason: input.reason ?? null };
     } else if (input.action === "pause") {
-      if (campaign.status === "completed" || campaign.status === "failed")
-        throw new PolicyError("terminal campaign cannot be paused");
-      kind = "campaign.pause";
+      if (runStatusIsTerminal(run.status))
+        throw new PolicyError("terminal run cannot be paused");
+      kind = "run.pause";
       payload = { reason: input.reason ?? null };
     } else if (input.action === "resume") {
-      if (!campaign.paused) throw new PolicyError("campaign is not paused");
-      if (campaign.pending_actions > 0)
-        throw new PolicyError("campaign cannot resume while actions are pending");
-      await this.reconcileTerminalJobReservations(campaignId);
+      if (!run.paused) throw new PolicyError("run is not paused");
+      if (run.pending_actions > 0)
+        throw new PolicyError("run cannot resume while actions are pending");
+      await this.reconcileTerminalJobReservations(runId);
       const deployment = profileSpec<DeploymentProfileSpec>(
         lock.profiles,
         "deployment",
       );
       if (deployment.route !== "hf_job")
-        throw new PolicyError("imported campaigns cannot resume execution Jobs");
-      if (preparationRequired(deployment)) {
-        const prepared = await this.preparedJob(campaignId);
-        if (!prepared) throw new PolicyError("campaign preparation is incomplete");
-      }
-      const unresolvedTasks = (await this.projection.tasks(campaignId)).filter(
+        throw new PolicyError("imported runs cannot resume execution Jobs");
+      const needsPreparation =
+        preparationRequired(deployment) && !(await this.preparedJob(runId));
+      const unresolvedTasks = (await this.projection.tasks(runId)).filter(
         (task) => !task.terminal_outcome,
       );
       const unresolvedTaskIds = (
         input.task_limit ? unresolvedTasks.slice(0, input.task_limit) : unresolvedTasks
       ).map((task) => task.task_id);
       if (unresolvedTaskIds.length === 0)
-        throw new PolicyError("campaign has no unresolved tasks to resume");
-      const maximumTasks =
-        deployment.worker_max_tasks_per_job ?? unresolvedTaskIds.length;
+        throw new PolicyError("run has no unresolved tasks to resume");
       const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
       const reservationCreatedAt = this.clock.now().toISOString();
-      const reserved = await this.reserveJobActions(
-        campaignId,
-        executionTaskBatches(unresolvedTaskIds, maximumTasks).map((taskIds) => ({
-          category: executionReservationCategory(taskIds),
+      let reservations: JobBudgetReservation[];
+      if (needsPreparation) {
+        const preparationLaunches = (await this.projection.runActions(runId)).filter(
+          (action) => {
+            if (action.action_kind !== "job.launch") return false;
+            const launch = JSON.parse(action.intent_body) as ActionIntent;
+            return launch.payload.worker_role === "preparation";
+          },
+        );
+        const preparationGeneration =
+          preparationLaunches.reduce(
+            (maximum, action) => Math.max(maximum, action.generation),
+            -1,
+          ) + 1;
+        reservations = [
+          {
+            category: "preparation",
+            generation: preparationGeneration,
+            created_at: reservationCreatedAt,
+            amount_microusd: policy.preparation_reservation_microusd ?? 0,
+          },
+        ];
+      } else {
+        const freshTaskIds: string[] = [];
+        for (const taskId of unresolvedTaskIds) {
+          const detail = await this.projection.task(runId, taskId);
+          if (!detail || detail.attempts.length === 0) freshTaskIds.push(taskId);
+        }
+        reservations = freshTaskIds.map((taskId) => ({
+          category: executionReservationCategory([taskId]),
           generation,
           created_at: reservationCreatedAt,
           amount_microusd: policy.reservation_microusd,
-        })),
-      );
+        }));
+      }
+      const reserved = await this.reserveJobActions(runId, reservations);
       if (!reserved)
-        throw new PolicyError("resumed execution would exceed the campaign ceiling");
-      kind = "campaign.resume";
+        throw new PolicyError("resumed execution would exceed the run ceiling");
+      kind = "run.resume";
       payload = {
         reason: input.reason ?? null,
         ...(input.task_limit ? { task_limit: input.task_limit } : {}),
+        task_ids: unresolvedTaskIds,
       };
     } else if (input.action === "publish") {
+      if (run.budget_exceeded)
+        throw new PolicyError("run cannot publish after exceeding its budget");
       if (
-        campaign.terminal_tasks !== campaign.total_tasks ||
-        campaign.admissible_tasks !== campaign.total_tasks ||
-        campaign.exhausted_tasks > 0
+        run.terminal_tasks !== run.total_tasks ||
+        run.admissible_tasks !== run.total_tasks ||
+        run.exhausted_tasks > 0
       )
         throw new PolicyError(
-          "campaign cannot publish before every task has an admissible selection",
+          "run cannot publish before every task has an admissible selection",
         );
-      if (campaign.pending_actions > 0 || campaign.cleanup_pending)
+      if (run.pending_actions > 0 || run.cleanup_pending)
         throw new PolicyError(
-          "campaign cannot publish while actions or endpoint cleanup are pending",
+          "run cannot publish while actions or endpoint cleanup are pending",
         );
-      if (await this.projection.campaignPublication(campaignId))
-        throw new PolicyError("campaign is already published");
+      if (await this.projection.runPublication(runId))
+        throw new PolicyError("run is already published");
       kind = "publication.publish";
       target = "results";
       payload = {};
     } else if (input.action === "supersede") {
       if (!input.publication_id)
         throw new PolicyError("supersession requires the old publication ID");
-      const current = await this.projection.campaignPublication(campaignId);
+      const current = await this.projection.runPublication(runId);
       if (current?.status !== "published")
-        throw new PolicyError("replacement campaign is not published");
+        throw new PolicyError("replacement run is not published");
       const previous = await this.projection.publication(input.publication_id);
       if (previous?.status !== "published")
         throw new PolicyError("superseded publication does not exist");
       if (await this.projection.publicationSupersession(input.publication_id))
         throw new PolicyError("publication is already superseded");
-      if (previous.campaign_id === campaignId)
+      if (previous.run_id === runId)
         throw new PolicyError("publication cannot supersede itself");
       kind = "publication.supersede";
       target = input.publication_id;
@@ -3407,11 +2784,11 @@ export class ControlService {
       };
     } else if (input.action === "pause_endpoint") {
       const endpoints = (await this.projection.endpoints()).filter(
-        (endpoint) => endpoint.campaign_id === campaignId && !endpoint.cleanup_verified,
+        (endpoint) => endpoint.run_id === runId && !endpoint.cleanup_verified,
       );
       if (endpoints.length !== 1)
         throw new PolicyError(
-          `expected one active campaign endpoint, found ${endpoints.length}`,
+          `expected one active run endpoint, found ${endpoints.length}`,
         );
       const endpoint = endpoints[0];
       if (!endpoint) throw new PolicyError("active endpoint disappeared");
@@ -3421,13 +2798,14 @@ export class ControlService {
     } else {
       if (!input.task_id)
         return this.queueEligibleInfrastructureRetries(
-          campaignId,
+          runId,
           lock,
           input,
           generation,
           actor,
+          idempotency,
         );
-      const task = await this.projection.task(campaignId, input.task_id);
+      const task = await this.projection.task(runId, input.task_id);
       if (!task) throw new PolicyError("retry task does not exist");
       if (!infrastructureSealReplaceable(task.task.terminal_outcome))
         throw new PolicyError("terminal tasks cannot be retried");
@@ -3437,13 +2815,13 @@ export class ControlService {
           "infrastructure retry requires an eligible infrastructure failure",
         );
       const existingRetry = await this.projection.retryActionForAttempt(
-        campaignId,
+        runId,
         priorAttempt.attempt_id,
       );
       if (
         existingRetry ||
         (await this.laterExecutionLaunchExists(
-          campaignId,
+          runId,
           input.task_id,
           priorAttempt.action_id,
         ))
@@ -3466,84 +2844,39 @@ export class ControlService {
         completedAt: priorAttempt.created_at,
         amountMicrousd: policy.reservation_microusd,
       };
-      const prepared = preparationRequired(deployment)
-        ? await this.preparedJob(campaignId)
-        : null;
-      if (preparationRequired(deployment) && !prepared)
-        throw new PolicyError("campaign preparation is incomplete");
-      const settlement = await this.settleClosedSandboxAmbiguities(
-        campaignId,
-        input.task_id,
-        actor,
-      );
-      const unresolved = await this.projection.pendingDispatchedSandboxCommandActions(
-        campaignId,
-        input.task_id,
-      );
-      if (settlement.unresolved > 0 || unresolved.length > 0)
-        throw new PolicyError(
-          "infrastructure retry requires terminal Sandbox I/O action recovery",
-        );
-      const sandboxAuthorized = Boolean(
-        deployment.sandbox || deployment.sandbox_template,
-      );
-      const sandboxTimeout =
-        deployment.sandbox_template?.max_timeout_seconds ??
-        deployment.sandbox?.timeout_seconds;
+      const sourceRow = await this.projection.action(priorAttempt.action_id);
+      if (sourceRow?.action_kind !== "job.launch")
+        throw new PolicyError("infrastructure attempt has no physical Job launch");
+      const source = JSON.parse(sourceRow.intent_body) as ActionIntent;
       kind = "job.launch";
       payload = {
-        worker_role: "execution",
+        ...withoutRunActionIdempotency(source.payload),
+        task_id: input.task_id,
         task_ids: [input.task_id],
-        job_image: deployment.job_image,
-        job_command: deployment.job_command,
-        hardware: deployment.hardware,
-        timeout_seconds: deployment.timeout_seconds,
-        success_without_worker_receipt: policy.success_without_worker_receipt,
-        max_infrastructure_attempts: policy.max_infrastructure_attempts,
-        required_positive_metrics: policy.required_positive_metrics ?? [],
-        reservation_microusd: policy.reservation_microusd,
-        trusted_worker: deployment.trusted_worker,
-        ...(deployment.route === "hf_job" &&
-        typeof deployment.active_hourly_cost_microusd === "number"
-          ? { active_hourly_cost_microusd: deployment.active_hourly_cost_microusd }
-          : {}),
-        ...(deployment.worker_revision
-          ? { worker_revision: deployment.worker_revision }
-          : {}),
-        inference_token: deployment.inference_token ?? "forbidden",
-        ...(deployment.inference_token === "required"
-          ? {
-              inference_max_requests: deployment.inference_max_requests,
-              inference_max_concurrency: deployment.inference_max_concurrency,
-              inference_timeout_seconds: deployment.inference_timeout_seconds,
-              inference_max_output_tokens: deployment.inference_max_output_tokens,
-            }
-          : {}),
-        campaign_lock_digest: sha256(canonicalJson(lock)),
-        ...(prepared ? { prepared_job_digest: sha256(canonicalJson(prepared)) } : {}),
-        ...(deployment.sandbox ? { sandbox: deployment.sandbox } : {}),
-        ...(sandboxAuthorized ? { sandbox_authorized: true } : {}),
-        ...(sandboxTimeout ? { sandbox_timeout_seconds: sandboxTimeout } : {}),
         reason: input.reason ?? null,
         prior_attempt_id: priorAttempt.attempt_id,
       };
     }
+    payload = {
+      ...payload,
+      idempotency_key_digest: idempotency.key_digest,
+      idempotency_payload_digest: idempotency.payload_digest,
+    };
     if (
       retryReservation &&
       !(await this.reserveReplacement(
-        campaignId,
+        runId,
         retryReservation.attemptId,
         retryReservation.completedAt,
         retryReservation.amountMicrousd,
       ))
     )
-      throw new PolicyError("replacement Job would exceed the campaign ceiling");
+      throw new PolicyError("replacement Job would exceed the run ceiling");
     let actionTimestamp = this.clock.now().toISOString();
-    if (kind === "campaign.pause" || kind === "campaign.resume") {
-      const latestLifecycle = (await this.projection.campaignActions(campaignId)).find(
+    if (kind === "run.pause" || kind === "run.resume") {
+      const latestLifecycle = (await this.projection.runActions(runId)).find(
         (action) =>
-          action.action_kind === "campaign.pause" ||
-          action.action_kind === "campaign.resume",
+          action.action_kind === "run.pause" || action.action_kind === "run.resume",
       );
       if (
         latestLifecycle &&
@@ -3554,7 +2887,7 @@ export class ControlService {
         ).toISOString();
     }
     const intent = this.actionIntent(
-      campaignId,
+      runId,
       kind,
       target,
       generation,
@@ -3565,14 +2898,40 @@ export class ControlService {
     const adopted = Boolean(await this.projection.action(intent.action_id));
     await this.writeAction(intent);
     return {
-      campaign_id: campaignId,
+      run_id: runId,
       action_id: intent.action_id,
-      status_url: `/api/v1/campaigns/${campaignId}`,
+      status_url: `/api/v1/runs/${runId}`,
       adopted,
     };
   }
 
-  resolvedProfile<T>(lock: CampaignLock, kind: ResolvedProfile["kind"]): T {
+  async admitAutomaticPublication(runId: string): Promise<boolean> {
+    return this.withRunMutationAdmission(runId, async () => {
+      const run = await this.projection.run(runId);
+      if (
+        !run ||
+        run.total_tasks === 0 ||
+        run.terminal_tasks !== run.total_tasks ||
+        run.admissible_tasks !== run.total_tasks ||
+        run.exhausted_tasks > 0 ||
+        run.pending_actions > 0 ||
+        run.cleanup_pending ||
+        run.budget_exceeded ||
+        run.cancellation_requested
+      )
+        return false;
+      if (await this.projection.runPublication(runId)) return false;
+      if (await this.projection.hasRunAction(runId, "run.cancel")) return false;
+      if (await this.projection.hasRunAction(runId, "publication.publish"))
+        return false;
+      await this.writeAction(
+        this.actionIntent(runId, "publication.publish", "results", 0, {}),
+      );
+      return true;
+    });
+  }
+
+  resolvedProfile<T>(lock: RunLock, kind: ResolvedProfile["kind"]): T {
     return profileSpec<T>(lock.profiles, kind);
   }
 

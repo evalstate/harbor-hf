@@ -10,6 +10,7 @@ function system(writeMode: "disabled" | "enabled" = "enabled") {
   return {
     source_revision: "test-revision-0123456789abcdef",
     write_mode: writeMode,
+    initialization: { ready: true, status: "ready" },
     projection: {
       ready: true,
       rebuilding: false,
@@ -50,7 +51,7 @@ test("shows the operational overview on desktop and mobile", async ({ page }) =>
     route.fulfill({ json: session }),
   );
   await page.route("**/api/v1/system", (route) => route.fulfill({ json: system() }));
-  await page.route("**/api/v1/campaigns", (route) =>
+  await page.route("**/api/v1/runs", (route) =>
     route.fulfill({ json: { items: [], next_cursor: null } }),
   );
   await page.route("**/api/v1/endpoints", (route) =>
@@ -71,14 +72,14 @@ test("shows the operational overview on desktop and mobile", async ({ page }) =>
   ).toBe(true);
 });
 
-test("disables campaign launch and omits account details", async ({ page }) => {
+test("disables run launch and omits account details", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),
   );
   await page.route("**/api/v1/system", (route) =>
     route.fulfill({ json: system("disabled") }),
   );
-  await page.route("**/api/v1/campaigns", (route) =>
+  await page.route("**/api/v1/runs", (route) =>
     route.fulfill({ json: { items: [], next_cursor: null } }),
   );
   await page.route("**/api/v1/events", (route) => route.abort());
@@ -97,7 +98,7 @@ test("requires confirmation before starting a run", async ({ page }) => {
   await page.route("**/api/v1/system", (route) =>
     route.fulfill({ json: system("enabled") }),
   );
-  await page.route("**/api/v1/campaigns", (route) =>
+  await page.route("**/api/v1/runs", (route) =>
     route.fulfill({ json: { items: [], next_cursor: null } }),
   );
   await page.route("**/api/v1/profiles**", (route) =>
@@ -152,7 +153,7 @@ test("requires confirmation before starting a run", async ({ page }) => {
             spec: {
               models: ["gpt-oss-20b"],
               harnesses: ["opencode"],
-              sandbox_template: {
+              trial_job_template: {
                 inference_upstream: "https://router.huggingface.co/v1",
               },
             },
@@ -190,7 +191,7 @@ test("requires confirmation before starting a run", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("shows campaign failures as errors rather than missing data", async ({ page }) => {
+test("shows run failures as errors rather than missing data", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),
   );
@@ -205,17 +206,15 @@ test("shows campaign failures as errors rather than missing data", async ({ page
       },
     },
   };
-  await page.route("**/api/v1/campaigns/campaign-error", (route) =>
+  await page.route("**/api/v1/runs/run-error", (route) => route.fulfill(forbidden));
+  await page.route("**/api/v1/runs/run-error/capacity", (route) =>
     route.fulfill(forbidden),
   );
-  await page.route("**/api/v1/campaigns/campaign-error/capacity", (route) =>
-    route.fulfill(forbidden),
-  );
-  await page.route("**/api/v1/campaigns/campaign-error/tasks**", (route) =>
+  await page.route("**/api/v1/runs/run-error/tasks**", (route) =>
     route.fulfill({ json: { items: [], next_cursor: null } }),
   );
   await page.route("**/api/v1/events", (route) => route.abort());
-  await page.goto("/campaigns/campaign-error");
+  await page.goto("/runs/run-error");
   await expect(page.getByText("Forbidden")).toBeVisible();
   await expect(page.getByText(/browser-request-id/)).toBeVisible();
   await expect(page.getByText("Run not found")).toHaveCount(0);
@@ -241,7 +240,7 @@ test("shows the official leaderboard table and cost-score plot", async ({ page }
             rank: 1,
             pareto: true,
             configuration_digest: "sha256:strong",
-            campaign_id: "run-strong",
+            run_id: "run-strong",
             publication_id: "publication-strong",
             published_at: "2026-08-21T00:00:00.000Z",
             benchmark: "terminal-bench-2-1",
@@ -289,10 +288,10 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
   await page.route("**/api/v1/system", (route) =>
     route.fulfill({ json: system("enabled") }),
   );
-  await page.route("**/api/v1/campaigns/run-table", (route) =>
+  await page.route("**/api/v1/runs/run-table", (route) =>
     route.fulfill({
       json: {
-        campaign_id: "run-table",
+        run_id: "run-table",
         created_at: "2026-08-24T00:00:00.000Z",
         status: "active",
         ceiling_microusd: 1_000_000,
@@ -314,11 +313,11 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
       },
     }),
   );
-  await page.route("**/api/v1/campaigns/run-table/capacity", (route) =>
+  await page.route("**/api/v1/runs/run-table/capacity", (route) =>
     route.fulfill({
       json: {
-        campaign_active: 4,
-        campaign_limit: 16,
+        run_active: 4,
+        run_limit: 16,
         namespace_active: 4,
         namespace_limit: 128,
         provider_reserved: 4,
@@ -331,12 +330,14 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
       },
     }),
   );
-  await page.route("**/api/v1/campaigns/run-table/tasks**", (route) =>
-    route.fulfill({
+  let taskRequests = 0;
+  await page.route("**/api/v1/runs/run-table/tasks**", (route) => {
+    taskRequests += 1;
+    return route.fulfill({
       json: {
-        items: Array.from({ length: 30 }, (_, index) => ({
-          campaign_id: "run-table",
-          task_id: `task-${String(index + 1).padStart(2, "0")}`,
+        items: Array.from({ length: 125 }, (_, index) => ({
+          run_id: "run-table",
+          task_id: `task-${String(index + 1).padStart(3, "0")}`,
           terminal_outcome:
             index === 0 ? "complete" : index === 1 ? "infrastructure" : null,
           selected_attempt_id: index < 2 ? `attempt-${index + 1}` : null,
@@ -344,14 +345,15 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
         })),
         next_cursor: null,
       },
-    }),
-  );
+    });
+  });
+  let jobRequests = 0;
   await page.route("**/api/v1/jobs**", (route) => {
-    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    jobRequests += 1;
     const jobs = [
       {
         action_id: "action-job-1",
-        campaign_id: "run-table",
+        run_id: "run-table",
         action_kind: "job.observe",
         generation: 2,
         target: "job-one",
@@ -365,7 +367,7 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
       },
       {
         action_id: "action-job-2",
-        campaign_id: "run-table",
+        run_id: "run-table",
         action_kind: "job.observe",
         generation: 3,
         target: "job-two",
@@ -379,21 +381,25 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
       },
     ];
     return route.fulfill({
-      json: cursor
-        ? { items: [jobs[1]], next_cursor: null }
-        : { items: [jobs[0]], next_cursor: "page-2" },
+      json: { items: jobs, next_cursor: null },
     });
   });
   await page.route("**/api/v1/events", (route) => route.abort());
 
   await page.goto("/runs/run-table");
+  await expect(page.getByText("task-125")).toBeAttached();
+  await expect(page.getByRole("navigation", { name: "Collection pages" })).toHaveCount(
+    0,
+  );
+  expect(taskRequests).toBe(1);
+  expect(jobRequests).toBe(1);
   await expect(page.getByRole("heading", { name: "Physical HF Jobs" })).toBeVisible();
   await expect(page.getByText("2 Jobs recorded, 1 active.")).toBeVisible();
   await page.getByLabel("Filter observed state").fill("error");
   await expect(page.getByText("1 of 2 rows")).toBeVisible();
   await expect(page.getByText("Running", { exact: true })).toHaveCount(0);
 
-  await page.getByText("Observed", { exact: true }).hover();
+  await page.getByRole("button", { name: "Observed" }).focus();
   await expect(page.getByRole("tooltip")).toBeVisible();
   await expect(page.getByRole("tooltip")).toHaveCSS("opacity", "1");
   await expect(page.getByRole("tooltip")).toContainText("Latest Hub stage");

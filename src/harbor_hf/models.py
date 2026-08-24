@@ -425,7 +425,7 @@ class ServingProfileBinding(StrictModel):
     sample_tasks_sha256: ContentDigest
 
 
-class CampaignControllerSpec(StrictModel):
+class RunControllerSpec(StrictModel):
     planning_trial_seconds: int = Field(ge=1)
     headroom_factor: Decimal = Field(ge=Decimal("1.0"))
     wave_reserve_seconds: int = Field(ge=1)
@@ -442,7 +442,7 @@ class CampaignControllerSpec(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def staleness_covers_three_heartbeats(self) -> CampaignControllerSpec:
+    def staleness_covers_three_heartbeats(self) -> RunControllerSpec:
         if self.stale_after_seconds < 3 * self.heartbeat_seconds:
             raise ValueError(
                 "controller stale_after_seconds must cover at least three heartbeats"
@@ -471,7 +471,7 @@ class ExecutionSpec(StrictModel):
     serving_profile: ServingProfileBinding | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    controller: CampaignControllerSpec | None = Field(
+    controller: RunControllerSpec | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -526,7 +526,7 @@ class PublishingSpec(StrictModel):
             )
         if (self.role == "component") != (self.component_kind is not None):
             raise ValueError(
-                "publishing.component_kind is required only for component runs"
+                "publishing.component_kind is required only for component executions"
             )
         return self
 
@@ -730,7 +730,7 @@ def resolved_judge_required_tasks(benchmark: BenchmarkSpec) -> list[str]:
 def _validate_remote_input_pins(spec: ExperimentSpec) -> None:
     if spec.artifacts.trial_evidence is None:
         raise ValueError(
-            "remote benchmark runs require an artifacts.trial_evidence policy"
+            "remote benchmark executions require an artifacts.trial_evidence policy"
         )
     if spec.benchmark.source is None:
         pinned_harbor_dataset_reference(

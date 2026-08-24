@@ -1,15 +1,11 @@
-import type {
-  AttemptReceipt,
-  CampaignLock,
-  LaunchPolicySpec,
-} from "@harbor-hf/contracts";
+import type { AttemptReceipt, RunLock, LaunchPolicySpec } from "@harbor-hf/contracts";
 
 export interface AttemptAdmissibility {
   admissible: boolean;
   reason: string | null;
 }
 
-export function requiredPositiveMetrics(lock: CampaignLock): readonly string[] {
+export function requiredPositiveMetrics(lock: RunLock): readonly string[] {
   const policy = lock.profiles.find((profile) => profile.kind === "launch_policy")
     ?.spec as LaunchPolicySpec | undefined;
   if (policy?.required_positive_metrics) return policy.required_positive_metrics;

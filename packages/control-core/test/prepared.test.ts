@@ -2,7 +2,6 @@ import type {
   ActionIntent,
   ProfileObject,
   ProfilePromotion,
-  SandboxPolicy,
 } from "@harbor-hf/contracts";
 import { canonicalJson, deterministicId, sha256 } from "@harbor-hf/contracts";
 import {
@@ -36,13 +35,13 @@ afterEach(async () => {
   }
 });
 
-async function setup() {
+async function setup(taskCount = 1) {
   const root = await mkdtemp(join(tmpdir(), "hhf-prepared-"));
   const bucket = join(root, "bucket");
   await mkdir(bucket);
   const store = new FilesystemObjectStore(bucket);
   const projection = await Projection.open(join(root, "projection.sqlite"));
-  const profiles = preparedProfiles();
+  const profiles = preparedProfiles(taskCount);
   const service = new Service("test", store, projection, profiles);
   await projection.rebuild(store);
   await service.initialize(profiles);
@@ -54,8 +53,8 @@ async function configureCapacity(service: Service): Promise<void> {
   const createdAt = "2026-08-22T00:00:00.000Z";
   const spec = {
     namespace: "test",
-    max_active_sandboxes: 2,
-    hardware_limits: [{ hardware: "cpu-basic", max_active_sandboxes: 1 }],
+    max_active_jobs: 2,
+    hardware_limits: [{ hardware: "cpu-basic", max_active_jobs: 1 }],
     start_burst: 2,
     start_refill_tokens: 1,
     start_refill_period_seconds: 60,
@@ -94,7 +93,7 @@ async function configureCapacity(service: Service): Promise<void> {
   service.configureCapacityProfile("current");
 }
 
-async function campaign(service: Service, idempotencyKey = "prepared-campaign") {
+async function run(service: Service, idempotencyKey = "prepared-run") {
   const submitted = await service.submit(
     {
       benchmark: "prepared-benchmark",
@@ -108,12 +107,12 @@ async function campaign(service: Service, idempotencyKey = "prepared-campaign") 
     idempotencyKey,
     { subject: "operator", role: "operator" },
   );
-  const lock = await service.projection.campaignLock(submitted.campaign_id);
-  if (!lock) throw new Error("campaign lock is missing");
+  const lock = await service.projection.runLock(submitted.run_id);
+  if (!lock) throw new Error("run lock is missing");
   const launch = service.actionIntent(
-    submitted.campaign_id,
+    submitted.run_id,
     "job.launch",
-    "campaign-preparation",
+    "run-preparation",
     0,
     {
       worker_role: "preparation",
@@ -125,11 +124,11 @@ async function campaign(service: Service, idempotencyKey = "prepared-campaign") 
       timeout_seconds: 600,
       trusted_worker: true,
       inference_token: "forbidden",
-      campaign_lock_digest: sha256(canonicalJson(lock)),
+      run_lock_digest: sha256(canonicalJson(lock)),
     },
   );
   await service.writeAction(launch);
-  return { campaignId: submitted.campaign_id, lock, launch };
+  return { runId: submitted.run_id, lock, launch };
 }
 
 class PreparationActions implements ExternalActionPort {
@@ -139,7 +138,7 @@ class PreparationActions implements ExternalActionPort {
 
   async execute(intent: ActionIntent): Promise<ExternalActionResult> {
     this.intents.push(intent);
-    if (intent.action_kind === "campaign.admit")
+    if (intent.action_kind === "run.admit")
       return { outcome: "completed", observed_state: "admitted" };
     if (intent.action_kind === "job.launch")
       return {
@@ -162,20 +161,24 @@ class PreparationActions implements ExternalActionPort {
   }
 }
 
-function trialPayload(inputDigest: string) {
+function trialPayload(
+  inputDigest: string,
+  taskId = "task-001-trial-1",
+  sourceTaskId = "task-001",
+) {
   return {
     phase: "trial",
-    task_id: "task-001-trial-1",
-    source_task_id: "task-001",
+    task_id: taskId,
+    source_task_id: sourceTaskId,
     trial_index: 1,
     input_digest: inputDigest,
     trial_lock: {
       schema_version: 2,
       task: {
-        name: "task-001",
+        name: sourceTaskId,
         type: "git",
         digest: inputDigest,
-        path: "tasks/task-001",
+        path: `tasks/${sourceTaskId}`,
         git_url: "https://github.com/example/tasks.git",
         git_commit_id: "a".repeat(40),
       },
@@ -184,17 +187,21 @@ function trialPayload(inputDigest: string) {
         model_name: "openai/example/model:provider",
       },
       environment: {
-        import_path:
-          "harbor_hf_agents.support.control_sandbox_environment:ControlSandboxEnvironment",
+        import_path: "example.environment:Environment",
         delete: true,
         kwargs: {
-          control_task_id: "task-001-trial-1",
+          control_task_id: taskId,
           control_max_command_seconds: 900,
           control_keepalive_seconds: 300,
+          control_max_transfer_bytes: 1_073_741_824,
+          control_max_transfer_file_bytes: 536_870_912,
+          control_max_transfer_files: 10_000,
+          control_max_transfer_path_depth: 32,
         },
       },
       verifier: { disable: false },
     },
+    trial_lock_digest: `sha256:${"c".repeat(64)}`,
     declared_image: "python:3.12",
     image: `library/python@sha256:${"b".repeat(64)}`,
     cpus: 1,
@@ -243,83 +250,75 @@ async function settle(reconciler: Reconciler, rounds: number): Promise<void> {
 }
 
 describe("prepared Harbor jobs", () => {
-  it("reports hardware capacity before a queued campaign gets a Sandbox", async () => {
+  it("reports hardware capacity before a queued run gets a Job", async () => {
     const { service } = await setup();
     await configureCapacity(service);
-    const first = await campaign(service, "hardware-view-first");
-    const queued = await campaign(service, "hardware-view-queued");
-    const policy: SandboxPolicy = {
-      image: `registry.example/sandbox@sha256:${"d".repeat(64)}`,
-      hardware: "cpu-basic",
-      timeout_seconds: 3_600,
-      idle_timeout_seconds: 600,
-      inference_token: "forbidden",
-      reservation_microusd: 100,
-      active_hourly_cost_microusd: 10_000,
-      max_sandboxes: 2,
-      max_commands: 128,
-      max_command_seconds: 3_600,
-      max_transfer_bytes: 67_108_864,
-      allowed_roots: ["/app", "/logs", "/tmp"],
-    };
-    const create = (campaignId: string) =>
-      service.actionIntent(campaignId, "sandbox.create", "task-001-trial-1", 0, {
+    const first = await run(service, "hardware-view-first");
+    const queued = await run(service, "hardware-view-queued");
+    const launch = (runId: string) =>
+      service.actionIntent(runId, "job.launch", "task-001-trial-1", 0, {
+        worker_role: "execution",
         task_id: "task-001-trial-1",
-        sandbox: policy,
+        task_ids: ["task-001-trial-1"],
+        hardware: "cpu-basic",
+        max_jobs: 2,
       });
-    const firstIntent = create(first.campaignId);
-    const queuedIntent = create(queued.campaignId);
+    const firstIntent = launch(first.runId);
+    const queuedIntent = launch(queued.runId);
 
-    await expect(service.admitSandboxCreate(firstIntent, 2)).resolves.toEqual(
+    await expect(service.admitJobLaunch(firstIntent)).resolves.toEqual(
       expect.objectContaining({ status: "admitted" }),
     );
-    await expect(service.admitSandboxCreate(queuedIntent, 2)).resolves.toEqual(
+    await expect(service.admitJobLaunch(queuedIntent)).resolves.toEqual(
       expect.objectContaining({
         status: "deferred",
-        limiting_factor: "hardware_sandbox_capacity",
+        limiting_factor: "hardware_job_capacity",
       }),
     );
 
-    await expect(service.sandboxCapacityView(queued.campaignId)).resolves.toEqual(
+    await expect(service.jobCapacityView(queued.runId)).resolves.toEqual(
       expect.objectContaining({
         hardware_limit: 1,
         hardware_active: 1,
-        limiting_factor: "hardware_sandbox_capacity",
+        limiting_factor: "hardware_job_capacity",
       }),
     );
   });
 
   it("stores one exact immutable Harbor lock before execution", async () => {
     const { service } = await setup();
-    const { campaignId, lock, launch } = await campaign(service);
+    const { runId, lock, launch } = await run(service);
     const task = lock.tasks[0];
-    if (!task) throw new Error("campaign task is missing");
+    if (!task) throw new Error("run task is missing");
 
     const trial = await service.submitPreparedJob(
-      campaignId,
+      runId,
       launch.action_id,
       trialPayload(task.input_digest),
     );
     expect(trial).toMatchObject({ phase: "trial", adopted: false });
     await expect(
       service.submitPreparedJob(
-        campaignId,
+        runId,
         launch.action_id,
         trialPayload(task.input_digest),
       ),
     ).resolves.toMatchObject({ adopted: true });
 
     const finalized = await service.submitPreparedJob(
-      campaignId,
+      runId,
       launch.action_id,
       finalizePayload(lock.created_at),
     );
     expect(finalized).toMatchObject({ phase: "finalize", adopted: false });
-    const prepared = await service.preparedJob(campaignId);
+    const prepared = await service.preparedJob(runId);
     expect(prepared).toMatchObject({
-      campaign_id: campaignId,
+      run_id: runId,
       harbor_version: "0.21.0",
       trials: [{ task_id: "task-001-trial-1" }],
+    });
+    expect(await service.preparedTrial(runId, "task-001-trial-1")).toMatchObject({
+      trial_lock_digest: `sha256:${"c".repeat(64)}`,
     });
     expect(prepared?.harbor_lock_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
@@ -336,7 +335,7 @@ describe("prepared Harbor jobs", () => {
         ceiling_microusd: 1_000_000,
         confirmed: true,
       },
-      "prepared-reconciler-campaign",
+      "prepared-reconciler-run",
       { subject: "operator", role: "operator" },
     );
     const actions = new PreparationActions();
@@ -353,9 +352,9 @@ describe("prepared Harbor jobs", () => {
       },
     );
     await settle(reconciler, 5);
-    const lock = await projection.campaignLock(submitted.campaign_id);
-    if (!lock) throw new Error("campaign lock is missing");
-    const preparation = (await projection.campaignActions(submitted.campaign_id))
+    const lock = await projection.runLock(submitted.run_id);
+    if (!lock) throw new Error("run lock is missing");
+    const preparation = (await projection.runActions(submitted.run_id))
       .map((row) => JSON.parse(row.intent_body) as ActionIntent)
       .find(
         (intent) =>
@@ -370,21 +369,21 @@ describe("prepared Harbor jobs", () => {
       }),
     );
     const task = lock.tasks[0];
-    if (!task) throw new Error("campaign task is missing");
+    if (!task) throw new Error("run task is missing");
     await service.submitPreparedJob(
-      submitted.campaign_id,
+      submitted.run_id,
       preparation.action_id,
       trialPayload(task.input_digest),
     );
     await service.submitPreparedJob(
-      submitted.campaign_id,
+      submitted.run_id,
       preparation.action_id,
       finalizePayload(lock.created_at),
     );
     actions.prepared = true;
     await settle(reconciler, 5);
 
-    const execution = (await projection.campaignActions(submitted.campaign_id))
+    const execution = (await projection.runActions(submitted.run_id))
       .map((row) => JSON.parse(row.intent_body) as ActionIntent)
       .find(
         (intent) =>
@@ -392,15 +391,29 @@ describe("prepared Harbor jobs", () => {
           intent.payload.worker_role === "execution",
       );
     expect(execution?.payload).toMatchObject({
+      task_id: "task-001-trial-1",
       task_ids: ["task-001-trial-1"],
-      sandbox_authorized: true,
+      job_image: `example.invalid/worker@sha256:${"a".repeat(64)}`,
+      task_image: `library/python@sha256:${"b".repeat(64)}`,
+      job_command: [
+        "/bin/sh",
+        "-c",
+        [
+          "set -eu",
+          "'/opt/worker/start-root-services'",
+          "unset HF_INFERENCE_TOKEN HARBOR_HF_INFERENCE_TOKEN",
+          "exec 'run-worker'",
+        ].join("\n"),
+      ],
+      hardware: "cpu-basic",
+      timeout_seconds: 2_760,
       worker_revision: "abcdef0",
     });
     expect(execution?.payload.prepared_job_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
-  it("prepares a start-paused campaign and adopts its repeated resume", async () => {
-    const { service, projection } = await setup();
+  it("prepares a start-paused run and adopts its repeated resume", async () => {
+    const { service, projection } = await setup(3);
     const submitted = await service.submit(
       {
         benchmark: "prepared-benchmark",
@@ -412,7 +425,7 @@ describe("prepared Harbor jobs", () => {
         start_paused: true,
         confirmed: true,
       },
-      "prepared-paused-campaign",
+      "prepared-paused-run",
       { subject: "operator", role: "operator" },
     );
     const actions = new PreparationActions();
@@ -429,9 +442,26 @@ describe("prepared Harbor jobs", () => {
       },
     );
     await settle(reconciler, 5);
-    const lock = await projection.campaignLock(submitted.campaign_id);
-    if (!lock) throw new Error("campaign lock is missing");
-    const preparation = (await projection.campaignActions(submitted.campaign_id))
+    expect(
+      actions.intents.filter((intent) => intent.action_kind === "job.launch"),
+    ).toHaveLength(0);
+    const first = await service.runAction(
+      submitted.run_id,
+      { action: "resume", task_limit: 1, confirmed: true },
+      "prepared-paused-resume",
+      { subject: "operator", role: "operator" },
+    );
+    const repeated = await service.runAction(
+      submitted.run_id,
+      { action: "resume", task_limit: 1, confirmed: true },
+      "prepared-paused-resume",
+      { subject: "operator", role: "operator" },
+    );
+    expect(repeated).toMatchObject({ action_id: first.action_id, adopted: true });
+    await settle(reconciler, 4);
+    const lock = await projection.runLock(submitted.run_id);
+    if (!lock) throw new Error("run lock is missing");
+    const preparation = (await projection.runActions(submitted.run_id))
       .map((row) => JSON.parse(row.intent_body) as ActionIntent)
       .find(
         (intent) =>
@@ -439,57 +469,202 @@ describe("prepared Harbor jobs", () => {
           intent.payload.worker_role === "preparation",
       );
     if (!preparation) throw new Error("preparation launch is missing");
-    const task = lock.tasks[0];
-    if (!task) throw new Error("campaign task is missing");
+    expect(preparation.payload.selected_task_ids).toEqual(["task-001-trial-1"]);
+    for (const task of lock.tasks)
+      await service.submitPreparedJob(
+        submitted.run_id,
+        preparation.action_id,
+        trialPayload(task.input_digest, task.task_id, task.source_task_id),
+      );
     await service.submitPreparedJob(
-      submitted.campaign_id,
-      preparation.action_id,
-      trialPayload(task.input_digest),
-    );
-    await service.submitPreparedJob(
-      submitted.campaign_id,
+      submitted.run_id,
       preparation.action_id,
       finalizePayload(lock.created_at),
     );
     actions.prepared = true;
     await settle(reconciler, 5);
 
-    expect(await service.preparedJob(submitted.campaign_id)).not.toBeNull();
-    expect(await projection.campaign(submitted.campaign_id)).toMatchObject({
-      status: "paused",
-      paused: true,
+    expect(await service.preparedJob(submitted.run_id)).not.toBeNull();
+    expect(await projection.run(submitted.run_id)).toMatchObject({
+      paused: false,
       terminal_tasks: 0,
     });
-    expect(
-      actions.intents.filter(
+    const execution = actions.intents.filter(
+      (intent) =>
+        intent.action_kind === "job.launch" &&
+        intent.payload.worker_role === "execution",
+    );
+    expect(execution).toHaveLength(1);
+    expect(execution[0]?.payload.task_ids).toEqual(["task-001-trial-1"]);
+  });
+
+  it("launches only nonterminal selected tasks after preparation", async () => {
+    const { service, projection } = await setup(2);
+    const submitted = await service.submit(
+      {
+        benchmark: "prepared-benchmark",
+        model: "prepared-model",
+        harness: "prepared-harness",
+        deployment: "prepared-deployment",
+        launch_policy: "prepared-policy",
+        ceiling_microusd: 1_000_000,
+        confirmed: true,
+      },
+      "prepared-task-cancellation",
+      { subject: "operator", role: "operator" },
+    );
+    const actions = new PreparationActions();
+    const reconciler = new Reconciler(
+      service,
+      projection,
+      actions,
+      new ResultPublisher(service.store, projection, service),
+      {
+        interval_ms: 100,
+        observation_interval_ms: 0,
+        worker_receipt_grace_ms: 0,
+        batch_size: 16,
+      },
+    );
+    await settle(reconciler, 5);
+    const lock = await projection.runLock(submitted.run_id);
+    if (!lock) throw new Error("run lock is missing");
+    const preparation = (await projection.runActions(submitted.run_id))
+      .map((row) => JSON.parse(row.intent_body) as ActionIntent)
+      .find(
+        (intent) =>
+          intent.action_kind === "job.launch" &&
+          intent.payload.worker_role === "preparation",
+      );
+    if (!preparation) throw new Error("preparation launch is missing");
+    await service.runAction(
+      submitted.run_id,
+      {
+        action: "cancel",
+        task_id: "task-001-trial-1",
+        confirmed: true,
+      },
+      "cancel-prepared-task",
+      { subject: "operator", role: "operator" },
+    );
+    await settle(reconciler, 3);
+    for (const task of lock.tasks)
+      await service.submitPreparedJob(
+        submitted.run_id,
+        preparation.action_id,
+        trialPayload(task.input_digest, task.task_id, task.source_task_id),
+      );
+    await service.submitPreparedJob(
+      submitted.run_id,
+      preparation.action_id,
+      finalizePayload(lock.created_at),
+    );
+    actions.prepared = true;
+
+    await settle(reconciler, 5);
+
+    const execution = (await projection.runActions(submitted.run_id))
+      .map((row) => JSON.parse(row.intent_body) as ActionIntent)
+      .filter(
         (intent) =>
           intent.action_kind === "job.launch" &&
           intent.payload.worker_role === "execution",
-      ),
+      );
+    expect(execution).toHaveLength(1);
+    expect(execution[0]?.payload.task_ids).toEqual(["task-002-trial-1"]);
+    expect(await projection.run(submitted.run_id)).toMatchObject({
+      terminal_tasks: 1,
+      reserved_microusd: 100_000,
+    });
+  });
+
+  it("finishes preparation observation when every selected task is cancelled", async () => {
+    const { service, projection } = await setup(2);
+    const submitted = await service.submit(
+      {
+        benchmark: "prepared-benchmark",
+        model: "prepared-model",
+        harness: "prepared-harness",
+        deployment: "prepared-deployment",
+        launch_policy: "prepared-policy",
+        ceiling_microusd: 1_000_000,
+        confirmed: true,
+      },
+      "prepared-all-tasks-cancelled",
+      { subject: "operator", role: "operator" },
+    );
+    const actions = new PreparationActions();
+    const reconciler = new Reconciler(
+      service,
+      projection,
+      actions,
+      new ResultPublisher(service.store, projection, service),
+      {
+        interval_ms: 100,
+        observation_interval_ms: 0,
+        worker_receipt_grace_ms: 0,
+        batch_size: 16,
+      },
+    );
+    await settle(reconciler, 5);
+    const lock = await projection.runLock(submitted.run_id);
+    if (!lock) throw new Error("run lock is missing");
+    const preparation = (await projection.runActions(submitted.run_id))
+      .map((row) => JSON.parse(row.intent_body) as ActionIntent)
+      .find(
+        (intent) =>
+          intent.action_kind === "job.launch" &&
+          intent.payload.worker_role === "preparation",
+      );
+    if (!preparation) throw new Error("preparation launch is missing");
+    for (const task of lock.tasks)
+      await service.runAction(
+        submitted.run_id,
+        { action: "cancel", task_id: task.task_id, confirmed: true },
+        `cancel-${task.task_id}`,
+        { subject: "operator", role: "operator" },
+      );
+    await settle(reconciler, 3);
+    expect(await projection.run(submitted.run_id)).toMatchObject({
+      status: "cancelling",
+      terminal_tasks: 2,
+    });
+    for (const task of lock.tasks)
+      await service.submitPreparedJob(
+        submitted.run_id,
+        preparation.action_id,
+        trialPayload(task.input_digest, task.task_id, task.source_task_id),
+      );
+    await service.submitPreparedJob(
+      submitted.run_id,
+      preparation.action_id,
+      finalizePayload(lock.created_at),
+    );
+    actions.prepared = true;
+
+    await settle(reconciler, 5);
+
+    const runActions = await projection.runActions(submitted.run_id);
+    expect(
+      runActions.filter((row) => {
+        if (row.action_kind !== "job.launch") return false;
+        const intent = JSON.parse(row.intent_body) as ActionIntent;
+        return intent.payload.worker_role === "execution";
+      }),
     ).toHaveLength(0);
-
-    const first = await service.campaignAction(
-      submitted.campaign_id,
-      { action: "resume", task_limit: 1, confirmed: true },
-      "prepared-paused-resume",
-      { subject: "operator", role: "operator" },
-    );
-    const repeated = await service.campaignAction(
-      submitted.campaign_id,
-      { action: "resume", task_limit: 1, confirmed: true },
-      "prepared-paused-resume",
-      { subject: "operator", role: "operator" },
-    );
-    expect(repeated).toMatchObject({ action_id: first.action_id, adopted: true });
-    await settle(reconciler, 4);
-
     expect(
-      actions.intents.filter(
-        (intent) =>
-          intent.action_kind === "job.launch" &&
-          intent.payload.worker_role === "execution",
+      runActions.find(
+        (row) =>
+          row.action_kind === "job.observe" && row.observed_state === "COMPLETED",
       ),
-    ).toHaveLength(1);
+    ).toBeDefined();
+    expect(await projection.run(submitted.run_id)).toMatchObject({
+      status: "cancelled",
+      terminal_tasks: 2,
+      pending_actions: 0,
+      reserved_microusd: 0,
+    });
+    expect(await projection.activeJobAdmissions("test")).toEqual([]);
   });
 
   it("stops preparation after its configured attempt limit", async () => {
@@ -504,7 +679,7 @@ describe("prepared Harbor jobs", () => {
         ceiling_microusd: 1_000_000,
         confirmed: true,
       },
-      "failed-preparation-campaign",
+      "failed-preparation-run",
       { subject: "operator", role: "operator" },
     );
     const actions = new PreparationActions();
@@ -524,7 +699,7 @@ describe("prepared Harbor jobs", () => {
 
     await settle(reconciler, 24);
 
-    const launches = (await projection.campaignActions(submitted.campaign_id))
+    const launches = (await projection.runActions(submitted.run_id))
       .map((row) => JSON.parse(row.intent_body) as ActionIntent)
       .filter(
         (intent) =>
@@ -532,86 +707,57 @@ describe("prepared Harbor jobs", () => {
           intent.payload.worker_role === "preparation",
       );
     expect(launches).toHaveLength(2);
-    expect(launches.every((intent) => intent.target === "campaign-preparation")).toBe(
-      true,
-    );
-    expect(await projection.campaign(submitted.campaign_id)).toMatchObject({
+    expect(launches.every((intent) => intent.target === "run-preparation")).toBe(true);
+    expect(await projection.run(submitted.run_id)).toMatchObject({
       terminal_tasks: 1,
       total_tasks: 1,
+      reserved_microusd: 0,
+      exhausted_tasks: 1,
     });
+    expect(await projection.runAttempts(submitted.run_id)).toHaveLength(0);
   });
 
   it("rejects prepared task sources outside the benchmark profile", async () => {
     const { service } = await setup();
-    const { campaignId, lock, launch } = await campaign(service);
+    const { runId, lock, launch } = await run(service);
     const task = lock.tasks[0];
-    if (!task) throw new Error("campaign task is missing");
+    if (!task) throw new Error("run task is missing");
     const payload = trialPayload(task.input_digest);
     (payload.trial_lock.task as Record<string, unknown>).git_url =
       "https://github.com/example/other.git";
 
     await expect(
-      service.submitPreparedJob(campaignId, launch.action_id, payload),
+      service.submitPreparedJob(runId, launch.action_id, payload),
     ).rejects.toThrow("task source does not match");
   });
 
   it("accepts a historical prepared environment without explicit keepalive", async () => {
     const { service } = await setup();
-    const { campaignId, lock, launch } = await campaign(service);
+    const { runId, lock, launch } = await run(service);
     const task = lock.tasks[0];
-    if (!task) throw new Error("campaign task is missing");
+    if (!task) throw new Error("run task is missing");
     const payload = trialPayload(task.input_digest);
     delete (payload.trial_lock.environment.kwargs as Record<string, unknown>)
       .control_keepalive_seconds;
 
     await expect(
-      service.submitPreparedJob(campaignId, launch.action_id, payload),
+      service.submitPreparedJob(runId, launch.action_id, payload),
     ).resolves.toMatchObject({ phase: "trial", adopted: false });
-  });
-
-  it("rejects a prepared command limit that differs from task timeouts", async () => {
-    const { service } = await setup();
-    const { campaignId, lock, launch } = await campaign(service);
-    const task = lock.tasks[0];
-    if (!task) throw new Error("campaign task is missing");
-    const payload = trialPayload(task.input_digest);
-    (
-      payload.trial_lock.environment.kwargs as Record<string, unknown>
-    ).control_max_command_seconds = 899;
-
-    await expect(
-      service.submitPreparedJob(campaignId, launch.action_id, payload),
-    ).rejects.toThrow("environment does not match control policy");
-  });
-
-  it("rejects a prepared keepalive that differs from task timeouts", async () => {
-    const { service } = await setup();
-    const { campaignId, lock, launch } = await campaign(service);
-    const task = lock.tasks[0];
-    if (!task) throw new Error("campaign task is missing");
-    const payload = trialPayload(task.input_digest);
-    (
-      payload.trial_lock.environment.kwargs as Record<string, unknown>
-    ).control_keepalive_seconds = 299;
-
-    await expect(
-      service.submitPreparedJob(campaignId, launch.action_id, payload),
-    ).rejects.toThrow("environment does not match control policy");
   });
 
   it("rejects a changed prepared trial after the first durable write", async () => {
     const { service } = await setup();
-    const { campaignId, lock, launch } = await campaign(service);
+    const { runId, lock, launch } = await run(service);
     const task = lock.tasks[0];
-    if (!task) throw new Error("campaign task is missing");
+    if (!task) throw new Error("run task is missing");
     await service.submitPreparedJob(
-      campaignId,
+      runId,
       launch.action_id,
       trialPayload(task.input_digest),
     );
 
     await expect(
-      service.submitPreparedJob(campaignId, launch.action_id, {
+      service.submitPreparedJob(runId, launch.action_id, {
         ...trialPayload(task.input_digest),
         cpus: 2,
       }),

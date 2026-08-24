@@ -1,7 +1,9 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { get, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
+  ActionIntent,
   OperatorAcl,
   ProfileObject,
   ProfilePromotion,
@@ -11,20 +13,20 @@ import {
   canonicalJson,
   controlRecordPath,
   deterministicId,
-  sandboxActionResultPath,
   sha256,
   validateLeaderboardSnapshot,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
 import {
   encodeLeaderboardSqlite,
+  eventCursor,
   LEADERBOARD_RECEIPT_PREFIX,
   LEADERBOARD_SNAPSHOT_PREFIX,
   loadLatestLeaderboard,
   mintWorkerCapability,
 } from "@harbor-hf/control-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildApp } from "../src/app.js";
+import { buildApp, SSE_LIVE_BUFFER_LIMIT, SSE_REPLAY_LIMIT } from "../src/app.js";
 import { AuthenticationService, AuthStore, safeReturnPath } from "../src/auth.js";
 import type { AppConfig } from "../src/config.js";
 import { createRuntime, type Runtime } from "../src/runtime.js";
@@ -65,7 +67,7 @@ async function setup(
     auth_path: join(root, "auth.sqlite"),
     profiles_root: resolve("profiles"),
     capacity_profile_alias: selectedCapacityAlias,
-    max_active_sandboxes: 16,
+    max_active_jobs: 16,
     web_root: join(root, "web"),
     auth_mode: "development",
     write_mode: writeMode,
@@ -74,6 +76,7 @@ async function setup(
     hf_token: "test-token-not-a-real-credential",
     hf_inference_token: null,
     reconcile_interval_ms: 60_000,
+    sync_interval_ms: 30_000,
     observe_interval_ms: 0,
     worker_receipt_grace_ms: 0,
     source_revision: "test-revision",
@@ -104,135 +107,11 @@ const input = {
   confirmed: true,
 };
 
-function sandboxDeploymentRecords(): Array<ProfileObject | ProfilePromotion> {
-  const sandbox = {
-    image: `registry.example/task-sandbox@sha256:${"c".repeat(64)}`,
-    hardware: "cpu-upgrade",
-    timeout_seconds: 7_200,
-    idle_timeout_seconds: 1_800,
-    inference_token: "required" as const,
-    inference_upstream: "https://route.example.endpoints.huggingface.cloud/v1",
-    inference_model: "example/model",
-    inference_api: "chat-completions" as const,
-    inference_max_requests: 256,
-    inference_max_concurrency: 1,
-    inference_max_total_concurrency: 1,
-    inference_timeout_seconds: 1_800,
-    inference_max_output_tokens: 32_768,
-    root_bootstrap_command: ["/opt/worker/start-root-services"],
-    reservation_microusd: 2_000_000,
-    active_hourly_cost_microusd: 30_000,
-    max_sandboxes: 1,
-    max_commands: 1,
-    max_command_seconds: 3_600,
-    max_transfer_bytes: 1_048_576,
-    allowed_roots: ["/app", "/logs"] as [string, ...string[]],
-  };
-  const spec = {
-    route: "hf_job" as const,
-    models: ["control-smoke"] as [string, ...string[]],
-    harnesses: ["control-smoke"] as [string, ...string[]],
-    job_image: `registry.example/worker@sha256:${"a".repeat(64)}`,
-    job_command: ["python", "-m", "worker"] as [string, ...string[]],
-    hardware: "cpu-basic",
-    active_hourly_cost_microusd: 10_000,
-    timeout_seconds: 7_200,
-    trusted_worker: true,
-    inference_token: "forbidden" as const,
-    sandbox,
-    inference_provider: "test-provider",
-    input_price_microusd_per_million_tokens: 100_000,
-    output_price_microusd_per_million_tokens: 200_000,
-    harbor_version: "0.21.0",
-    worker_revision: "abcdef0",
-    worker_concurrency: 1,
-    worker_max_tasks_per_job: 1,
-    context_window: 131_072,
-  };
-  const profile: ProfileObject = {
-    schema_version: "v1",
-    kind: "profile.object",
-    record_id: deterministicId(
-      "profile",
-      "deployment",
-      "hf-sandbox-test",
-      sha256(canonicalJson(spec)),
-    ),
-    created_at: "2026-08-18T00:00:00.000Z",
-    actor: { subject: "profile-import", role: "migration" },
-    profile_kind: "deployment",
-    name: "hf-sandbox-test",
-    spec,
-  };
-  const profileId = sha256(canonicalJson(profile));
-  const promotion: ProfilePromotion = {
-    schema_version: "v1",
-    kind: "profile.promotion",
-    record_id: deterministicId(
-      "promotion",
-      "deployment",
-      "hf-sandbox-test",
-      profileId,
-      "approved",
-    ),
-    created_at: "2026-08-18T00:00:01.000Z",
-    actor: { subject: "profile-operator", role: "operator" },
-    profile_kind: "deployment",
-    alias: "hf-sandbox-test",
-    profile_id: profileId,
-    promotion_state: "approved",
-    reason: "approved after sandbox review",
-    evidence: [sha256("sandbox-evidence")],
-  };
-  const benchmarkSpec = {
-    task_ids: ["control-smoke-task"] as [string],
-    task_digests: [sha256("control-smoke-task")] as [string],
-    benchmark: "control-smoke",
-    revision: sha256("benchmark"),
-  };
-  const benchmarkProfile: ProfileObject = {
-    schema_version: "v1",
-    kind: "profile.object",
-    record_id: deterministicId(
-      "profile",
-      "benchmark",
-      "control-smoke",
-      sha256(canonicalJson(benchmarkSpec)),
-    ),
-    created_at: "2026-08-18T00:00:00.000Z",
-    actor: { subject: "profile-import", role: "migration" },
-    profile_kind: "benchmark",
-    name: "control-smoke",
-    spec: benchmarkSpec,
-  };
-  const benchmarkProfileId = sha256(canonicalJson(benchmarkProfile));
-  const benchmarkPromotion: ProfilePromotion = {
-    schema_version: "v1",
-    kind: "profile.promotion",
-    record_id: deterministicId(
-      "promotion",
-      "benchmark",
-      "control-smoke",
-      benchmarkProfileId,
-      "approved",
-    ),
-    created_at: "2026-08-18T00:00:01.000Z",
-    actor: { subject: "profile-operator", role: "operator" },
-    profile_kind: "benchmark",
-    alias: "control-smoke",
-    profile_id: benchmarkProfileId,
-    promotion_state: "approved",
-    reason: "approved after sandbox review",
-    evidence: [sha256("sandbox-evidence")],
-  };
-  return [profile, promotion, benchmarkProfile, benchmarkPromotion];
-}
-
 function capacityRecords(): Array<ProfileObject | ProfilePromotion> {
   const spec = {
     namespace: "test",
-    max_active_sandboxes: 1,
-    hardware_limits: [{ hardware: "cpu-upgrade", max_active_sandboxes: 1 }],
+    max_active_jobs: 1,
+    hardware_limits: [{ hardware: "cpu-upgrade", max_active_jobs: 1 }],
     start_burst: 1,
     start_refill_tokens: 1,
     start_refill_period_seconds: 60,
@@ -275,6 +154,81 @@ function capacityRecords(): Array<ProfileObject | ProfilePromotion> {
   return [profile, promotion];
 }
 
+function openSse(url: string): Promise<IncomingMessage> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = get(url, resolvePromise);
+    request.on("error", rejectPromise);
+  });
+}
+
+function readSseEnvelope(response: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let buffered = "";
+    response.setEncoding("utf8");
+    response.on("data", (chunk: string) => {
+      buffered += chunk;
+      const frameEnd = buffered.indexOf("\n\n");
+      if (frameEnd < 0) return;
+      const data = buffered
+        .slice(0, frameEnd)
+        .split("\n")
+        .find((line) => line.startsWith("data: "))
+        ?.slice("data: ".length);
+      if (data) resolvePromise(JSON.parse(data) as Record<string, unknown>);
+    });
+    response.on("error", rejectPromise);
+  });
+}
+
+function readSseEnvelopes(
+  response: IncomingMessage,
+  count: number,
+): Promise<Record<string, unknown>[]> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let buffered = "";
+    const events: Record<string, unknown>[] = [];
+    response.setEncoding("utf8");
+    response.on("data", (chunk: string) => {
+      buffered += chunk;
+      const frames = buffered.split("\n\n");
+      buffered = frames.pop() ?? "";
+      for (const frame of frames) {
+        const data = frame
+          .split("\n")
+          .find((line) => line.startsWith("data: "))
+          ?.slice("data: ".length);
+        if (data) events.push(JSON.parse(data) as Record<string, unknown>);
+      }
+      if (events.length >= count) resolvePromise(events.slice(0, count));
+    });
+    response.on("error", rejectPromise);
+  });
+}
+
+function backpressureNextCursorReset(server: Server): Promise<ServerResponse> {
+  return new Promise((resolvePromise) => {
+    server.prependListener("request", (request, response) => {
+      if (!request.url?.startsWith("/api/v1/events")) return;
+      const write = response.write.bind(response);
+      response.write = ((
+        chunk: string | Uint8Array,
+        encodingOrCallback?: BufferEncoding | (() => void),
+        callback?: () => void,
+      ): boolean => {
+        const written =
+          typeof encodingOrCallback === "function"
+            ? write(chunk, encodingOrCallback)
+            : encodingOrCallback
+              ? write(chunk, encodingOrCallback, callback)
+              : write(chunk);
+        if (!String(chunk).includes('"cursor.reset"')) return written;
+        resolvePromise(response);
+        return false;
+      }) as typeof response.write;
+    });
+  });
+}
+
 describe("control API", () => {
   it("answers liveness before the projection rebuild finishes", async () => {
     const root = await mkdtemp(join(tmpdir(), "hhf-api-"));
@@ -292,7 +246,7 @@ describe("control API", () => {
       auth_path: join(root, "auth.sqlite"),
       profiles_root: resolve("profiles"),
       capacity_profile_alias: null,
-      max_active_sandboxes: 16,
+      max_active_jobs: 16,
       web_root: join(root, "web"),
       auth_mode: "development",
       write_mode: "disabled",
@@ -301,6 +255,7 @@ describe("control API", () => {
       hf_token: "test-token-not-a-real-credential",
       hf_inference_token: null,
       reconcile_interval_ms: 60_000,
+      sync_interval_ms: 30_000,
       observe_interval_ms: 0,
       worker_receipt_grace_ms: 0,
       source_revision: "test-revision",
@@ -311,12 +266,20 @@ describe("control API", () => {
     expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(
       200,
     );
-    expect((await app.inject({ method: "GET", url: "/health/ready" })).statusCode).toBe(
-      503,
-    );
-    const campaigns = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
-    expect(campaigns.statusCode).toBe(503);
-    expect(campaigns.json()).toMatchObject({
+    const ready = await app.inject({ method: "GET", url: "/health/ready" });
+    expect(ready.statusCode).toBe(200);
+    expect(ready.json()).toEqual({
+      status: "initializing",
+    });
+    const system = await app.inject({ method: "GET", url: "/api/v1/system" });
+    expect(system.statusCode).toBe(200);
+    expect(system.json()).toMatchObject({
+      initialization: { ready: false, status: "initializing" },
+      projection: { ready: false },
+    });
+    const runs = await app.inject({ method: "GET", url: "/api/v1/runs" });
+    expect(runs.statusCode).toBe(503);
+    expect(runs.json()).toMatchObject({
       error: { code: "control_not_ready" },
     });
     const login = await app.inject({
@@ -333,6 +296,129 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("keeps routes unready after projection replay until runtime initialization ends", async () => {
+    const { runtime, app } = await setup("disabled");
+    const initializeService = runtime.service.initialize.bind(runtime.service);
+    let releaseService = () => undefined;
+    let markServiceStarted = () => undefined;
+    const serviceBlocked = new Promise<void>((resolvePromise) => {
+      releaseService = resolvePromise;
+    });
+    const serviceStarted = new Promise<void>((resolvePromise) => {
+      markServiceStarted = resolvePromise;
+    });
+    vi.spyOn(runtime.service, "initialize").mockImplementationOnce(async (profiles) => {
+      markServiceStarted();
+      await serviceBlocked;
+      await initializeService(profiles);
+    });
+
+    const initialize = runtime.initialize();
+    await serviceStarted;
+    expect(runtime.projection.system().ready).toBe(true);
+    expect(runtime.ready).toBe(false);
+    const system = await app.inject({ method: "GET", url: "/api/v1/system" });
+    expect(system.statusCode).toBe(200);
+    expect(system.json()).toMatchObject({
+      initialization: { ready: false, status: "initializing" },
+      projection: { ready: true },
+    });
+    expect((await app.inject({ method: "GET", url: "/health/ready" })).json()).toEqual({
+      status: "initializing",
+    });
+    expect((await app.inject({ method: "GET", url: "/api/v1/runs" })).statusCode).toBe(
+      503,
+    );
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/auth/login?return_to=%2Foverview",
+        })
+      ).statusCode,
+    ).toBe(503);
+
+    releaseService();
+    await initialize;
+    expect(runtime.ready).toBe(true);
+    expect((await app.inject({ method: "GET", url: "/health/ready" })).json()).toEqual({
+      status: "ready",
+    });
+    await app.close();
+  });
+
+  it("preserves a valid session while the ACL projection rebuilds", async () => {
+    const acl: OperatorAcl = {
+      schema_version: "v1",
+      kind: "operator.acl",
+      record_id: "operator-acl-rebuild",
+      created_at: "2026-08-24T00:00:00.000Z",
+      actor: { subject: "test", role: "migration" },
+      operators: ["operator"],
+      readers: [],
+    };
+    const { runtime, app } = await setup("disabled", async (seededRuntime) => {
+      await seededRuntime.service.append(acl);
+    });
+    runtime.config.auth_mode = "oauth";
+    const session = runtime.auth.store.createSession("operator", "test-user", 60);
+    let releaseListing = () => undefined;
+    let markListingStarted = () => undefined;
+    const listingBlocked = new Promise<void>((resolve) => {
+      releaseListing = resolve;
+    });
+    const listingStarted = new Promise<void>((resolve) => {
+      markListingStarted = resolve;
+    });
+    const rebuild = runtime.projection.rebuild({
+      list: async (prefix) => {
+        markListingStarted();
+        await listingBlocked;
+        return runtime.store.list(prefix);
+      },
+      read: (key) => runtime.store.read(key),
+      create: (key, bytes) => runtime.store.create(key, bytes),
+    });
+    await listingStarted;
+
+    const system = await app.inject({
+      method: "GET",
+      url: "/api/v1/system",
+      headers: { cookie: `hhf_session=${session.id}` },
+    });
+    expect(system.statusCode).toBe(200);
+    expect(system.json()).toMatchObject({
+      initialization: { ready: false, status: "initializing" },
+      projection: { ready: false },
+    });
+    expect(runtime.auth.store.session(session.id)).not.toBeNull();
+
+    const rebuilding = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/session",
+      headers: { cookie: `hhf_session=${session.id}` },
+    });
+    expect(rebuilding.statusCode).toBe(503);
+    expect(rebuilding.json()).toMatchObject({
+      error: { code: "control_not_ready" },
+    });
+    expect(runtime.auth.store.session(session.id)).not.toBeNull();
+
+    releaseListing();
+    await rebuild;
+    const ready = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/session",
+      headers: { cookie: `hhf_session=${session.id}` },
+    });
+    expect(ready.statusCode).toBe(200);
+    expect(ready.json()).toMatchObject({
+      authenticated: true,
+      actor: { username: "test-user", role: "operator" },
+    });
+    await app.close();
+  });
+
   it("reports liveness and projection readiness separately", async () => {
     const { app } = await setup();
     expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(
@@ -344,38 +430,501 @@ describe("control API", () => {
     await app.close();
   });
 
-  it("returns an unavailable capacity view for campaigns without Sandboxes", async () => {
+  it("flushes SSE response headers before the first event", async () => {
+    const { app } = await setup();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      let receivedHeaders = false;
+      const request = get(
+        `http://127.0.0.1:${address.port}/api/v1/events`,
+        (response) => {
+          receivedHeaders = true;
+          try {
+            expect(response.statusCode).toBe(200);
+            expect(response.headers["content-type"]).toBe("text/event-stream");
+            response.destroy();
+            resolvePromise();
+          } catch (error) {
+            response.destroy();
+            rejectPromise(error);
+          }
+        },
+      );
+      request.setTimeout(2_000, () => {
+        request.destroy(new Error("SSE response headers were not flushed"));
+      });
+      request.on("error", (error) => {
+        if (!receivedHeaders) rejectPromise(error);
+      });
+    });
+    await app.close();
+  });
+
+  it("streams records ingested by periodic Bucket sync without reconnecting", async () => {
+    const { runtime, app } = await setup();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+    const cursor = runtime.projection.system().event_cursor;
+    if (!cursor) throw new Error("projection has no event cursor");
+
+    let closeResponse = () => undefined;
+    const eventPromise = new Promise<Record<string, unknown>>(
+      (resolvePromise, rejectPromise) => {
+        const request = get(
+          `http://127.0.0.1:${address.port}/api/v1/events?cursor=${encodeURIComponent(cursor)}`,
+          (response) => {
+            closeResponse = () => response.destroy();
+            let buffered = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk: string) => {
+              buffered += chunk;
+              const frames = buffered.split("\n\n");
+              buffered = frames.pop() ?? "";
+              for (const frame of frames) {
+                const data = frame
+                  .split("\n")
+                  .find((line) => line.startsWith("data: "))
+                  ?.slice("data: ".length);
+                if (!data) continue;
+                const event = JSON.parse(data) as Record<string, unknown>;
+                if (event.type === "operator.acl") resolvePromise(event);
+              }
+            });
+            response.on("error", rejectPromise);
+          },
+        );
+        request.on("error", rejectPromise);
+      },
+    );
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(1));
+
+    const record: OperatorAcl = {
+      schema_version: "v1",
+      kind: "operator.acl",
+      record_id: "remote-sse-operator-acl",
+      created_at: "2026-08-24T10:00:00.000Z",
+      actor: { subject: "remote-sync-test", role: "migration" },
+      operators: ["operator"],
+      readers: ["reader"],
+    };
+    const key = controlRecordPath(record);
+    const bytes = new TextEncoder().encode(canonicalJson(record));
+    await runtime.store.create(key, bytes);
+    await expect(runtime.service.syncProjection()).resolves.toBe(1);
+
+    await expect(eventPromise).resolves.toMatchObject({
+      type: "operator.acl",
+      occurred_at: record.created_at,
+      replay: false,
+      cursor_reset: false,
+      data: {
+        key,
+        digest: sha256(bytes),
+        record_id: record.record_id,
+      },
+    });
+    closeResponse();
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(0));
+    await app.close();
+  });
+
+  it("unsubscribes an SSE listener when the client closes during replay", async () => {
+    const { runtime, app } = await setup();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+    const cursor = runtime.projection.system().event_cursor;
+    if (!cursor) throw new Error("projection has no event cursor");
+    const originalAudit = runtime.projection.audit.bind(runtime.projection);
+    let releaseReplay: () => void = () => undefined;
+    const replayBlocked = new Promise<void>((resolvePromise) => {
+      releaseReplay = resolvePromise;
+    });
+    let markReplayStarted: () => void = () => undefined;
+    const replayStarted = new Promise<void>((resolvePromise) => {
+      markReplayStarted = resolvePromise;
+    });
+    vi.spyOn(runtime.projection, "audit").mockImplementationOnce(
+      async (replayCursor, limit) => {
+        markReplayStarted();
+        await replayBlocked;
+        return originalAudit(replayCursor, limit);
+      },
+    );
+
+    const response = await new Promise<IncomingMessage>(
+      (resolvePromise, rejectPromise) => {
+        const request = get(
+          `http://127.0.0.1:${address.port}/api/v1/events?cursor=${encodeURIComponent(cursor)}`,
+          resolvePromise,
+        );
+        request.on("error", rejectPromise);
+      },
+    );
+    await replayStarted;
+    expect(runtime.service.events.listenerCount()).toBe(1);
+    response.destroy();
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(0));
+    releaseReplay();
+    await app.close();
+  });
+
+  it("resets an invalid SSE cursor and unsubscribes on disconnect", async () => {
+    const { runtime, app } = await setup();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+
+    let closeResponse = () => undefined;
+    const envelope = await new Promise<Record<string, unknown>>(
+      (resolvePromise, rejectPromise) => {
+        const request = get(
+          `http://127.0.0.1:${address.port}/api/v1/events?cursor=invalid`,
+          (response) => {
+            closeResponse = () => response.destroy();
+            response.setEncoding("utf8");
+            let buffered = "";
+            response.on("data", (chunk: string) => {
+              buffered += chunk;
+              const frameEnd = buffered.indexOf("\n\n");
+              if (frameEnd < 0) return;
+              const data = buffered
+                .slice(0, frameEnd)
+                .split("\n")
+                .find((line) => line.startsWith("data: "))
+                ?.slice("data: ".length);
+              if (data) resolvePromise(JSON.parse(data) as Record<string, unknown>);
+            });
+            response.on("error", rejectPromise);
+          },
+        );
+        request.on("error", rejectPromise);
+      },
+    );
+    expect(envelope).toMatchObject({
+      type: "cursor.reset",
+      replay: true,
+      cursor_reset: true,
+      data: {
+        reason: "invalid_cursor",
+        latest_cursor: runtime.projection.system().event_cursor,
+        replay_limit: SSE_REPLAY_LIMIT,
+      },
+    });
+    closeResponse();
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(0));
+    await app.close();
+  });
+
+  it("replays live events buffered while a cursor reset is backpressured", async () => {
+    const { runtime, app } = await setup();
+    const resetWrite = backpressureNextCursorReset(app.server);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+
+    const response = await openSse(
+      `http://127.0.0.1:${address.port}/api/v1/events?cursor=invalid`,
+    );
+    const envelopes = readSseEnvelopes(response, 2);
+    const blockedResponse = await resetWrite;
+    runtime.service.events.publish({
+      id: "event-during-reset-drain",
+      type: "run.request",
+      occurred_at: "2026-08-24T10:00:00.000Z",
+      data: { run_id: "run-during-reset" },
+    });
+    blockedResponse.emit("drain");
+
+    await expect(envelopes).resolves.toMatchObject([
+      {
+        type: "cursor.reset",
+        data: { reason: "invalid_cursor" },
+        cursor_reset: true,
+      },
+      {
+        id: "event-during-reset-drain",
+        type: "run.request",
+        replay: false,
+        cursor_reset: false,
+      },
+    ]);
+    response.destroy();
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(0));
+    await app.close();
+  });
+
+  it("disconnects cleanly when a backpressured reset buffer reaches its bound", async () => {
+    const { runtime, app } = await setup();
+    const resetWrite = backpressureNextCursorReset(app.server);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+
+    const response = await openSse(
+      `http://127.0.0.1:${address.port}/api/v1/events?cursor=invalid`,
+    );
+    const resetEnvelope = readSseEnvelope(response);
+    const disconnected = new Promise<void>((resolvePromise, rejectPromise) => {
+      response.once("end", resolvePromise);
+      response.once("error", rejectPromise);
+    });
+    const blockedResponse = await resetWrite;
+    for (let index = 0; index <= SSE_LIVE_BUFFER_LIMIT; index += 1)
+      runtime.service.events.publish({
+        id: `reset-buffer-${index}`,
+        type: "run.request",
+        occurred_at: "2026-08-24T10:00:00.000Z",
+        data: { run_id: `run-reset-buffer-${index}` },
+      });
+    blockedResponse.emit("drain");
+
+    await expect(resetEnvelope).resolves.toMatchObject({
+      type: "cursor.reset",
+      data: { reason: "invalid_cursor" },
+      cursor_reset: true,
+    });
+    await disconnected;
+    expect(runtime.service.events.listenerCount()).toBe(0);
+    await app.close();
+  });
+
+  it("resets a prior cursor epoch without replaying full history", async () => {
+    const { runtime, app } = await setup();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+    const staleCursor = eventCursor("stale-server-epoch", 1);
+    let closeResponse = () => undefined;
+
+    const envelope = await new Promise<Record<string, unknown>>(
+      (resolvePromise, rejectPromise) => {
+        const request = get(
+          `http://127.0.0.1:${address.port}/api/v1/events?cursor=${encodeURIComponent(staleCursor)}`,
+          (response) => {
+            closeResponse = () => response.destroy();
+            response.setEncoding("utf8");
+            let buffered = "";
+            response.on("data", (chunk: string) => {
+              buffered += chunk;
+              const frameEnd = buffered.indexOf("\n\n");
+              if (frameEnd < 0) return;
+              const data = buffered
+                .slice(0, frameEnd)
+                .split("\n")
+                .find((line) => line.startsWith("data: "))
+                ?.slice("data: ".length);
+              if (data) resolvePromise(JSON.parse(data) as Record<string, unknown>);
+            });
+            response.on("error", rejectPromise);
+          },
+        );
+        request.on("error", rejectPromise);
+      },
+    );
+
+    expect(envelope).toMatchObject({
+      type: "cursor.reset",
+      replay: true,
+      cursor_reset: true,
+      data: {
+        reason: "epoch_changed",
+        latest_cursor: runtime.projection.system().event_cursor,
+        replay_limit: SSE_REPLAY_LIMIT,
+      },
+    });
+    expect(envelope).not.toHaveProperty("id");
+    closeResponse();
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(0));
+    await app.close();
+  });
+
+  it("resets a current cursor when durable history exceeds the replay cap", async () => {
+    const { runtime, app } = await setup();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+    const cursor = runtime.projection.system().event_cursor;
+    if (!cursor) throw new Error("projection has no event cursor");
+    vi.spyOn(runtime.projection, "audit").mockResolvedValue(
+      Array.from({ length: SSE_REPLAY_LIMIT + 1 }, (_, index) => ({
+        id: `event-${index}`,
+        type: "run.request",
+        occurred_at: "2026-08-24T10:00:00.000Z",
+        data: { run_id: `run-${index}` },
+      })),
+    );
+
+    const response = await openSse(
+      `http://127.0.0.1:${address.port}/api/v1/events?cursor=${encodeURIComponent(cursor)}`,
+    );
+    const envelope = await readSseEnvelope(response);
+    expect(envelope).toMatchObject({
+      type: "cursor.reset",
+      data: {
+        reason: "replay_limit_exceeded",
+        latest_cursor: runtime.projection.system().event_cursor,
+        replay_limit: SSE_REPLAY_LIMIT,
+      },
+      replay: true,
+      cursor_reset: true,
+    });
+    expect(runtime.projection.audit).toHaveBeenCalledWith(cursor, SSE_REPLAY_LIMIT + 1);
+    response.destroy();
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(0));
+    await app.close();
+  });
+
+  it("resets when live events exceed the bounded replay buffer", async () => {
+    const { runtime, app } = await setup();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+    const cursor = runtime.projection.system().event_cursor;
+    if (!cursor) throw new Error("projection has no event cursor");
+    let releaseReplay = () => undefined;
+    let markReplayStarted = () => undefined;
+    const replayBlocked = new Promise<void>((resolvePromise) => {
+      releaseReplay = resolvePromise;
+    });
+    const replayStarted = new Promise<void>((resolvePromise) => {
+      markReplayStarted = resolvePromise;
+    });
+    vi.spyOn(runtime.projection, "audit").mockImplementationOnce(async () => {
+      markReplayStarted();
+      await replayBlocked;
+      return [];
+    });
+
+    const response = await openSse(
+      `http://127.0.0.1:${address.port}/api/v1/events?cursor=${encodeURIComponent(cursor)}`,
+    );
+    const envelope = readSseEnvelope(response);
+    await replayStarted;
+    for (let index = 0; index <= SSE_LIVE_BUFFER_LIMIT; index += 1)
+      runtime.service.events.publish({
+        id: `buffered-${index}`,
+        type: "run.request",
+        occurred_at: "2026-08-24T10:00:00.000Z",
+        data: { run_id: `run-${index}` },
+      });
+    releaseReplay();
+
+    await expect(envelope).resolves.toMatchObject({
+      type: "cursor.reset",
+      data: {
+        reason: "buffer_limit_exceeded",
+        replay_limit: SSE_REPLAY_LIMIT,
+      },
+      replay: true,
+      cursor_reset: true,
+    });
+    response.destroy();
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(0));
+    await app.close();
+  });
+
+  it("closes a live SSE connection when the client backpressures writes", async () => {
+    const { runtime, app } = await setup();
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("test server has no TCP address");
+
+    const response = await openSse(`http://127.0.0.1:${address.port}/api/v1/events`);
+    response.pause();
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(1));
+    runtime.service.events.publish({
+      id: "large-live-event",
+      type: "run.request",
+      occurred_at: "2026-08-24T10:00:00.000Z",
+      data: { payload: "x".repeat(256 * 1024) },
+    });
+
+    await vi.waitFor(() => expect(runtime.service.events.listenerCount()).toBe(0));
+    response.destroy();
+    await app.close();
+  });
+
+  it("returns an empty capacity view before a trial Job starts", async () => {
     const { app } = await setup();
     const submission = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "no-sandbox-capacity" },
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "empty-job-capacity" },
       payload: input,
     });
-    const campaignId = submission.json().campaign_id as string;
+    const runId = submission.json().run_id as string;
     const response = await app.inject({
       method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/capacity`,
+      url: `/api/v1/runs/${runId}/capacity`,
     });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       configured: true,
-      campaign_limit: 0,
-      campaign_active: 0,
+      run_limit: 1,
+      run_active: 0,
       provider_limit: 0,
     });
     await app.close();
   });
 
-  it("reads and replaces the namespace Sandbox cap", async () => {
+  it("rejects lifecycle mutations after a Run completes", async () => {
+    const { runtime, app } = await setup();
+    const submission = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "terminal-run-api" },
+      payload: input,
+    });
+    const runId = submission.json().run_id as string;
+    const run = await runtime.projection.run(runId);
+    if (!run) throw new Error("submitted Run is missing");
+    vi.spyOn(runtime.projection, "run").mockResolvedValue({
+      ...run,
+      status: "completed",
+    });
+
+    for (const action of ["cancel", "pause"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/v1/runs/${runId}/actions`,
+        headers: { "idempotency-key": `terminal-run-${action}` },
+        payload: { action, confirmed: true },
+      });
+      expect(response.statusCode).toBe(422);
+      expect(response.json()).toMatchObject({
+        error: {
+          code: "policy_rejected",
+          message: `terminal run cannot be ${action === "cancel" ? "cancelled" : "paused"}`,
+        },
+      });
+    }
+    await app.close();
+  });
+
+  it("reads and replaces the namespace Job cap", async () => {
     const { app } = await setup();
     const initial = await app.inject({ method: "GET", url: "/api/v1/capacity" });
     expect(initial.statusCode).toBe(200);
     expect(initial.json()).toMatchObject({
       alias: "capacity-test",
       configured: true,
-      max_active_sandboxes: 1,
+      max_active_jobs: 1,
       start_burst: 1,
     });
 
@@ -383,48 +932,75 @@ describe("control API", () => {
       method: "POST",
       url: "/api/v1/capacity",
       headers: { "idempotency-key": "capacity-set-128" },
-      payload: { max_active_sandboxes: 128, confirmed: true },
+      payload: { max_active_jobs: 128, confirmed: true },
     });
     expect(updated.statusCode).toBe(200);
     expect(updated.json()).toMatchObject({
       alias: "capacity-test",
       configured: true,
-      max_active_sandboxes: 128,
+      max_active_jobs: 128,
       start_burst: 128,
       start_refill_tokens: 128,
     });
 
     const repeated = await app.inject({
-      method: "GET",
+      method: "POST",
       url: "/api/v1/capacity",
+      headers: { "idempotency-key": "capacity-set-128" },
+      payload: { max_active_jobs: 128, confirmed: true },
     });
-    expect(repeated.json().max_active_sandboxes).toBe(128);
+    expect(repeated.statusCode).toBe(200);
+    expect(repeated.json().max_active_jobs).toBe(128);
+    const conflict = await app.inject({
+      method: "POST",
+      url: "/api/v1/capacity",
+      headers: { "idempotency-key": "capacity-set-128" },
+      payload: { max_active_jobs: 64, confirmed: true },
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toMatchObject({
+      error: {
+        code: "idempotency_conflict",
+        message:
+          "idempotency key already belongs to a different capacity policy request",
+      },
+    });
     await app.close();
   });
 
-  it("seeds a missing namespace Sandbox cap from the service default", async () => {
+  it("seeds a missing namespace Job cap from the service default", async () => {
     const { app } = await setup("enabled", undefined, "current", false);
     const response = await app.inject({ method: "GET", url: "/api/v1/capacity" });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       alias: "current",
       configured: true,
-      max_active_sandboxes: 16,
+      max_active_jobs: 16,
       start_burst: 16,
       start_refill_tokens: 16,
     });
     await app.close();
   });
 
-  it("rejects a namespace Sandbox cap change when writes are disabled", async () => {
+  it("rejects a namespace Job cap change when writes are disabled", async () => {
     const { app } = await setup("disabled");
     const response = await app.inject({
       method: "POST",
       url: "/api/v1/capacity",
       headers: { "idempotency-key": "capacity-disabled" },
-      payload: { max_active_sandboxes: 128, confirmed: true },
+      payload: { max_active_jobs: 128, confirmed: true },
     });
     expect(response.statusCode).toBe(503);
+    await app.close();
+  });
+
+  it("does not expose task Sandbox routes", async () => {
+    const { app } = await setup();
+    await app.ready();
+    const openapi = app.swagger() as { paths: Record<string, unknown> };
+    expect(Object.keys(openapi.paths).some((path) => path.includes("sandboxes"))).toBe(
+      false,
+    );
     await app.close();
   });
 
@@ -489,14 +1065,12 @@ describe("control API", () => {
     );
     const response = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "durable-profile-campaign-key" },
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "durable-profile-run-key" },
       payload: input,
     });
     expect(response.statusCode).toBe(202);
-    const lock = await runtime.projection.campaignLock(
-      response.json().campaign_id as string,
-    );
+    const lock = await runtime.projection.runLock(response.json().run_id as string);
     const lockedModel = lock?.profiles.find((item) => item.kind === "model");
     expect(lockedModel).toMatchObject({
       name: "control-smoke",
@@ -532,33 +1106,31 @@ describe("control API", () => {
     );
     const repeated = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "durable-profile-campaign-key" },
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "durable-profile-run-key" },
       payload: input,
     });
     expect(repeated.statusCode).toBe(202);
     expect(repeated.json()).toMatchObject({ adopted: true });
     expect(
       (
-        await runtime.projection.campaignLock(repeated.json().campaign_id as string)
+        await runtime.projection.runLock(repeated.json().run_id as string)
       )?.profiles.find((item) => item.kind === "model")?.profile_id,
     ).toBe(profileId);
     await app.close();
   });
 
-  it("paginates every collection response", async () => {
+  it("paginates bounded global collection responses", async () => {
     const { runtime, app } = await setup();
-    const campaign = await app.inject({
+    await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "pagination-campaign-key" },
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "pagination-run-key" },
       payload: input,
     });
-    const campaignId = campaign.json().campaign_id as string;
     await runtime.reconciler.tick();
     const urls = [
-      "/api/v1/campaigns?limit=1",
-      `/api/v1/campaigns/${campaignId}/tasks?limit=1`,
+      "/api/v1/runs?limit=1",
       "/api/v1/jobs?limit=1",
       "/api/v1/endpoints?limit=1",
       "/api/v1/profiles?limit=1",
@@ -594,15 +1166,48 @@ describe("control API", () => {
     await app.close();
   });
 
-  it("exposes Hub inspect URLs for Jobs", async () => {
+  it("returns every logical task for one Run in a single response", async () => {
     const { runtime, app } = await setup();
-    const campaign = await app.inject({
+    const run = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "job-inspect-campaign-key" },
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "bulk-task-list-key" },
       payload: input,
     });
-    expect(campaign.statusCode).toBe(202);
+    const runId = run.json().run_id as string;
+    await runtime.projection.db
+      .insertInto("tasks")
+      .values(
+        Array.from({ length: 125 }, (_, index) => ({
+          run_id: runId,
+          task_id: `bulk-task-${String(index).padStart(3, "0")}`,
+          input_digest: `sha256:${String(index).padStart(64, "0")}`,
+          terminal_outcome: null,
+          selected_attempt_id: null,
+        })),
+      )
+      .execute();
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/v1/runs/${runId}/tasks`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().items).toHaveLength(126);
+    expect(response.json().next_cursor).toBeNull();
+    await app.close();
+  });
+
+  it("exposes Hub inspect URLs for Jobs", async () => {
+    const { runtime, app } = await setup();
+    const run = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "job-inspect-run-key" },
+      payload: input,
+    });
+    expect(run.statusCode).toBe(202);
     await runtime.reconciler.tick();
     const jobs = await app.inject({ method: "GET", url: "/api/v1/jobs" });
     expect(jobs.statusCode).toBe(200);
@@ -623,22 +1228,24 @@ describe("control API", () => {
 
   it("returns the latest observed state for each Job", async () => {
     const { runtime, app } = await setup();
-    const campaign = await app.inject({
+    const run = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "job-latest-state-key" },
       payload: { ...input, ceiling_microusd: 100_000 },
     });
-    expect(campaign.statusCode).toBe(202);
-    const campaignId = campaign.json().campaign_id as string;
+    expect(run.statusCode).toBe(202);
+    const runId = run.json().run_id as string;
     const actor = { subject: "operator" as const, role: "operator" as const };
     const resourceId = "job-latest-state";
     const payload = {
+      task_id: "control-smoke-task",
       task_ids: ["control-smoke-task"],
       max_infrastructure_attempts: 1,
       success_without_worker_receipt: true,
       resource_id: resourceId,
     };
+    let launchActionId: string | null = null;
     for (const record of [
       {
         kind: "job.launch" as const,
@@ -670,14 +1277,18 @@ describe("control API", () => {
       },
     ]) {
       const intent = runtime.service.actionIntent(
-        campaignId,
+        runId,
         record.kind,
         resourceId,
         record.generation,
-        payload,
+        {
+          ...payload,
+          ...(launchActionId ? { launch_action_id: launchActionId } : {}),
+        },
         actor,
         record.createdAt,
       );
+      if (record.kind === "job.launch") launchActionId = intent.action_id;
       await runtime.service.writeAction(intent);
       await runtime.service.receipt(intent, {
         outcome: record.kind === "job.launch" ? "created" : "completed",
@@ -698,6 +1309,7 @@ describe("control API", () => {
     expect(matching).toHaveLength(1);
     expect(matching[0]).toMatchObject({
       action_kind: "job.observe",
+      launch_action_id: launchActionId,
       observed_state: "ERROR",
       resource_id: resourceId,
       cost_microusd: 40_000,
@@ -706,52 +1318,163 @@ describe("control API", () => {
     });
     const scoped = await app.inject({
       method: "GET",
-      url: `/api/v1/jobs?campaign_id=${encodeURIComponent(campaignId)}`,
+      url: `/api/v1/jobs?run_id=${encodeURIComponent(runId)}`,
     });
     expect(scoped.statusCode).toBe(200);
     expect(
-      (scoped.json().items as Array<{ campaign_id: string }>).every(
-        (item) => item.campaign_id === campaignId,
+      (scoped.json().items as Array<{ run_id: string }>).every(
+        (item) => item.run_id === runId,
       ),
     ).toBe(true);
     const empty = await app.inject({
       method: "GET",
-      url: "/api/v1/jobs?campaign_id=campaign-missing",
+      url: "/api/v1/jobs?run_id=run-missing",
     });
     expect(empty.json().items).toEqual([]);
     await app.close();
   });
 
-  it("limits worker capabilities to their campaign action routes", async () => {
+  it("returns a stable unpaginated Run Job snapshot above 2,000 Jobs", async () => {
+    const { runtime, app } = await setup();
+    const runId = "bulk-jobs-run";
+    const itemCount = 2_001;
+    const intentBody = (index: number, launchActionId?: string) =>
+      canonicalJson({
+        payload: {
+          task_ids: [`task-${index}`],
+          resource_id: `job-${index}`,
+          ...(launchActionId ? { launch_action_id: launchActionId } : {}),
+        },
+      });
+    const launches = Array.from({ length: itemCount }, (_, index) => ({
+      action_id: `bulk-launch-${String(index).padStart(4, "0")}`,
+      run_id: runId,
+      action_kind: "job.launch",
+      generation: 0,
+      target: `job-${index}`,
+      intent_body: intentBody(index),
+      receipt_body: null,
+      outcome: null,
+      observed_state: "SCHEDULING",
+      resource_id: `job-${index}`,
+      created_at: "2026-08-24T10:00:00.000Z",
+    }));
+    for (let offset = 0; offset < launches.length; offset += 250)
+      await runtime.projection.db
+        .insertInto("actions")
+        .values(launches.slice(offset, offset + 250))
+        .execute();
+    const projectedJobs = launches.map((launch, index) => ({
+      ...launch,
+      launch_action_id: launch.action_id,
+      assigned_tasks: 1,
+      assigned_task_ids_body: canonicalJson([`task-${index}`]),
+      cost_microusd: 0,
+      is_replacement: 0,
+    }));
+    for (let offset = 0; offset < projectedJobs.length; offset += 250)
+      await runtime.projection.db
+        .insertInto("jobs")
+        .values(projectedJobs.slice(offset, offset + 250))
+        .execute();
+
+    const first = await app.inject({
+      method: "GET",
+      url: `/api/v1/jobs?run_id=${runId}&limit=1&cursor=ignored`,
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().items).toHaveLength(itemCount);
+    expect(first.json().next_cursor).toBeNull();
+
+    const observedIndex = 1_000;
+    const launchActionId = launches[observedIndex]?.action_id;
+    if (!launchActionId) throw new Error("bulk launch fixture is missing");
+    await runtime.projection.db
+      .insertInto("actions")
+      .values({
+        action_id: "bulk-observe-1000",
+        run_id: runId,
+        action_kind: "job.observe",
+        generation: 1,
+        target: `job-${observedIndex}`,
+        intent_body: intentBody(observedIndex, launchActionId),
+        receipt_body: canonicalJson({ cost_microusd: 42 }),
+        outcome: "completed",
+        observed_state: "RUNNING",
+        resource_id: `job-${observedIndex}`,
+        created_at: "2026-08-24T10:01:00.000Z",
+      })
+      .execute();
+    await runtime.projection.db
+      .updateTable("jobs")
+      .set({
+        action_id: "bulk-observe-1000",
+        action_kind: "job.observe",
+        generation: 1,
+        target: `job-${observedIndex}`,
+        intent_body: intentBody(observedIndex, launchActionId),
+        receipt_body: canonicalJson({ cost_microusd: 42 }),
+        outcome: "completed",
+        observed_state: "RUNNING",
+        resource_id: `job-${observedIndex}`,
+        created_at: "2026-08-24T10:01:00.000Z",
+        cost_microusd: 42,
+      })
+      .where("launch_action_id", "=", launchActionId)
+      .execute();
+
+    const second = await app.inject({
+      method: "GET",
+      url: `/api/v1/jobs?run_id=${runId}`,
+    });
+    expect(second.json().items).toHaveLength(itemCount);
+    expect(
+      second
+        .json()
+        .items.find((item: { resource_id: string }) => item.resource_id === "job-1000"),
+    ).toMatchObject({
+      action_id: "bulk-observe-1000",
+      launch_action_id: launchActionId,
+      observed_state: "RUNNING",
+      cost_microusd: 42,
+    });
+    expect(second.json().next_cursor).toBeNull();
+    await app.close();
+  });
+
+  it("limits worker capabilities to their run action routes", async () => {
     const { runtime, app } = await setup();
     const submission = await runtime.service.submit(
       input,
       "worker-capability-submission",
       { subject: "operator", role: "operator" },
     );
-    const lock = await runtime.projection.campaignLock(submission.campaign_id);
+    const lock = await runtime.projection.runLock(submission.run_id);
     expect(lock).not.toBeNull();
-    if (!lock) throw new Error("campaign lock is missing");
+    if (!lock) throw new Error("run lock is missing");
     const taskId = lock.tasks[0]?.task_id;
     expect(taskId).toBeDefined();
     const token = mintWorkerCapability(runtime.config.hf_token ?? "", {
       namespace: runtime.config.namespace,
-      campaign_id: submission.campaign_id,
-      campaign_lock_digest: sha256(canonicalJson(lock)),
+      run_id: submission.run_id,
+      run_lock_digest: sha256(canonicalJson(lock)),
       action_id: "action-worker-capability",
       task_ids: [taskId ?? "missing"],
-      operations: ["campaign.read", "attempt.submit", "evidence.write"],
+      operations: ["run.read", "attempt.submit", "evidence.write"],
       expires_at: Math.floor(Date.now() / 1000) + 60,
     });
     const headers = { "x-harbor-hf-worker-capability": token };
 
     const lockResponse = await app.inject({
       method: "GET",
-      url: `/api/v1/campaigns/${submission.campaign_id}/lock`,
+      url: `/api/v1/runs/${submission.run_id}/lock`,
       headers,
     });
     expect(lockResponse.statusCode).toBe(200);
-    expect(lockResponse.json().tasks).toMatchObject([{ task_id: taskId }]);
+    expect(lockResponse.json()).toEqual(lock);
+    expect(sha256(canonicalJson(lockResponse.json()))).toBe(
+      sha256(canonicalJson(lock)),
+    );
     expect(
       (await app.inject({ method: "GET", url: "/api/v1/profiles", headers }))
         .statusCode,
@@ -760,7 +1483,7 @@ describe("control API", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/api/v1/campaigns/campaign-other/lock",
+          url: "/api/v1/runs/run-other/lock",
           headers,
         })
       ).statusCode,
@@ -769,7 +1492,7 @@ describe("control API", () => {
       (
         await app.inject({
           method: "POST",
-          url: `/api/v1/campaigns/${submission.campaign_id}/tasks/${taskId}/attempts`,
+          url: `/api/v1/runs/${submission.run_id}/tasks/${taskId}/attempts`,
           headers: { ...headers, "idempotency-key": "worker-scope-attempt" },
           payload: {
             action_id: "action-not-authorized",
@@ -821,7 +1544,7 @@ describe("control API", () => {
 
     for (const url of [
       "/api/v1/system",
-      "/api/v1/campaigns",
+      "/api/v1/runs",
       "/api/v1/jobs",
       "/api/v1/endpoints",
       "/api/v1/results",
@@ -852,7 +1575,7 @@ describe("control API", () => {
     });
     const mutation = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "anonymous-mutation" },
       payload: input,
     });
@@ -862,7 +1585,7 @@ describe("control API", () => {
     const oversized = `{"padding":"${"x".repeat(2 * 1024 * 1024)}"}`;
     const anonymousOversized = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: {
         "content-type": "application/json",
         "idempotency-key": "anonymous-oversized",
@@ -873,7 +1596,7 @@ describe("control API", () => {
     runtime.config.auth_mode = "development";
     const authenticatedOversized = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: {
         "content-type": "application/json",
         "idempotency-key": "authenticated-oversized",
@@ -925,18 +1648,18 @@ describe("control API", () => {
     ).toBe(200);
     const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
       namespace: runtime.config.namespace,
-      campaign_id: "campaign-rate-limit",
-      campaign_lock_digest: `sha256:${"a".repeat(64)}`,
+      run_id: "run-rate-limit",
+      run_lock_digest: `sha256:${"a".repeat(64)}`,
       action_id: "action-rate-limit",
       task_ids: ["task-rate-limit"],
-      operations: ["campaign.read"],
+      operations: ["run.read"],
       expires_at: Math.floor(Date.now() / 1000) + 60,
     });
     expect(
       (
         await app.inject({
           method: "GET",
-          url: "/api/v1/campaigns/campaign-rate-limit/lock",
+          url: "/api/v1/runs/run-rate-limit/lock",
           headers: { "x-harbor-hf-worker-capability": capability },
         })
       ).statusCode,
@@ -992,18 +1715,18 @@ describe("control API", () => {
 
     const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
       namespace: runtime.config.namespace,
-      campaign_id: "campaign-verified-limit",
-      campaign_lock_digest: `sha256:${"a".repeat(64)}`,
+      run_id: "run-verified-limit",
+      run_lock_digest: `sha256:${"a".repeat(64)}`,
       action_id: "action-verified-limit",
       task_ids: ["task-verified-limit"],
-      operations: ["campaign.read"],
+      operations: ["run.read"],
       expires_at: Math.floor(Date.now() / 1000) + 60,
     });
     expect(
       (
         await app.inject({
           method: "GET",
-          url: "/api/v1/campaigns/campaign-verified-limit/lock",
+          url: "/api/v1/runs/run-verified-limit/lock",
           headers: { "x-harbor-hf-worker-capability": capability },
         })
       ).statusCode,
@@ -1164,7 +1887,6 @@ describe("control API", () => {
       entries: [
         {
           publication_id: "publication-one",
-          campaign_id: "campaign-one",
           run_id: "run-one",
           published_at: "2026-08-15T00:00:00Z",
           benchmark: "benchmark-one",
@@ -1226,12 +1948,12 @@ describe("control API", () => {
     const { runtime, app } = await setup();
     const submission = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "missing-publication-rows-campaign" },
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "missing-publication-rows-run" },
       payload: input,
     });
-    const campaignId = submission.json().campaign_id as string;
-    const publicationId = deterministicId("publication", campaignId);
+    const runId = submission.json().run_id as string;
+    const publicationId = deterministicId("publication", runId);
     const resultPath = `results/schema=v1/publications/${publicationId}/receipt.json`;
     const catalog = {
       schema_version: "v1",
@@ -1242,8 +1964,7 @@ describe("control API", () => {
       entries: [
         {
           publication_id: publicationId,
-          campaign_id: campaignId,
-          run_id: campaignId,
+          run_id: runId,
           published_at: "2026-08-16T00:00:01.000Z",
           benchmark: "control-smoke",
           model: "control-smoke",
@@ -1268,7 +1989,7 @@ describe("control API", () => {
       record_id: deterministicId("publication-receipt", publicationId),
       created_at: "2026-08-16T00:00:01.000Z",
       actor: { subject: "harbor-hf-control", role: "service" },
-      campaign_id: campaignId,
+      run_id: runId,
       publication_id: publicationId,
       publication_state: "published",
       object_digests: [
@@ -1310,7 +2031,7 @@ describe("control API", () => {
 
     const row = {
       configuration_digest: `sha256:${"b".repeat(64)}`,
-      campaign_id: "run-leaderboard",
+      run_id: "run-leaderboard",
       publication_id: "publication-leaderboard",
       published_at: "2026-08-21T00:00:00.000Z",
       benchmark: "control-smoke",
@@ -1339,7 +2060,7 @@ describe("control API", () => {
       actor: { subject: "harbor-hf-control", role: "service" },
       sqlite_key: sqliteKey,
       sqlite_digest: sqliteDigest,
-      source_digest: sha256(canonicalJson([row.campaign_id])),
+      source_digest: sha256(canonicalJson([row.run_id])),
       entry_count: 1,
     });
     await runtime.store.create(
@@ -1364,27 +2085,32 @@ describe("control API", () => {
 
   it("accepts idempotent trusted-worker attempt receipts", async () => {
     const { runtime, app } = await setup();
-    const campaign = await app.inject({
+    const run = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "campaign-request-key" },
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "run-request-key" },
       payload: input,
     });
-    const campaignId = campaign.json().campaign_id as string;
+    const runId = run.json().run_id as string;
     await runtime.reconciler.tick();
     const launch = (await runtime.projection.actions()).find(
       (action) => action.action_kind === "job.launch",
     );
-    if (!launch) throw new Error("campaign admission did not create a Job launch");
-    const lock = await runtime.projection.campaignLock(campaignId);
-    if (!lock) throw new Error("campaign lock is missing");
+    if (!launch) throw new Error("run admission did not create a Job launch");
+    await runtime.service.receipt(JSON.parse(launch.intent_body) as ActionIntent, {
+      outcome: "created",
+      observed_state: "RUNNING",
+      resource_id: "job-worker-attempt",
+    });
+    const lock = await runtime.projection.runLock(runId);
+    if (!lock) throw new Error("run lock is missing");
     const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
       namespace: runtime.config.namespace,
-      campaign_id: campaignId,
-      campaign_lock_digest: sha256(canonicalJson(lock)),
+      run_id: runId,
+      run_lock_digest: sha256(canonicalJson(lock)),
       action_id: launch.action_id,
       task_ids: ["control-smoke-task"],
-      operations: ["campaign.read", "attempt.submit", "evidence.write"],
+      operations: ["run.read", "attempt.submit", "evidence.write"],
       expires_at: Math.floor(Date.now() / 1000) + 60,
     });
     const capabilityHeaders = {
@@ -1397,12 +2123,12 @@ describe("control API", () => {
     const chunk = Buffer.from("worker evidence chunk", "utf8");
     const chunkDigest = sha256(chunk);
     const chunkPath = workerEvidenceObjectPath(
-      campaignId,
+      runId,
       launch.action_id,
       "control-smoke-task",
       chunkDigest,
     );
-    const evidenceUrl = `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`;
+    const evidenceUrl = `/api/v1/runs/${runId}/tasks/control-smoke-task/attempts`;
     const evidencePayload = {
       operation: "upload_evidence",
       action_id: launch.action_id,
@@ -1446,7 +2172,7 @@ describe("control API", () => {
     const manifest = {
       schema_version: "v1",
       kind: "worker.evidence.manifest",
-      campaign_id: campaignId,
+      run_id: runId,
       action_id: launch.action_id,
       task_id: "control-smoke-task",
       objects: [{ path: chunkPath, digest: chunkDigest, size: chunk.byteLength }],
@@ -1454,7 +2180,7 @@ describe("control API", () => {
     const manifestBytes = Buffer.from(canonicalJson(manifest), "utf8");
     const manifestDigest = sha256(manifestBytes);
     const manifestPath = workerEvidenceObjectPath(
-      campaignId,
+      runId,
       launch.action_id,
       "control-smoke-task",
       manifestDigest,
@@ -1484,14 +2210,14 @@ describe("control API", () => {
     };
     const missingCapability = await app.inject({
       method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`,
+      url: `/api/v1/runs/${runId}/tasks/control-smoke-task/attempts`,
       headers: { "idempotency-key": "worker-attempt-key" },
       payload,
     });
     expect(missingCapability.statusCode).toBe(403);
     const first = await app.inject({
       method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`,
+      url: `/api/v1/runs/${runId}/tasks/control-smoke-task/attempts`,
       headers: workerHeaders,
       payload,
     });
@@ -1499,7 +2225,7 @@ describe("control API", () => {
     expect(first.json()).toMatchObject({ adopted: false });
     const duplicate = await app.inject({
       method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`,
+      url: `/api/v1/runs/${runId}/tasks/control-smoke-task/attempts`,
       headers: workerHeaders,
       payload,
     });
@@ -1507,15 +2233,23 @@ describe("control API", () => {
     expect(duplicate.json()).toMatchObject({ adopted: true });
     const taskDetail = await app.inject({
       method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task`,
+      url: `/api/v1/runs/${runId}/tasks/control-smoke-task`,
     });
     expect(taskDetail.statusCode).toBe(200);
+    expect(taskDetail.json().attempts[0]).toMatchObject({
+      action_id: launch.action_id,
+      physical_job: {
+        resource_id: "job-worker-attempt",
+        observed_state: "RUNNING",
+        inspect_url: expect.stringContaining("https://huggingface.co/jobs/test/"),
+      },
+    });
     expect(taskDetail.json().attempts[0]).not.toHaveProperty("evidence_path");
     expect(taskDetail.json().attempts[0]).not.toHaveProperty("evidence_digest");
     expect(JSON.stringify(taskDetail.json())).not.toContain(manifestPath);
     const conflict = await app.inject({
       method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/attempts`,
+      url: `/api/v1/runs/${runId}/tasks/control-smoke-task/attempts`,
       headers: workerHeaders,
       payload: { ...payload, outcome: "semantic" },
     });
@@ -1530,645 +2264,11 @@ describe("control API", () => {
     await app.close();
   });
 
-  it("queues capacity-controlled Sandbox creates and reports the limiting state", async () => {
-    const records = sandboxDeploymentRecords();
-    const { runtime, app } = await setup(
-      "enabled",
-      async (seedRuntime) => {
-        for (const record of records)
-          await seedRuntime.store.create(
-            controlRecordPath(record),
-            new TextEncoder().encode(canonicalJson(record)),
-          );
-      },
-      "capacity-test",
-    );
-    const submission = await app.inject({
-      method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "capacity-campaign-key" },
-      payload: {
-        ...input,
-        deployment: "hf-sandbox-test",
-        ceiling_microusd: 20_000_000,
-      },
-    });
-    const campaignId = submission.json().campaign_id as string;
-    await runtime.reconciler.tick();
-    const lock = await runtime.projection.campaignLock(campaignId);
-    const launch = (await runtime.projection.campaignActions(campaignId)).find(
-      (action) => action.action_kind === "job.launch",
-    );
-    if (!lock || !launch) throw new Error("campaign launch is missing");
-    const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
-      namespace: runtime.config.namespace,
-      campaign_id: campaignId,
-      campaign_lock_digest: sha256(canonicalJson(lock)),
-      action_id: launch.action_id,
-      task_ids: ["control-smoke-task"],
-      operations: ["campaign.read", "sandbox.create", "sandbox.close"],
-      expires_at: Math.floor(Date.now() / 1000) + 60,
-    });
-    const headers = {
-      "x-harbor-hf-worker-capability": capability,
-      "idempotency-key": "capacity-create-key",
-    };
-    const campaignState = await app.inject({
-      method: "GET",
-      url: `/api/v1/campaigns/${campaignId}`,
-      headers: { "x-harbor-hf-worker-capability": capability },
-    });
-    expect(campaignState.statusCode).toBe(200);
-    expect(campaignState.json().cancellation_requested).toBe(false);
-    const lifecycle = vi.spyOn(
-      runtime.sandboxes as NonNullable<Runtime["sandboxes"]>,
-      "lifecycle",
-    );
-    lifecycle.mockImplementation(async (intent) => ({
-      outcome: intent.action_kind === "sandbox.create" ? "created" : "completed",
-      observed_state: intent.action_kind === "sandbox.close" ? "CANCELED" : "RUNNING",
-      resource_id: "private-capacity-sandbox-id",
-      cost_microusd: 0,
-    }));
-
-    const queued = await app.inject({
-      method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
-      headers,
-    });
-    expect(queued.statusCode).toBe(202);
-    expect(queued.json()).toMatchObject({
-      state: "QUEUED",
-      limiting_factor: null,
-    });
-    await runtime.reconciler.tick();
-    const created = await app.inject({
-      method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
-      headers,
-    });
-    expect(created.statusCode).toBe(200);
-    expect(created.json()).toMatchObject({ state: "RUNNING" });
-    expect(lifecycle).toHaveBeenCalledTimes(1);
-
-    const capacity = await app.inject({
-      method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/capacity`,
-    });
-    expect(capacity.statusCode).toBe(200);
-    expect(capacity.json()).toMatchObject({
-      configured: true,
-      namespace_limit: 1,
-      namespace_active: 1,
-      campaign_active: 1,
-      provider_reserved: 1,
-      start_tokens: 0,
-    });
-    expect(JSON.stringify(capacity.json())).not.toContain(
-      "private-capacity-sandbox-id",
-    );
-    const profiles = await app.inject({ method: "GET", url: "/api/v1/profiles" });
-    const capacityProfile = profiles
-      .json()
-      .items.find((item: { profile_kind: string }) => item.profile_kind === "capacity");
-    expect(capacityProfile.spec).not.toHaveProperty("namespace");
-    await app.close();
-  });
-
-  it("keeps Sandbox lifecycle capability-scoped, durable, and topology-redacted", async () => {
-    const records = sandboxDeploymentRecords();
-    const { runtime, app } = await setup("enabled", async (seedRuntime) => {
-      for (const record of records)
-        await seedRuntime.store.create(
-          controlRecordPath(record),
-          new TextEncoder().encode(canonicalJson(record)),
-        );
-    });
-    runtime.service.configureCapacityProfile(null);
-    const submission = await app.inject({
-      method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "sandbox-campaign-key" },
-      payload: {
-        ...input,
-        deployment: "hf-sandbox-test",
-        ceiling_microusd: 20_000_000,
-      },
-    });
-    expect(submission.statusCode).toBe(202);
-    const campaignId = submission.json().campaign_id as string;
-    await runtime.reconciler.tick();
-    const lock = await runtime.projection.campaignLock(campaignId);
-    if (!lock) throw new Error("campaign lock is missing");
-    const launch = (await runtime.projection.campaignActions(campaignId)).find(
-      (action) => action.action_kind === "job.launch",
-    );
-    if (!launch) throw new Error("campaign admission did not create a Job launch");
-    const browserLock = await app.inject({
-      method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/lock`,
-    });
-    expect(browserLock.statusCode).toBe(200);
-    const browserDeployment = browserLock
-      .json()
-      .profiles.find((profile: { kind: string }) => profile.kind === "deployment");
-    expect(browserDeployment.spec).not.toHaveProperty("task_sandboxes");
-    const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
-      namespace: runtime.config.namespace,
-      campaign_id: campaignId,
-      campaign_lock_digest: sha256(canonicalJson(lock)),
-      action_id: launch.action_id,
-      task_ids: ["control-smoke-task"],
-      operations: [
-        "campaign.read",
-        "attempt.submit",
-        "evidence.write",
-        "sandbox.create",
-        "sandbox.observe",
-        "sandbox.exec",
-        "sandbox.write",
-        "sandbox.read",
-        "sandbox.close",
-      ],
-      expires_at: Math.floor(Date.now() / 1000) + 60,
-    });
-    const capabilityHeaders = {
-      "x-harbor-hf-worker-capability": capability,
-    };
-    const lifecycle = vi.spyOn(
-      runtime.sandboxes as NonNullable<Runtime["sandboxes"]>,
-      "lifecycle",
-    );
-    lifecycle.mockImplementation(async (intent) => ({
-      outcome: intent.action_kind === "sandbox.create" ? "created" : "completed",
-      observed_state: intent.action_kind === "sandbox.close" ? "CANCELED" : "RUNNING",
-      resource_id: "private-remote-sandbox-id",
-    }));
-    vi.spyOn(
-      runtime.sandboxes as NonNullable<Runtime["sandboxes"]>,
-      "execute",
-    ).mockResolvedValue({
-      exit_code: 0,
-      stdout: "ok\n",
-      stderr: "",
-      signal: null,
-      timed_out: false,
-      duration_ms: 12,
-    });
-    const write = vi
-      .spyOn(runtime.sandboxes as NonNullable<Runtime["sandboxes"]>, "write")
-      .mockResolvedValue();
-    vi.spyOn(
-      runtime.sandboxes as NonNullable<Runtime["sandboxes"]>,
-      "read",
-    ).mockResolvedValue({ bytes: Buffer.from("result", "utf8") });
-
-    const operatorLock = await app.inject({
-      method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/lock`,
-    });
-    expect(JSON.stringify(operatorLock.json())).not.toContain(
-      "route.example.endpoints.huggingface.cloud",
-    );
-    const workerLock = await app.inject({
-      method: "GET",
-      url: `/api/v1/campaigns/${campaignId}/lock`,
-      headers: capabilityHeaders,
-    });
-    expect(JSON.stringify(workerLock.json())).toContain(
-      "route.example.endpoints.huggingface.cloud",
-    );
-
-    const limitedCapability = mintWorkerCapability(runtime.config.hf_token ?? "", {
-      namespace: runtime.config.namespace,
-      campaign_id: campaignId,
-      campaign_lock_digest: sha256(canonicalJson(lock)),
-      action_id: launch.action_id,
-      task_ids: ["control-smoke-task"],
-      operations: ["campaign.read"],
-      expires_at: Math.floor(Date.now() / 1000) + 60,
-    });
-    const deniedCreate = await app.inject({
-      method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
-      headers: {
-        "x-harbor-hf-worker-capability": limitedCapability,
-        "idempotency-key": "sandbox-denied-create-key",
-      },
-    });
-    expect(deniedCreate.statusCode).toBe(403);
-
-    const competingCreates = await Promise.all([
-      app.inject({
-        method: "POST",
-        url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
-        headers: {
-          ...capabilityHeaders,
-          "idempotency-key": "sandbox-create-key",
-        },
-      }),
-      app.inject({
-        method: "POST",
-        url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
-        headers: {
-          ...capabilityHeaders,
-          "idempotency-key": "sandbox-competing-create-key",
-        },
-      }),
-    ]);
-    const create = competingCreates.find((response) => response.statusCode === 200);
-    const rejectedCreate = competingCreates.find(
-      (response) => response.statusCode === 422,
-    );
-    if (!create) throw new Error("Sandbox create did not succeed");
-    expect(rejectedCreate?.json().error.message).toContain("Sandbox count");
-    expect(create.json()).toMatchObject({ state: "RUNNING" });
-    expect(JSON.stringify(create.json())).not.toContain("private-remote-sandbox-id");
-    const createIntent = lifecycle.mock.calls[0]?.[0];
-    expect(lifecycle.mock.calls[0]?.[1]).toEqual({ adoption_only: false });
-    expect(createIntent?.payload.sandbox).toMatchObject({
-      image: `registry.example/task-sandbox@sha256:${"c".repeat(64)}`,
-      hardware: "cpu-upgrade",
-      reservation_microusd: 2_000_000,
-    });
-    const sandboxId = create.json().sandbox_id as string;
-    const repeatedCreate = await app.inject({
-      method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-create-key",
-      },
-    });
-    expect(repeatedCreate.json()).toEqual(create.json());
-    expect(lifecycle).toHaveBeenCalledTimes(1);
-
-    const oversizedCommand = await app.inject({
-      method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/exec`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-oversized-command-key",
-      },
-      payload: {
-        command: ["python", "worker.py"],
-        cwd: "/app",
-        timeout_seconds: 3_601,
-      },
-    });
-    expect(oversizedCommand.statusCode).toBe(422);
-    expect(oversizedCommand.json().error.message).toContain("timeout");
-
-    const competingCommands = await Promise.all([
-      app.inject({
-        method: "POST",
-        url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/exec`,
-        headers: {
-          ...capabilityHeaders,
-          "idempotency-key": "sandbox-command-key",
-        },
-        payload: {
-          command: ["python", "x".repeat(5_000)],
-          cwd: "/app",
-          timeout_seconds: 60,
-        },
-      }),
-      app.inject({
-        method: "POST",
-        url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/exec`,
-        headers: {
-          ...capabilityHeaders,
-          "idempotency-key": "sandbox-competing-command-key",
-        },
-        payload: {
-          command: ["python", "other.py"],
-          cwd: "/app",
-          timeout_seconds: 60,
-        },
-      }),
-    ]);
-    const exec = competingCommands.find((response) => response.statusCode === 200);
-    const rejectedCommand = competingCommands.find(
-      (response) => response.statusCode === 422,
-    );
-    if (!exec) throw new Error("Sandbox command did not succeed");
-    expect(exec.json()).toMatchObject({ exit_code: 0, stdout: "ok\n" });
-    expect(rejectedCommand?.json().error.message).toContain("command count");
-    const conflictingExec = await app.inject({
-      method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/exec`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-command-key",
-      },
-      payload: {
-        command: ["false"],
-        cwd: "/app",
-        timeout_seconds: 60,
-      },
-    });
-    expect(conflictingExec.statusCode).toBe(409);
-
-    const content = Buffer.from("input", "utf8");
-    const deniedUpload = await app.inject({
-      method: "PUT",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/files`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-denied-upload-key",
-      },
-      payload: {
-        path: "/etc/input.txt",
-        content_digest: sha256(content),
-        content_base64: content.toString("base64"),
-      },
-    });
-    expect(deniedUpload.statusCode).toBe(422);
-    const upload = await app.inject({
-      method: "PUT",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/files`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-upload-key",
-      },
-      payload: {
-        path: "/app/input.txt",
-        content_digest: sha256(content),
-        content_base64: content.toString("base64"),
-        mode: "0600",
-      },
-    });
-    expect(upload.statusCode).toBe(200);
-    expect(upload.json()).toEqual({ digest: sha256(content), size: 5 });
-    expect(write).toHaveBeenCalledOnce();
-
-    const download = await app.inject({
-      method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/files/read`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-download-key",
-      },
-      payload: { path: "/logs/result.txt" },
-    });
-    expect(download.statusCode).toBe(200);
-    expect(download.json()).toEqual({
-      digest: sha256("result"),
-      size: 6,
-      content_base64: Buffer.from("result", "utf8").toString("base64"),
-    });
-
-    const close = await app.inject({
-      method: "DELETE",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-close-key",
-      },
-    });
-    expect(close.statusCode).toBe(200);
-    expect(close.json()).toEqual({ sandbox_id: sandboxId, state: "CANCELED" });
-    expect(await runtime.projection.campaign(campaignId)).toMatchObject({
-      reserved_microusd: 0,
-      observed_microusd: 2_000_000,
-    });
-    const actionKinds = (await runtime.projection.campaignActions(campaignId)).map(
-      (action) => action.action_kind,
-    );
-    expect(actionKinds).toEqual(
-      expect.arrayContaining([
-        "sandbox.create",
-        "sandbox.exec",
-        "sandbox.write",
-        "sandbox.read",
-        "sandbox.close",
-      ]),
-    );
-    await app.close();
-  });
-
-  it("terminalizes an ambiguous Sandbox command without replay", async () => {
-    const records = sandboxDeploymentRecords();
-    const { runtime, app } = await setup("enabled", async (seedRuntime) => {
-      for (const record of records)
-        await seedRuntime.store.create(
-          controlRecordPath(record),
-          new TextEncoder().encode(canonicalJson(record)),
-        );
-    });
-    runtime.service.configureCapacityProfile(null);
-    const submission = await app.inject({
-      method: "POST",
-      url: "/api/v1/campaigns",
-      headers: { "idempotency-key": "sandbox-ambiguous-campaign-key" },
-      payload: {
-        ...input,
-        deployment: "hf-sandbox-test",
-        ceiling_microusd: 20_000_000,
-      },
-    });
-    expect(submission.statusCode).toBe(202);
-    const campaignId = submission.json().campaign_id as string;
-    await runtime.reconciler.tick();
-    const lock = await runtime.projection.campaignLock(campaignId);
-    if (!lock) throw new Error("campaign lock is missing");
-    const launch = (await runtime.projection.campaignActions(campaignId)).find(
-      (action) => action.action_kind === "job.launch",
-    );
-    if (!launch) throw new Error("campaign admission did not create a Job launch");
-    const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
-      namespace: runtime.config.namespace,
-      campaign_id: campaignId,
-      campaign_lock_digest: sha256(canonicalJson(lock)),
-      action_id: launch.action_id,
-      task_ids: ["control-smoke-task"],
-      operations: ["campaign.read", "sandbox.create", "sandbox.exec", "sandbox.close"],
-      expires_at: Math.floor(Date.now() / 1000) + 60,
-    });
-    const capabilityHeaders = {
-      "x-harbor-hf-worker-capability": capability,
-    };
-    vi.spyOn(
-      runtime.sandboxes as NonNullable<Runtime["sandboxes"]>,
-      "lifecycle",
-    ).mockImplementation(async (intent) => ({
-      outcome: intent.action_kind === "sandbox.create" ? "created" : "completed",
-      observed_state: intent.action_kind === "sandbox.close" ? "CANCELED" : "RUNNING",
-      resource_id: "private-ambiguous-sandbox-resource",
-    }));
-    const execute = vi
-      .spyOn(runtime.sandboxes as NonNullable<Runtime["sandboxes"]>, "execute")
-      .mockRejectedValue(
-        new Error(
-          "private adapter response at https://private.example.invalid contains topology",
-        ),
-      );
-    const create = await app.inject({
-      method: "POST",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-ambiguous-create-key",
-      },
-    });
-    expect(create.statusCode).toBe(200);
-    const sandboxId = create.json().sandbox_id as string;
-    const execUrl = `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}/exec`;
-    const execInput = {
-      method: "POST" as const,
-      url: execUrl,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-ambiguous-command-key",
-      },
-      payload: {
-        command: ["python", "worker.py"],
-        cwd: "/app",
-        timeout_seconds: 60,
-      },
-    };
-    const failed = await app.inject(execInput);
-    expect(failed.statusCode).toBe(503);
-    expect(failed.json()).toMatchObject({
-      error: {
-        code: "sandbox_action_ambiguous",
-        message: "Sandbox action outcome is unknown and cannot be replayed",
-        request_id: expect.any(String),
-      },
-    });
-    expect(JSON.stringify(failed.json())).not.toContain("private.example.invalid");
-    expect(execute).toHaveBeenCalledOnce();
-    const command = (await runtime.projection.campaignActions(campaignId)).find(
-      (action) => action.action_kind === "sandbox.exec",
-    );
-    if (!command?.receipt_body) throw new Error("ambiguous receipt is missing");
-    expect(JSON.parse(command.receipt_body)).toMatchObject({
-      outcome: "failed",
-      observed_state: "AMBIGUOUS",
-      error_code: "sandbox_external_outcome_unknown",
-    });
-    expect(await runtime.projection.actionAdvanced(command.action_id)).toBe(true);
-    const resultPath = sandboxActionResultPath(campaignId, command.action_id);
-    const resultPrefix = resultPath.slice(0, -"/result.json".length);
-    expect(await runtime.store.list(resultPrefix)).toEqual([]);
-    expect(
-      await runtime.projection.pendingDispatchedSandboxCommandActions(
-        campaignId,
-        "control-smoke-task",
-      ),
-    ).toEqual([]);
-
-    const repeated = await app.inject(execInput);
-    expect(repeated.statusCode).toBe(409);
-    expect(repeated.json()).toMatchObject({
-      error: { code: "idempotency_conflict" },
-    });
-    expect(execute).toHaveBeenCalledOnce();
-    const close = await app.inject({
-      method: "DELETE",
-      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes/${sandboxId}`,
-      headers: {
-        ...capabilityHeaders,
-        "idempotency-key": "sandbox-ambiguous-close-key",
-      },
-    });
-    expect(close.statusCode).toBe(200);
-    await app.close();
-  });
-
-  it("keeps historical disposition correction operator-scoped and redacted", async () => {
-    const { runtime, app } = await setup("enabled");
-    const correct = vi
-      .spyOn(runtime.service, "correctHistoricalSandboxAmbiguities")
-      .mockResolvedValue({
-        batch_id: "disposition-batch-safe",
-        batch_digest: `sha256:${"a".repeat(64)}`,
-        items: [
-          {
-            action_id: "action-safe",
-            disposition_record_id: "disposition-action-safe",
-            created: true,
-          },
-        ],
-      });
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/v1/campaigns/campaign-safe/tasks/task-safe/action-dispositions",
-      headers: { "idempotency-key": "disposition-request-key" },
-      payload: {
-        action_ids: ["action-safe"],
-        reason: "correct a proved historical observation",
-        confirmed: true,
-      },
-    });
-    expect(response.statusCode).toBe(201);
-    expect(response.json()).toEqual({
-      batch_id: "disposition-batch-safe",
-      batch_digest: `sha256:${"a".repeat(64)}`,
-      items: [
-        {
-          action_id: "action-safe",
-          disposition_record_id: "disposition-action-safe",
-          created: true,
-        },
-      ],
-    });
-    expect(correct).toHaveBeenCalledWith(
-      "campaign-safe",
-      "task-safe",
-      {
-        action_ids: ["action-safe"],
-        reason: "correct a proved historical observation",
-        confirmed: true,
-      },
-      "disposition-request-key",
-      expect.objectContaining({ role: "operator" }),
-    );
-    expect(JSON.stringify(response.json())).not.toContain("close_action_id");
-    expect(JSON.stringify(response.json())).not.toContain("resource_id");
-
-    vi.spyOn(runtime.projection, "actionDispositionViews").mockResolvedValue([
-      {
-        action_id: "action-safe",
-        campaign_id: "campaign-safe",
-        task_id: "task-safe",
-        recorded_outcome: "completed",
-        recorded_observed_state: "suppressed-sandbox-cleanup-ambiguous",
-        effective_outcome: "failed",
-        effective_observed_state: "AMBIGUOUS",
-        effective_error_code: "sandbox_external_outcome_unknown",
-        reason_code: "historical_non_replay_safe_command_ambiguity",
-        corrected_at: "2026-08-21T00:00:00Z",
-        actor_role: "operator",
-        disposition_record_id: "disposition-action-safe",
-        batch_id: "disposition-batch-safe",
-        batch_size: 1,
-      },
-    ]);
-    const listed = await app.inject({
-      method: "GET",
-      url: "/api/v1/campaigns/campaign-safe/tasks/task-safe/action-dispositions",
-    });
-    expect(listed.statusCode).toBe(200);
-    expect(listed.json()).toMatchObject({
-      items: [
-        {
-          recorded_outcome: "completed",
-          effective_outcome: "failed",
-          effective_observed_state: "AMBIGUOUS",
-        },
-      ],
-      next_cursor: null,
-    });
-    expect(JSON.stringify(listed.json())).not.toContain("receipt_digest");
-    await app.close();
-  });
-
   it("returns a client error for an unknown profile alias", async () => {
     const { app } = await setup("enabled");
     const response = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "unknown-profile-key" },
       payload: { ...input, model: "unknown-model" },
     });
@@ -2179,7 +2279,7 @@ describe("control API", () => {
     await app.close();
   });
 
-  it("rejects a campaign ceiling above the immutable launch-policy maximum", async () => {
+  it("rejects a run ceiling above the immutable launch-policy maximum", async () => {
     const { app } = await setup("enabled");
     const cappedInput = {
       benchmark: "terminal-bench-2-1-replacement",
@@ -2192,7 +2292,7 @@ describe("control API", () => {
     };
     const over = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "profile-ceiling-api-key" },
       payload: cappedInput,
     });
@@ -2200,16 +2300,16 @@ describe("control API", () => {
     expect(over.json()).toMatchObject({
       error: {
         code: "policy_rejected",
-        message: "campaign ceiling exceeds the launch policy maximum",
+        message: "run ceiling exceeds the launch policy maximum",
         request_id: expect.any(String),
       },
     });
-    const empty = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
+    const empty = await app.inject({ method: "GET", url: "/api/v1/runs" });
     expect(empty.json().items).toEqual([]);
 
     const exact = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "profile-ceiling-api-key" },
       payload: { ...cappedInput, ceiling_microusd: 180_000_000 },
     });
@@ -2221,49 +2321,49 @@ describe("control API", () => {
     const { runtime, app } = await setup();
     const missingKey = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       payload: input,
     });
     expect(missingKey.statusCode).toBe(409);
     const unconfirmed = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "request-key-0001" },
       payload: { ...input, confirmed: false },
     });
     expect(unconfirmed.statusCode).toBe(400);
     const wrongProfile = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "request-key-0002" },
       payload: { ...input, model: "other-model" },
     });
     expect(wrongProfile.statusCode).toBe(422);
     const response = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "request-key-0003" },
       payload: input,
     });
     expect(response.statusCode).toBe(202);
     const duplicate = await app.inject({
       method: "POST",
-      url: "/api/v1/campaigns",
+      url: "/api/v1/runs",
       headers: { "idempotency-key": "request-key-0003" },
       payload: input,
     });
     expect(duplicate.json()).toMatchObject({
       adopted: true,
-      campaign_id: response.json().campaign_id,
+      run_id: response.json().run_id,
     });
     const lock = await app.inject({
       method: "GET",
-      url: `/api/v1/campaigns/${response.json().campaign_id}/lock`,
+      url: `/api/v1/runs/${response.json().run_id}/lock`,
     });
     expect(lock.statusCode).toBe(200);
     expect(lock.json()).toMatchObject({
-      kind: "campaign.lock",
-      campaign_id: response.json().campaign_id,
+      kind: "run.lock",
+      run_id: response.json().run_id,
       tasks: [{ task_id: "control-smoke-task" }],
     });
     const audit = await app.inject({ method: "GET", url: "/api/v1/audit" });
@@ -2277,8 +2377,8 @@ describe("control API", () => {
 describe("authentication state", () => {
   it("keeps post-login redirects on the callback origin", () => {
     const callback = "https://control.example/auth/callback";
-    expect(safeReturnPath("/campaigns?state=active#latest", callback)).toBe(
-      "/campaigns?state=active#latest",
+    expect(safeReturnPath("/runs?state=active#latest", callback)).toBe(
+      "/runs?state=active#latest",
     );
     expect(safeReturnPath("/\\evil.example", callback)).toBe("/");
     expect(safeReturnPath("//evil.example", callback)).toBe("/");

@@ -12,10 +12,10 @@ from harbor.models.agent.context import AgentContext
 from harbor_hf_agents.openclaw.agent import OpenClawAgent
 from harbor_hf_agents.support.hf_inference_bridge import (
     prepare_hf_inference_bridge,
-    stop_hf_inference_bridge,
 )
-from harbor_hf_agents.support.sandbox_inference_route import (
-    use_sandbox_inference_route,
+from harbor_hf_agents.support.job_inference_route import (
+    use_job_inference_route,
+    with_job_inference_bridge_cleanup,
 )
 
 _DEFAULT_CODEX_PLUGIN_VERSION = "2026.7.1-1"
@@ -397,6 +397,7 @@ class OpenClawCodexAgent(OpenClawAgent):
 
     @override
     @with_prompt_template
+    @with_job_inference_bridge_cleanup
     async def run(
         self,
         instruction: str,
@@ -412,7 +413,7 @@ class OpenClawCodexAgent(OpenClawAgent):
             if (value := self._get_env(key))
         }
         env["OPENCLAW_AGENT_ID"] = self._resolved_openclaw_agent_id()
-        bridged = await use_sandbox_inference_route(
+        bridged = await use_job_inference_route(
             self,
             environment,
             env,
@@ -459,16 +460,12 @@ class OpenClawCodexAgent(OpenClawAgent):
                 env=env,
             )
         finally:
-            try:
-                await self.exec_as_agent(
-                    environment,
-                    command=(
-                        "agent_id=$OPENCLAW_AGENT_ID; "
-                        'rm -f "$HOME/.openclaw/agents/$agent_id/agent/'
-                        'codex-home/config.toml"'
-                    ),
-                    env=env,
-                )
-            finally:
-                if bridged:
-                    await stop_hf_inference_bridge(self, environment)
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    "agent_id=$OPENCLAW_AGENT_ID; "
+                    'rm -f "$HOME/.openclaw/agents/$agent_id/agent/'
+                    'codex-home/config.toml"'
+                ),
+                env=env,
+            )

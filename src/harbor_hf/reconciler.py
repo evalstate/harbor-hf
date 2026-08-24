@@ -9,12 +9,7 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from harbor_hf.campaigns import (
-    CampaignLock,
-    CampaignRunLock,
-    estimated_partial_wave_cost,
-)
-from harbor_hf.control import ActionKind, ActionProjection, CampaignEvent
+from harbor_hf.control import ActionKind, ActionProjection, RunEvent
 from harbor_hf.recovery import (
     RecoveryProjection,
     TerminalDecision,
@@ -22,6 +17,11 @@ from harbor_hf.recovery import (
     WaveProjection,
     project_recovery,
     retry_is_ready,
+)
+from harbor_hf.runs import (
+    RunExecutionLock,
+    RunLock,
+    estimated_partial_wave_cost,
 )
 
 _UNBOUNDED = 2**31 - 1
@@ -54,15 +54,15 @@ class AdmissionLimits(FrozenModel):
     global_active_waves: int = Field(default=_UNBOUNDED, ge=1)
     deployment_active_waves: int = Field(default=1, ge=1)
     provider_active_waves: int = Field(default=_UNBOUNDED, ge=1)
-    campaign_active_waves: int = Field(default=_UNBOUNDED, ge=1)
+    run_active_waves: int = Field(default=_UNBOUNDED, ge=1)
 
 
 class AdmissionUsage(FrozenModel):
     global_active_waves: int = Field(default=0, ge=0)
     deployment_active_waves: dict[str, int] = Field(default_factory=dict)
     provider_active_waves: dict[str, int] = Field(default_factory=dict)
-    campaign_active_waves: dict[str, int] = Field(default_factory=dict)
-    campaign_spend_microusd: dict[str, int] = Field(default_factory=dict)
+    run_active_waves: dict[str, int] = Field(default_factory=dict)
+    run_spend_microusd: dict[str, int] = Field(default_factory=dict)
 
 
 class ReconcileContext(FrozenModel):
@@ -75,7 +75,7 @@ class ReconcileAction(FrozenModel):
     action_id: str
     action_key: str
     kind: ActionKind
-    campaign_id: str
+    run_id: str
     deployment_digest: str = ""
     provider: str = ""
     wave_id: str | None = None
@@ -96,7 +96,7 @@ class BlockedAction(FrozenModel):
         "global-budget",
         "deployment-budget",
         "provider-budget",
-        "campaign-budget",
+        "run-budget",
         "spend-cap",
         "spend-estimate-missing",
         "backoff",
@@ -104,7 +104,7 @@ class BlockedAction(FrozenModel):
 
 
 class ReconcilePlan(FrozenModel):
-    campaign_id: str
+    run_id: str
     status: str
     action_count: int
     actions: list[ReconcileAction]
@@ -136,8 +136,8 @@ class _MutableUsage:
         )
         self.deployments = dict(usage.deployment_active_waves)
         self.providers = dict(usage.provider_active_waves)
-        self.campaigns = dict(usage.campaign_active_waves)
-        self.spend = dict(usage.campaign_spend_microusd)
+        self.runs = dict(usage.run_active_waves)
+        self.spend = dict(usage.run_spend_microusd)
         for wave in projection.waves.values():
             if wave.status == "closed":
                 continue
@@ -145,16 +145,16 @@ class _MutableUsage:
                 self.deployments.get(wave.deployment_digest, 0) + 1
             )
             self.providers[wave.provider] = self.providers.get(wave.provider, 0) + 1
-            campaign_id = projection.campaign.campaign_id
-            self.campaigns[campaign_id] = self.campaigns.get(campaign_id, 0) + 1
-        campaign_id = projection.campaign.campaign_id
-        self.spend[campaign_id] = (
-            self.spend.get(campaign_id, 0)
+            run_id = projection.run.run_id
+            self.runs[run_id] = self.runs.get(run_id, 0) + 1
+        run_id = projection.run.run_id
+        self.spend[run_id] = (
+            self.spend.get(run_id, 0)
             + projection.spend_microusd
             + sum(wave.estimated_cost_microusd for wave in projection.waves.values())
         )
 
-    def admit(self, candidate: _Candidate, campaign_id: str) -> None:
+    def admit(self, candidate: _Candidate, run_id: str) -> None:
         self.global_waves += 1
         self.deployments[candidate.deployment_digest] = (
             self.deployments.get(candidate.deployment_digest, 0) + 1
@@ -162,15 +162,15 @@ class _MutableUsage:
         self.providers[candidate.provider] = (
             self.providers.get(candidate.provider, 0) + 1
         )
-        self.campaigns[campaign_id] = self.campaigns.get(campaign_id, 0) + 1
-        self.spend[campaign_id] = self.spend.get(campaign_id, 0) + (
+        self.runs[run_id] = self.runs.get(run_id, 0) + 1
+        self.spend[run_id] = self.spend.get(run_id, 0) + (
             candidate.estimated_cost_microusd or 0
         )
 
 
 def plan_reconciliation(
-    lock: CampaignLock,
-    events: list[CampaignEvent],
+    lock: RunLock,
+    events: list[RunEvent],
     *,
     context: ReconcileContext | None = None,
     now: datetime | None = None,
@@ -178,8 +178,8 @@ def plan_reconciliation(
     projection = project_recovery(lock, events)
     observed_context = context or ReconcileContext()
     requested_now = (now or datetime.now(UTC)).astimezone(UTC)
-    observed_now = max(requested_now, projection.campaign.last_observed_at)
-    if projection.campaign.status in {"completed", "partial", "failed", "cancelled"}:
+    observed_now = max(requested_now, projection.run.last_observed_at)
+    if projection.run.status in {"completed", "partial", "failed", "cancelled"}:
         return projection, _plan(lock, projection, [], [], projection.terminal_decision)
 
     candidates, preblocked = _candidates(
@@ -198,15 +198,15 @@ def plan_reconciliation(
 
 
 def _plan(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     actions: list[ReconcileAction],
     blocked: list[BlockedAction],
     terminal: TerminalDecision | None,
 ) -> ReconcilePlan:
     return ReconcilePlan(
-        campaign_id=lock.campaign_id,
-        status=projection.campaign.status,
+        run_id=lock.run_id,
+        status=projection.run.status,
         action_count=len(actions),
         actions=actions,
         blocked=blocked,
@@ -215,14 +215,14 @@ def _plan(
 
 
 def _candidates(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     context: ReconcileContext,
     now: datetime,
 ) -> tuple[list[_Candidate], list[BlockedAction]]:
     candidates = _cleanup_candidates(lock, projection, now)
     blocked: list[BlockedAction] = []
-    cancelling = projection.campaign.status in {
+    cancelling = projection.run.status in {
         "cancel_requested",
         "draining",
         "manual_intervention",
@@ -243,10 +243,10 @@ def _candidates(
 
 
 def _cleanup_candidates(
-    lock: CampaignLock, projection: RecoveryProjection, now: datetime
+    lock: RunLock, projection: RecoveryProjection, now: datetime
 ) -> list[_Candidate]:
     candidates: list[_Candidate] = []
-    cancelling = projection.campaign.status in {
+    cancelling = projection.run.status in {
         "cancel_requested",
         "draining",
         "manual_intervention",
@@ -268,7 +268,7 @@ def _cleanup_candidates(
 
 
 def _cancellation_grace_elapsed(
-    lock: CampaignLock, projection: RecoveryProjection, now: datetime
+    lock: RunLock, projection: RecoveryProjection, now: datetime
 ) -> bool:
     requested_at = projection.cancel_requested_at
     if requested_at is None:
@@ -286,9 +286,9 @@ def _execution_cancellations(projection: RecoveryProjection) -> list[_Candidate]
             wave_id=execution.wave_id,
             shard_ids=[execution.shard_id],
             trial_ids=[execution.trial_id],
-            target_ids=[execution.execution_id],
+            target_ids=[execution.attempt_id],
         )
-        for execution in projection.executions.values()
+        for execution in projection.attempts.values()
         if execution.status == "active"
     ]
 
@@ -337,7 +337,7 @@ def _cancellation_wave_actions(
         return [candidate("cancel-wave"), candidate("cleanup-wave")]
     active_execution = any(
         execution.wave_id == observed.wave_id and execution.status == "active"
-        for execution in projection.executions.values()
+        for execution in projection.attempts.values()
     )
     if active_execution:
         return [candidate("drain-wave")]
@@ -347,13 +347,13 @@ def _cancellation_wave_actions(
 
 
 def _unobserved_wave_cancellations(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     known_wave_ids: set[str],
     force_cancel: bool,
 ) -> list[_Candidate]:
     candidates: list[_Candidate] = []
-    for action in projection.campaign.actions.values():
+    for action in projection.run.actions.values():
         if (
             action.action_kind not in {"submit-wave", "retry-shard"}
             or action.status == "failed"
@@ -383,14 +383,14 @@ def _unobserved_wave_cancellations(
 
 
 def _retry_candidates(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     context: ReconcileContext,
     now: datetime,
 ) -> tuple[list[_Candidate], list[BlockedAction]]:
     reserved_trial_ids = {
         trial_id
-        for action in projection.campaign.actions.values()
+        for action in projection.run.actions.values()
         if action.action_kind == "retry-shard"
         and not _action_is_spent(projection, action)
         for trial_id in action.target_ids
@@ -431,7 +431,7 @@ def _retry_candidates(
                         admission.estimated_wave_cost_microusd,
                         len(trial_ids),
                     ),
-                    spend_cap_microusd=_run_admission(
+                    spend_cap_microusd=_execution_admission(
                         lock, deployment
                     ).spend_cap_microusd,
                 )
@@ -450,13 +450,13 @@ def _retry_candidates(
 
 
 def _new_wave_candidates(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     context: ReconcileContext,
 ) -> list[_Candidate]:
     assigned = _assigned_shards(lock, projection)
     groups: dict[str, list[str]] = defaultdict(list)
-    for run in sorted(lock.runs, key=lambda value: value.run_id):
+    for run in sorted(lock.executions, key=lambda value: value.execution_id):
         for shard in sorted(run.shards, key=lambda value: value.shard_id):
             status = projection.shards[shard.shard_id].status
             if shard.shard_id not in assigned and status in {"planned", "queued"}:
@@ -475,7 +475,7 @@ def _new_wave_candidates(
                     shard_ids=chunk,
                     target_ids=chunk,
                     estimated_cost_microusd=admission.estimated_wave_cost_microusd,
-                    spend_cap_microusd=_run_admission(
+                    spend_cap_microusd=_execution_admission(
                         lock, deployment_digest
                     ).spend_cap_microusd,
                 )
@@ -483,7 +483,7 @@ def _new_wave_candidates(
     return candidates
 
 
-def _assigned_shards(lock: CampaignLock, projection: RecoveryProjection) -> set[str]:
+def _assigned_shards(lock: RunLock, projection: RecoveryProjection) -> set[str]:
     assigned: set[str] = set()
     for wave in projection.waves.values():
         if wave.status != "closed":
@@ -496,8 +496,8 @@ def _assigned_shards(lock: CampaignLock, projection: RecoveryProjection) -> set[
             for shard_id in wave.shard_ids
             if _shard_has_execution_evidence(projection, shard_id)
         )
-    assigned.update(execution.shard_id for execution in projection.executions.values())
-    for action in projection.campaign.actions.values():
+    assigned.update(execution.shard_id for execution in projection.attempts.values())
+    for action in projection.run.actions.values():
         if action.action_kind in {
             "submit-wave",
             "retry-shard",
@@ -512,7 +512,7 @@ def _shard_has_execution_evidence(
     projection: RecoveryProjection, shard_id: str
 ) -> bool:
     return any(
-        projection.trials[trial_id].executions
+        projection.trials[trial_id].attempts
         or projection.trials[trial_id].status != "planned"
         for trial_id in projection.shards[shard_id].trial_ids
     )
@@ -549,7 +549,7 @@ def _action_is_spent(projection: RecoveryProjection, action: ActionProjection) -
 
 
 def _action_shard_ids(
-    lock: CampaignLock,
+    lock: RunLock,
     kind: ActionKind,
     target_ids: list[str],
 ) -> list[str]:
@@ -560,14 +560,14 @@ def _action_shard_ids(
     requested = set(target_ids)
     return sorted(
         shard.shard_id
-        for run in lock.runs
+        for run in lock.executions
         for shard in run.shards
         if requested.intersection(trial.trial_id for trial in shard.trials)
     )
 
 
 def _admit(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     candidates: list[_Candidate],
     context: ReconcileContext,
@@ -596,7 +596,7 @@ def _admit(
                 if action is None:
                     continue
             else:
-                usage.admit(candidate, lock.campaign_id)
+                usage.admit(candidate, lock.run_id)
         if len(actions) >= context.limits.action_limit:
             break
         actions.append(action)
@@ -604,14 +604,14 @@ def _admit(
 
 
 def _denied_billable_action(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     candidate: _Candidate,
     reason: Literal[
         "global-budget",
         "deployment-budget",
         "provider-budget",
-        "campaign-budget",
+        "run-budget",
         "spend-cap",
         "spend-estimate-missing",
     ],
@@ -639,7 +639,7 @@ def _denied_billable_action(
 
 
 def _durable_spend_cap_blocks_retry(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     candidate: _Candidate,
 ) -> bool:
@@ -651,7 +651,7 @@ def _durable_spend_cap_blocks_retry(
         )
         if cap is not None
     ]
-    locked_estimate = _run_admission(
+    locked_estimate = _execution_admission(
         lock, candidate.deployment_digest
     ).estimated_wave_cost_microusd
     if not caps or locked_estimate is None:
@@ -663,7 +663,7 @@ def _durable_spend_cap_blocks_retry(
 
 
 def _budget_reason(
-    lock: CampaignLock,
+    lock: RunLock,
     candidate: _Candidate,
     context: ReconcileContext,
     usage: _MutableUsage,
@@ -672,7 +672,7 @@ def _budget_reason(
         "global-budget",
         "deployment-budget",
         "provider-budget",
-        "campaign-budget",
+        "run-budget",
         "spend-cap",
         "spend-estimate-missing",
     ]
@@ -688,11 +688,9 @@ def _budget_reason(
         return "deployment-budget"
     if usage.providers.get(candidate.provider, 0) >= limits.provider_active_waves:
         return "provider-budget"
-    campaign_limit = min(
-        limits.campaign_active_waves, lock.recovery_policy.max_active_waves
-    )
-    if usage.campaigns.get(lock.campaign_id, 0) >= campaign_limit:
-        return "campaign-budget"
+    run_limit = min(limits.run_active_waves, lock.recovery_policy.max_active_waves)
+    if usage.runs.get(lock.run_id, 0) >= run_limit:
+        return "run-budget"
     caps = [
         cap
         for cap in (
@@ -704,7 +702,7 @@ def _budget_reason(
     cap = min(caps) if caps else None
     if cap is not None and candidate.estimated_cost_microusd is None:
         return "spend-estimate-missing"
-    projected = usage.spend.get(lock.campaign_id, 0) + (
+    projected = usage.spend.get(lock.run_id, 0) + (
         candidate.estimated_cost_microusd or 0
     )
     if cap is not None and projected > cap:
@@ -713,7 +711,7 @@ def _budget_reason(
 
 
 def _materialize(
-    lock: CampaignLock,
+    lock: RunLock,
     projection: RecoveryProjection,
     candidate: _Candidate,
 ) -> ReconcileAction | None:
@@ -721,14 +719,14 @@ def _materialize(
         action.action_kind == candidate.kind
         and action.target_ids == candidate.target_ids
         and _action_is_spent(projection, action)
-        for action in projection.campaign.actions.values()
+        for action in projection.run.actions.values()
     )
     value = candidate.model_dump(mode="json")
-    value.update({"campaign_id": lock.campaign_id, "action_retry": retries})
+    value.update({"run_id": lock.run_id, "action_retry": retries})
     action_key = _short_digest(value)
     if any(
         action.action_key == action_key and not _action_is_spent(projection, action)
-        for action in projection.campaign.actions.values()
+        for action in projection.run.actions.values()
     ):
         return None
     values = candidate.model_dump(mode="python")
@@ -740,17 +738,17 @@ def _materialize(
     return ReconcileAction(
         action_id=f"act-{action_key}",
         action_key=action_key,
-        campaign_id=lock.campaign_id,
+        run_id=lock.run_id,
         **values,
     )
 
 
 def _deployment(
-    lock: CampaignLock,
+    lock: RunLock,
     context: ReconcileContext,
     deployment_digest: str,
 ) -> DeploymentAdmission:
-    locked = _run_admission(lock, deployment_digest)
+    locked = _execution_admission(lock, deployment_digest)
     observed = context.deployments.get(deployment_digest)
     if observed is None:
         return DeploymentAdmission(
@@ -777,8 +775,10 @@ def _admission_provider(admission: DeploymentAdmission) -> str:
     return admission.provider
 
 
-def _run_admission(lock: CampaignLock, deployment_digest: str) -> CampaignRunLock:
-    matches = [run for run in lock.runs if run.deployment_digest == deployment_digest]
+def _execution_admission(lock: RunLock, deployment_digest: str) -> RunExecutionLock:
+    matches = [
+        run for run in lock.executions if run.deployment_digest == deployment_digest
+    ]
     if not matches:
         raise ValueError("unknown deployment admission target")
     first = matches[0]
@@ -802,11 +802,11 @@ def _run_admission(lock: CampaignLock, deployment_digest: str) -> CampaignRunLoc
     return first
 
 
-def _deployment_for_shards(lock: CampaignLock, shard_ids: list[str]) -> str:
+def _deployment_for_shards(lock: RunLock, shard_ids: list[str]) -> str:
     wanted = set(shard_ids)
     matches = {
         run.deployment_digest
-        for run in lock.runs
+        for run in lock.executions
         if any(shard.shard_id in wanted for shard in run.shards)
     }
     if len(matches) != 1:

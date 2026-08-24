@@ -12,6 +12,10 @@ stage will update this document with the exact request shape before the
 TypeScript service accepts production submissions. There will be no parallel
 legacy manifest mode.
 
+The `hf-sandbox` extra and `remote.harbor.sandbox_*` fields below are names from
+the pinned external Harbor API used by the legacy local worker. They do not
+describe a control-service lifecycle resource or compatibility path.
+
 ## Minimal Shape
 
 ```yaml
@@ -177,7 +181,7 @@ A trusted recorder holds the upstream credential. The verifier receives the HF
 Job ingress credential through `AGENT_JUDGE_API_KEY`, plus an execution-scoped
 capability URL and the locked model in `AGENT_JUDGE_API_URL` and
 `AGENT_JUDGE_MODEL`. The recorder can enforce `reasoning_effort` and remove a
-verifier-supplied `temperature` before forwarding a request. Campaign workers
+verifier-supplied `temperature` before forwarding a request. Run workers
 and deployment profiling workers both construct the recorder from this locked
 judge configuration; profiling does not substitute the HF router for a direct
 OpenAI or Gemini judge. The recorder retains exact bounded request and response
@@ -196,7 +200,7 @@ reject unknown IDs, and may not remove every cell.
 The [control service plan](2026-08-16-harbor-hf-control-service-plan.md) will
 make these profiles reusable. Built-in profiles will live in the existing
 Harbor-HF source repo, namespace-specific profile objects will use the existing
-private evidence Bucket, and the resolved campaign lock will continue to inline
+private evidence Bucket, and the resolved run lock will continue to inline
 every behavior-affecting field. No profile-specific Hub repository or Bucket is
 allowed.
 
@@ -262,7 +266,7 @@ revision-equivalent when the published value is `not_observed`.
 
 Provider `limits.max_spend_usd` and `limits.estimated_wave_cost_usd` must be
 configured together. The estimate is a conservative admission reservation for
-one deployment wave, must not exceed the cap, and is preserved in the campaign
+one deployment wave, must not exceed the cap, and is preserved in the run
 and wave locks. It remains charged after closure when provider billing is not
 attributable, so missing observations cannot reopen spent budget. It is not
 presented as observed provider billing. Provider
@@ -293,19 +297,19 @@ selection concurrency, model/deployment/agent/benchmark identity, Harbor client
 runtime, reasoning mode, sampled workload, and token limits. When present,
 validation fails unless the manifest has one resolved matrix cell and every
 identity, workload, and concurrency value matches. The binding is copied into
-run locks and participates in campaign and experiment digests.
+run locks and participates in run and experiment digests.
 `max_trials_per_shard` deterministically bounds the number of task-attempt pairs
-in one campaign shard and defaults to 64. `max_shards_per_wave` bounds compatible
+in one run shard and defaults to 64. `max_shards_per_wave` bounds compatible
 shards assigned under one endpoint startup and defaults to 8. Provider request
 concurrency is part of the deployment profile. Timeout values are in seconds.
 `agent_setup_timeout_multiplier` is an optional positive multiplier forwarded to
 Harbor for agent installation and setup. Set it only when measured setup time
-exceeds Harbor's default; it does not extend the campaign wall-clock limit.
+exceeds Harbor's default; it does not extend the run wall-clock limit.
 `timeout_seconds` is a wall-clock limit for Harbor execution. On expiry, an
 endpoint worker terminates the Harbor process group and starts verified cleanup.
 A provider controller drains the internal wave and records its durable state.
 
-Inference Provider campaigns require `execution.controller` with every field
+Inference Provider runs require `execution.controller` with every field
 written explicitly:
 
 ```yaml
@@ -342,7 +346,7 @@ the planning trial duration, headroom, and wave reserve. Every wave must fit
 must fit `remote.job.timeout_seconds`. A provider wave lock enforces the planned
 trial-work duration. Recorder setup draws from `wave_reserve_seconds`, and any
 unused setup allowance remains for drain and evidence publication. The plan and
-campaign lock store these values and include them in their digests.
+run lock store these values and include them in their digests.
 
 Every task selected by `benchmark.task_names` is passed to Harbor. The resolved
 `task_digests` map gives exact and glob selections a deterministic trial count.
@@ -400,14 +404,14 @@ The current contract uses separate benchmark and index destinations. The
 [control service plan](2026-08-16-harbor-hf-control-service-plan.md) replaces
 that new-write shape in place with immutable normalized rows and catalog objects
 under `results/schema=v1/` in the namespace's existing private
-`<artifact-bucket>` Bucket. New campaigns will not create result repositories
+`<artifact-bucket>` Bucket. New runs will not create result repositories
 or Datasets. This section remains authoritative until that switch is
 implemented.
 
 `publishing.dataset` identifies the versioned, benchmark-specific publication.
 `dataset_visibility` is required and is `private` or `public`.
 `index_dataset` identifies the run catalog. Single-run planning can omit it, but
-campaign submission requires it because completed campaigns publish their
+run submission requires it because completed runs publish their
 normalized result and index atomically. `index_dataset_visibility` is required
 exactly when `index_dataset` is present. Harbor HF creates missing repositories
 with the requested visibility and checks existing repositories before it reads
@@ -455,10 +459,10 @@ endpoint-specific file committed against an expected parent revision as an
 atomic lease and removes it with the same compare-and-swap protocol only after
 verified cleanup.
 
-Provider controllers use one campaign claim in the same coordination Dataset.
+Provider controllers use one run claim in the same coordination Dataset.
 The Job wrapper records its start time before cloning the pinned worker source,
 so remaining-time admission includes checkout and `uv` startup.
-The claim records campaign, plan, physical Job, attempt, heartbeat, and expiry.
+The claim records run, plan, physical Job, attempt, heartbeat, and expiry.
 The controller also writes immutable attempt reservations, launch receipts,
 and start and end receipts plus a latest status record whose Dataset history
 preserves every revision. A parent-checked launch claim serializes the
@@ -472,17 +476,17 @@ Every billable provider action also uses one parent-checked capacity claim keyed
 by provider service. The namespace runs at most one internal wave per provider
 service because independent manifests do not prove a larger shared quota. A
 busy controller waits and reruns remaining-time admission without reserving the
-action. Capacity claims do not expire across campaigns. The exact owner releases
+action. Capacity claims do not expire across runs. The exact owner releases
 the claim after synchronous execution. If that Job crashes, the owning
-campaign's watchdog releases the abandoned claim after proving the Job terminal
-or absent, even when policy blocks a replacement. Other campaigns can then
+run's watchdog releases the abandoned claim after proving the Job terminal
+or absent, even when policy blocks a replacement. Other runs can then
 acquire the provider normally.
 
-One shared scheduled watchdog inspects only campaign IDs listed in its command.
+One shared scheduled watchdog inspects only run IDs listed in its command.
 It never executes trials or reconciliation actions. For a retryable controller
 failure, it verifies the latest checkpoint, records an immutable recovery
 decision, reserves the next sequential attempt, and launches from the original
-input and worker revision. It does nothing for healthy or terminal campaigns.
+input and worker revision. It does nothing for healthy or terminal runs.
 `paused-capacity`, `paused-policy`, deterministic failure, spend changes, and
 attempt exhaustion require an operator decision.
 
@@ -534,7 +538,7 @@ URI spellings cannot reserve the same destination independently. Only
 the finalized, scrubbed tree is copied to its reserved Bucket prefix, and the
 root terminal marker is copied last. Nested task markers are preserved. If a
 successful physical execution reaches the Bucket but logical trial finalization
-is interrupted, campaign finalization adopts it only when it is the unique
+is interrupted, run finalization adopts it only when it is the unique
 checksum-valid success. It records the recovery and recreates the locked,
 checksum-complete trial envelope before writing the trial marker last, without
 rerunning the agent. If the envelope was already complete, it validates the
@@ -543,12 +547,12 @@ execution evidence stops publication. If the controller is killed
 before finalization, raw sessions and logs disappear with the Job instead of
 remaining in the bucket. Submission queries both the configured artifact Bucket and the managed
 `jobs-artifacts` input Bucket and refuses to start a Job unless both are private.
-The resolved benchmark-source contract changes a provider campaign input to
-exactly `manifest.yaml`, `source.lock.json`, `campaign.lock.json`, and
+The resolved benchmark-source contract changes a provider run input to
+exactly `manifest.yaml`, `source.lock.json`, `run.lock.json`, and
 `input-manifest.json`. The input manifest records the byte count and SHA-256 of
 the other three files. Submission uploads that folder under a content-addressed
 prefix and mounts it read-only. A benchmark bundle is stored once under its own
-content address and mounted separately; it is not duplicated in each campaign
+content address and mounted separately; it is not duplicated in each run
 input package. This package change takes effect with the benchmark-source
 implementation and has no fallback to the old authenticated-Git path.
 
@@ -560,17 +564,17 @@ source, a directory becomes a bundle reference, an existing bundle is verified,
 and a package remains content-addressed. Planning expands the matrix and
 computes a digest from canonical JSON that includes this source lock. Remote
 validation and submission reject mutable dataset, task, model, serving-image,
-source, and agent references. The campaign lock preserves the exact selected
+source, and agent references. The run lock preserves the exact selected
 matrix cell without rewriting the requested document.
 
-Campaign planning additionally sorts resolved cells and tasks, creates one
+Run planning additionally sorts resolved cells and tasks, creates one
 logical trial per task and requested attempt, splits those trials into bounded
-shards, and content-addresses every cell and shard. The campaign plan digest is
+shards, and content-addresses every cell and shard. The run plan digest is
 derived from resolved execution semantics; the separate manifest digest still
 identifies the exact requested document. Reordering equivalent profile lists or
-task-digest mappings therefore does not change the campaign plan digest.
+task-digest mappings therefore does not change the run plan digest.
 
-Every submitted run writes `manifest.yaml`, `run.lock.json`,
+Every submitted run writes `manifest.yaml`, `execution.lock.json`,
 `endpoint.snapshot.json`, and `runtime-environment.json`. Provider-backed runs
 must mark hidden details as `not_reported`; failed collection is `unknown`, and
 irrelevant fields are `not_applicable`. These statuses accompany null values

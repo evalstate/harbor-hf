@@ -144,7 +144,7 @@ class EndpointConfiguration(FrozenModel):
 class ManagedEndpointIdentity(FrozenModel):
     namespace: str = Field(min_length=1)
     name: EndpointName
-    campaign_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+    run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
     deployment_digest: DeploymentDigest
     tags: list[str]
 
@@ -156,7 +156,7 @@ class ManagedEndpointIdentity(FrozenModel):
     @model_validator(mode="after")
     def identity_is_deterministic(self) -> ManagedEndpointIdentity:
         expected_name, expected_tags = _managed_identity_values(
-            self.namespace, self.campaign_id, self.deployment_digest
+            self.namespace, self.run_id, self.deployment_digest
         )
         if self.name != expected_name or self.tags != expected_tags:
             raise ValueError("managed endpoint identity is not deterministic")
@@ -272,36 +272,36 @@ def deployment_digest(
 
 
 def managed_endpoint_identity(
-    *, namespace: str, campaign_id: str, deployment_digest: DeploymentDigest
+    *, namespace: str, run_id: str, deployment_digest: DeploymentDigest
 ) -> ManagedEndpointIdentity:
-    name, tags = _managed_identity_values(namespace, campaign_id, deployment_digest)
+    name, tags = _managed_identity_values(namespace, run_id, deployment_digest)
     return ManagedEndpointIdentity(
         namespace=namespace,
         name=name,
-        campaign_id=campaign_id,
+        run_id=run_id,
         deployment_digest=deployment_digest,
         tags=tags,
     )
 
 
 def _managed_identity_values(
-    namespace: str, campaign_id: str, deployment_digest: DeploymentDigest
+    namespace: str, run_id: str, deployment_digest: DeploymentDigest
 ) -> tuple[str, list[str]]:
     identity_hash = _digest(
         {
             "namespace": namespace,
-            "campaign_id": campaign_id,
+            "run_id": run_id,
             "deployment_digest": deployment_digest,
         }
     ).removeprefix("sha256:")
     digest_hash = deployment_digest.removeprefix("sha256:")
-    campaign_hash = hashlib.sha256(campaign_id.encode()).hexdigest()
+    run_hash = hashlib.sha256(run_id.encode()).hexdigest()
     return (
         f"harbor-hf-{identity_hash[:40]}",
         sorted(
             [
                 _MANAGED_TAG,
-                f"harbor-hf-campaign-{campaign_hash[:24]}",
+                f"harbor-hf-run-{run_hash[:24]}",
                 f"harbor-hf-deployment-{digest_hash[:24]}",
             ]
         ),
@@ -311,14 +311,14 @@ def _managed_identity_values(
 def build_desired_endpoint(
     *,
     namespace: str,
-    campaign_id: str,
+    run_id: str,
     model: ModelProfile,
     deployment: DeploymentProfile,
 ) -> DesiredEndpoint:
     digest = deployment_digest(model, deployment)
     identity = managed_endpoint_identity(
         namespace=namespace,
-        campaign_id=campaign_id,
+        run_id=run_id,
         deployment_digest=digest,
     )
     settings = EndpointSettings.model_validate(deployment.parameters)

@@ -4,16 +4,17 @@ const nullableInteger = {
   anyOf: [{ type: "integer" }, { type: "null" }],
 } as const;
 
-export const campaignViewSchema = {
+export const runViewSchema = {
   type: "object",
   additionalProperties: false,
   required: [
-    "campaign_id",
+    "run_id",
     "created_at",
     "status",
     "ceiling_microusd",
     "reserved_microusd",
     "observed_microusd",
+    "budget_exceeded",
     "total_tasks",
     "terminal_tasks",
     "admissible_tasks",
@@ -29,12 +30,13 @@ export const campaignViewSchema = {
     "paused",
   ],
   properties: {
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     created_at: { type: "string", format: "date-time" },
     status: { type: "string" },
     ceiling_microusd: integer,
     reserved_microusd: integer,
     observed_microusd: integer,
+    budget_exceeded: { type: "boolean" },
     total_tasks: integer,
     terminal_tasks: integer,
     admissible_tasks: integer,
@@ -57,7 +59,7 @@ export const namespaceCapacityPolicySchema = {
   required: [
     "alias",
     "configured",
-    "max_active_sandboxes",
+    "max_active_jobs",
     "start_burst",
     "start_refill_tokens",
     "start_refill_period_seconds",
@@ -66,7 +68,7 @@ export const namespaceCapacityPolicySchema = {
   properties: {
     alias: nullableString,
     configured: { type: "boolean" },
-    max_active_sandboxes: nullableInteger,
+    max_active_jobs: nullableInteger,
     start_burst: nullableInteger,
     start_refill_tokens: nullableInteger,
     start_refill_period_seconds: nullableInteger,
@@ -77,9 +79,9 @@ export const namespaceCapacityPolicySchema = {
 export const namespaceCapacityUpdateSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["max_active_sandboxes", "confirmed"],
+  required: ["max_active_jobs", "confirmed"],
   properties: {
-    max_active_sandboxes: { type: "integer", minimum: 1, maximum: 1024 },
+    max_active_jobs: { type: "integer", minimum: 1, maximum: 1024 },
     confirmed: { const: true },
   },
 } as const;
@@ -92,8 +94,8 @@ export const capacitySchema = {
     "profile_id",
     "namespace_limit",
     "namespace_active",
-    "campaign_limit",
-    "campaign_active",
+    "run_limit",
+    "run_active",
     "hardware_limit",
     "hardware_active",
     "provider_limit",
@@ -101,7 +103,6 @@ export const capacitySchema = {
     "start_tokens",
     "start_burst",
     "queued",
-    "cleanup_held",
     "limiting_factor",
     "not_before",
   ],
@@ -110,8 +111,8 @@ export const capacitySchema = {
     profile_id: nullableString,
     namespace_limit: nullableInteger,
     namespace_active: integer,
-    campaign_limit: integer,
-    campaign_active: integer,
+    run_limit: integer,
+    run_active: integer,
     hardware_limit: nullableInteger,
     hardware_active: integer,
     provider_limit: integer,
@@ -119,18 +120,17 @@ export const capacitySchema = {
     start_tokens: nullableInteger,
     start_burst: nullableInteger,
     queued: integer,
-    cleanup_held: integer,
     limiting_factor: nullableString,
     not_before: nullableString,
   },
 } as const;
 
-export const campaignListSchema = {
+export const runListSchema = {
   type: "object",
   additionalProperties: false,
   required: ["items", "next_cursor"],
   properties: {
-    items: { type: "array", items: campaignViewSchema },
+    items: { type: "array", items: runViewSchema },
     next_cursor: nullableString,
   },
 } as const;
@@ -138,90 +138,12 @@ export const campaignListSchema = {
 export const acceptedSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["campaign_id", "action_id", "status_url", "adopted"],
+  required: ["run_id", "action_id", "status_url", "adopted"],
   properties: {
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     action_id: { type: "string" },
     status_url: { type: "string" },
     adopted: { type: "boolean" },
-  },
-} as const;
-
-export const actionDispositionCorrectionSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["action_ids", "reason", "confirmed"],
-  properties: {
-    action_ids: {
-      type: "array",
-      minItems: 1,
-      maxItems: 100,
-      uniqueItems: true,
-      items: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{1,159}$" },
-    },
-    reason: { type: "string", minLength: 1, maxLength: 1000 },
-    confirmed: { const: true },
-  },
-} as const;
-
-export const actionDispositionCorrectionResultSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["batch_id", "batch_digest", "items"],
-  properties: {
-    batch_id: { type: "string" },
-    batch_digest: { type: "string" },
-    items: {
-      type: "array",
-      maxItems: 100,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["action_id", "disposition_record_id", "created"],
-        properties: {
-          action_id: { type: "string" },
-          disposition_record_id: { type: "string" },
-          created: { type: "boolean" },
-        },
-      },
-    },
-  },
-} as const;
-
-export const actionDispositionViewSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: [
-    "action_id",
-    "campaign_id",
-    "task_id",
-    "recorded_outcome",
-    "recorded_observed_state",
-    "effective_outcome",
-    "effective_observed_state",
-    "effective_error_code",
-    "reason_code",
-    "corrected_at",
-    "actor_role",
-    "disposition_record_id",
-    "batch_id",
-    "batch_size",
-  ],
-  properties: {
-    action_id: { type: "string" },
-    campaign_id: { type: "string" },
-    task_id: { type: "string" },
-    recorded_outcome: { type: "string" },
-    recorded_observed_state: { type: "string" },
-    effective_outcome: { type: "string" },
-    effective_observed_state: { type: "string" },
-    effective_error_code: { type: "string" },
-    reason_code: { type: "string" },
-    corrected_at: { type: "string", format: "date-time" },
-    actor_role: { type: "string" },
-    disposition_record_id: { type: "string" },
-    batch_id: { type: "string" },
-    batch_size: integer,
   },
 } as const;
 
@@ -257,9 +179,9 @@ export const evidenceAcceptedSchema = {
 export const attemptAcceptedSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["campaign_id", "task_id", "attempt_id", "status_url", "adopted"],
+  required: ["run_id", "task_id", "attempt_id", "status_url", "adopted"],
   properties: {
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     task_id: { type: "string" },
     attempt_id: { type: "string" },
     status_url: { type: "string" },
@@ -271,14 +193,14 @@ export const taskSchema = {
   type: "object",
   additionalProperties: false,
   required: [
-    "campaign_id",
+    "run_id",
     "task_id",
     "input_digest",
     "terminal_outcome",
     "selected_attempt_id",
   ],
   properties: {
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     task_id: { type: "string" },
     input_digest: { type: "string" },
     terminal_outcome: nullableString,
@@ -292,24 +214,40 @@ export const attemptSchema = {
   required: [
     "attempt_id",
     "action_id",
-    "campaign_id",
+    "run_id",
     "task_id",
     "outcome",
     "replacement_eligible",
     "cost_microusd",
     "metrics",
     "created_at",
+    "physical_job",
   ],
   properties: {
     attempt_id: { type: "string" },
     action_id: { type: "string" },
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     task_id: { type: "string" },
     outcome: { type: "string" },
     replacement_eligible: integer,
     cost_microusd: integer,
     metrics: { type: "object", additionalProperties: { type: "number" } },
     created_at: { type: "string", format: "date-time" },
+    physical_job: {
+      anyOf: [
+        { type: "null" },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["resource_id", "observed_state", "inspect_url"],
+          properties: {
+            resource_id: nullableString,
+            observed_state: nullableString,
+            inspect_url: nullableString,
+          },
+        },
+      ],
+    },
   },
 } as const;
 
@@ -326,9 +264,16 @@ export const taskDetailSchema = {
         {
           type: "object",
           additionalProperties: false,
-          required: ["last_attempt_id", "attempt_count", "reason", "created_at"],
+          required: [
+            "source_action_id",
+            "last_attempt_id",
+            "attempt_count",
+            "reason",
+            "created_at",
+          ],
           properties: {
-            last_attempt_id: { type: "string" },
+            source_action_id: { type: "string" },
+            last_attempt_id: nullableString,
             attempt_count: integer,
             reason: { type: "string" },
             created_at: { type: "string", format: "date-time" },
@@ -344,7 +289,7 @@ export const actionSchema = {
   additionalProperties: false,
   required: [
     "action_id",
-    "campaign_id",
+    "run_id",
     "action_kind",
     "generation",
     "target",
@@ -355,7 +300,7 @@ export const actionSchema = {
   ],
   properties: {
     action_id: { type: "string" },
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     action_kind: { type: "string" },
     generation: integer,
     target: { type: "string" },
@@ -371,12 +316,14 @@ export const jobSchema = {
   additionalProperties: false,
   required: [
     ...actionSchema.required,
+    "launch_action_id",
     "inspect_url",
     "cost_microusd",
     "assigned_tasks",
   ],
   properties: {
     ...actionSchema.properties,
+    launch_action_id: { type: "string" },
     inspect_url: nullableString,
     cost_microusd: integer,
     assigned_tasks: integer,
@@ -388,7 +335,7 @@ export const endpointSchema = {
   additionalProperties: false,
   required: [
     "action_id",
-    "campaign_id",
+    "run_id",
     "endpoint_id",
     "desired_state",
     "observed_state",
@@ -399,7 +346,7 @@ export const endpointSchema = {
   ],
   properties: {
     action_id: { type: "string" },
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     endpoint_id: { type: "string" },
     desired_state: { type: "string" },
     observed_state: { type: "string" },
@@ -444,20 +391,13 @@ export const profileSchema = {
 export const publicationSchema = {
   type: "object",
   additionalProperties: false,
-  required: [
-    "publication_id",
-    "campaign_id",
-    "status",
-    "catalog_digest",
-    "published_at",
-  ],
+  required: ["publication_id", "run_id", "status", "catalog_digest", "published_at"],
   properties: {
     publication_id: { type: "string" },
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     status: { type: "string" },
     catalog_digest: nullableString,
     published_at: { type: "string", format: "date-time" },
-    run_id: nullableString,
     benchmark: nullableString,
     model: nullableString,
     harness: nullableString,
@@ -566,7 +506,7 @@ export const leaderboardRowSchema = {
     "rank",
     "pareto",
     "configuration_digest",
-    "campaign_id",
+    "run_id",
     "publication_id",
     "published_at",
     "benchmark",
@@ -587,7 +527,7 @@ export const leaderboardRowSchema = {
     rank: integer,
     pareto: { type: "boolean" },
     configuration_digest: { type: "string" },
-    campaign_id: { type: "string" },
+    run_id: { type: "string" },
     publication_id: { type: "string" },
     published_at: { type: "string", format: "date-time" },
     benchmark: { type: "string" },
@@ -673,10 +613,25 @@ export const sessionSchema = {
 export const systemSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["source_revision", "write_mode", "projection", "resource_contract"],
+  required: [
+    "source_revision",
+    "write_mode",
+    "initialization",
+    "projection",
+    "resource_contract",
+  ],
   properties: {
     source_revision: { type: "string" },
     write_mode: { enum: ["disabled", "enabled"] },
+    initialization: {
+      type: "object",
+      additionalProperties: false,
+      required: ["ready", "status"],
+      properties: {
+        ready: { type: "boolean" },
+        status: { enum: ["initializing", "ready"] },
+      },
+    },
     projection: {
       type: "object",
       additionalProperties: false,

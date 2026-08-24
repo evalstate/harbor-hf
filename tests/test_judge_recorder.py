@@ -72,7 +72,7 @@ def test_records_exact_bodies_and_enforces_model(tmp_path: Path) -> None:
     base = recorder.start(host="127.0.0.1", port=0)
     destination = tmp_path / "judge"
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="locked/judge",
         destination=destination,
@@ -138,7 +138,7 @@ def test_records_openai_reasoning_overrides(tmp_path: Path) -> None:
     base = recorder.start(host="127.0.0.1", port=0)
     destination = tmp_path / "judge"
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="gpt-5.6-luna",
         destination=destination,
@@ -191,7 +191,7 @@ def test_revoke_recreates_empty_bucket_directory(tmp_path: Path) -> None:
     )
     destination = tmp_path / "judge"
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=destination,
@@ -222,7 +222,7 @@ def test_revoke_waits_for_inflight_exchange(tmp_path: Path) -> None:
     base = recorder.start(host="127.0.0.1", port=0)
     destination = tmp_path / "judge"
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=destination,
@@ -268,7 +268,7 @@ def test_rejects_streaming_without_upstream_call(tmp_path: Path) -> None:
     )
     base = recorder.start(host="127.0.0.1", port=0)
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=tmp_path / "judge",
@@ -300,7 +300,7 @@ def test_rejects_untrusted_routing_fields_without_upstream_call(tmp_path: Path) 
     )
     base = recorder.start(host="127.0.0.1", port=0)
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=tmp_path / "judge",
@@ -330,7 +330,7 @@ def test_known_secret_in_prompt_fails_closed(tmp_path: Path) -> None:
     )
     base = recorder.start(host="127.0.0.1", port=0)
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=tmp_path / "judge",
@@ -370,7 +370,7 @@ def test_secret_bearing_retained_header_returns_controlled_failure(
     )
     base = recorder.start(host="127.0.0.1", port=0)
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=tmp_path / "judge",
@@ -410,7 +410,7 @@ def test_records_transport_errors_and_delivered_response(tmp_path: Path) -> None
     base = recorder.start(host="127.0.0.1", port=0)
     destination = tmp_path / "judge"
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=destination,
@@ -454,7 +454,7 @@ def test_absolute_deadline_stops_streamed_judge_response(tmp_path: Path) -> None
     base = recorder.start(host="127.0.0.1", port=0)
     destination = tmp_path / "judge"
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=destination,
@@ -490,7 +490,7 @@ def test_response_limit_stops_and_records_failed_exchange(tmp_path: Path) -> Non
     base = recorder.start(host="127.0.0.1", port=0)
     destination = tmp_path / "judge"
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=destination,
@@ -530,7 +530,7 @@ def test_decoded_response_limit_blocks_compression_expansion(tmp_path: Path) -> 
     base = recorder.start(host="127.0.0.1", port=0)
     destination = tmp_path / "judge"
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=destination,
@@ -563,7 +563,7 @@ def test_revoked_scope_is_unavailable(tmp_path: Path) -> None:
     )
     base = recorder.start(host="127.0.0.1", port=0)
     capability = recorder.register_scope(
-        execution_id="exec",
+        attempt_id="exec",
         trial_id="trial",
         model="judge",
         destination=tmp_path / "judge",

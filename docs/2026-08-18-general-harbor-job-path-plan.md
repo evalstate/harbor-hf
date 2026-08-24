@@ -7,6 +7,11 @@ tags: [harbor, jobs, campaigns]
 
 # General Harbor job path plan
 
+**Status.** Superseded implementation record. Campaign and Sandbox references
+below describe the pre-reset design and remain only as dated history. The
+[control service specification](CONTROL_SERVICE.md) defines the current
+Run-native, one-Job-per-attempt architecture.
+
 Harbor-HF must not gain a new script or worker path for each benchmark, model,
 or harness. Harbor already resolves those inputs. Harbor-HF must run the exact
 resolved Harbor job on Hugging Face and apply the same security and budget

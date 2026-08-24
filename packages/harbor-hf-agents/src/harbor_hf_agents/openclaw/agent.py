@@ -27,11 +27,11 @@ from harbor.utils.trajectory_utils import format_trajectory_json
 
 from harbor_hf_agents.support.hf_inference_bridge import (
     prepare_hf_inference_bridge,
-    stop_hf_inference_bridge,
 )
 from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
-from harbor_hf_agents.support.sandbox_inference_route import (
-    use_sandbox_inference_route,
+from harbor_hf_agents.support.job_inference_route import (
+    use_job_inference_route,
+    with_job_inference_bridge_cleanup,
 )
 
 OPENCLAW_AGENT_SETUP_TIMEOUT_SEC = 1200.0
@@ -1105,6 +1105,7 @@ class OpenClawAgent(IsolatedProviderAgent):
         )
 
     @with_prompt_template
+    @with_job_inference_bridge_cleanup
     async def run(
         self,
         instruction: str,
@@ -1135,7 +1136,7 @@ class OpenClawAgent(IsolatedProviderAgent):
         prefix = self._provider_env_prefix(provider)
         bridged = False
         if provider == "openai":
-            bridged = await use_sandbox_inference_route(
+            bridged = await use_job_inference_route(
                 self,
                 environment,
                 env,
@@ -1161,11 +1162,7 @@ class OpenClawAgent(IsolatedProviderAgent):
                     "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS"
                 ),
             )
-        try:
-            await self._run_prepared(instruction, environment, context, env)
-        finally:
-            if bridged:
-                await stop_hf_inference_bridge(self, environment)
+        await self._run_prepared(instruction, environment, context, env)
 
     async def _run_prepared(
         self,

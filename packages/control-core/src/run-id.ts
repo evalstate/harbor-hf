@@ -30,7 +30,7 @@ export function runtimeKind(
   if (spec.route !== "hf_job") return "none";
   if (typeof spec.inference_provider === "string" && spec.inference_provider.length > 0)
     return "providers";
-  const upstream = spec.sandbox_template?.inference_upstream;
+  const upstream = spec.trial_job_template?.inference_upstream;
   if (typeof upstream !== "string" || upstream.length === 0) return "none";
   if (upstream.includes("router.huggingface.co")) return "providers";
   if (upstream.includes("endpoints.huggingface.cloud")) return "endpoints";

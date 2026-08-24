@@ -324,17 +324,10 @@
     "agent": {
       "$ref": "#/$defs/AgentEvidence"
     },
-    "campaign_id": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Campaign Id"
+    "attempt_id": {
+      "minLength": 1,
+      "title": "Attempt Id",
+      "type": "string"
     },
     "captured_at": {
       "format": "date-time",
@@ -363,9 +356,16 @@
       "type": "integer"
     },
     "run_id": {
-      "minLength": 1,
-      "title": "Run Id",
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Id"
     },
     "schema_version": {
       "const": "harbor-hf/trial-evidence/v1",
@@ -396,8 +396,8 @@
     }
   },
   "required": [
-    "run_id",
     "execution_id",
+    "attempt_id",
     "trial_id",
     "task_name",
     "task_digest",

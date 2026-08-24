@@ -4,15 +4,15 @@ Harbor HF publishes results derived from canonical private evidence. The
 private `<artifact-bucket>` Bucket holds evidence, normalized rows, and catalog
 objects. The TypeScript control service rebuilds a disposable SQLite projection
 and serves authenticated result views through the same React application used
-for campaign progress. The browser never reads the Bucket. Keep deployed names
+for run progress. The browser never reads the Bucket. Keep deployed names
 in private configuration.
 
 ## Evidence hierarchy
 
-Canonical campaign evidence follows this hierarchy:
+Canonical run evidence follows this hierarchy:
 
 ```text
-campaign lock
+run lock
 wave lifecycle and cleanup evidence
 run lock
 shard progress
@@ -118,19 +118,19 @@ uv run harbor-hf artifacts restore-trial TRIAL_ROOT DESTINATION
 A restore operation performs no remote fetch. Download private evidence first
 through an approved credential path.
 
-## Campaign verification
+## Run verification
 
 After reconciliation is terminal:
 
 ```bash
-uv run harbor-hf artifacts verify CAMPAIGN_ID \
+uv run harbor-hf artifacts verify RUN_ID \
   --namespace NAMESPACE \
   --format json > artifacts-verify.json
 ```
 
 Review every run and declared checksum. Confirm:
 
-- campaign and run identities;
+- run and run identities;
 - task names, task digests, and logical attempts;
 - selected physical executions;
 - finite rewards and metric ownership;
@@ -186,7 +186,7 @@ zero.
 ## Result classes
 
 Ordinary complete results may enter the comparable cohort defined by the
-publication contract. Complete campaigns can contain terminal benchmark zeros
+publication contract. Complete runs can contain terminal benchmark zeros
 and declared exhausted failures when the protocol defines them.
 
 Partial and composite results need explicit labels. Correction and diagnostic results need them too. Manually selected results
@@ -214,9 +214,9 @@ uv run harbor-hf audit
 
 Record:
 
-- publication ID and campaign ID
+- publication ID and run ID
 - immutable paths and SHA-256 digests for every result object
-- source campaign, selected attempts, and Bucket evidence paths
+- source run, selected attempts, and Bucket evidence paths
 - full model, benchmark, harness, and deployment provenance
 - row counts for each normalized table
 - result outcome, quality, publication role, and metric unit
@@ -246,7 +246,7 @@ direct Bucket credential and owns no authoritative state.
 
 A final report should state:
 
-- campaign result class and completeness
+- run result class and completeness
 - logical and physical execution counts
 - score calculation and denominator
 - failures and infrastructure retries by category

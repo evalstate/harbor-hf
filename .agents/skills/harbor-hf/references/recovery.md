@@ -8,7 +8,7 @@ retry or repair. Worker logs alone cannot authorize a rerun.
 
 Collect a secret-free snapshot:
 
-- immutable campaign manifest and plan plus the lock;
+- immutable run manifest and plan plus the lock;
 - complete append-only event history and current projection;
 - controller claim, status history, attempts, start and end receipts, and
   recovery decisions;
@@ -32,7 +32,7 @@ Retryable infrastructure failures include:
 
 - immutable source preparation failure;
 - transient custom-agent installation failure unrelated to locked content;
-- HF Job or Sandbox loss before terminal evidence;
+- HF Job loss before terminal evidence;
 - private ingress startup or authentication failure;
 - provider transport failure covered by the locked retry policy;
 - interrupted artifact publication;
@@ -64,10 +64,10 @@ contained a credential. Do not copy or redact it.
 When a provider controller Job becomes terminal before terminal Bucket evidence
 appears:
 
-1. Inspect its exact campaign, attempt, plan, and input labels and final state.
+1. Inspect its exact run, attempt, plan, and input labels and final state.
 2. Inspect the controller claim, latest status, start receipt, and checkpoint.
 3. List wave, execution, and trial prefixes without modifying them.
-4. Run the controller watchdog in dry-run mode for that campaign ID.
+4. Run the controller watchdog in dry-run mode for that run ID.
 5. Confirm that the decision classifies only infrastructure loss, preserves
    completed trials, fits the original duration and spend bounds, and names the
    next sequential attempt.
@@ -113,10 +113,10 @@ are ambiguous. Stop without selecting one.
 
 ## Retry requests
 
-Use the campaign projection to identify retryable trials in one shard. Preview:
+Use the run projection to identify retryable trials in one shard. Preview:
 
 ```bash
-uv run harbor-hf campaign retry CAMPAIGN_ID \
+uv run harbor-hf run retry RUN_ID \
   --namespace NAMESPACE \
   --shard SHARD_ID \
   --reason 'REASON' \
@@ -125,7 +125,7 @@ uv run harbor-hf campaign retry CAMPAIGN_ID \
 
 Review the exact target trial IDs and current classifications. Apply by removing
 `--dry-run`. A live provider controller observes the request at its next action
-boundary and runs the admitted retry wave in process. For endpoint campaigns,
+boundary and runs the admitted retry wave in process. For endpoint runs,
 preview reconciliation before submitting the retry wave.
 
 A retry creates a new physical execution under the same logical trial. It does
@@ -140,7 +140,7 @@ blocked even when the prior Job is terminal.
 
 Inspect:
 
-- campaign `max_spend_usd`;
+- run `max_spend_usd`;
 - every wave `estimated_wave_cost_usd` reservation;
 - observed spend and attribution status;
 - retry candidate estimate;
@@ -151,16 +151,16 @@ Never edit an immutable cap or erase a reservation. If the approved retry cannot
 fit, choose one explicit path:
 
 - accept the infrastructure exhaustion under the declared result policy;
-- create a linked replacement campaign with a new budget and only the work that
+- create a linked replacement run with a new budget and only the work that
   policy allows;
 - stop and obtain a new protocol decision.
 
-A replacement campaign must not quietly discard the original campaign or reuse
+A replacement run must not quietly discard the original run or reuse
 its identity.
 
 ## Immutable replacements
 
-Create a new campaign identity when changing any behavior-affecting value,
+Create a new run identity when changing any behavior-affecting value,
 including:
 
 - worker, Harbor, model, benchmark, task, agent, or image revision;
@@ -172,7 +172,7 @@ including:
 - publication role or evaluation identity.
 
 Write a replacement record before submission. It should name the superseded
-campaign, reason, original hashes, preserved evidence prefixes, selected logical
+run, reason, original hashes, preserved evidence prefixes, selected logical
 trials, excluded terminal outcomes, and new manifest and plan digests.
 
 ## Duplicate prevention ledger
@@ -180,7 +180,7 @@ trials, excluded terminal outcomes, and new manifest and plan digests.
 Before a replacement or supplement, create one row per original logical trial:
 
 ```text
-original campaign ID
+original run ID
 run ID
 trial ID
 task name
@@ -191,7 +191,7 @@ selected execution ID
 terminal marker
 checksum status
 replacement eligibility
-replacement campaign ID
+replacement run ID
 replacement trial ID
 reason
 ```
@@ -207,10 +207,10 @@ Rules:
 - Recovered evidence keeps original hashes and provenance.
 - One original logical trial maps to at most one accepted replacement outcome.
 
-Validate the ledger against both campaign plans and both Bucket trees before
+Validate the ledger against both run plans and both Bucket trees before
 launch and before publication.
 
-## Duration-bound campaigns
+## Duration-bound runs
 
 When a wave reaches its duration bound after partial progress:
 
@@ -219,7 +219,7 @@ When a wave reaches its duration bound after partial progress:
 3. Do not classify the entire wave as an agent failure.
 4. Recalculate wave capacity from measured trial durations and effective
    provider concurrency.
-5. Check whether the original campaign can admit bounded retry waves within its
+5. Check whether the original run can admit bounded retry waves within its
    spend and retry policy.
 6. If the manifest needs smaller waves, create a linked immutable replacement
    and a duplicate prevention ledger.
@@ -230,7 +230,7 @@ is too short.
 
 ## Endpoint cleanup recovery
 
-If a campaign stops in manual intervention:
+If a run stops in manual intervention:
 
 1. Verify the owning controller and watchdog Jobs are terminal or identify the
    current owner.
@@ -242,7 +242,7 @@ If a campaign stops in manual intervention:
 6. Preview resume:
 
 ```bash
-uv run harbor-hf campaign resume CAMPAIGN_ID \
+uv run harbor-hf run resume RUN_ID \
   --namespace NAMESPACE \
   --cleanup-verified \
   --reason 'REASON' \
@@ -267,17 +267,17 @@ when applicable, until:
 - cancellation and cleanup evidence is durable;
 - leases are released;
 - available trial evidence is published to the private Bucket;
-- the campaign projection is terminal.
+- the run projection is terminal.
 
 Do not infer cancellation completion from a CLI return code.
 
 ## Sealing
 
-`campaign seal` converts exhausted retries in a drained partial campaign into
+`run seal` converts exhausted retries in a drained partial run into
 explicit zero-score outcomes. It is irreversible policy work, so preview it:
 
 ```bash
-uv run harbor-hf campaign seal CAMPAIGN_ID \
+uv run harbor-hf run seal RUN_ID \
   --namespace NAMESPACE \
   --dry-run
 ```

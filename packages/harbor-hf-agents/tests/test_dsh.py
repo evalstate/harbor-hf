@@ -12,10 +12,10 @@ from harbor_hf_agents.dsh.agent import DshAgent
 
 
 @pytest.fixture(autouse=True)
-def no_sandbox_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_job_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         dsh_agent,
-        "use_sandbox_inference_route",
+        "use_job_inference_route",
         AsyncMock(return_value=False),
     )
     monkeypatch.setattr(
@@ -24,8 +24,7 @@ def no_sandbox_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
         AsyncMock(return_value=False),
     )
     monkeypatch.setattr(
-        dsh_agent,
-        "stop_hf_inference_bridge",
+        "harbor_hf_agents.support.job_inference_route.stop_hf_inference_bridge",
         AsyncMock(),
     )
 
@@ -38,7 +37,7 @@ def _run_call(exec_calls: list) -> object:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_route_uses_dsh_env(
+async def test_job_route_uses_dsh_env(
     temp_dir,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -49,7 +48,7 @@ async def test_sandbox_route_uses_dsh_env(
         env["DSH_API_KEY"] = "harbor-local-inference-bridge"
         return True
 
-    monkeypatch.setattr(dsh_agent, "use_sandbox_inference_route", use_route)
+    monkeypatch.setattr(dsh_agent, "use_job_inference_route", use_route)
     agent = DshAgent(
         logs_dir=temp_dir,
         model_name="openai/openai/gpt-oss-20b:together",
@@ -76,7 +75,7 @@ async def test_sandbox_route_uses_dsh_env(
 
 
 @pytest.mark.asyncio
-async def test_copies_openai_route_when_sandbox_file_is_absent(
+async def test_copies_openai_route_when_job_file_is_absent(
     temp_dir,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

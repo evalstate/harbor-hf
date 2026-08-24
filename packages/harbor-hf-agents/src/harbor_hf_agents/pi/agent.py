@@ -26,13 +26,13 @@ from packaging.version import InvalidVersion, Version
 
 from harbor_hf_agents.support.hf_inference_bridge import (
     prepare_hf_inference_bridge,
-    stop_hf_inference_bridge,
 )
 from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
-from harbor_hf_agents.support.provider_outcome import validate_pi_terminal_output
-from harbor_hf_agents.support.sandbox_inference_route import (
-    use_sandbox_inference_route,
+from harbor_hf_agents.support.job_inference_route import (
+    use_job_inference_route,
+    with_job_inference_bridge_cleanup,
 )
+from harbor_hf_agents.support.provider_outcome import validate_pi_terminal_output
 
 _CURRENT_PI_PACKAGE = "@earendil-works/pi-coding-agent"
 _LEGACY_PI_PACKAGE = "@mariozechner/pi-coding-agent"
@@ -388,6 +388,7 @@ class PiAgent(IsolatedProviderAgent):
 
     @override
     @with_prompt_template
+    @with_job_inference_bridge_cleanup
     async def run(  # noqa: C901 -- parser branches
         self,
         instruction: str,
@@ -443,7 +444,7 @@ class PiAgent(IsolatedProviderAgent):
         allowed_model = self.model_name.split("/", 1)[1]
         bridged = False
         if provider == "openai":
-            bridged = await use_sandbox_inference_route(
+            bridged = await use_job_inference_route(
                 self,
                 environment,
                 env,
@@ -519,16 +520,12 @@ class PiAgent(IsolatedProviderAgent):
                 result.stdout if isinstance(result.stdout, str) else ""
             )
         finally:
-            try:
-                if self._models_json is not None:
-                    await self.exec_as_agent(
-                        environment,
-                        command="rm -f $HOME/.pi/agent/models.json",
-                        env=env,
-                    )
-            finally:
-                if bridged:
-                    await stop_hf_inference_bridge(self, environment)
+            if self._models_json is not None:
+                await self.exec_as_agent(
+                    environment,
+                    command="rm -f $HOME/.pi/agent/models.json",
+                    env=env,
+                )
 
     @override
     def populate_context_post_run(  # noqa: C901 -- parser branches

@@ -9,10 +9,10 @@ import yaml
 from harbor_hf.harbor_adapter.exporter import classify_private_artifact
 from harbor_hf.io import load_experiment
 from harbor_hf.models import (
-    CampaignControllerSpec,
     EndpointRef,
     ExperimentSpec,
     RemoteExecutionSpec,
+    RunControllerSpec,
 )
 
 EXAMPLE = Path(__file__).parent.parent / "examples" / "shellbench.yaml"
@@ -23,7 +23,7 @@ def with_provider_controller(spec: ExperimentSpec) -> ExperimentSpec:
         update={
             "execution": spec.execution.model_copy(
                 update={
-                    "controller": CampaignControllerSpec(
+                    "controller": RunControllerSpec(
                         planning_trial_seconds=1,
                         headroom_factor="1.0",
                         wave_reserve_seconds=1,

@@ -16,9 +16,7 @@ import { HuggingFaceBucketStore } from "../src/bucket-store.js";
 
 const token = ["hf", "not-a-real-credential"].join("_");
 
-function store(
-  options: { downloadConcurrency?: number; retryDelaysMs?: readonly number[] } = {},
-) {
+function store(options: { retryDelaysMs?: readonly number[] } = {}) {
   return new HuggingFaceBucketStore({
     bucketId: "example/control",
     accessToken: token,
@@ -34,22 +32,78 @@ describe("HuggingFaceBucketStore", () => {
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(new Blob(["payload"]));
     hub.uploadFile.mockResolvedValue(undefined);
+    hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
+      yield {
+        type: "file",
+        path,
+        size: 7,
+        xetHash: "a".repeat(64),
+      };
+    });
 
     await expect(
       store().create("control/v1/object.json", new TextEncoder().encode("payload")),
-    ).resolves.toMatchObject({ created: true });
+    ).resolves.toMatchObject({
+      created: true,
+      source_identity: `xet:${"a".repeat(64)}`,
+    });
     expect(hub.uploadFile).toHaveBeenCalledTimes(1);
     expect(hub.uploadFile.mock.calls[0]?.[0]).toMatchObject({
       repo: { type: "bucket", name: "example/control" },
       file: { path: "control/v1/object.json" },
     });
+    expect(hub.listFiles).toHaveBeenCalledTimes(2);
+    for (const [options] of hub.listFiles.mock.calls)
+      expect(options).toMatchObject({
+        path: "control/v1/object.json",
+        recursive: false,
+        expand: true,
+      });
+  });
+
+  it("fails an upload when targeted metadata has no xet identity", async () => {
+    hub.downloadFile.mockResolvedValueOnce(null);
+    hub.uploadFile.mockResolvedValue(undefined);
+    hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
+      yield {
+        type: "file",
+        path,
+        size: 7,
+        uploadedAt: "2026-08-24T10:00:00Z",
+      };
+    });
+
+    await expect(
+      store().create("control/v1/object.json", new TextEncoder().encode("payload")),
+    ).rejects.toThrow("Bucket object has no valid xetHash");
+    expect(hub.uploadFile).toHaveBeenCalledTimes(1);
+    expect(hub.listFiles).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "control/v1/object.json",
+        recursive: false,
+        expand: true,
+      }),
+    );
   });
 
   it("adopts identical objects and rejects immutable conflicts", async () => {
-    hub.downloadFile.mockResolvedValueOnce(new Blob(["payload"]));
+    hub.downloadFile
+      .mockResolvedValueOnce(new Blob(["payload"]))
+      .mockResolvedValueOnce(new Blob(["payload"]));
+    hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
+      yield {
+        type: "file",
+        path,
+        size: 7,
+        xetHash: "a".repeat(64),
+      };
+    });
     await expect(
       store().create("control/v1/object.json", new TextEncoder().encode("payload")),
-    ).resolves.toMatchObject({ created: false });
+    ).resolves.toMatchObject({
+      created: false,
+      source_identity: `xet:${"a".repeat(64)}`,
+    });
 
     hub.downloadFile.mockResolvedValueOnce(new Blob(["different"]));
     await expect(
@@ -58,29 +112,45 @@ describe("HuggingFaceBucketStore", () => {
     expect(hub.uploadFile).not.toHaveBeenCalled();
   });
 
-  it("bounds concurrent downloads while listing a large ledger", async () => {
+  it("rejects an overwrite between upload verification and metadata capture", async () => {
+    hub.downloadFile
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(new Blob(["payload"]));
+    hub.uploadFile.mockResolvedValue(undefined);
+    let listing = 0;
+    hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
+      listing += 1;
+      yield {
+        type: "file",
+        path,
+        size: 7,
+        xetHash: (listing === 1 ? "a" : "b").repeat(64),
+      };
+    });
+
+    await expect(
+      store().create("control/v1/object.json", new TextEncoder().encode("payload")),
+    ).rejects.toBeInstanceOf(ImmutableConflictError);
+  });
+
+  it("lists Bucket metadata without downloading objects", async () => {
     hub.listFiles.mockImplementation(async function* () {
       for (let index = 0; index < 12; index += 1)
         yield {
           type: "file",
           path: `control/v1/${String(index).padStart(2, "0")}.json`,
           size: 1,
+          xetHash: index.toString(16).padStart(64, "0"),
         };
     });
-    let active = 0;
-    let maximum = 0;
-    hub.downloadFile.mockImplementation(async () => {
-      active += 1;
-      maximum = Math.max(maximum, active);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      active -= 1;
-      return new Blob(["x"]);
-    });
 
-    const entries = await store({ downloadConcurrency: 3 }).list("control/v1");
+    const entries = await store().list("control/v1");
 
     expect(entries).toHaveLength(12);
-    expect(maximum).toBe(3);
+    expect(hub.downloadFile).not.toHaveBeenCalled();
+    expect(hub.listFiles).toHaveBeenCalledWith(
+      expect.objectContaining({ expand: true }),
+    );
   });
 
   it("retries transient fetch failures with bounded delays", async () => {
@@ -125,23 +195,64 @@ describe("HuggingFaceBucketStore", () => {
     expect(hub.downloadFile).toHaveBeenCalledTimes(1);
   });
 
-  it("lists files in deterministic order with verified digests", async () => {
+  it("lists file keys and sizes in deterministic order", async () => {
     hub.listFiles.mockImplementation(async function* () {
-      yield { type: "file", path: "control/v1/z.json", size: 1 };
+      yield {
+        type: "file",
+        path: "control/v1/z.json",
+        size: 1,
+        xetHash: "A".repeat(64),
+      };
       yield { type: "directory", path: "control/v1/nested", size: 0 };
-      yield { type: "file", path: "control/v1/a.json", size: 1 };
+      yield {
+        type: "file",
+        path: "control/v1/a.json",
+        size: 1,
+        xetHash: "b".repeat(64),
+      };
     });
-    hub.downloadFile.mockImplementation(
-      async ({ path }: { path: string }) =>
-        new Blob([path.endsWith("a.json") ? "a" : "z"]),
-    );
-
     const entries = await store().list("control/v1");
 
-    expect(entries.map((entry) => entry.key)).toEqual([
-      "control/v1/a.json",
-      "control/v1/z.json",
+    expect(entries).toEqual([
+      {
+        key: "control/v1/a.json",
+        size: 1,
+        source_identity: `xet:${"b".repeat(64)}`,
+      },
+      {
+        key: "control/v1/z.json",
+        size: 1,
+        source_identity: `xet:${"a".repeat(64)}`,
+      },
     ]);
-    expect(entries.every((entry) => entry.digest.startsWith("sha256:"))).toBe(true);
+    expect(hub.downloadFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ type: "file", path: "control/v1/missing.json", size: 1 }],
+    [
+      {
+        type: "file",
+        path: "control/v1/invalid-xet.json",
+        size: 1,
+        xetHash: "not-a-hash",
+        uploadedAt: "2026-08-24T10:00:00Z",
+      },
+    ],
+    [
+      {
+        type: "file",
+        path: "control/v1/upload-time-only.json",
+        size: 1,
+        uploadedAt: "2026-08-24T10:00:00Z",
+      },
+    ],
+  ])("rejects a Bucket file without a valid identity", async (entry) => {
+    hub.listFiles.mockImplementation(async function* () {
+      yield entry;
+    });
+
+    await expect(store().list("control/v1")).rejects.toThrow();
+    expect(hub.downloadFile).not.toHaveBeenCalled();
   });
 });

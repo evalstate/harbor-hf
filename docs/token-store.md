@@ -19,7 +19,7 @@ The default file is:
 A minimal file looks like this:
 
 ```ini
-[campaign]
+[run]
 hf_token = TOKEN_VALUE
 ```
 
@@ -70,25 +70,25 @@ file.
 Add, verify, and select a token with one command:
 
 ```bash
-harbor-hf auth add-job-token campaign
+harbor-hf auth add-job-token run
 ```
 
 The command confirms both destinations, reads the value through a hidden
 prompt, verifies that Hugging Face reports the `fineGrained` role, writes it to
-the token store, and writes only `campaign` to Harbor HF's JSON config. Use
+the token store, and writes only `run` to Harbor HF's JSON config. Use
 `--force` to replace an existing entry.
 
 List and switch saved entries without printing values:
 
 ```bash
 harbor-hf auth tokens
-harbor-hf auth use-job-token campaign
+harbor-hf auth use-job-token run
 ```
 
 Remove an entry or clear only the current selection:
 
 ```bash
-harbor-hf auth remove-job-token campaign
+harbor-hf auth remove-job-token run
 harbor-hf auth clear-job-token
 ```
 

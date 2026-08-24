@@ -30,7 +30,7 @@ from harbor_hf.models import (
 )
 from harbor_hf.publication_envelope import (
     PUBLICATION_ENVELOPE_PATH,
-    PhysicalExecutionReference,
+    PhysicalAttemptReference,
     ProfileDigests,
     PublicationEnvelope,
     RuntimeIdentity,
@@ -49,9 +49,9 @@ DatasetId = Annotated[
     str,
     Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"),
 ]
-OwnerType = Literal["run", "trial", "execution"]
+OwnerType = Literal["execution", "trial", "attempt"]
 RuntimeKind = Literal["endpoint", "provider"]
-RunQuality = Literal["clean", "degraded"]
+ExecutionQuality = Literal["clean", "degraded"]
 ResultKind = Literal["ordinary", "composed"]
 CatalogScope = Literal["primary", "audit"]
 CatalogDecisionAction = Literal["promote", "withdraw"]
@@ -63,15 +63,15 @@ TaskOutcome = Literal[
     "unsupported",
 ]
 ArtifactKind = Literal[
-    "run_lock",
+    "execution_lock",
     "verification",
     "runtime_environment",
     "endpoint_snapshot",
     "composition",
 ]
-TableName = Literal["runs", "trials", "executions", "metrics", "artifacts"]
+TableName = Literal["executions", "trials", "attempts", "metrics", "artifacts"]
 
-_SUMMARY_PATH = "run-summary.json"
+_SUMMARY_PATH = "execution-summary.json"
 _CHECKSUMS_PATH = "checksums.json"
 _TERMINAL_MARKERS = frozenset({"_SUCCESS", "_PARTIAL", "_FAILED", "_CANCELLED"})
 _FORBIDDEN_ARTIFACT_PARTS = frozenset(
@@ -88,7 +88,7 @@ _FORBIDDEN_ARTIFACT_PARTS = frozenset(
     }
 )
 _ARTIFACT_PATHS: Mapping[ArtifactKind, str] = {
-    "run_lock": "run.lock.json",
+    "execution_lock": "execution.lock.json",
     "verification": "verification.json",
     "runtime_environment": "runtime-environment.json",
     "endpoint_snapshot": "endpoint.snapshot.json",
@@ -128,19 +128,19 @@ class CatalogDecision(FrozenModel):
 class EvidenceSource(FrozenModel):
     bucket: str = Field(min_length=1)
     prefix: str = Field(min_length=1)
-    run_lock_path: str = "run.lock.json"
-    summary_path: Literal["run-summary.json"] = _SUMMARY_PATH
+    execution_lock_path: str = "execution.lock.json"
+    summary_path: Literal["execution-summary.json"] = _SUMMARY_PATH
 
     @model_validator(mode="after")
     def paths_are_canonical(self) -> EvidenceSource:
         _validate_relative_path(self.prefix)
-        _validate_relative_path(self.run_lock_path)
+        _validate_relative_path(self.execution_lock_path)
         return self
 
 
-class RunEvidence(FrozenModel):
+class ExecutionEvidence(FrozenModel):
+    execution_id: EntityId
     run_id: EntityId
-    campaign_id: EntityId
     experiment: str = Field(min_length=1)
     evaluation_id: EvaluationId
     publication_role: PublicationRole
@@ -149,7 +149,7 @@ class RunEvidence(FrozenModel):
     benchmark_revision: str = Field(min_length=1)
     result_kind: ResultKind = "ordinary"
     outcome: Literal["complete"] = "complete"
-    quality: RunQuality
+    quality: ExecutionQuality
     created_at: AwareDatetime
     completed_at: AwareDatetime
     model_id: EntityId
@@ -165,11 +165,11 @@ class RunEvidence(FrozenModel):
     agent_revision: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def completion_follows_creation(self) -> RunEvidence:
+    def completion_follows_creation(self) -> ExecutionEvidence:
         if self.completed_at < self.created_at:
-            raise ValueError("run completion precedes creation")
+            raise ValueError("execution completion precedes creation")
         if (self.publication_role == "component") != (self.component_kind is not None):
-            raise ValueError("run component kind conflicts with publication role")
+            raise ValueError("execution component kind conflicts with publication role")
         return self
 
 
@@ -178,12 +178,12 @@ class TrialEvidence(FrozenModel):
     task_name: str = Field(min_length=1)
     task_digest: Digest
     logical_attempt: int = Field(ge=1)
-    selected_execution_id: EntityId | None
+    selected_attempt_id: EntityId | None
     outcome: TaskOutcome
 
 
-class ExecutionEvidence(FrozenModel):
-    execution_id: EntityId
+class AttemptEvidence(FrozenModel):
+    attempt_id: EntityId
     trial_id: EntityId
     physical_attempt: int = Field(ge=1)
     runtime_kind: RuntimeKind
@@ -195,17 +195,17 @@ class ExecutionEvidence(FrozenModel):
     remote_job_id: str | None = None
 
     @model_validator(mode="after")
-    def completion_follows_start(self) -> ExecutionEvidence:
+    def completion_follows_start(self) -> AttemptEvidence:
         if self.completed_at < self.started_at:
-            raise ValueError("execution completion precedes start")
+            raise ValueError("attempt completion precedes start")
         if self.physical_attempt == 1 and self.retry_reason is not None:
-            raise ValueError("first execution cannot have a retry reason")
+            raise ValueError("first attempt cannot have a retry reason")
         if (self.status == "failed") != (self.failure_category is not None):
-            raise ValueError("execution failure category conflicts with its status")
+            raise ValueError("attempt failure category conflicts with its status")
         return self
 
 
-def task_outcome_matches_execution(
+def task_outcome_matches_attempt(
     outcome: TaskOutcome,
     status: str,
     failure_category: RetryCategory | None,
@@ -223,29 +223,28 @@ def task_outcome_matches_execution(
     return failure_category not in {"agent", "benchmark"}
 
 
-def _validate_trial_execution_reference(
+def _validate_trial_attempt_reference(
     trial: TrialEvidence,
-    executions: Mapping[str, object],
+    attempts: Mapping[str, object],
 ) -> None:
     if trial.outcome == "unsupported":
-        if trial.selected_execution_id is not None:
-            raise ValueError("unsupported trial has a selected execution")
+        if trial.selected_attempt_id is not None:
+            raise ValueError("unsupported trial has a selected attempt")
         if any(
-            isinstance(execution, ExecutionEvidence)
-            and execution.trial_id == trial.trial_id
-            for execution in executions.values()
+            isinstance(attempt, AttemptEvidence) and attempt.trial_id == trial.trial_id
+            for attempt in attempts.values()
         ):
-            raise ValueError("unsupported trial has a physical execution")
+            raise ValueError("unsupported trial has a physical attempt")
         return
-    selected = executions.get(trial.selected_execution_id)
+    selected = attempts.get(trial.selected_attempt_id)
     if (
-        not isinstance(selected, ExecutionEvidence)
+        not isinstance(selected, AttemptEvidence)
         or selected.trial_id != trial.trial_id
-        or not task_outcome_matches_execution(
+        or not task_outcome_matches_attempt(
             trial.outcome, selected.status, selected.failure_category
         )
     ):
-        raise ValueError("trial selected execution conflicts with its outcome")
+        raise ValueError("trial selected attempt conflicts with its outcome")
 
 
 class MetricEvidence(FrozenModel):
@@ -289,24 +288,24 @@ class ResultEvidence(FrozenModel):
         "harbor-hf/result-evidence/v1"
     )
     sanitized: Literal[True]
-    run: RunEvidence
+    execution: ExecutionEvidence
     trials: list[TrialEvidence]
-    executions: list[ExecutionEvidence]
+    attempts: list[AttemptEvidence]
     metrics: list[MetricEvidence]
     artifacts: list[ArtifactEvidence]
 
     @model_validator(mode="after")
     def references_are_consistent(self) -> ResultEvidence:
         trials = _unique_by_id(self.trials, "trial_id", "trial")
-        executions = _unique_by_id(self.executions, "execution_id", "execution")
+        attempts = _unique_by_id(self.attempts, "attempt_id", "attempt")
         for trial in self.trials:
-            _validate_trial_execution_reference(trial, executions)
-        if any(execution.trial_id not in trials for execution in self.executions):
-            raise ValueError("execution references an unknown trial")
+            _validate_trial_attempt_reference(trial, attempts)
+        if any(attempt.trial_id not in trials for attempt in self.attempts):
+            raise ValueError("attempt references an unknown trial")
         owners = {
-            "run": {self.run.run_id},
+            "execution": {self.execution.execution_id},
             "trial": set(trials),
-            "execution": set(executions),
+            "attempt": set(attempts),
         }
         for record in [*self.metrics, *self.artifacts]:
             if record.owner_id not in owners[record.owner_type]:
@@ -314,8 +313,8 @@ class ResultEvidence(FrozenModel):
         _require_unique_measurements(self.metrics)
         _require_unique_artifacts(self.artifacts)
         degraded = any(trial.outcome != "scored" for trial in self.trials)
-        if (self.run.quality == "degraded") != degraded:
-            raise ValueError("run quality conflicts with its trial outcomes")
+        if (self.execution.quality == "degraded") != degraded:
+            raise ValueError("execution quality conflicts with its trial outcomes")
         return self
 
 
@@ -327,30 +326,32 @@ class EvidenceReader(Protocol):
 
 class TraceValues(TypedDict):
     publication_id: str
-    run_id: str
+    execution_id: str
     source_bucket: str
     source_prefix: str
     source_checksum: str
-    run_lock_path: str
-    run_lock_sha256: str
+    execution_lock_path: str
+    execution_lock_sha256: str
     control_commit: str
 
 
 class TraceRow(FrozenModel):
     schema_version: str
     publication_id: EntityId
-    run_id: EntityId
+    execution_id: EntityId
     source_bucket: str = Field(min_length=1)
     source_prefix: str = Field(min_length=1)
     source_checksum: Digest
-    run_lock_path: str = Field(min_length=1)
-    run_lock_sha256: Digest
+    execution_lock_path: str = Field(min_length=1)
+    execution_lock_sha256: Digest
     control_commit: Commit
 
 
-class RunRow(TraceRow):
-    schema_version: Literal["harbor-hf/results/runs/v1"] = "harbor-hf/results/runs/v1"
-    campaign_id: EntityId
+class ExecutionRow(TraceRow):
+    schema_version: Literal["harbor-hf/results/executions/v1"] = (
+        "harbor-hf/results/executions/v1"
+    )
+    run_id: EntityId
     experiment: str = Field(min_length=1)
     evaluation_id: EvaluationId
     publication_role: PublicationRole
@@ -360,7 +361,7 @@ class RunRow(TraceRow):
     benchmark_revision: str = Field(min_length=1)
     result_kind: ResultKind
     outcome: Literal["complete"]
-    quality: RunQuality
+    quality: ExecutionQuality
     created_at: AwareDatetime
     completed_at: AwareDatetime
     model_id: EntityId
@@ -380,12 +381,12 @@ class RunRow(TraceRow):
     benchmark_failed_count: int = Field(ge=0)
     infrastructure_exhausted_count: int = Field(ge=0)
     unsupported_count: int = Field(ge=0)
-    execution_count: int = Field(ge=0)
+    attempt_count: int = Field(ge=0)
 
     @model_validator(mode="after")
-    def completion_follows_creation(self) -> RunRow:
+    def completion_follows_creation(self) -> ExecutionRow:
         if self.completed_at < self.created_at:
-            raise ValueError("run completion precedes creation")
+            raise ValueError("execution completion precedes creation")
         outcome_count = (
             self.scored_trial_count
             + self.agent_failed_count
@@ -394,13 +395,13 @@ class RunRow(TraceRow):
             + self.unsupported_count
         )
         if outcome_count != self.planned_trial_count:
-            raise ValueError("run task outcome counts do not match trial count")
+            raise ValueError("execution task outcome counts do not match trial count")
         if (self.quality == "degraded") != (
             self.scored_trial_count < self.planned_trial_count
         ):
-            raise ValueError("run quality conflicts with task outcome counts")
+            raise ValueError("execution quality conflicts with task outcome counts")
         if (self.publication_role == "component") != (self.component_kind is not None):
-            raise ValueError("run component kind conflicts with publication role")
+            raise ValueError("execution component kind conflicts with publication role")
         if self.publication_role == "final" and self.result_kind == "composed":
             if not self.source_publication_ids:
                 raise ValueError("composed final result requires source publications")
@@ -417,15 +418,15 @@ class TrialRow(TraceRow):
     task_name: str = Field(min_length=1)
     task_digest: Digest
     logical_attempt: int = Field(ge=1)
-    selected_execution_id: EntityId | None
+    selected_attempt_id: EntityId | None
     outcome: TaskOutcome
 
 
-class ExecutionRow(TraceRow):
-    schema_version: Literal["harbor-hf/results/executions/v1"] = (
-        "harbor-hf/results/executions/v1"
+class AttemptRow(TraceRow):
+    schema_version: Literal["harbor-hf/results/attempts/v1"] = (
+        "harbor-hf/results/attempts/v1"
     )
-    execution_id: EntityId
+    attempt_id: EntityId
     trial_id: EntityId
     physical_attempt: int = Field(ge=1)
     runtime_kind: RuntimeKind
@@ -437,13 +438,13 @@ class ExecutionRow(TraceRow):
     remote_job_id: str | None
 
     @model_validator(mode="after")
-    def values_are_consistent(self) -> ExecutionRow:
+    def values_are_consistent(self) -> AttemptRow:
         if self.completed_at < self.started_at:
-            raise ValueError("execution completion precedes start")
+            raise ValueError("attempt completion precedes start")
         if self.physical_attempt == 1 and self.retry_reason is not None:
-            raise ValueError("first execution cannot have a retry reason")
+            raise ValueError("first attempt cannot have a retry reason")
         if (self.status == "failed") != (self.failure_category is not None):
-            raise ValueError("execution failure category conflicts with its status")
+            raise ValueError("attempt failure category conflicts with its status")
         return self
 
 
@@ -495,21 +496,21 @@ class PublicationProvenance(FrozenModel):
 
 class ResultTables(FrozenModel):
     publication_id: str
-    runs: list[RunRow]
-    trials: list[TrialRow]
     executions: list[ExecutionRow]
+    trials: list[TrialRow]
+    attempts: list[AttemptRow]
     metrics: list[MetricRow]
     artifacts: list[ArtifactRow]
     provenance: PublicationProvenance
 
     @model_validator(mode="after")
     def has_one_consistent_run(self) -> ResultTables:
-        if len(self.runs) != 1:
-            raise ValueError("a publication must contain exactly one run row")
+        if len(self.executions) != 1:
+            raise ValueError("a publication must contain exactly one execution row")
         rows = [
-            *self.runs,
-            *self.trials,
             *self.executions,
+            *self.trials,
+            *self.attempts,
             *self.metrics,
             *self.artifacts,
         ]
@@ -521,15 +522,15 @@ class ResultTables(FrozenModel):
 class GlobalIndexRow(FrozenModel):
     schema_version: Literal["harbor-hf/results/index/v1"] = "harbor-hf/results/index/v1"
     publication_id: EntityId
+    execution_id: EntityId
     run_id: EntityId
-    campaign_id: EntityId
     evaluation_id: EvaluationId
     publication_role: PublicationRole
     component_kind: ComponentKind | None
     benchmark: str = Field(min_length=1)
     result_kind: ResultKind
     outcome: Literal["complete"]
-    quality: RunQuality
+    quality: ExecutionQuality
     completed_at: AwareDatetime
     model_repo: str = Field(min_length=1)
     model_revision: str = Field(min_length=1)
@@ -546,8 +547,8 @@ class CatalogRow(FrozenModel):
         "harbor-hf/results/catalog/v1"
     )
     publication_id: EntityId
+    execution_id: EntityId
     run_id: EntityId
-    campaign_id: EntityId
     evaluation_id: EvaluationId
     publication_role: PublicationRole
     component_kind: ComponentKind | None
@@ -556,7 +557,7 @@ class CatalogRow(FrozenModel):
     benchmark_revision: str = Field(min_length=1)
     result_kind: ResultKind
     outcome: Literal["complete"]
-    quality: RunQuality
+    quality: ExecutionQuality
     created_at: AwareDatetime
     completed_at: AwareDatetime
     model_repo: str = Field(min_length=1)
@@ -575,8 +576,8 @@ class CatalogRow(FrozenModel):
     benchmark_failed_count: int = Field(ge=0)
     infrastructure_exhausted_count: int = Field(ge=0)
     unsupported_count: int = Field(ge=0)
-    execution_count: int = Field(ge=0)
-    failed_executions: int = Field(ge=0)
+    attempt_count: int = Field(ge=0)
+    failed_attempts: int = Field(ge=0)
     duration_seconds: float = Field(ge=0)
     result_dataset: DatasetId
     result_revision: Commit
@@ -634,8 +635,8 @@ class ResultCompositionManifest(FrozenModel):
     schema_version: Literal["harbor-hf/result-composition/v1"] = (
         "harbor-hf/result-composition/v1"
     )
+    execution_id: EntityId
     run_id: EntityId
-    campaign_id: EntityId
     experiment: str = Field(min_length=1)
     created_at: AwareDatetime
     completed_at: AwareDatetime
@@ -691,7 +692,7 @@ class ResultProjection(FrozenModel):
         "harbor-hf/result-projection/v1"
     )
     publication_id: EntityId
-    run_id: EntityId
+    execution_id: EntityId
     source_bucket: str = Field(min_length=1)
     source_prefix: str = Field(min_length=1)
     source_checksum: Digest
@@ -737,59 +738,59 @@ def build_result_tables(
     provenance = _load_publication_provenance(reader, source, summary, lock, checksums)
     trace: TraceValues = {
         "publication_id": _publication_id(
-            summary.run.run_id,
+            summary.execution.execution_id,
             source,
             source_checksum,
             lock_checksum,
             provenance.execution_profile_sha256,
         ),
-        "run_id": summary.run.run_id,
+        "execution_id": summary.execution.execution_id,
         "source_bucket": source.bucket,
         "source_prefix": source.prefix,
         "source_checksum": source_checksum,
-        "run_lock_path": source.run_lock_path,
-        "run_lock_sha256": lock_checksum,
+        "execution_lock_path": source.execution_lock_path,
+        "execution_lock_sha256": lock_checksum,
         "control_commit": control_commit,
     }
     publication_id = trace["publication_id"]
-    run_evidence = summary.run
+    execution_evidence = summary.execution
     outcome_counts = {
         outcome: sum(trial.outcome == outcome for trial in summary.trials)
         for outcome in _TASK_OUTCOMES
     }
-    run = RunRow(
+    execution = ExecutionRow(
         **trace,
-        campaign_id=run_evidence.campaign_id,
-        experiment=run_evidence.experiment,
-        evaluation_id=run_evidence.evaluation_id,
-        publication_role=run_evidence.publication_role,
-        component_kind=run_evidence.component_kind,
+        run_id=execution_evidence.run_id,
+        experiment=execution_evidence.experiment,
+        evaluation_id=execution_evidence.evaluation_id,
+        publication_role=execution_evidence.publication_role,
+        component_kind=execution_evidence.component_kind,
         source_publication_ids=[],
-        benchmark=run_evidence.benchmark,
-        benchmark_revision=run_evidence.benchmark_revision,
-        result_kind=run_evidence.result_kind,
-        outcome=run_evidence.outcome,
-        quality=run_evidence.quality,
-        created_at=run_evidence.created_at,
-        completed_at=run_evidence.completed_at,
-        model_id=run_evidence.model_id,
-        model_repo=run_evidence.model_repo,
-        model_revision=run_evidence.model_revision,
-        deployment_id=run_evidence.deployment_id,
-        provider=run_evidence.provider,
-        region=run_evidence.region,
-        hardware=run_evidence.hardware,
-        accelerator_count=run_evidence.accelerator_count,
-        agent_id=run_evidence.agent_id,
-        agent_name=run_evidence.agent_name,
-        agent_revision=run_evidence.agent_revision,
+        benchmark=execution_evidence.benchmark,
+        benchmark_revision=execution_evidence.benchmark_revision,
+        result_kind=execution_evidence.result_kind,
+        outcome=execution_evidence.outcome,
+        quality=execution_evidence.quality,
+        created_at=execution_evidence.created_at,
+        completed_at=execution_evidence.completed_at,
+        model_id=execution_evidence.model_id,
+        model_repo=execution_evidence.model_repo,
+        model_revision=execution_evidence.model_revision,
+        deployment_id=execution_evidence.deployment_id,
+        provider=execution_evidence.provider,
+        region=execution_evidence.region,
+        hardware=execution_evidence.hardware,
+        accelerator_count=execution_evidence.accelerator_count,
+        agent_id=execution_evidence.agent_id,
+        agent_name=execution_evidence.agent_name,
+        agent_revision=execution_evidence.agent_revision,
         planned_trial_count=len(summary.trials),
         scored_trial_count=outcome_counts["scored"],
         agent_failed_count=outcome_counts["agent_failed"],
         benchmark_failed_count=outcome_counts["benchmark_failed"],
         infrastructure_exhausted_count=outcome_counts["infrastructure_exhausted"],
         unsupported_count=outcome_counts["unsupported"],
-        execution_count=len(summary.executions),
+        attempt_count=len(summary.attempts),
     )
     trials = [
         TrialRow(
@@ -798,15 +799,15 @@ def build_result_tables(
             task_name=record.task_name,
             task_digest=record.task_digest,
             logical_attempt=record.logical_attempt,
-            selected_execution_id=record.selected_execution_id,
+            selected_attempt_id=record.selected_attempt_id,
             outcome=record.outcome,
         )
         for record in sorted(summary.trials, key=lambda item: item.trial_id)
     ]
-    executions = [
-        ExecutionRow(
+    attempts = [
+        AttemptRow(
             **trace,
-            execution_id=record.execution_id,
+            attempt_id=record.attempt_id,
             trial_id=record.trial_id,
             physical_attempt=record.physical_attempt,
             runtime_kind=record.runtime_kind,
@@ -817,12 +818,12 @@ def build_result_tables(
             retry_reason=record.retry_reason,
             remote_job_id=record.remote_job_id,
         )
-        for record in sorted(summary.executions, key=lambda item: item.execution_id)
+        for record in sorted(summary.attempts, key=lambda item: item.attempt_id)
     ]
     metrics = [
         MetricRow(
             **trace,
-            metric_id=_metric_id(summary.run.run_id, record),
+            metric_id=_metric_id(summary.execution.execution_id, record),
             owner_type=record.owner_type,
             owner_id=record.owner_id,
             name=record.name,
@@ -835,7 +836,7 @@ def build_result_tables(
     artifacts = [
         ArtifactRow(
             **trace,
-            artifact_id=_artifact_id(summary.run.run_id, record),
+            artifact_id=_artifact_id(summary.execution.execution_id, record),
             owner_type=record.owner_type,
             owner_id=record.owner_id,
             kind=record.kind,
@@ -848,9 +849,9 @@ def build_result_tables(
     ]
     return ResultTables(
         publication_id=publication_id,
-        runs=[run],
+        executions=[execution],
         trials=trials,
-        executions=executions,
+        attempts=attempts,
         metrics=metrics,
         artifacts=artifacts,
         provenance=provenance,
@@ -870,7 +871,7 @@ def compose_result_tables(
         source for source in manifest.sources if source.role == "base"
     )
     base = sources[base_reference.publication_id]
-    base_run = base.runs[0]
+    base_run = base.executions[0]
     _validate_composition_compatibility(manifest, sources, base_run)
     selected_rows = _select_composition_rows(manifest, sources, base)
     manifest_bytes = canonical_json_bytes(manifest.model_dump(mode="json"))
@@ -881,9 +882,9 @@ def compose_result_tables(
         base.provenance.execution_profile_sha256,
         control_commit,
     )
-    trials, executions, metrics = _compose_child_rows(manifest, selected_rows, trace)
-    _require_unique_composed_rows(trials, executions, metrics)
-    run = _build_composed_run(manifest, base_run, trace, trials, executions)
+    trials, attempts, metrics = _compose_child_rows(manifest, selected_rows, trace)
+    _require_unique_composed_rows(trials, attempts, metrics)
+    run = _build_composed_run(manifest, base_run, trace, trials, attempts)
     source_pairs = sorted(
         {
             pair
@@ -895,18 +896,16 @@ def compose_result_tables(
             )
         }
     )
-    envelope = _build_composition_envelope(
-        manifest, manifest_bytes, base_run, executions
-    )
+    envelope = _build_composition_envelope(manifest, manifest_bytes, base_run, attempts)
     envelope_bytes = canonical_json_bytes(envelope.model_dump(mode="json"))
     artifacts = [
         ArtifactRow(
             **trace,
             artifact_id=_composition_entity_id(
-                "artifact", manifest.run_id, "composition.json"
+                "artifact", manifest.execution_id, "composition.json"
             ),
-            owner_type="run",
-            owner_id=manifest.run_id,
+            owner_type="execution",
+            owner_id=manifest.execution_id,
             kind="composition",
             path="composition.json",
             sha256=manifest_digest,
@@ -916,9 +915,9 @@ def compose_result_tables(
     ]
     tables = ResultTables(
         publication_id=trace["publication_id"],
-        runs=[run],
+        executions=[run],
         trials=sorted(trials, key=lambda item: item.trial_id),
-        executions=sorted(executions, key=lambda item: item.execution_id),
+        attempts=sorted(attempts, key=lambda item: item.attempt_id),
         metrics=sorted(metrics, key=lambda item: item.metric_id),
         artifacts=artifacts,
         provenance=PublicationProvenance(
@@ -946,12 +945,11 @@ def build_result_publication(
     *,
     extra_files: Sequence[DatasetFile] = (),
 ) -> ResultPublication:
-    campaign_id = tables.runs[0].campaign_id
+    run_id = tables.executions[0].run_id
     files = [
         DatasetFile(
             path=(
-                f"data/{table}/schema=v1/campaign={campaign_id}/"
-                f"{tables.publication_id}.parquet"
+                f"data/{table}/schema=v1/run={run_id}/{tables.publication_id}.parquet"
             ),
             content=_parquet_bytes(_table_rows(tables, table), parquet_schema(table)),
         )
@@ -963,8 +961,8 @@ def build_result_publication(
     receipt_value = {
         "schema_version": "harbor-hf/result-publication/v1",
         "publication_id": tables.publication_id,
-        "run_id": tables.runs[0].run_id,
-        "source_checksum": tables.runs[0].source_checksum,
+        "execution_id": tables.executions[0].execution_id,
+        "source_checksum": tables.executions[0].source_checksum,
         "files": {item.path: _sha256_bytes(item.content) for item in files},
     }
     return ResultPublication(
@@ -997,10 +995,10 @@ def _validate_composition_sources(
         raise ResultPublicationError("composition sources do not match its manifest")
     for source in manifest.sources:
         tables = sources[source.publication_id]
-        run = tables.runs[0]
+        run = tables.executions[0]
         if (
             tables.publication_id != source.publication_id
-            or run.run_id != source.run_id
+            or run.execution_id != source.execution_id
             or run.source_checksum != source.source_checksum
         ):
             raise ResultPublicationError("composition source identity conflicts")
@@ -1058,22 +1056,22 @@ def _composition_trace(
     source = EvidenceSource(
         bucket=manifest.evidence_bucket,
         prefix=manifest.evidence_prefix,
-        run_lock_path="composition.json",
+        execution_lock_path="composition.json",
     )
     return {
         "publication_id": _publication_id(
-            manifest.run_id,
+            manifest.execution_id,
             source,
             manifest_digest,
             manifest_digest,
             execution_profile_sha256,
         ),
-        "run_id": manifest.run_id,
+        "execution_id": manifest.execution_id,
         "source_bucket": manifest.evidence_bucket,
         "source_prefix": manifest.evidence_prefix,
         "source_checksum": manifest_digest,
-        "run_lock_path": "composition.json",
-        "run_lock_sha256": manifest_digest,
+        "execution_lock_path": "composition.json",
+        "execution_lock_sha256": manifest_digest,
         "control_commit": control_commit,
     }
 
@@ -1082,51 +1080,51 @@ def _compose_child_rows(
     manifest: ResultCompositionManifest,
     selected_rows: Sequence[tuple[TrialRow, ResultTables]],
     trace: TraceValues,
-) -> tuple[list[TrialRow], list[ExecutionRow], list[MetricRow]]:
+) -> tuple[list[TrialRow], list[AttemptRow], list[MetricRow]]:
     trials: list[TrialRow] = []
-    executions: list[ExecutionRow] = []
+    attempts: list[AttemptRow] = []
     metrics: list[MetricRow] = []
     for trial, tables in selected_rows:
         trials.append(trial.model_copy(update={**trace}))
         trial_executions = [
             execution
-            for execution in tables.executions
+            for execution in tables.attempts
             if execution.trial_id == trial.trial_id
         ]
-        executions.extend(
+        attempts.extend(
             execution.model_copy(update={**trace}) for execution in trial_executions
         )
         metrics.extend(_copy_selected_metrics(trial, trial_executions, tables, trace))
     for unsupported in manifest.unsupported_tasks:
-        trial, reward = _unsupported_rows(manifest.run_id, unsupported, trace)
+        trial, reward = _unsupported_rows(manifest.execution_id, unsupported, trace)
         trials.append(trial)
         metrics.append(reward)
-    return trials, executions, metrics
+    return trials, attempts, metrics
 
 
 def _copy_selected_metrics(
     trial: TrialRow,
-    executions: Sequence[ExecutionRow],
+    attempts: Sequence[AttemptRow],
     tables: ResultTables,
     trace: TraceValues,
 ) -> list[MetricRow]:
-    execution_ids = {execution.execution_id for execution in executions}
+    attempt_ids = {execution.attempt_id for execution in attempts}
     return [
         metric.model_copy(update={**trace})
         for metric in tables.metrics
         if (metric.owner_type == "trial" and metric.owner_id == trial.trial_id)
-        or (metric.owner_type == "execution" and metric.owner_id in execution_ids)
+        or (metric.owner_type == "attempt" and metric.owner_id in attempt_ids)
     ]
 
 
 def _unsupported_rows(
-    run_id: str,
+    execution_id: str,
     unsupported: UnsupportedTask,
     trace: TraceValues,
 ) -> tuple[TrialRow, MetricRow]:
     trial_id = _composition_entity_id(
         "trial",
-        run_id,
+        execution_id,
         unsupported.task_name,
         str(unsupported.logical_attempt),
         "unsupported",
@@ -1137,7 +1135,7 @@ def _unsupported_rows(
         task_name=unsupported.task_name,
         task_digest=unsupported.task_digest,
         logical_attempt=unsupported.logical_attempt,
-        selected_execution_id=None,
+        selected_attempt_id=None,
         outcome="unsupported",
     )
     metric = MetricEvidence(
@@ -1149,7 +1147,7 @@ def _unsupported_rows(
     )
     reward = MetricRow(
         **trace,
-        metric_id=_metric_id(run_id, metric),
+        metric_id=_metric_id(execution_id, metric),
         **metric.model_dump(mode="python"),
     )
     return trial, reward
@@ -1157,18 +1155,18 @@ def _unsupported_rows(
 
 def _build_composed_run(
     manifest: ResultCompositionManifest,
-    base: RunRow,
+    base: ExecutionRow,
     trace: TraceValues,
     trials: Sequence[TrialRow],
-    executions: Sequence[ExecutionRow],
-) -> RunRow:
+    attempts: Sequence[AttemptRow],
+) -> ExecutionRow:
     counts = {
         outcome: sum(trial.outcome == outcome for trial in trials)
         for outcome in _TASK_OUTCOMES
     }
-    return RunRow(
+    return ExecutionRow(
         **trace,
-        campaign_id=manifest.campaign_id,
+        run_id=manifest.run_id,
         experiment=manifest.experiment,
         evaluation_id=base.evaluation_id,
         publication_role="final",
@@ -1200,39 +1198,39 @@ def _build_composed_run(
         benchmark_failed_count=counts["benchmark_failed"],
         infrastructure_exhausted_count=counts["infrastructure_exhausted"],
         unsupported_count=counts["unsupported"],
-        execution_count=len(executions),
+        attempt_count=len(attempts),
     )
 
 
 def _build_composition_envelope(
     manifest: ResultCompositionManifest,
     manifest_bytes: bytes,
-    base: RunRow,
-    executions: Sequence[ExecutionRow],
+    base: ExecutionRow,
+    attempts: Sequence[AttemptRow],
 ) -> PublicationEnvelope:
-    physical_executions = [
-        PhysicalExecutionReference(
-            execution_id=execution.execution_id,
-            trial_id=execution.trial_id,
-            physical_attempt=execution.physical_attempt,
-            status=execution.status,
-            failure_category=execution.failure_category,
-            started_at=execution.started_at,
-            completed_at=execution.completed_at,
-            retry_reason=execution.retry_reason,
-            remote_job_id=execution.remote_job_id,
+    physical_attempts = [
+        PhysicalAttemptReference(
+            attempt_id=attempt.attempt_id,
+            trial_id=attempt.trial_id,
+            physical_attempt=attempt.physical_attempt,
+            status=attempt.status,
+            failure_category=attempt.failure_category,
+            started_at=attempt.started_at,
+            completed_at=attempt.completed_at,
+            retry_reason=attempt.retry_reason,
+            remote_job_id=attempt.remote_job_id,
             bundle_status="source_publication",
         )
-        for execution in executions
+        for attempt in attempts
     ]
     return PublicationEnvelope(
+        execution_id=manifest.execution_id,
         run_id=manifest.run_id,
-        campaign_id=manifest.campaign_id,
         created_at=manifest.created_at,
         completed_at=manifest.completed_at,
         evidence_bucket=manifest.evidence_bucket,
         evidence_prefix=manifest.evidence_prefix,
-        run_lock=object_reference("composition.json", manifest_bytes),
+        execution_lock=object_reference("composition.json", manifest_bytes),
         profiles=ProfileDigests(
             experiment=canonical_digest(
                 {
@@ -1259,16 +1257,16 @@ def _build_composition_envelope(
             ),
         ),
         runtime=RuntimeIdentity(
-            kind=executions[0].runtime_kind,
+            kind=attempts[0].runtime_kind,
             provider=base.provider,
             region=base.region,
             hardware=base.hardware,
             accelerator_count=base.accelerator_count,
         ),
         cleanup_outcome=(
-            "not_applicable" if executions[0].runtime_kind == "provider" else "verified"
+            "not_applicable" if attempts[0].runtime_kind == "provider" else "verified"
         ),
-        executions=physical_executions,
+        attempts=physical_attempts,
         sources=manifest.sources,
     )
 
@@ -1276,7 +1274,7 @@ def _build_composition_envelope(
 def _validate_composition_compatibility(
     manifest: ResultCompositionManifest,
     sources: Mapping[str, ResultTables],
-    base: RunRow,
+    base: ExecutionRow,
 ) -> None:
     if (
         len({tables.provenance.execution_profile_sha256 for tables in sources.values()})
@@ -1295,7 +1293,7 @@ def _validate_composition_compatibility(
         "agent_revision",
     )
     for reference in manifest.sources:
-        run = sources[reference.publication_id].runs[0]
+        run = sources[reference.publication_id].executions[0]
         if (
             run.result_kind != "ordinary"
             or run.evaluation_id != base.evaluation_id
@@ -1307,10 +1305,10 @@ def _validate_composition_compatibility(
     runtime_kinds = {
         execution.runtime_kind
         for tables in sources.values()
-        for execution in tables.executions
+        for execution in tables.attempts
     }
     if not runtime_kinds:
-        raise ResultPublicationError("composition sources contain no executions")
+        raise ResultPublicationError("composition sources contain no attempts")
     if len(runtime_kinds) != 1:
         raise ResultPublicationError("composition sources use mixed runtime kinds")
 
@@ -1326,12 +1324,12 @@ def _composition_entity_id(kind: str, *parts: str) -> str:
 
 def _require_unique_composed_rows(
     trials: Sequence[TrialRow],
-    executions: Sequence[ExecutionRow],
+    attempts: Sequence[AttemptRow],
     metrics: Sequence[MetricRow],
 ) -> None:
     checks = (
         ("trial", [row.trial_id for row in trials]),
-        ("execution", [row.execution_id for row in executions]),
+        ("attempt", [row.attempt_id for row in attempts]),
         ("metric", [row.metric_id for row in metrics]),
     )
     for kind, identities in checks:
@@ -1343,7 +1341,7 @@ def _build_projection_file(
     tables: ResultTables, table_files: list[DatasetFile]
 ) -> DatasetFile:
     provenance = tables.provenance
-    run = tables.runs[0]
+    run = tables.executions[0]
     references = {
         table: ProjectionFileReference(
             path=next(
@@ -1364,7 +1362,7 @@ def _build_projection_file(
     }
     projection = ResultProjection(
         publication_id=tables.publication_id,
-        run_id=run.run_id,
+        execution_id=run.execution_id,
         source_bucket=run.source_bucket,
         source_prefix=run.source_prefix,
         source_checksum=run.source_checksum,
@@ -1387,11 +1385,11 @@ def _build_projection_file(
 def build_global_index_row(
     tables: ResultTables, *, result_dataset: str, result_revision: str
 ) -> GlobalIndexRow:
-    run = tables.runs[0]
+    run = tables.executions[0]
     return GlobalIndexRow(
         publication_id=tables.publication_id,
+        execution_id=run.execution_id,
         run_id=run.run_id,
-        campaign_id=run.campaign_id,
         evaluation_id=run.evaluation_id,
         publication_role=run.publication_role,
         component_kind=run.component_kind,
@@ -1434,13 +1432,13 @@ def build_catalog_row(
     result_revision: str,
     projection: DatasetFile,
 ) -> CatalogRow:
-    run = tables.runs[0]
+    run = tables.executions[0]
     rewards = _trial_reward_scores(tables)
     score = sum(rewards) / len(rewards) if rewards else 0.0
     return CatalogRow(
         publication_id=tables.publication_id,
+        execution_id=run.execution_id,
         run_id=run.run_id,
-        campaign_id=run.campaign_id,
         evaluation_id=run.evaluation_id,
         publication_role=run.publication_role,
         component_kind=run.component_kind,
@@ -1468,9 +1466,9 @@ def build_catalog_row(
         benchmark_failed_count=run.benchmark_failed_count,
         infrastructure_exhausted_count=run.infrastructure_exhausted_count,
         unsupported_count=run.unsupported_count,
-        execution_count=run.execution_count,
-        failed_executions=sum(
-            execution.status == "failed" for execution in tables.executions
+        attempt_count=run.attempt_count,
+        failed_attempts=sum(
+            execution.status == "failed" for execution in tables.attempts
         ),
         duration_seconds=(run.completed_at - run.created_at).total_seconds(),
         result_dataset=result_dataset,
@@ -1495,9 +1493,9 @@ def build_catalog_window_file(
     )
 
 
-def catalog_lookup_path(run_id: str) -> str:
-    identity = hashlib.sha256(run_id.encode()).hexdigest()
-    return f"data/catalog/schema=v1/runs/{identity}.parquet"
+def catalog_lookup_path(execution_id: str) -> str:
+    identity = hashlib.sha256(execution_id.encode()).hexdigest()
+    return f"data/catalog/schema=v1/executions/{identity}.parquet"
 
 
 def catalog_publication_lookup_path(publication_id: str) -> str:
@@ -1507,7 +1505,7 @@ def catalog_publication_lookup_path(publication_id: str) -> str:
 
 def build_catalog_lookup_file(row: CatalogRow) -> DatasetFile:
     return DatasetFile(
-        path=catalog_lookup_path(row.run_id),
+        path=catalog_lookup_path(row.execution_id),
         content=_parquet_bytes([row], catalog_parquet_schema()),
     )
 
@@ -1621,14 +1619,14 @@ def audit_result_tables(
     expected = build_result_tables(reader, source, control_commit=control_commit)
     if observed != expected:
         raise ResultPublicationError("published rows differ from canonical evidence")
-    run = expected.runs[0]
+    run = expected.executions[0]
     return AuditReport(
         publication_id=expected.publication_id,
         source_checksum=run.source_checksum,
         row_counts={
-            "runs": len(expected.runs),
-            "trials": len(expected.trials),
             "executions": len(expected.executions),
+            "trials": len(expected.trials),
+            "attempts": len(expected.attempts),
             "metrics": len(expected.metrics),
             "artifacts": len(expected.artifacts),
         },
@@ -1665,15 +1663,18 @@ def _verify_evidence(
     if set(checksums) != expected_paths:
         raise ResultPublicationError("evidence checksum manifest is incomplete")
     _verify_object_checksums(reader, source, checksums)
-    if source.summary_path not in checksums or source.run_lock_path not in checksums:
+    if (
+        source.summary_path not in checksums
+        or source.execution_lock_path not in checksums
+    ):
         raise ResultPublicationError("evidence omits its summary or immutable run lock")
     summary, lock = _load_summary_and_lock(reader, source)
-    if lock.get("run_id") != summary.run.run_id:
+    if lock.get("execution_id") != summary.execution.execution_id:
         raise ResultPublicationError("evidence summary does not match its run lock")
     if (
-        lock.get("evaluation_id") != summary.run.evaluation_id
-        or lock.get("publication_role") != summary.run.publication_role
-        or lock.get("component_kind") != summary.run.component_kind
+        lock.get("evaluation_id") != summary.execution.evaluation_id
+        or lock.get("publication_role") != summary.execution.publication_role
+        or lock.get("component_kind") != summary.execution.component_kind
     ):
         raise ResultPublicationError(
             "evidence publication role does not match its run lock"
@@ -1685,7 +1686,7 @@ def _verify_evidence(
         summary,
         lock,
         source_checksum,
-        checksums[source.run_lock_path],
+        checksums[source.execution_lock_path],
         checksums,
     )
 
@@ -1742,7 +1743,7 @@ def _load_publication_provenance(
     _validate_envelope_executions(envelope, summary)
     manifests = []
     archives = []
-    for execution in envelope.executions:
+    for execution in envelope.attempts:
         bundle = execution.harbor_bundle
         if bundle is None:
             continue
@@ -1772,15 +1773,15 @@ def _validate_envelope_identity(
     summary: ResultEvidence,
     checksums: Mapping[str, str],
 ) -> None:
-    run = summary.run
+    run = summary.execution
     expected_prefix = source.prefix.rstrip("/")
     if (
-        envelope.run_id != run.run_id
-        or envelope.campaign_id != run.campaign_id
+        envelope.execution_id != run.execution_id
+        or envelope.run_id != run.run_id
         or envelope.evidence_bucket != source.bucket
         or envelope.evidence_prefix != expected_prefix
-        or envelope.run_lock.path != source.run_lock_path
-        or envelope.run_lock.digest != checksums.get(source.run_lock_path)
+        or envelope.execution_lock.path != source.execution_lock_path
+        or envelope.execution_lock.digest != checksums.get(source.execution_lock_path)
     ):
         raise ResultPublicationError("publication envelope identity conflicts")
     runtime = envelope.runtime
@@ -1798,34 +1799,34 @@ def _validate_envelope_executions(
     summary: ResultEvidence,
 ) -> None:
     expected = {
-        execution.execution_id: (
-            execution.trial_id,
-            execution.physical_attempt,
-            execution.status,
-            execution.failure_category,
-            execution.started_at,
-            execution.completed_at,
-            execution.retry_reason,
-            execution.remote_job_id,
+        attempt.attempt_id: (
+            attempt.trial_id,
+            attempt.physical_attempt,
+            attempt.status,
+            attempt.failure_category,
+            attempt.started_at,
+            attempt.completed_at,
+            attempt.retry_reason,
+            attempt.remote_job_id,
         )
-        for execution in summary.executions
+        for attempt in summary.attempts
     }
     observed = {
-        execution.execution_id: (
-            execution.trial_id,
-            execution.physical_attempt,
-            execution.status,
-            execution.failure_category,
-            execution.started_at,
-            execution.completed_at,
-            execution.retry_reason,
-            execution.remote_job_id,
+        attempt.attempt_id: (
+            attempt.trial_id,
+            attempt.physical_attempt,
+            attempt.status,
+            attempt.failure_category,
+            attempt.started_at,
+            attempt.completed_at,
+            attempt.retry_reason,
+            attempt.remote_job_id,
         )
-        for execution in envelope.executions
+        for attempt in envelope.attempts
     }
     if observed != expected:
         raise ResultPublicationError(
-            "publication envelope executions conflict with normalized evidence"
+            "publication envelope attempts conflict with normalized evidence"
         )
 
 
@@ -1886,7 +1887,7 @@ def _load_summary_and_lock(
             reader.read_bytes(
                 bucket=source.bucket,
                 prefix=source.prefix,
-                path=source.run_lock_path,
+                path=source.execution_lock_path,
             )
         )
     except Exception as error:
@@ -1933,7 +1934,7 @@ def _verify_artifact_evidence(
 
 
 def _publication_id(
-    run_id: str,
+    execution_id: str,
     source: EvidenceSource,
     source_checksum: str,
     lock_checksum: str,
@@ -1941,24 +1942,24 @@ def _publication_id(
 ) -> str:
     value = {
         "publication_contract": RESULT_PUBLICATION_CONTRACT,
-        "run_id": run_id,
+        "execution_id": execution_id,
         "source_bucket": source.bucket,
         "source_prefix": source.prefix,
         "source_checksum": source_checksum,
-        "run_lock_sha256": lock_checksum,
+        "execution_lock_sha256": lock_checksum,
         "execution_profile_sha256": execution_profile_sha256,
     }
     return f"pub-{_digest(value).removeprefix('sha256:')[:32]}"
 
 
-def _metric_id(run_id: str, record: MetricEvidence) -> str:
-    value = {"run_id": run_id, **record.model_dump(mode="json")}
+def _metric_id(execution_id: str, record: MetricEvidence) -> str:
+    value = {"execution_id": execution_id, **record.model_dump(mode="json")}
     return f"metric-{_digest(value).removeprefix('sha256:')[:32]}"
 
 
-def _artifact_id(run_id: str, record: ArtifactEvidence) -> str:
+def _artifact_id(execution_id: str, record: ArtifactEvidence) -> str:
     value = {
-        "run_id": run_id,
+        "execution_id": execution_id,
         "owner_type": record.owner_type,
         "owner_id": record.owner_id,
         "path": record.path,
@@ -1968,10 +1969,10 @@ def _artifact_id(run_id: str, record: ArtifactEvidence) -> str:
 
 
 def _unique_by_id(
-    records: list[TrialEvidence] | list[ExecutionEvidence],
-    field: Literal["trial_id", "execution_id"],
+    records: list[TrialEvidence] | list[AttemptEvidence],
+    field: Literal["trial_id", "attempt_id"],
     label: str,
-) -> dict[str, TrialEvidence | ExecutionEvidence]:
+) -> dict[str, TrialEvidence | AttemptEvidence]:
     indexed = {str(getattr(record, field)): record for record in records}
     if len(indexed) != len(records):
         raise ValueError(f"result evidence contains a duplicate {label}")
@@ -2045,16 +2046,16 @@ def _canonical_json(value: object) -> bytes:
 
 
 def _table_names() -> tuple[TableName, ...]:
-    return ("runs", "trials", "executions", "metrics", "artifacts")
+    return ("executions", "trials", "attempts", "metrics", "artifacts")
 
 
 def _table_rows(tables: ResultTables, table: TableName) -> Sequence[FrozenModel]:
-    if table == "runs":
-        return tables.runs
-    if table == "trials":
-        return tables.trials
     if table == "executions":
         return tables.executions
+    if table == "trials":
+        return tables.trials
+    if table == "attempts":
+        return tables.attempts
     if table == "metrics":
         return tables.metrics
     return tables.artifacts
@@ -2094,12 +2095,12 @@ def _trace_fields() -> list[pa.Field]:
     return [
         _field("schema_version", pa.string()),
         _field("publication_id", pa.string()),
-        _field("run_id", pa.string()),
+        _field("execution_id", pa.string()),
         _field("source_bucket", pa.string()),
         _field("source_prefix", pa.string()),
         _field("source_checksum", pa.string()),
-        _field("run_lock_path", pa.string()),
-        _field("run_lock_sha256", pa.string()),
+        _field("execution_lock_path", pa.string()),
+        _field("execution_lock_sha256", pa.string()),
         _field("control_commit", pa.string()),
     ]
 
@@ -2126,11 +2127,11 @@ def _make_schema(version: str, fields: list[pa.Field]) -> pa.Schema:
 
 _TIMESTAMP = pa.timestamp("us", tz="UTC")
 _PARQUET_SCHEMAS: Mapping[TableName, pa.Schema] = {
-    "runs": _make_schema(
-        "harbor-hf/results/runs/v1",
+    "executions": _make_schema(
+        "harbor-hf/results/executions/v1",
         [
             *_trace_fields(),
-            _field("campaign_id", pa.string()),
+            _field("run_id", pa.string()),
             _field("experiment", pa.string()),
             *_catalog_identity_fields(),
             _field("model_id", pa.string()),
@@ -2150,7 +2151,7 @@ _PARQUET_SCHEMAS: Mapping[TableName, pa.Schema] = {
             _field("benchmark_failed_count", pa.int64()),
             _field("infrastructure_exhausted_count", pa.int64()),
             _field("unsupported_count", pa.int64()),
-            _field("execution_count", pa.int64()),
+            _field("attempt_count", pa.int64()),
         ],
     ),
     "trials": _make_schema(
@@ -2161,15 +2162,15 @@ _PARQUET_SCHEMAS: Mapping[TableName, pa.Schema] = {
             _field("task_name", pa.string()),
             _field("task_digest", pa.string()),
             _field("logical_attempt", pa.int64()),
-            _field("selected_execution_id", pa.string(), nullable=True),
+            _field("selected_attempt_id", pa.string(), nullable=True),
             _field("outcome", pa.string()),
         ],
     ),
-    "executions": _make_schema(
-        "harbor-hf/results/executions/v1",
+    "attempts": _make_schema(
+        "harbor-hf/results/attempts/v1",
         [
             *_trace_fields(),
-            _field("execution_id", pa.string()),
+            _field("attempt_id", pa.string()),
             _field("trial_id", pa.string()),
             _field("physical_attempt", pa.int64()),
             _field("runtime_kind", pa.string()),
@@ -2215,8 +2216,8 @@ _INDEX_SCHEMA = _make_schema(
     [
         _field("schema_version", pa.string()),
         _field("publication_id", pa.string()),
+        _field("execution_id", pa.string()),
         _field("run_id", pa.string()),
-        _field("campaign_id", pa.string()),
         _field("evaluation_id", pa.string()),
         _field("publication_role", pa.string()),
         _field("component_kind", pa.string(), nullable=True),
@@ -2241,8 +2242,8 @@ _CATALOG_SCHEMA = _make_schema(
     [
         _field("schema_version", pa.string()),
         _field("publication_id", pa.string()),
+        _field("execution_id", pa.string()),
         _field("run_id", pa.string()),
-        _field("campaign_id", pa.string()),
         *_catalog_identity_fields(),
         _field("model_repo", pa.string()),
         _field("model_revision", pa.string()),
@@ -2260,8 +2261,8 @@ _CATALOG_SCHEMA = _make_schema(
         _field("benchmark_failed_count", pa.int64()),
         _field("infrastructure_exhausted_count", pa.int64()),
         _field("unsupported_count", pa.int64()),
-        _field("execution_count", pa.int64()),
-        _field("failed_executions", pa.int64()),
+        _field("attempt_count", pa.int64()),
+        _field("failed_attempts", pa.int64()),
         _field("duration_seconds", pa.float64()),
         _field("result_dataset", pa.string()),
         _field("result_revision", pa.string()),

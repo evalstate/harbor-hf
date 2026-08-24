@@ -40,6 +40,7 @@ function system(writeMode: "disabled" | "enabled" = "enabled") {
   return {
     source_revision: "revision-0123456789abcdef",
     write_mode: writeMode,
+    initialization: { ready: true, status: "ready" },
     projection: {
       ready: true,
       rebuilding: false,
@@ -84,7 +85,7 @@ function launchProfiles() {
       approved("tb21-gpt-oss-20b-opencode-providers", "deployment", {
         models: ["gpt-oss-20b"],
         harnesses: ["opencode"],
-        sandbox_template: {
+        trial_job_template: {
           inference_upstream: "https://router.huggingface.co/v1",
         },
       }),
@@ -119,11 +120,11 @@ function stubLaunchPage(onSubmit?: (value: Record<string, unknown>) => void) {
       const path = String(input);
       if (path.includes("auth/session")) return json(session());
       if (path.includes("/system")) return json(system());
-      if (path.endsWith("/api/v1/campaigns") && init?.method === "POST") {
+      if (path.endsWith("/api/v1/runs") && init?.method === "POST") {
         onSubmit?.(JSON.parse(String(init.body)) as Record<string, unknown>);
         return new Promise<Response>(() => undefined);
       }
-      if (path.includes("/campaigns")) return json({ items: [], next_cursor: null });
+      if (path.includes("/runs")) return json({ items: [], next_cursor: null });
       if (path.includes("/profiles")) return json(launchProfiles());
       throw new Error(`unexpected request: ${path}`);
     }),
@@ -164,7 +165,7 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session("visible-user"));
         if (path.includes("/system")) return json(system());
-        if (path.includes("/campaigns")) return json({ items: [], next_cursor: null });
+        if (path.includes("/runs")) return json({ items: [], next_cursor: null });
         if (path.includes("/endpoints")) return json({ items: [], next_cursor: null });
         throw new Error(`unexpected request: ${path}`);
       }),
@@ -178,14 +179,14 @@ describe("control web", () => {
     expect(screen.getByRole("button", { name: "Sign out" })).toBeVisible();
   });
 
-  it("keeps the authenticated shell and stale data after a transient session failure", async () => {
+  it("keeps the overview session during a projection rebuild", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const path = String(input);
         if (path.includes("/system")) return json(system());
-        if (path.includes("/campaigns")) return json({ items: [], next_cursor: null });
+        if (path.includes("/runs")) return json({ items: [], next_cursor: null });
         if (path.includes("/endpoints")) return json({ items: [], next_cursor: null });
         throw new Error(`unexpected request: ${path}`);
       }),
@@ -201,11 +202,10 @@ describe("control web", () => {
       query.setState({
         ...query.state,
         error: new ApiError(
-          429,
-          "rate_limit_exceeded",
-          "request rate limit exceeded",
+          503,
+          "control_not_ready",
+          "projection is rebuilding",
           "safe-request-id",
-          Date.now() + 60_000,
         ),
         status: "error",
         fetchStatus: "idle",
@@ -217,6 +217,7 @@ describe("control web", () => {
     expect(
       screen.queryByRole("link", { name: /sign in with hugging face/i }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByText(/access denied/i)).not.toBeInTheDocument();
     expect(screen.getByText(/safe-request-id/)).toBeInTheDocument();
   });
 
@@ -229,11 +230,11 @@ describe("control web", () => {
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system("enabled"));
         if (path.includes("/endpoints")) return json({ items: [], next_cursor: null });
-        if (path.includes("/campaigns"))
+        if (path.includes("/runs"))
           return json({
             items: [
               {
-                campaign_id: "run-newer",
+                run_id: "run-newer",
                 status: "completed",
                 terminal_tasks: 2,
                 successful_tasks: 2,
@@ -243,7 +244,7 @@ describe("control web", () => {
                 created_at: "2026-08-21T21:00:00.000Z",
               },
               {
-                campaign_id: "run-older",
+                run_id: "run-older",
                 status: "completed",
                 terminal_tasks: 1,
                 successful_tasks: 1,
@@ -277,11 +278,11 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system("disabled"));
-        if (path.includes("/campaigns")) return json({ items: [], next_cursor: null });
+        if (path.includes("/runs")) return json({ items: [], next_cursor: null });
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns");
+    renderApp("/runs");
     expect(await screen.findByRole("button", { name: "Start a run" })).toBeDisabled();
     expect(screen.getByText("Disabled", { exact: true })).toBeInTheDocument();
   });
@@ -294,9 +295,9 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.endsWith("/api/v1/campaigns/campaign-1"))
+        if (path.endsWith("/api/v1/runs/run-1"))
           return json({
-            campaign_id: "campaign-1",
+            run_id: "run-1",
             created_at: "2026-08-18T00:00:00.000Z",
             status: "active",
             publication_status: null,
@@ -309,14 +310,14 @@ describe("control web", () => {
             ceiling_microusd: 3_000_000,
             cleanup_pending: true,
           });
-        if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
+        if (path.includes("/api/v1/runs/run-1/tasks"))
           return json({ items: [], next_cursor: null });
         if (path.includes("/api/v1/jobs"))
           return json({ items: [], next_cursor: null });
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns/campaign-1");
+    renderApp("/runs/run-1");
     const user = userEvent.setup();
 
     await user.click(await screen.findByRole("button", { name: /cancel run/i }));
@@ -334,9 +335,9 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.endsWith("/api/v1/campaigns/campaign-1"))
+        if (path.endsWith("/api/v1/runs/run-1"))
           return json({
-            campaign_id: "campaign-1",
+            run_id: "run-1",
             created_at: "2026-08-18T00:00:00.000Z",
             status: "completed-invalid",
             publication_status: "published",
@@ -354,14 +355,14 @@ describe("control web", () => {
             replacement_assigned_tasks: 75,
             replacement_recorded_tasks: 21,
           });
-        if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
+        if (path.includes("/api/v1/runs/run-1/tasks"))
           return json({ items: [], next_cursor: null });
         if (path.includes("/api/v1/jobs"))
           return json({
             items: [
               {
                 action_id: "action-job-retry",
-                campaign_id: "campaign-1",
+                run_id: "run-1",
                 action_kind: "job.observe",
                 generation: 1,
                 target: "job-retry",
@@ -378,8 +379,8 @@ describe("control web", () => {
           });
         if (path.includes("/capacity"))
           return json({
-            campaign_active: 1,
-            campaign_limit: 8,
+            run_active: 1,
+            run_limit: 8,
             namespace_active: 1,
             namespace_limit: 8,
             provider_reserved: 0,
@@ -392,13 +393,15 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns/campaign-1");
+    renderApp("/runs/run-1");
     expect(await screen.findByText("Replacement in progress")).toBeInTheDocument();
-    expect(screen.getByText("Replacement Job on this run")).toBeInTheDocument();
+    expect(screen.getByText("Replacement Jobs on this Run")).toBeInTheDocument();
     expect(
       screen.getByText(/21 of 75 assigned tasks have a replacement receipt/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/1 sandbox active, 2 queued creates/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/1 physical Job active, 2 queued admissions/),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(/The task list still shows selected seals/),
     ).toBeInTheDocument();
@@ -409,7 +412,7 @@ describe("control web", () => {
     ).toBeInTheDocument();
   });
 
-  it("lists campaign Jobs with Hub inspect links", async () => {
+  it("does not classify publication work as replacement recovery", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -417,71 +420,92 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.endsWith("/api/v1/campaigns/campaign-1"))
+        if (path.endsWith("/api/v1/runs/run-1"))
           return json({
-            campaign_id: "campaign-1",
+            run_id: "run-1",
             created_at: "2026-08-18T00:00:00.000Z",
-            status: "completed",
-            publication_status: "published",
+            status: "publishing",
+            publication_status: null,
             total_tasks: 1,
             terminal_tasks: 1,
             successful_tasks: 1,
-            pending_actions: 0,
+            pending_actions: 1,
             observed_microusd: 0,
             reserved_microusd: 0,
-            ceiling_microusd: 0,
-            cleanup_pending: false,
+            ceiling_microusd: 1_000,
+            cleanup_pending: true,
+            admissible_tasks: 1,
+            exhausted_tasks: 0,
+            invalid_selected_tasks: 0,
+            replacement_assigned_tasks: 0,
+            replacement_recorded_tasks: 0,
           });
-        if (path.includes("/api/v1/campaigns/campaign-1/tasks/control-smoke-task"))
-          return json({
-            task: {
-              campaign_id: "campaign-1",
-              task_id: "control-smoke-task",
-              input_digest: "sha256:aa",
-              terminal_outcome: "complete",
-              selected_attempt_id: "attempt-1",
-            },
-            attempts: [
-              {
-                attempt_id: "attempt-1",
-                action_id: "action-job-1",
-                campaign_id: "campaign-1",
-                task_id: "control-smoke-task",
-                outcome: "complete",
-                replacement_eligible: false,
-                cost_microusd: 0,
-                metrics: { reward: 1 },
-                created_at: "2026-08-18T00:00:00.000Z",
-              },
-            ],
-          });
-        if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
+        if (path.includes("/api/v1/runs/run-1/tasks"))
           return json({ items: [], next_cursor: null });
-        if (path.includes("/api/v1/jobs") && path.includes("campaign_id=campaign-1"))
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        if (path.includes("/capacity"))
           return json({
-            items: [
-              {
-                action_id: "action-job-1",
-                campaign_id: "campaign-1",
-                action_kind: "job.observe",
-                generation: 1,
-                target: "693994e21a39f67af5a41ad0",
-                outcome: "completed",
-                observed_state: "COMPLETED",
-                resource_id: "693994e21a39f67af5a41ad0",
-                inspect_url:
-                  "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
-                created_at: "2026-08-18T00:00:00.000Z",
-                cost_microusd: 1_000_000,
-                assigned_tasks: 1,
-              },
-            ],
-            next_cursor: null,
+            run_active: 0,
+            run_limit: 1,
+            namespace_active: 0,
+            namespace_limit: 1,
+            provider_reserved: 0,
+            provider_limit: 0,
+            queued: 0,
+            cleanup_held: 0,
+            limiting_factor: null,
+            start_burst: 1,
           });
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns/campaign-1/tasks/control-smoke-task");
+
+    renderApp("/runs/run-1");
+    expect(await screen.findByText("Publishing")).toBeInTheDocument();
+    expect(screen.queryByText("Replacement in progress")).not.toBeInTheDocument();
+    expect(screen.queryByText("Replacement Jobs on this Run")).not.toBeInTheDocument();
+  });
+
+  it("shows each attempt's launch action and projected physical Job", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("auth/session")) return json(session());
+      if (path.includes("/system")) return json(system());
+      if (path.includes("/api/v1/runs/run-1/tasks/control-smoke-task"))
+        return json({
+          task: {
+            run_id: "run-1",
+            task_id: "control-smoke-task",
+            input_digest: "sha256:aa",
+            terminal_outcome: "complete",
+            selected_attempt_id: "attempt-1",
+          },
+          attempts: [
+            {
+              attempt_id: "attempt-1",
+              action_id: "action-job-1",
+              run_id: "run-1",
+              task_id: "control-smoke-task",
+              outcome: "complete",
+              replacement_eligible: false,
+              cost_microusd: 0,
+              metrics: { reward: 1 },
+              created_at: "2026-08-18T00:00:00.000Z",
+              physical_job: {
+                resource_id: "693994e21a39f67af5a41ad0",
+                observed_state: "COMPLETED",
+                inspect_url:
+                  "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
+              },
+            },
+          ],
+        });
+      throw new Error(`unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp("/runs/run-1/tasks/control-smoke-task");
     const link = await screen.findByRole("link", {
       name: /693994e21a39f67af5a41ad0/i,
     });
@@ -489,9 +513,55 @@ describe("control web", () => {
       "href",
       "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
     );
+    expect(screen.getByText("job.launch action")).toBeInTheDocument();
+    expect(screen.getByText("action-job-1")).toBeInTheDocument();
+    expect(screen.getByText("Selected result")).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "Physical HF Jobs" }),
-    ).toBeInTheDocument();
+      fetchMock.mock.calls.some(([input]) => String(input).includes("/jobs")),
+    ).toBe(false);
+  });
+
+  it("does not label an attempt without a projected Job as physical", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/runs/run-1/tasks/cancelled-task"))
+          return json({
+            task: {
+              run_id: "run-1",
+              task_id: "cancelled-task",
+              input_digest: "sha256:aa",
+              terminal_outcome: "cancelled",
+              selected_attempt_id: null,
+            },
+            attempts: [
+              {
+                attempt_id: "attempt-cancelled",
+                action_id: "action-cancelled",
+                run_id: "run-1",
+                task_id: "cancelled-task",
+                outcome: "cancelled",
+                replacement_eligible: false,
+                cost_microusd: 0,
+                metrics: {},
+                created_at: "2026-08-18T00:00:00.000Z",
+                physical_job: null,
+              },
+            ],
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/runs/run-1/tasks/cancelled-task");
+
+    expect(await screen.findByText("Attempt 1")).toBeInTheDocument();
+    expect(screen.getByText("Source action")).toBeInTheDocument();
+    expect(screen.queryByText("Physical trial Job attempt 1")).not.toBeInTheDocument();
+    expect(screen.queryByText("job.launch action")).not.toBeInTheDocument();
   });
 
   it("links Jobs to the Hub inspect page", async () => {
@@ -507,7 +577,7 @@ describe("control web", () => {
             items: [
               {
                 action_id: "action-job-1",
-                campaign_id: "campaign-job-1",
+                run_id: "run-job-1",
                 action_kind: "job.launch",
                 generation: 1,
                 target: "task-1",
@@ -538,7 +608,7 @@ describe("control web", () => {
     expect(screen.getByText(formatMoney(1_000_000))).toBeInTheDocument();
   });
 
-  it("shows campaign request errors instead of a false not-found state", async () => {
+  it("shows run request errors instead of a false not-found state", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -546,13 +616,13 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.endsWith("/api/v1/campaigns/campaign-error"))
+        if (path.endsWith("/api/v1/runs/run-error"))
           return json(
             {
               error: {
                 code: "access_denied",
                 message: "access denied",
-                request_id: "request-campaign",
+                request_id: "request-run",
               },
             },
             403,
@@ -561,7 +631,7 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns/campaign-error");
+    renderApp("/runs/run-error");
     expect(await screen.findByText("Forbidden")).toBeInTheDocument();
     expect(screen.queryByText("Run not found")).not.toBeInTheDocument();
   });
@@ -576,12 +646,12 @@ describe("control web", () => {
         requests.push(path);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.includes("/campaigns")) {
+        if (path.includes("/runs")) {
           const laterPage = path.includes("cursor=cursor-one");
           return json({
             items: [
               {
-                campaign_id: laterPage ? "campaign-second" : "campaign-first",
+                run_id: laterPage ? "run-second" : "run-first",
                 status: "active",
                 terminal_tasks: 0,
                 successful_tasks: 0,
@@ -597,16 +667,16 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns");
+    renderApp("/runs");
     const user = userEvent.setup();
 
-    expect(await screen.findByText("campaign-first")).toBeInTheDocument();
+    expect(await screen.findByText("run-first")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Next" }));
-    expect(await screen.findByText("campaign-second")).toBeInTheDocument();
+    expect(await screen.findByText("run-second")).toBeInTheDocument();
     expect(requests.some((path) => path.includes("cursor=cursor-one"))).toBe(true);
   });
 
-  it("labels finished campaigns with sealed failures separately from complete success", async () => {
+  it("labels finished runs with sealed failures separately from complete success", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -614,11 +684,11 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.includes("/campaigns"))
+        if (path.includes("/runs"))
           return json({
             items: [
               {
-                campaign_id: "campaign-success",
+                run_id: "run-success",
                 status: "completed",
                 terminal_tasks: 1,
                 successful_tasks: 1,
@@ -628,7 +698,7 @@ describe("control web", () => {
                 created_at: "2026-08-16T00:00:00Z",
               },
               {
-                campaign_id: "campaign-timeout",
+                run_id: "run-timeout",
                 status: "completed",
                 terminal_tasks: 2,
                 successful_tasks: 1,
@@ -638,7 +708,7 @@ describe("control web", () => {
                 created_at: "2026-08-16T01:00:00Z",
               },
               {
-                campaign_id: "campaign-cancelled",
+                run_id: "run-cancelled",
                 status: "cancelled",
                 terminal_tasks: 2,
                 successful_tasks: 1,
@@ -647,13 +717,23 @@ describe("control web", () => {
                 ceiling_microusd: 0,
                 created_at: "2026-08-16T02:00:00Z",
               },
+              {
+                run_id: "run-cancelling",
+                status: "cancelling",
+                terminal_tasks: 1,
+                successful_tasks: 0,
+                total_tasks: 2,
+                observed_microusd: 0,
+                ceiling_microusd: 0,
+                created_at: "2026-08-16T03:00:00Z",
+              },
             ],
             next_cursor: null,
           });
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns");
+    renderApp("/runs");
     expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
     expect(screen.getByText("Completed with failures").className).toContain("amber");
     const cancelledBadge = screen
@@ -664,6 +744,10 @@ describe("control web", () => {
       .getAllByText("Completed", { exact: true })
       .find((element) => element.tagName === "SPAN");
     expect(successBadge?.className).toContain("emerald");
+    const cancellingBadge = screen
+      .getAllByText("Cancelling")
+      .find((element) => element.tagName === "SPAN");
+    expect(cancellingBadge?.className).toContain("cyan");
   });
 
   it("explains the cost ceiling on hover", async () => {
@@ -683,7 +767,7 @@ describe("control web", () => {
     stubLaunchPage((value) => {
       submission = value;
     });
-    renderApp("/campaigns");
+    renderApp("/runs");
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Start a run" }));
     const launchPolicy = screen.getByRole("combobox", { name: "Launch policy" });
@@ -703,7 +787,7 @@ describe("control web", () => {
     expect(submission?.launch_policy).toBe("control-smoke");
   });
 
-  it("shows the full run name instead of a truncated campaign id", async () => {
+  it("shows the full run name instead of a truncated run id", async () => {
     const runName = "run-gpt-oss-20b-opencode-off-providers-a1b2c3d4e5f6";
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
@@ -712,11 +796,11 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.includes("/campaigns"))
+        if (path.includes("/runs"))
           return json({
             items: [
               {
-                campaign_id: runName,
+                run_id: runName,
                 status: "queued",
                 terminal_tasks: 0,
                 successful_tasks: 0,
@@ -742,7 +826,7 @@ describe("control web", () => {
     expect(screen.queryByText(/run-gpt-oss-20…/)).not.toBeInTheDocument();
   });
 
-  it("keeps campaign completed distinct from a timed-out task", async () => {
+  it("keeps run completed distinct from a timed-out task", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -750,14 +834,14 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.endsWith("/api/v1/campaigns/campaign-mixed/capacity"))
+        if (path.endsWith("/api/v1/runs/run-mixed/capacity"))
           return json({
             configured: true,
             profile_id: "sha256:capacity",
             namespace_limit: 8,
             namespace_active: 3,
-            campaign_limit: 4,
-            campaign_active: 2,
+            run_limit: 4,
+            run_active: 2,
             hardware_limit: null,
             hardware_active: 0,
             provider_limit: 4,
@@ -766,12 +850,12 @@ describe("control web", () => {
             start_burst: 2,
             queued: 1,
             cleanup_held: 0,
-            limiting_factor: "namespace_sandbox_capacity",
+            limiting_factor: "namespace_job_capacity",
             not_before: null,
           });
-        if (path.endsWith("/api/v1/campaigns/campaign-mixed"))
+        if (path.endsWith("/api/v1/runs/run-mixed"))
           return json({
-            campaign_id: "campaign-mixed",
+            run_id: "run-mixed",
             created_at: "2026-08-18T00:00:00.000Z",
             status: "completed",
             publication_status: "published",
@@ -785,18 +869,18 @@ describe("control web", () => {
             cleanup_pending: false,
             cancellation_requested: false,
           });
-        if (path.includes("/api/v1/campaigns/campaign-mixed/tasks"))
+        if (path.includes("/api/v1/runs/run-mixed/tasks"))
           return json({
             items: [
               {
-                campaign_id: "campaign-mixed",
+                run_id: "run-mixed",
                 task_id: "timeout-task",
                 input_digest: "sha256:aa",
                 terminal_outcome: "benchmark_timeout",
                 selected_attempt_id: "attempt-timeout",
               },
               {
-                campaign_id: "campaign-mixed",
+                run_id: "run-mixed",
                 task_id: "complete-task",
                 input_digest: "sha256:bb",
                 terminal_outcome: "complete",
@@ -810,7 +894,7 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns/campaign-mixed");
+    renderApp("/runs/run-mixed");
     expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
     expect(
       screen.getByText("Published. 1 sealed task did not succeed."),
@@ -820,8 +904,8 @@ describe("control web", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Scored success").className).toContain("emerald");
     expect(screen.getByText("Timed out").className).toContain("amber");
-    expect(screen.getByText("Sandbox capacity")).toBeInTheDocument();
-    expect(await screen.findByText("Namespace Sandbox Capacity")).toBeInTheDocument();
+    expect(screen.getByText("Job capacity")).toBeInTheDocument();
+    expect(await screen.findByText("Namespace Job Capacity")).toBeInTheDocument();
     expect(screen.getByText("3/8 active")).toBeInTheDocument();
   });
 
@@ -834,14 +918,14 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system("enabled"));
-        if (path.endsWith("/api/v1/campaigns/campaign-mixed/capacity"))
+        if (path.endsWith("/api/v1/runs/run-mixed/capacity"))
           return json({
             configured: false,
             profile_id: null,
             namespace_limit: null,
             namespace_active: 0,
-            campaign_limit: 1,
-            campaign_active: 0,
+            run_limit: 1,
+            run_active: 0,
             hardware_limit: null,
             hardware_active: 0,
             provider_limit: 0,
@@ -853,23 +937,23 @@ describe("control web", () => {
             limiting_factor: null,
             not_before: null,
           });
-        if (path.endsWith("/api/v1/campaigns/campaign-mixed/actions")) {
+        if (path.endsWith("/api/v1/runs/run-mixed/actions")) {
           posts.push({
             path,
             body: init?.body ? JSON.parse(String(init.body)) : null,
           });
           return json(
             {
-              campaign_id: "campaign-mixed",
+              run_id: "run-mixed",
               action_id: "action-retry",
               adopted: false,
             },
             202,
           );
         }
-        if (path.endsWith("/api/v1/campaigns/campaign-mixed"))
+        if (path.endsWith("/api/v1/runs/run-mixed"))
           return json({
-            campaign_id: "campaign-mixed",
+            run_id: "run-mixed",
             created_at: "2026-08-18T00:00:00.000Z",
             status: "completed",
             publication_status: "published",
@@ -883,11 +967,11 @@ describe("control web", () => {
             cleanup_pending: false,
             cancellation_requested: false,
           });
-        if (path.includes("/api/v1/campaigns/campaign-mixed/tasks"))
+        if (path.includes("/api/v1/runs/run-mixed/tasks"))
           return json({
             items: [
               {
-                campaign_id: "campaign-mixed",
+                run_id: "run-mixed",
                 task_id: "infra-task",
                 input_digest: "sha256:aa",
                 terminal_outcome: "infrastructure",
@@ -901,7 +985,7 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns/campaign-mixed");
+    renderApp("/runs/run-mixed");
     const user = userEvent.setup();
     await user.click(
       await screen.findByRole("button", { name: "Retry infrastructure failures" }),
@@ -909,7 +993,7 @@ describe("control web", () => {
     await user.click(screen.getByRole("button", { name: "Confirm retry" }));
     expect(posts).toEqual([
       {
-        path: "/api/v1/campaigns/campaign-mixed/actions",
+        path: "/api/v1/runs/run-mixed/actions",
         body: {
           action: "retry_infrastructure",
           task_id: null,
@@ -928,14 +1012,14 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.endsWith("/api/v1/campaigns/campaign-cancelled/capacity"))
+        if (path.endsWith("/api/v1/runs/run-cancelled/capacity"))
           return json({
             configured: false,
             profile_id: null,
             namespace_limit: null,
             namespace_active: 0,
-            campaign_limit: 1,
-            campaign_active: 0,
+            run_limit: 1,
+            run_active: 0,
             hardware_limit: null,
             hardware_active: 0,
             provider_limit: 0,
@@ -944,12 +1028,12 @@ describe("control web", () => {
             start_burst: null,
             queued: 0,
             cleanup_held: 0,
-            limiting_factor: "campaign_cancelled",
+            limiting_factor: "run_cancelled",
             not_before: null,
           });
-        if (path.endsWith("/api/v1/campaigns/campaign-cancelled"))
+        if (path.endsWith("/api/v1/runs/run-cancelled"))
           return json({
-            campaign_id: "campaign-cancelled",
+            run_id: "run-cancelled",
             created_at: "2026-08-18T00:00:00.000Z",
             status: "cancelled",
             publication_status: "published",
@@ -963,11 +1047,11 @@ describe("control web", () => {
             cleanup_pending: false,
             cancellation_requested: true,
           });
-        if (path.includes("/api/v1/campaigns/campaign-cancelled/tasks"))
+        if (path.includes("/api/v1/runs/run-cancelled/tasks"))
           return json({
             items: [
               {
-                campaign_id: "campaign-cancelled",
+                run_id: "run-cancelled",
                 task_id: "cancelled-task",
                 input_digest: "sha256:cc",
                 terminal_outcome: "cancelled",
@@ -981,7 +1065,7 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns/campaign-cancelled");
+    renderApp("/runs/run-cancelled");
     expect(
       await screen.findByText("Published. 1 sealed task cancelled."),
     ).toBeInTheDocument();
@@ -1004,9 +1088,9 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
-        if (path.endsWith("/api/v1/campaigns/campaign-failed"))
+        if (path.endsWith("/api/v1/runs/run-failed"))
           return json({
-            campaign_id: "campaign-failed",
+            run_id: "run-failed",
             created_at: "2026-08-18T00:00:00.000Z",
             status: "completed",
             publication_status: "published",
@@ -1019,18 +1103,18 @@ describe("control web", () => {
             ceiling_microusd: 0,
             cleanup_pending: false,
           });
-        if (path.includes("/api/v1/campaigns/campaign-failed/tasks"))
+        if (path.includes("/api/v1/runs/run-failed/tasks"))
           return json({
             items: [
               {
-                campaign_id: "campaign-failed",
+                run_id: "run-failed",
                 task_id: "policy-task",
                 input_digest: "sha256:aa",
                 terminal_outcome: "policy",
                 selected_attempt_id: "attempt-policy",
               },
               {
-                campaign_id: "campaign-failed",
+                run_id: "run-failed",
                 task_id: "agent-task",
                 input_digest: "sha256:bb",
                 terminal_outcome: "agent",
@@ -1044,7 +1128,7 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/campaigns/campaign-failed");
+    renderApp("/runs/run-failed");
     expect(await screen.findByText("Completed with failures")).toBeInTheDocument();
     expect(screen.getByText("Provider rejected the request")).toBeInTheDocument();
     expect(screen.getByText("Agent ended without a score")).toBeInTheDocument();
@@ -1065,7 +1149,7 @@ describe("control web", () => {
             items: [
               {
                 publication_id: "publication-one",
-                campaign_id: "run-gpt-oss-20b-opencode-off-providers-a1b2c3d4e5f6",
+                run_id: "run-gpt-oss-20b-opencode-off-providers-a1b2c3d4e5f6",
                 status: "published",
                 catalog_digest: "sha256:catalog",
                 published_at: "2026-08-21T00:00:00.000Z",
@@ -1125,11 +1209,10 @@ describe("control web", () => {
         if (path.includes("/api/v1/results/publication-one"))
           return json({
             publication_id: "publication-one",
-            campaign_id: "campaign-one",
+            run_id: "run-one",
             status: "published",
             catalog_digest: "sha256:catalog",
             published_at: "2026-08-21T00:00:00.000Z",
-            run_id: null,
             benchmark: "control-smoke",
             model: "control-smoke",
             harness: "control-smoke",
@@ -1222,7 +1305,7 @@ describe("control web", () => {
                 rank: 1,
                 pareto: true,
                 configuration_digest: "sha256:strong",
-                campaign_id: "run-strong",
+                run_id: "run-strong",
                 publication_id: "publication-strong",
                 published_at: "2026-08-21T00:00:00.000Z",
                 benchmark: "terminal-bench-2-1",
@@ -1243,7 +1326,7 @@ describe("control web", () => {
                 rank: 2,
                 pareto: false,
                 configuration_digest: "sha256:weak",
-                campaign_id: "run-weak",
+                run_id: "run-weak",
                 publication_id: "publication-weak",
                 published_at: "2026-08-21T00:00:00.000Z",
                 benchmark: "terminal-bench-2-1",

@@ -1,15 +1,15 @@
-# Production Campaign Implementation Plan
+# Production Run Implementation Plan
 
-**Status.** Current implementation record.
+**Status.** Superseded implementation record. Sandbox references below describe
+the pre-reset runtime and are retained as history, not current guidance.
 
 The approved [control service
 plan](2026-08-16-harbor-hf-control-service-plan.md) is the canonical plan for
-replacing live Git-backed campaign coordination, consolidating profiles and
+replacing live Git-backed run coordination, consolidating profiles and
 result publication, and limiting each namespace to a small fixed set of Hub
 resources. The [control service specification](CONTROL_SERVICE.md) defines the
-TypeScript service and React application. This document records the architecture
-that is currently implemented and remains useful for its execution, evidence,
-and endpoint-safety milestones.
+current TypeScript service, one-Job-per-attempt execution model, and React
+application.
 
 ## Goal
 
@@ -25,12 +25,12 @@ properties.
 
 ## Implementation Status
 
-The campaign control plane, endpoint and provider wave execution, recovery,
+The run control plane, endpoint and provider wave execution, recovery,
 admission control, evidence finalization, normalized publication, and read-only
 presentation layers are implemented. Production adapters are exercised through
 the same application layer as the in-memory fault tests. The remaining work is
-operational hardening through broader remote campaigns and upstream integration,
-not a separate execution architecture. Completed and normally failed executions
+operational hardening through broader remote runs and upstream integration,
+not a separate execution architecture. Completed and normally failed attempts
 publish complete sanitized evidence, but a worker or Sandbox killed before
 finalization can lose its Job-local in-progress session files. Milestone 8 plans
 incremental private evidence checkpoints for that remaining failure window; it
@@ -43,12 +43,12 @@ The remaining architecture work also includes the
 [provider-agent migration](provider-agent-architecture.md). All provider-backed
 agents will move to one installable package in this repository and Harbor's
 public custom-agent import path. Upstream Harbor remains unchanged. This is a
-hard replacement for new provider campaigns, not a second execution path.
+hard replacement for new provider runs, not a second execution path.
 
 ## Starting Point
 
 The original single-run implementation provides the execution kernel reused by
-campaign waves:
+run waves:
 
 - immutable source, model, image, dataset, task, and agent references;
 - permanent run reservations and compare-and-swap endpoint leases;
@@ -60,18 +60,18 @@ campaign waves:
 - terminal success or failure markers written after verified endpoint cleanup;
 - endpoint-backed execution without local inference or task execution.
 
-Campaign execution reuses this kernel and its validation and cleanup behavior;
+Run execution reuses this kernel and its validation and cleanup behavior;
 it does not maintain a weaker parallel worker path.
 
 ## Architectural Decisions
 
 ### Reconciliation Instead Of A Long-Running Server
 
-Campaign orchestration is implemented as a stateless reconciler. Each pass:
+Run orchestration is implemented as a stateless reconciler. Each pass:
 
-1. reads immutable campaign plans and append-only events;
+1. reads immutable run plans and append-only events;
 2. inspects current HF Jobs, Inference Endpoints, and provider state;
-3. derives a projection of campaigns, runs, shards, and deployment waves;
+3. derives a projection of runs, runs, shards, and deployment waves;
 4. reserves a bounded set of idempotent actions;
 5. performs those actions and records their outcomes;
 6. exits.
@@ -99,8 +99,8 @@ One endpoint-backed wave:
 7. publishes terminal evidence and releases the lease.
 
 This amortizes model startup across compatible shards without allowing
-unbounded endpoint reuse. Endpoint reuse is limited to one campaign by default.
-Cross-campaign reuse requires a later explicit policy and is not inferred from
+unbounded endpoint reuse. Endpoint reuse is limited to one run by default.
+Cross-run reuse requires a later explicit policy and is not inferred from
 matching endpoint names.
 
 Provider-backed waves use the same run, shard, trial, execution, and artifact
@@ -113,7 +113,7 @@ Each HF storage primitive has one purpose:
 
 | Store | Contents | Mutation model |
 | --- | --- | --- |
-| Private control Dataset | Campaign plans, reservations, leases, run-level events, and publisher cursors | Small parent-checked commits |
+| Private control Dataset | Run plans, reservations, leases, run-level events, and publisher cursors | Small parent-checked commits |
 | Private artifact Bucket | Sessions, logs, Harbor trees, trajectories, archives, and checksums | Unique prefixes with terminal markers |
 | Benchmark result Dataset | Normalized run, trial, execution, metric, and artifact tables | Serialized publisher commits |
 | Global index Dataset | One discoverable row per published run | Serialized publisher commits |
@@ -157,20 +157,20 @@ utilities.
 
 The migration replaces every existing provider-agent path together. No built-in
 Harbor fallback, compatibility alias, dual writer, or runtime source patch
-remains for new campaigns. Historical evidence stays readable through its
+remains for new runs. Historical evidence stays readable through its
 immutable records.
 
 ## Durable Domain Model
 
 The initial schema is deliberately small. Schema versioning is required before
-the first campaign is submitted.
+the first run is submitted.
 
 | Entity | Identity | Meaning |
 | --- | --- | --- |
 | Experiment | User-defined ID plus manifest digest | Requested matrix and policy |
-| Campaign plan | Content digest | Fully resolved immutable execution plan |
-| Campaign | Generated ID plus plan digest | One submitted execution of a plan |
-| Run | Digest of campaign ID and resolved matrix cell | One homogeneous benchmark configuration |
+| Run plan | Content digest | Fully resolved immutable execution plan |
+| Run | Generated ID plus plan digest | One submitted execution of a plan |
+| Run | Digest of run ID and resolved matrix cell | One homogeneous benchmark configuration |
 | Shard | Digest of run ID and ordered task-attempt set | Bounded schedulable work |
 | Trial | Digest of run ID, task digest, and logical attempt | Benchmark-semantic attempt |
 | Execution | Generated ID scoped to one trial | One physical invocation of a logical trial |
@@ -178,8 +178,8 @@ the first campaign is submitted.
 | Artifact | Digest of typed owner, path, and content | Checksummed evidence object |
 | Event | Generated ID, typed subject, kind, and schema version | Append-only state transition evidence |
 
-Submitting the same plan twice creates two campaigns. It does not overwrite or
-silently adopt the first campaign. Within a campaign, deterministic run, shard,
+Submitting the same plan twice creates two runs. It does not overwrite or
+silently adopt the first run. Within a run, deterministic run, shard,
 and trial IDs make repeated reconciliation idempotent. An infrastructure retry
 creates a new execution ID and never changes the logical trial identity.
 
@@ -191,14 +191,14 @@ explicit `owner_type` and `owner_id` pair.
 
 A shard is only a scheduling batch. An execution belongs to one trial, not to
 the shard that happened to schedule it. Retrying a lost shard creates physical
-executions only for trials that lack a valid completed execution; completed
+attempts only for trials that lack a valid completed execution; completed
 trials are not repeated.
 
 ### State Projections
 
 Events are authoritative; status fields are rebuildable projections.
 
-Campaign projection:
+Run projection:
 
 ```text
 queued -> active -> draining -> completed
@@ -228,14 +228,14 @@ planned -> acquiring -> provisioning -> ready -> active -> draining
 A verifier reward of zero is a valid completed benchmark result. `invalid`
 means evidence or benchmark semantics failed validation after bounded retries.
 `failed_infrastructure` means no valid benchmark result was produced after the
-allowed physical executions. When a run also contains valid completed trials,
+allowed physical attempts. When a run also contains valid completed trials,
 both terminal failure states contribute zero to its fixed denominator instead
 of making the whole run partial. A run with no valid completed trial still
 fails closed.
 
 These are internal recovery states. Public task outcomes are `scored`,
 `agent_failed`, `benchmark_failed`, and `infrastructure_exhausted`. Physical
-executions separately publish `succeeded`, `failed`, or `cancelled` plus a
+attempts separately publish `succeeded`, `failed`, or `cancelled` plus a
 typed failure category. The planned task count is locked before execution and
 is always the score denominator. A complete run is `clean` when every task is
 scored and `degraded` when one or more exhausted tasks contribute zero.
@@ -271,9 +271,9 @@ The control Dataset stores only small coordination records:
 ```text
 schema/
   current.json
-campaigns/<campaign-id>/
+runs/<run-id>/
   request.yaml
-  campaign.lock.json
+  run.lock.json
   reservations/<reservation-id>.json
   events/<event-id>.json
 coordination/
@@ -292,11 +292,11 @@ conflicts are surfaced as control-plane errors rather than bypassing a lease.
 
 ## Artifact Layout
 
-New campaign execution uses a versioned layout:
+New run execution uses a versioned layout:
 
 ```text
-campaigns/<campaign-id>/
-  campaign.lock.json
+runs/<run-id>/
+  run.lock.json
   waves/<wave-id>/
     wave.lock.json
     endpoint.snapshot.json
@@ -305,7 +305,7 @@ campaigns/<campaign-id>/
     wave-summary.json
     _SUCCESS or _FAILED or _CANCELLED
   runs/<run-id>/
-    run.lock.json
+    execution.lock.json
     shards/<shard-id>/
       shard.lock.json
       events.jsonl
@@ -313,7 +313,7 @@ campaigns/<campaign-id>/
       _SUCCESS or _FAILED or _CANCELLED
     trials/<trial-id>/
       trial.lock.json
-      executions/<execution-id>/
+      attempts/<execution-id>/
         manifest.yaml
         events.jsonl
         harbor.log
@@ -324,9 +324,9 @@ campaigns/<campaign-id>/
         _SUCCESS or _FAILED or _CANCELLED
       trial-summary.json
       _SUCCESS or _FAILED or _CANCELLED
-    run-summary.json
+    execution-summary.json
     _SUCCESS or _PARTIAL or _FAILED or _CANCELLED
-  campaign-summary.json
+  run-summary.json
   _SUCCESS or _PARTIAL or _FAILED or _CANCELLED
 ```
 
@@ -338,7 +338,7 @@ single-run artifact prefixes remain readable and are never rewritten.
 execution. It records sorted relative paths, logical kinds, byte sizes, SHA-256
 digests, and private publication classification. Files are limited to 64 MiB
 each and 512 MiB per execution. Symbolic links and unsafe paths are rejected.
-Successful OpenClaw executions require at least one session JSONL; handled
+Successful OpenClaw attempts require at least one session JSONL; handled
 failures still publish the requirement and its satisfaction state for diagnosis.
 The compressed Harbor archive is deterministic and the execution checksum
 manifest covers both the inventory and archive.
@@ -347,8 +347,8 @@ manifest covers both the inventory and archive.
 
 Each pass has an explicit action limit and deadline:
 
-1. Acquire a short reconciler lease for one campaign or scheduling partition.
-2. Load the campaign plan, events, reservations, and relevant remote resources.
+1. Acquire a short reconciler lease for one run or scheduling partition.
+2. Load the run plan, events, reservations, and relevant remote resources.
 3. Rebuild projections and verify invariants.
 4. Convert desired-versus-observed differences into deterministic actions.
 5. Order cleanup and cancellation actions ahead of new billable work.
@@ -363,11 +363,11 @@ or pause request failed. It inspects deterministic labels and current provider
 state before deciding whether to retry.
 
 A terminal HF Job without terminal wave evidence is recovered explicitly:
-active executions become categorized `lost` failures, the wave drains and is
+active attempts become categorized `lost` failures, the wave drains and is
 cleaned, and untouched or retryable trials enter a new action generation. A
 Job that becomes terminal during cancellation makes that pass ambiguous and
 halts later actions until the next evidence observation. One malformed
-campaign produces a per-campaign failure result and does not abort
+run produces a per-run failure result and does not abort
 `reconcile-all`.
 
 ### Scheduling And Concurrency
@@ -379,8 +379,8 @@ Concurrency is enforced at distinct levels:
 - maximum active waves per provider and hardware pool;
 - maximum active Harbor shards within a wave;
 - maximum agents and requests admitted to one serving deployment;
-- maximum controller retries per shard and physical executions per trial;
-- maximum estimated campaign and wave spend.
+- maximum controller retries per shard and physical attempts per trial;
+- maximum estimated run and wave spend.
 
 Serving concurrency is taken from a measured deployment profile. The scheduler
 does not infer safe concurrency from GPU names or context-window capacity. A
@@ -395,13 +395,13 @@ Before automated selection is complete:
 - all points, failures, retries, and raw measurements use the checked-in
   `harbor-hf/serving-profile/v1` schema;
 - `execution.concurrent_trials` equals the selected profile concurrency; and
-- campaign notes retain the selected profile's Bucket URI and SHA-256 digest.
+- run notes retain the selected profile's Bucket URI and SHA-256 digest.
 
 The production profiler will add `profile plan`, `profile run`, and
 `profile select`. It must execute the full ladder under one endpoint lease and
 watchdog, pause and verify the endpoint before finalization, select only from
 complete evidence, and write the selected profile digest into the immutable
-campaign input. Automated campaign launch must fail closed when that profile
+run input. Automated run launch must fail closed when that profile
 identity or selected concurrency does not match. Independent endpoint startups
 for every candidate are explicitly outside the design.
 
@@ -416,7 +416,7 @@ Cancellation is a durable request, not a process signal:
 5. publish available evidence and cancellation markers;
 6. release leases only after cleanup is verified.
 
-Repeated cancellation requests are idempotent. A campaign with valid completed
+Repeated cancellation requests are idempotent. A run with valid completed
 trials may finish as `partial`; completed evidence is not deleted.
 
 ## Endpoint Provisioning
@@ -442,7 +442,7 @@ ambiguous API outcomes.
 
 Created endpoints start paused or are paused immediately after provisioning
 verification. Deletion is a separate explicit retention policy. Ordinary
-campaign completion pauses endpoints and preserves their reproducibility
+run completion pauses endpoints and preserves their reproducibility
 records.
 
 ## Result Publication
@@ -452,11 +452,11 @@ markers, verifies the raw checksums, and writes normalized Parquet tables:
 
 - `runs` for the immutable benchmark configuration and aggregate outcome;
 - `trials` for logical attempts and verifier results;
-- `executions` for infrastructure invocations and retry reasons;
+- `attempts` for infrastructure invocations and retry reasons;
 - `metrics` for latency, token, throughput, concurrency, cost, and utilization;
 - `artifacts` for checksums, media types, sizes, and canonical evidence paths.
 
-Rows use stable entity IDs and are idempotent. A rerun is a new campaign and
+Rows use stable entity IDs and are idempotent. A rerun is a new run and
 new rows, not an update to historical measurements. Dataset schema versions and
 migrations are explicit. The publisher records its source Bucket checksum and
 control-repository commit so every table row can be traced back to evidence.
@@ -481,7 +481,7 @@ ordinary complete runs.
 
 ## Observability And Operational Targets
 
-Every campaign must expose status without reading worker logs. Projections and
+Every run must expose status without reading worker logs. Projections and
 metrics include:
 
 - queued, active, retrying, complete, invalid, failed, and cancelled counts;
@@ -504,7 +504,7 @@ Initial operational invariants:
 - no success marker is emitted while cleanup or validation is incomplete.
 
 Alerting initially uses failed scheduled Jobs, stale leases, cleanup-failure
-events, and campaigns with no progress across multiple reconciliation periods.
+events, and runs with no progress across multiple reconciliation periods.
 A dedicated external monitoring service is not required for the first release.
 
 ## CLI And Optional Space
@@ -512,20 +512,20 @@ A dedicated external monitoring service is not required for the first release.
 The CLI remains the canonical control surface:
 
 ```text
-harbor-hf campaign plan MANIFEST
-harbor-hf campaign submit MANIFEST
-harbor-hf campaign status CAMPAIGN_ID
-harbor-hf campaign reconcile CAMPAIGN_ID
-harbor-hf campaign cancel CAMPAIGN_ID
-harbor-hf campaign retry CAMPAIGN_ID --shard SHARD_ID
-harbor-hf artifacts verify CAMPAIGN_ID
-harbor-hf results publish CAMPAIGN_ID
+harbor-hf run plan MANIFEST
+harbor-hf run submit MANIFEST
+harbor-hf run status RUN_ID
+harbor-hf run reconcile RUN_ID
+harbor-hf run cancel RUN_ID
+harbor-hf run retry RUN_ID --shard SHARD_ID
+harbor-hf artifacts verify RUN_ID
+harbor-hf results publish RUN_ID
 ```
 
 Machine-readable JSON output is required for every command. Mutating commands
 support dry-run where meaningful and print the immutable IDs they reserve.
 
-An optional authenticated Space may create campaign requests and display
+An optional authenticated Space may create run requests and display
 projections. It calls the same application layer and writes the same control
 records. It never stores authoritative state, directly owns an endpoint, or
 decides that a run is complete.
@@ -541,23 +541,23 @@ Deliverables:
 - preserve current locks, lifecycle, evidence, and cleanup fixtures;
 - retain `harbor-hf submit` as the supported single-cell path;
 - capture compatibility tests for current artifact and coordination records;
-- document the campaign feature as additive until migration is complete.
+- document the run feature as additive until migration is complete.
 
 Exit evidence: the existing remote smoke, artifact audit, lifecycle tests,
 mutation gate, and endpoint cleanup verification remain valid.
 
-### Milestone 1: Campaign Schema And Deterministic Planning
+### Milestone 1: Run Schema And Deterministic Planning
 
 Deliverables:
 
-- add versioned campaign, run, shard, trial, execution, wave, event, and
+- add versioned run, run, shard, trial, execution, wave, event, and
   artifact models;
 - add matrix include and exclude rules;
 - resolve all selected Harbor tasks and digests without executing them;
 - split task-attempt sets deterministically under configured shard bounds;
-- produce `campaign.lock.json` and a stable plan digest;
+- produce `run.lock.json` and a stable plan digest;
 - export JSON Schema and compatibility fixtures;
-- add `campaign plan` with human and JSON output.
+- add `run plan` with human and JSON output.
 
 Tests:
 
@@ -574,11 +574,11 @@ same plan digest, run IDs, shard IDs, and trial IDs.
 Deliverables:
 
 - add the control Dataset layout and typed event store;
-- implement campaign and action reservations with parent-commit checking;
+- implement run and action reservations with parent-commit checking;
 - implement projection rebuilding and invariant validation;
 - implement a reconciler that emits an action plan without remote mutation;
 - add webhook and scheduled-Job installation commands;
-- add `campaign submit`, `status`, and `reconcile --dry-run`;
+- add `run submit`, `status`, and `reconcile --dry-run`;
 - record reconciler checkpoints and stale-lease diagnostics.
 
 Tests:
@@ -612,7 +612,7 @@ Tests:
 - controller-kill and watchdog-cleanup remote integration tests;
 - separate remote smokes for pinned vLLM and llama.cpp profiles.
 
-Exit criteria: one campaign runs at least two shards in one wave, survives a
+Exit criteria: one run runs at least two shards in one wave, survives a
 controller termination test, and finishes every created or resumed endpoint at
 `state=paused` with `readyReplica=0`.
 
@@ -622,11 +622,11 @@ Deliverables:
 
 - reconcile queued, active, lost, retryable, terminal, and cancelled work;
 - distinguish logical attempts from physical retries end to end;
-- add global, deployment, provider, and campaign concurrency budgets;
+- add global, deployment, provider, and run concurrency budgets;
 - add hard spend caps and cleanup-first admission control;
 - add durable cancellation, drain, retry, and manual-intervention workflows;
 - add backoff and quota handling without hiding benchmark failures;
-- add campaign summaries and terminal markers.
+- add run summaries and terminal markers.
 
 Tests:
 
@@ -635,9 +635,9 @@ Tests:
 - cancellation at every wave and shard phase;
 - quota exhaustion and retry-budget tests;
 - remote kill-and-reconcile tests with completed-trial preservation;
-- scale simulation across multiple campaigns and deployment digests.
+- scale simulation across multiple runs and deployment digests.
 
-Exit criteria: a multi-model, multi-hardware campaign survives reconciler and
+Exit criteria: a multi-model, multi-hardware run survives reconciler and
 wave-controller termination, resumes without republishing or rerunning valid
 trials, respects its spend cap, and leaves all endpoints paused.
 
@@ -665,7 +665,7 @@ Tests:
 - assertions that prompt text, tool arguments, response text, and credentials
   never enter provider request evidence.
 
-Exit criteria: a provider-backed campaign shard produces a valid Harbor result,
+Exit criteria: a provider-backed run shard produces a valid Harbor result,
 complete evidence, and normalized records without creating an endpoint.
 
 ### Milestone 6: Serialized Results Publication
@@ -674,7 +674,7 @@ Deliverables:
 
 - freeze reviewed Parquet schemas for all normalized tables;
 - implement one leased publisher per destination Dataset;
-- anchor result provenance to the immutable campaign-lock commit and expire
+- anchor result provenance to the immutable run-lock commit and expire
   abandoned publisher claims after a bounded interval;
 - verify complete raw evidence and checksums before publishing;
 - implement idempotent row generation, partitioning, and compaction;
@@ -697,13 +697,13 @@ rows and every row points to checksummed evidence and an immutable run lock.
 Deliverables:
 
 - build a read-only leaderboard Space from normalized Datasets;
-- add campaign, run, task, attempt, error, throughput, hardware, and cost views;
+- add run, run, task, attempt, error, throughput, hardware, and cost views;
 - support explicit complete, partial, composite, and manual-result labels;
 - document the workflow in Harbor Cookbook;
 - upstream only generic Harbor lifecycle or artifact extension points;
 - follow the staged [Harbor integration refactor](harbor-integration-refactor.md)
   so Harbor becomes the sole authority for execution requests and trial result
-  bundles without blocking current campaigns;
+  bundles without blocking current runs;
 - keep package boundaries compatible with a future Harbor monorepo import.
 
 Exit criteria: an external reader can identify the exact configuration,
@@ -713,7 +713,7 @@ evidence, result scope, and publication revision behind every displayed score.
 
 Status: planned, not implemented.
 
-The current finalization path preserves complete evidence for executions that
+The current finalization path preserves complete evidence for attempts that
 finish normally or fail through a handled path. A hard kill before finalization
 can still destroy sessions, trajectories, logs, and other files that exist only
 on the Job or Sandbox filesystem. Checkpointing narrows that loss window without
@@ -756,7 +756,7 @@ Tests:
   checkpoints and leaves every touched Inference Endpoint paused.
 
 Exit criteria: after an ungraceful remote kill, operators can retrieve the most
-recent checksum-valid private session checkpoint, while campaign recovery still
+recent checksum-valid private session checkpoint, while run recovery still
 reruns or fails the incomplete trial according to policy and publishes no
 partial benchmark result.
 
@@ -781,7 +781,7 @@ Deliverables:
   support;
 - preserve each agent's native request protocol, session format, and ATIF-v1.7
   conversion in its own module;
-- migrate every provider campaign profile to the custom import path; and
+- migrate every provider run profile to the custom import path; and
 - remove built-in-agent assumptions, Harbor fork pins, compatibility aliases,
   runtime-manifest experiments, and exact agent-session filename entries.
 
@@ -801,7 +801,7 @@ Tests:
 
 Exit criteria: every supported provider-backed agent runs through its custom
 import path against an unchanged Harbor revision, retains complete secret-free
-evidence, and passes the paid canaries. No new campaign can select the removed
+evidence, and passes the paid canaries. No new run can select the removed
 provider-agent path.
 
 ## Quality Gates For Every Milestone
@@ -822,11 +822,11 @@ provider-agent path.
 
 ## Migration And Compatibility
 
-1. Add campaign models and commands without changing `submit` behavior.
-2. Implement a one-cell campaign adapter that can reproduce a current run lock.
-3. Run campaign and single-run remote smokes against separate disposable run
+1. Add run models and commands without changing `submit` behavior.
+2. Implement a one-cell run adapter that can reproduce a current run lock.
+3. Run run and single-run remote smokes against separate disposable run
    IDs and compare evidence contracts.
-4. Make `submit` call the campaign application layer only after parity tests
+4. Make `submit` call the run application layer only after parity tests
    pass; keep its CLI contract as a convenience command.
 5. Continue reading legacy single-run prefixes and coordination records.
 6. Never rewrite historical artifacts or result rows during migration.
@@ -834,11 +834,11 @@ provider-agent path.
    successful rebuild audit.
 
 Rollback is code-only: stop webhook and scheduled reconciliation, cancel queued
-campaign work, let watchdogs pause active endpoints, and continue using the
-existing single-run path. Durable campaign plans and evidence remain readable.
+run work, let watchdogs pause active endpoints, and continue using the
+existing single-run path. Durable run plans and evidence remain readable.
 
 Provider-agent migration is not dual-path. Once the unified agents are enabled,
-rollback means reverting the release before submitting more campaigns; it does
+rollback means reverting the release before submitting more runs; it does
 not reactivate built-in Harbor provider agents or preserve a fallback writer.
 
 ## Scaling Boundary
@@ -851,11 +851,11 @@ engine, measure:
 - parent-commit conflict and retry rates;
 - reconciliation latency and no-progress periods;
 - control-repository history and projection rebuild cost;
-- active campaign, shard, and endpoint counts;
+- active run, shard, and endpoint counts;
 - requirements for transactions spanning independent HF resources.
 
 First reduce contention by partitioning reconciliation and coordination by
-campaign, endpoint identity, and publisher destination. Move to a managed
+run, endpoint identity, and publisher destination. Move to a managed
 database or workflow engine only when measured Hub coordination limits prevent
 the operational targets above. The domain IDs, events, ports, artifact layout,
 and result schemas must remain unchanged across that migration.
@@ -866,7 +866,7 @@ and result schemas must remain unchanged across that migration.
 - Modifying, forking, patching, or monkeypatching Harbor core.
 - Running inference or task containers locally.
 - Treating a Space as the execution service or source of truth.
-- Sharing one endpoint across unrelated campaigns by default.
+- Sharing one endpoint across unrelated runs by default.
 - Claiming exactly-once remote execution.
 - Inferring unreported provider hardware, engine, precision, or cost details.
 - Building a transactional database before object-backed reconciliation is

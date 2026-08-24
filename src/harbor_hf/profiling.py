@@ -22,7 +22,7 @@ from harbor_hf.models import (
     ModelProfile,
     profile_deployment_digest,
 )
-from harbor_hf.planner import RunCell, resolved_cells
+from harbor_hf.planner import ExecutionCell, resolved_cells
 from harbor_hf.provider_models import ProviderTarget
 
 Sha256Digest = str
@@ -183,7 +183,7 @@ class ProfilePlan(FrozenModel):
     profile_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
     plan_sha256: Sha256Digest = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     experiment: dict[str, object]
-    cell: RunCell
+    cell: ExecutionCell
     identity: ProfileIdentity
     model: ModelProfile
     deployment: DeploymentTarget
@@ -225,7 +225,7 @@ def bind_profile_target(
         raise ValueError("managed profile endpoints require remote execution")
     desired = build_desired_endpoint(
         namespace=spec.remote.job.namespace,
-        campaign_id=f"profile-{plan.profile_id}",
+        run_id=f"profile-{plan.profile_id}",
         model=plan.model,
         deployment=deployment,
     )
@@ -416,7 +416,7 @@ def _positive_cost_estimate(value: str) -> Decimal:
 
 def _validate_plan_inputs(
     spec: ExperimentSpec,
-    cells: list[RunCell],
+    cells: list[ExecutionCell],
     candidate_concurrency: list[int],
     max_spend_usd: str,
     profile_timeout_seconds: int,
@@ -492,7 +492,7 @@ def new_unselected_profile(plan: ProfilePlan) -> ServingProfile:
 
 
 def _resolve_profiles(
-    spec: ExperimentSpec, cell: RunCell
+    spec: ExperimentSpec, cell: ExecutionCell
 ) -> tuple[ModelProfile, DeploymentTarget, AgentProfile]:
     models = {profile.id: profile for profile in spec.matrix.models}
     deployments = {profile.id: profile for profile in spec.matrix.deployments}

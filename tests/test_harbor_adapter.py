@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from harbor_hf.evidence import scrub_secret, scrub_secret_paths
+from harbor_hf.executions import ExecutionLock, build_execution_lock
 from harbor_hf.harbor_adapter import (
     FilesystemHarborExecutionAdapter,
     HarborExecutionRequest,
@@ -24,7 +25,6 @@ from harbor_hf.harbor_adapter.exporter import (
 from harbor_hf.harbor_adapter.models import HarborCompatibilityBundle, sha256_digest
 from harbor_hf.harbor_adapter.validation import validate_compatibility_bundle
 from harbor_hf.models import ExperimentSpec
-from harbor_hf.runs import RunLock, build_run_lock
 
 GOLDEN_CONTRACT = Path(__file__).parent / "golden" / "harbor-adapter-contract-v1.json"
 
@@ -150,8 +150,8 @@ def test_openclaw_session_usage_only_fills_missing_native_totals(
 
 def _request(
     remote_spec: ExperimentSpec, tmp_path: Path
-) -> tuple[RunLock, HarborExecutionRequest]:
-    lock = build_run_lock(remote_spec, run_id="adapter-contract")
+) -> tuple[ExecutionLock, HarborExecutionRequest]:
+    lock = build_execution_lock(remote_spec, execution_id="adapter-contract")
     request = build_execution_request(
         lock,
         tmp_path / "jobs",
@@ -889,7 +889,9 @@ def test_typed_bundle_reports_trial_and_multistep_failures(
 def test_wildcard_request_counts_resolved_tasks_not_patterns(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="wildcard-contract").model_copy(
+    lock = build_execution_lock(
+        remote_spec, execution_id="wildcard-contract"
+    ).model_copy(
         update={
             "benchmark_tasks": ["task-*"],
             "benchmark_task_digests": {
@@ -925,7 +927,9 @@ def test_literal_bracketed_task_name_is_not_treated_as_a_pattern(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     deprecated = "[DERPRECATED] duplicate-task"
-    lock = build_run_lock(remote_spec, run_id="literal-task-name").model_copy(
+    lock = build_execution_lock(
+        remote_spec, execution_id="literal-task-name"
+    ).model_copy(
         update={
             "benchmark_tasks": [deprecated],
             "benchmark_task_digests": {
@@ -968,7 +972,7 @@ def test_request_rejects_task_maps_that_do_not_match_the_lock(
     tmp_path: Path,
     expected_task_digests: dict[str, str],
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="task-boundary").model_copy(
+    lock = build_execution_lock(remote_spec, execution_id="task-boundary").model_copy(
         update={
             "benchmark_tasks": ["task-*"],
             "benchmark_task_digests": {

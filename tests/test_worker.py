@@ -19,7 +19,8 @@ from harbor_hf.benchmark_source import (
     source_lock_bytes,
     source_lock_from_spec,
 )
-from harbor_hf.coordination import ClaimConflict, run_claim_path
+from harbor_hf.coordination import ClaimConflict, execution_claim_path
+from harbor_hf.executions import ExecutionLock, build_execution_lock
 from harbor_hf.harbor_adapter import build_execution_request
 from harbor_hf.models import (
     DeploymentProfile,
@@ -33,7 +34,6 @@ from harbor_hf.private_artifacts import (
     sanitize_private_artifact_symlinks,
 )
 from harbor_hf.process import CommandRunner, ProcessError
-from harbor_hf.runs import RunLock, build_run_lock
 from harbor_hf.worker import (
     EndpointManager,
     WorkerError,
@@ -65,8 +65,8 @@ from harbor_hf.worker import (
     run_endpoint_watchdog,
     run_worker,
     validate_endpoint_model,
+    validate_execution_lock,
     validate_harbor_result,
-    validate_run_lock,
     wait_for_runtime,
     wait_watchdog_ready,
 )
@@ -177,7 +177,7 @@ def _prepare_source(
     (destination / "uv.lock").write_text("", encoding="utf-8")
 
 
-def _launch_watchdog(_lock: RunLock, _endpoint: object, _token: str) -> str:
+def _launch_watchdog(_lock: ExecutionLock, _endpoint: object, _token: str) -> str:
     return "watchdog-job"
 
 
@@ -371,7 +371,7 @@ def test_endpoint_parsing_rejects_incomplete_response() -> None:
 
 
 def test_endpoint_model_must_match_lock(remote_spec: ExperimentSpec) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     validate_endpoint_model(lock, snapshot("running", 1))
 
     wrong = snapshot("running", 1)
@@ -434,7 +434,7 @@ def test_endpoint_model_requires_locked_serving_configuration(
     model[field] = value
 
     with pytest.raises(WorkerError, match=f"^{message}$"):
-        validate_endpoint_model(build_run_lock(remote_spec), endpoint_snapshot)
+        validate_endpoint_model(build_execution_lock(remote_spec), endpoint_snapshot)
 
 
 @pytest.mark.parametrize(
@@ -477,7 +477,7 @@ def test_endpoint_compute_requires_locked_deployment(
     endpoint_snapshot[field] = value
 
     with pytest.raises(WorkerError, match=f"endpoint {message} does not match"):
-        validate_endpoint_model(build_run_lock(remote_spec), endpoint_snapshot)
+        validate_endpoint_model(build_execution_lock(remote_spec), endpoint_snapshot)
 
 
 def test_endpoint_arguments_require_complete_ordered_identity(
@@ -502,7 +502,7 @@ def test_endpoint_arguments_require_complete_ordered_identity(
     with pytest.raises(
         WorkerError, match="^endpoint arguments do not match the locked deployment$"
     ):
-        validate_endpoint_model(build_run_lock(spec), endpoint_snapshot)
+        validate_endpoint_model(build_execution_lock(spec), endpoint_snapshot)
 
 
 def test_endpoint_omitted_arguments_match_an_empty_lock(
@@ -525,7 +525,7 @@ def test_endpoint_omitted_arguments_match_an_empty_lock(
     model.pop("args")
     model.pop("secrets")
 
-    validate_endpoint_model(build_run_lock(spec), endpoint_snapshot)
+    validate_endpoint_model(build_execution_lock(spec), endpoint_snapshot)
 
 
 def test_endpoint_environment_rejects_unlocked_extra_values(
@@ -539,13 +539,13 @@ def test_endpoint_environment_rejects_unlocked_extra_values(
     with pytest.raises(
         WorkerError, match="^endpoint environment does not match the locked deployment$"
     ):
-        validate_endpoint_model(build_run_lock(remote_spec), endpoint_snapshot)
+        validate_endpoint_model(build_execution_lock(remote_spec), endpoint_snapshot)
 
 
 def test_endpoint_compute_validation_covers_complete_identity(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     endpoint_snapshot = snapshot("running", 1)
 
     _validate_endpoint_compute(lock, endpoint_snapshot)
@@ -796,7 +796,7 @@ def test_prepare_locked_source_requires_pyproject(
 def test_launch_watchdog_requires_controller_job_before_submission(
     remote_spec: ExperimentSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     assert isinstance(lock.deployment, DeploymentProfile)
     endpoint = lock.deployment.endpoint
     assert endpoint is not None
@@ -811,7 +811,7 @@ def test_launch_watchdog_requires_controller_job_before_submission(
 def test_launch_watchdog_uses_independent_hf_job(
     remote_spec: ExperimentSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="watchdog-run")
+    lock = build_execution_lock(remote_spec, execution_id="watchdog-run")
     assert isinstance(lock.deployment, DeploymentProfile)
     endpoint = lock.deployment.endpoint
     assert endpoint is not None
@@ -881,7 +881,7 @@ def test_launch_watchdog_caps_timeout_and_requires_returned_id(
             )
         }
     )
-    lock = build_run_lock(capped)
+    lock = build_execution_lock(capped)
     assert isinstance(lock.deployment, DeploymentProfile)
     endpoint = lock.deployment.endpoint
     assert endpoint is not None
@@ -911,7 +911,7 @@ def test_launch_watchdog_caps_timeout_and_requires_returned_id(
 def test_launch_watchdog_does_not_cancel_after_failed_handshake(
     remote_spec: ExperimentSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     assert isinstance(lock.deployment, DeploymentProfile)
     endpoint = lock.deployment.endpoint
     assert endpoint is not None
@@ -1164,7 +1164,7 @@ def test_endpoint_watchdog_pauses_after_controller_finishes(
         controller_namespace="org",
         endpoint_name="endpoint",
         endpoint_namespace="org",
-        run_id="run-1",
+        execution_id="execution-1",
         token_secret_name="HF_TOKEN",
         timeout_seconds=60,
         api=api,
@@ -1181,7 +1181,7 @@ def test_endpoint_watchdog_pauses_after_controller_finishes(
         {
             "job_id": "watchdog-job",
             "labels": {
-                "harbor-hf-watchdog": "run-1",
+                "harbor-hf-watchdog": "execution-1",
                 "harbor-hf-endpoint": "aa3808503c913daab53ed1415fe04988",
                 "harbor-hf-watchdog-ready": "true",
             },
@@ -1226,7 +1226,7 @@ def test_endpoint_watchdog_survives_transient_inspection_failure(
         controller_namespace="org",
         endpoint_name="endpoint",
         endpoint_namespace="org",
-        run_id="run-1",
+        execution_id="execution-1",
         token_secret_name="HF_TOKEN",
         timeout_seconds=60,
         api=FakeApi(),
@@ -1265,7 +1265,7 @@ def test_endpoint_watchdog_retains_lease_until_pause_when_readiness_update_fails
             controller_namespace="org",
             endpoint_name="endpoint",
             endpoint_namespace="org",
-            run_id="run-1",
+            execution_id="execution-1",
             token_secret_name="HF_TOKEN",
             timeout_seconds=60,
             api=FakeApi(),
@@ -1300,7 +1300,7 @@ def test_endpoint_watchdog_rejects_competing_claim_before_readiness(
             controller_namespace="org",
             endpoint_name="endpoint",
             endpoint_namespace="org",
-            run_id="run-1",
+            execution_id="execution-1",
             token_secret_name="HF_TOKEN",
             timeout_seconds=60,
             api=api,
@@ -1329,7 +1329,7 @@ def test_endpoint_watchdog_retains_lease_when_pause_fails(
             controller_namespace="org",
             endpoint_name="endpoint",
             endpoint_namespace="org",
-            run_id="run-1",
+            execution_id="execution-1",
             token_secret_name="HF_TOKEN",
             timeout_seconds=60,
             api=FakeApi(),
@@ -1366,7 +1366,7 @@ def test_endpoint_watchdog_pauses_at_deadline(
         controller_namespace="org",
         endpoint_name="endpoint",
         endpoint_namespace="org",
-        run_id="run-1",
+        execution_id="execution-1",
         token_secret_name="BENCH_TOKEN",
         timeout_seconds=2,
         api=FakeApi(),
@@ -1393,7 +1393,7 @@ def test_endpoint_watchdog_requires_configured_secret(
             controller_namespace="org",
             endpoint_name="endpoint",
             endpoint_namespace="org",
-            run_id="run-1",
+            execution_id="execution-1",
             token_secret_name="MISSING_TOKEN",
             timeout_seconds=1,
         )
@@ -1411,7 +1411,7 @@ def test_endpoint_watchdog_requires_its_job_id(
             controller_namespace="org",
             endpoint_name="endpoint",
             endpoint_namespace="org",
-            run_id="run-1",
+            execution_id="execution-1",
             token_secret_name="HF_TOKEN",
             timeout_seconds=1,
             api=WatchdogApiStub(),
@@ -1444,7 +1444,7 @@ def test_endpoint_watchdog_builds_authenticated_api(
         controller_namespace="org",
         endpoint_name="endpoint",
         endpoint_namespace="org",
-        run_id="run-1",
+        execution_id="execution-1",
         token_secret_name="HF_TOKEN",
         timeout_seconds=1,
         runner=runner,
@@ -1616,7 +1616,7 @@ def test_cleanup_timeout_reports_last_transient_provider_error() -> None:
 def test_harbor_command_is_pinned_and_bounded(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
 
     source = tmp_path / "harbor-source"
     command = build_harbor_command(lock, tmp_path, "https://endpoint.example", source)
@@ -1671,7 +1671,7 @@ def test_harbor_source_agent_uses_reported_identity_without_version_override(
         update={"matrix": remote_spec.matrix.model_copy(update={"agents": [agent]})}
     )
 
-    lock = build_run_lock(spec)
+    lock = build_execution_lock(spec)
     request = build_execution_request(
         lock,
         tmp_path,
@@ -1695,7 +1695,7 @@ def test_package_agent_version_is_serialized_as_a_string(
         update={"matrix": remote_spec.matrix.model_copy(update={"agents": [agent]})}
     )
 
-    lock = build_run_lock(spec)
+    lock = build_execution_lock(spec)
     request = build_execution_request(
         lock,
         tmp_path,
@@ -1719,14 +1719,14 @@ def test_mark_watchdog_ready_publishes_complete_identity() -> None:
         "controller-namespace",
         "endpoint-namespace",
         "endpoint-name",
-        "run-1",
+        "execution-1",
     )
 
     assert api.label_updates == [
         {
             "job_id": "watchdog-job",
             "labels": {
-                "harbor-hf-watchdog": "run-1",
+                "harbor-hf-watchdog": "execution-1",
                 "harbor-hf-endpoint": "89d80c87fed8e87c598b0c6ddc685e46",
                 "harbor-hf-watchdog-ready": "true",
             },
@@ -1744,7 +1744,7 @@ def test_watchdog_readiness_helper_forwards_complete_identity() -> None:
         "controller-namespace",
         "endpoint-namespace",
         "endpoint-name",
-        "run-1",
+        "execution-1",
     )
 
     assert error is None
@@ -1752,7 +1752,7 @@ def test_watchdog_readiness_helper_forwards_complete_identity() -> None:
         {
             "job_id": "watchdog-job",
             "labels": {
-                "harbor-hf-watchdog": "run-1",
+                "harbor-hf-watchdog": "execution-1",
                 "harbor-hf-endpoint": "89d80c87fed8e87c598b0c6ddc685e46",
                 "harbor-hf-watchdog-ready": "true",
             },
@@ -1764,7 +1764,7 @@ def test_watchdog_readiness_helper_forwards_complete_identity() -> None:
 def test_controller_environment_records_only_reproducibility_fields(
     remote_spec: ExperimentSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     monkeypatch.setenv("JOB_ID", "job-123")
     monkeypatch.setenv("ACCELERATOR", "none")
     monkeypatch.setenv("CPU_CORES", "2")
@@ -2236,7 +2236,7 @@ def test_expected_trial_count_scales_explicit_tasks_and_attempts(
         }
     )
     execution = remote_spec.execution.model_copy(update={"attempts": 3})
-    lock = build_run_lock(
+    lock = build_execution_lock(
         remote_spec.model_copy(update={"benchmark": benchmark, "execution": execution})
     )
 
@@ -2262,7 +2262,7 @@ def test_expected_trial_count_uses_resolved_tasks_for_patterns(
             "task_digests": {resolved_task: "sha256:" + "3" * 64},
         }
     )
-    lock = build_run_lock(remote_spec.model_copy(update={"benchmark": benchmark}))
+    lock = build_execution_lock(remote_spec.model_copy(update={"benchmark": benchmark}))
 
     assert _expected_trial_count(lock) == 1
     assert _expected_task_counts(lock) == {resolved_task: 1}
@@ -2280,7 +2280,7 @@ def test_expected_task_counts_preserve_exact_tasks_mixed_with_patterns(
             },
         }
     )
-    lock = build_run_lock(remote_spec.model_copy(update={"benchmark": benchmark}))
+    lock = build_execution_lock(remote_spec.model_copy(update={"benchmark": benchmark}))
 
     assert _expected_trial_count(lock) == 2
     assert _expected_task_counts(lock) == {"exact-task": 1, "shell-selected": 1}
@@ -2756,7 +2756,7 @@ def test_direct_run_rejects_unexpected_root_directory(
     extra = tmp_path / "extra"
     extra.mkdir()
     (extra / "unbounded.log").write_text("evidence", encoding="utf-8")
-    lock = build_run_lock(remote_spec, run_id="unexpected-root-directory")
+    lock = build_execution_lock(remote_spec, execution_id="unexpected-root-directory")
 
     with pytest.raises(RuntimeError, match="unexpected directory: extra"):
         _validate_direct_private_artifacts(tmp_path, lock)
@@ -2806,7 +2806,7 @@ def test_direct_jobs_root_files_are_bounded(
     oversized = jobs / "oversized.log"
     with oversized.open("wb") as stream:
         stream.truncate(64 * 1024 * 1024 + 1)
-    lock = build_run_lock(remote_spec, run_id="jobs-root-limits")
+    lock = build_execution_lock(remote_spec, execution_id="jobs-root-limits")
 
     with pytest.raises(RuntimeError, match="file size limit: oversized.log"):
         _validate_direct_private_artifacts(tmp_path, lock)
@@ -2835,8 +2835,10 @@ def test_failed_direct_run_falls_back_from_undecodable_result(
     trial = tmp_path / "harbor-jobs" / "job" / "trial-fallback"
     trial.mkdir(parents=True)
     (trial / "result.json").write_bytes(b"\xff")
-    (tmp_path / "run.lock.json").write_text(
-        build_run_lock(remote_spec, run_id="undecodable-result").model_dump_json(),
+    (tmp_path / "execution.lock.json").write_text(
+        build_execution_lock(
+            remote_spec, execution_id="undecodable-result"
+        ).model_dump_json(),
         encoding="utf-8",
     )
     (tmp_path / "events.jsonl").write_text("", encoding="utf-8")
@@ -2847,7 +2849,7 @@ def test_failed_direct_run_falls_back_from_undecodable_result(
     manifest = json.loads(
         (trial / "private-artifacts.json").read_text(encoding="utf-8")
     )
-    assert manifest["execution_id"] == "undecodable-result"
+    assert manifest["attempt_id"] == "undecodable-result"
     assert manifest["trial_id"] == "trial-fallback"
 
 
@@ -2859,8 +2861,10 @@ def test_failed_direct_run_preserves_attempt_state_before_pruning(
     trial = tmp_path / "harbor-jobs" / "job" / "trial-fallback"
     trial.mkdir(parents=True)
     (trial / "result.json").write_text("{", encoding="utf-8")
-    (tmp_path / "run.lock.json").write_text(
-        build_run_lock(remote_spec, run_id="pruned-attempt").model_dump_json(),
+    (tmp_path / "execution.lock.json").write_text(
+        build_execution_lock(
+            remote_spec, execution_id="pruned-attempt"
+        ).model_dump_json(),
         encoding="utf-8",
     )
     (tmp_path / "harbor-request.json").write_text(
@@ -2983,8 +2987,10 @@ def test_failed_direct_run_refreshes_compatibility_after_final_pruning(
         '{"agent_info":{"name":"openclaw"},"agent_execution":null}\n',
         encoding="utf-8",
     )
-    (tmp_path / "run.lock.json").write_text(
-        build_run_lock(remote_spec, run_id="failed-refresh").model_dump_json(),
+    (tmp_path / "execution.lock.json").write_text(
+        build_execution_lock(
+            remote_spec, execution_id="failed-refresh"
+        ).model_dump_json(),
         encoding="utf-8",
     )
     (tmp_path / "events.jsonl").write_text("", encoding="utf-8")
@@ -3015,7 +3021,7 @@ def test_publish_evidence_requires_one_terminal_marker(
     source = tmp_path / "source"
     source.mkdir()
     (source / "record.json").write_text("{}\n", encoding="utf-8")
-    destination = tmp_path / "bucket" / "runs" / "run-1"
+    destination = tmp_path / "bucket" / "executions" / "run-1"
 
     with pytest.raises(WorkerError, match="exactly one terminal marker"):
         _publish_evidence(source, destination)
@@ -3052,7 +3058,7 @@ def test_publish_evidence_requires_one_terminal_marker(
 def test_prepare_evidence_destination_is_exclusive_and_creates_parents(
     tmp_path: Path,
 ) -> None:
-    destination = tmp_path / "bucket" / "runs" / "experiment" / "run-1"
+    destination = tmp_path / "bucket" / "executions" / "experiment" / "run-1"
 
     _prepare_evidence_destination(destination)
 
@@ -3064,7 +3070,7 @@ def test_prepare_evidence_destination_is_exclusive_and_creates_parents(
 def test_adopting_reserved_evidence_removes_stale_partial_files(
     tmp_path: Path,
 ) -> None:
-    destination = tmp_path / "bucket" / "runs" / "run-1"
+    destination = tmp_path / "bucket" / "executions" / "run-1"
     destination.mkdir(parents=True)
     (destination / "_RESERVED").write_text("\n", encoding="utf-8")
     (destination / "failure.json").write_text("{}\n", encoding="utf-8")
@@ -3084,7 +3090,7 @@ def test_publish_evidence_preserves_nested_terminal_markers(tmp_path: Path) -> N
     (source / "_SUCCESS").write_text("\n", encoding="utf-8")
     (nested / "_SUCCESS").write_text("task marker\n", encoding="utf-8")
     (nested / "_FAILED").write_text("task failure\n", encoding="utf-8")
-    destination = tmp_path / "bucket" / "runs" / "run-1"
+    destination = tmp_path / "bucket" / "executions" / "run-1"
 
     _prepare_evidence_destination(destination)
     _publish_evidence(source, destination)
@@ -3104,7 +3110,7 @@ def test_publish_evidence_preserves_incomplete_destination_for_retry(
     source.mkdir()
     (source / "record.json").write_text("{}\n", encoding="utf-8")
     (source / "_FAILED").write_text("\n", encoding="utf-8")
-    destination = tmp_path / "bucket" / "runs" / "run-1"
+    destination = tmp_path / "bucket" / "executions" / "run-1"
 
     def fail_copy(*_args: object, **_kwargs: object) -> None:
         raise OSError("copy failed")
@@ -3126,7 +3132,7 @@ def test_publish_evidence_retries_transient_copy_without_losing_staging(
     source.mkdir()
     (source / "record.json").write_text("{}\n", encoding="utf-8")
     (source / "_SUCCESS").write_text("\n", encoding="utf-8")
-    destination = tmp_path / "bucket" / "runs" / "run-1"
+    destination = tmp_path / "bucket" / "executions" / "run-1"
     _prepare_evidence_destination(destination)
     original = shutil.copyfile
     calls = 0
@@ -3160,7 +3166,7 @@ def test_publish_evidence_retries_transient_copy_without_losing_staging(
     assert not (destination / "_RESERVED").exists()
 
 
-def _write_lock(path: Path, lock: RunLock) -> None:
+def _write_lock(path: Path, lock: ExecutionLock) -> None:
     path.write_text(lock.model_dump_json(), encoding="utf-8")
     source = lock.benchmark_source
     source_lock = BenchmarkSourceLock(
@@ -3198,7 +3204,7 @@ def _successful_stream(
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["agents"][0]["extra_allowed_hosts"] == ["endpoint.example"]
     jobs_dir = Path(config["jobs_dir"])
-    assert any(part.startswith("harbor-hf-run-") for part in jobs_dir.parts)
+    assert any(part.startswith("harbor-hf-execution-") for part in jobs_dir.parts)
     trial = jobs_dir / "job" / "trial"
     trial.mkdir(parents=True)
     (trial / "result.json").write_text(
@@ -3242,7 +3248,7 @@ def test_worker_publishes_success_after_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="successful")
+    lock = build_execution_lock(remote_spec, execution_id="successful")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3310,7 +3316,7 @@ def test_worker_publishes_success_after_cleanup(
 
     assert (root / "_SUCCESS").exists()
     assert list(claims.claims) == [
-        run_claim_path(lock.artifact_bucket, lock.artifact_prefix)
+        execution_claim_path(lock.artifact_bucket, lock.artifact_prefix)
     ]
     assert readiness_timeouts == [3600]
     assert not (root / "_FAILED").exists()
@@ -3333,7 +3339,7 @@ def test_worker_publishes_success_after_cleanup(
     assert (
         root / "harbor-jobs/job/trial/agent/runtime.log"
     ).read_text() == "[REDACTED]"
-    assert json.loads((root / "run.lock.json").read_text()) == lock.model_dump(
+    assert json.loads((root / "execution.lock.json").read_text()) == lock.model_dump(
         mode="json"
     )
     expected_snapshot = snapshot("running", 1)
@@ -3353,6 +3359,7 @@ def test_worker_publishes_success_after_cleanup(
         "endpoint.final.json",
         "endpoint.snapshot.json",
         "events.jsonl",
+        "execution.lock.json",
         "harbor-compatibility.json",
         "harbor-export.log",
         "harbor-job.json",
@@ -3361,7 +3368,6 @@ def test_worker_publishes_success_after_cleanup(
         "harbor-request.json",
         "harbor.log",
         "manifest.yaml",
-        "run.lock.json",
         "runtime-environment.json",
         "source.lock.json",
         "verification.json",
@@ -3374,7 +3380,7 @@ def test_worker_publishes_success_after_cleanup(
         {key: value for key, value in record.items() if key != "at"}
         for record in event_records
     ] == [
-        {"event": "worker_started", "run_id": "successful"},
+        {"event": "worker_started", "execution_id": "successful"},
         {"event": "endpoint_baseline_validated"},
         {
             "event": "endpoint_lease_acquired",
@@ -3398,7 +3404,7 @@ def test_worker_publishes_success_after_cleanup(
             "state": "paused",
             "target_replicas": 1,
         },
-        {"event": "run_succeeded"},
+        {"event": "execution_succeeded"},
         {"event": "secrets_redacted", "files": ["harbor.log"]},
     ]
     checksums = json.loads((root / "checksums.json").read_text())
@@ -3427,7 +3433,7 @@ def test_worker_publishes_success_after_cleanup(
         "harbor.log",
         "harbor-request.json",
         "manifest.yaml",
-        "run.lock.json",
+        "execution.lock.json",
         "runtime-environment.json",
         "source.lock.json",
         "verification.json",
@@ -3453,7 +3459,7 @@ def test_direct_worker_fails_and_publishes_when_openclaw_session_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="missing-session")
+    lock = build_execution_lock(remote_spec, execution_id="missing-session")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3506,7 +3512,7 @@ def test_direct_worker_fails_and_publishes_when_openclaw_session_is_missing(
     manifest = json.loads(
         (root / "harbor-jobs/job/trial/private-artifacts.json").read_text()
     )
-    assert manifest["execution_id"] == lock.run_id
+    assert manifest["attempt_id"] == lock.execution_id
     assert manifest["trial_id"] == "00000000-0000-0000-0000-000000000001"
     assert manifest["requirements"] == [
         {
@@ -3524,18 +3530,18 @@ def test_worker_refuses_existing_run_prefix_before_remote_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="existing")
+    lock = build_execution_lock(remote_spec, execution_id="existing")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
     runner = EndpointRunner([])
     claims = FakeClaimStore()
     claims.acquire(
-        run_claim_path(lock.artifact_bucket, lock.artifact_prefix),
-        {"run_id": "other"},
+        execution_claim_path(lock.artifact_bucket, lock.artifact_prefix),
+        {"execution_id": "other"},
     )
 
-    with pytest.raises(WorkerError, match="^run ID is already reserved$"):
+    with pytest.raises(WorkerError, match="^execution ID is already reserved$"):
         run_worker(
             remote_manifest,
             lock_path,
@@ -3558,7 +3564,7 @@ def test_failed_run_claim_release_cannot_mask_failure_and_claim_expires(
             del path, owner
             raise RuntimeError("release transport failed")
 
-    lock = build_run_lock(remote_spec, run_id="release-failed")
+    lock = build_execution_lock(remote_spec, execution_id="release-failed")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3596,7 +3602,7 @@ def test_worker_rejects_incomplete_explicit_task_set(
     spec = remote_spec.model_copy(update={"benchmark": benchmark})
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text(spec.model_dump_json(), encoding="utf-8")
-    lock = build_run_lock(spec, run_id="incomplete-task-set")
+    lock = build_execution_lock(spec, execution_id="incomplete-task-set")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3630,7 +3636,7 @@ def test_worker_failure_still_pauses_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="failed")
+    lock = build_execution_lock(remote_spec, execution_id="failed")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3661,7 +3667,7 @@ def test_worker_failure_still_pauses_endpoint(
         json.loads(line)["event"]
         for line in (root / "events.jsonl").read_text().splitlines()
     ]
-    assert events[-2:] == ["endpoint_paused", "run_failed"]
+    assert events[-2:] == ["endpoint_paused", "execution_failed"]
 
 
 def test_worker_without_endpoint_lease_never_pauses_endpoint(
@@ -3670,13 +3676,13 @@ def test_worker_without_endpoint_lease_never_pauses_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="lease-lost")
+    lock = build_execution_lock(remote_spec, execution_id="lease-lost")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
     runner = EndpointRunner([snapshot("paused", 0)])
 
-    def reject_lease(_lock: RunLock, _endpoint: object, _token: str) -> str:
+    def reject_lease(_lock: ExecutionLock, _endpoint: object, _token: str) -> str:
         raise WorkerError("endpoint lease is held by another watchdog")
 
     with pytest.raises(
@@ -3701,7 +3707,7 @@ def test_worker_without_endpoint_lease_never_pauses_endpoint(
         "worker_started",
         "endpoint_baseline_validated",
         "endpoint_cleanup_skipped",
-        "run_failed",
+        "execution_failed",
     ]
 
 
@@ -3711,7 +3717,7 @@ def test_worker_marks_failed_when_success_evidence_cannot_finalize(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="finalization-failed")
+    lock = build_execution_lock(remote_spec, execution_id="finalization-failed")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3763,13 +3769,13 @@ def test_worker_does_not_resume_without_independent_watchdog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="no-watchdog")
+    lock = build_execution_lock(remote_spec, execution_id="no-watchdog")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
     runner = EndpointRunner([snapshot("paused", 0)])
 
-    def fail_watchdog(_lock: RunLock, _endpoint: object, _token: str) -> str:
+    def fail_watchdog(_lock: ExecutionLock, _endpoint: object, _token: str) -> str:
         raise WorkerError("watchdog unavailable")
 
     with pytest.raises(WorkerError, match="watchdog unavailable"):
@@ -3791,7 +3797,7 @@ def test_worker_rejects_endpoint_drift_before_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="drifted-endpoint")
+    lock = build_execution_lock(remote_spec, execution_id="drifted-endpoint")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3819,14 +3825,14 @@ def test_worker_rejects_live_endpoint_before_watchdog_start(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="live-endpoint")
+    lock = build_execution_lock(remote_spec, execution_id="live-endpoint")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
     runner = EndpointRunner([snapshot("running", 1)])
     watchdog_calls = 0
 
-    def launch_watchdog(_lock: RunLock, _endpoint: object, _token: str) -> str:
+    def launch_watchdog(_lock: ExecutionLock, _endpoint: object, _token: str) -> str:
         nonlocal watchdog_calls
         watchdog_calls += 1
         return "watchdog-job"
@@ -3854,7 +3860,7 @@ def test_cleanup_failure_prevents_success_and_redacts_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="cleanup-failed")
+    lock = build_execution_lock(remote_spec, execution_id="cleanup-failed")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3890,7 +3896,7 @@ def test_cleanup_failure_prevents_success_and_redacts_failure(
     ] == [
         {"event": "endpoint_pause_requested"},
         {"event": "endpoint_cleanup_failed", "error": "RuntimeError"},
-        {"event": "run_failed", "error_type": "RuntimeError"},
+        {"event": "execution_failed", "error_type": "RuntimeError"},
         {"event": "secrets_redacted", "files": ["harbor.log"]},
     ]
 
@@ -3901,7 +3907,9 @@ def test_worker_preserves_execution_and_cleanup_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="execution-and-cleanup-failed")
+    lock = build_execution_lock(
+        remote_spec, execution_id="execution-and-cleanup-failed"
+    )
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -3941,7 +3949,7 @@ def test_worker_preserves_execution_and_cleanup_failures(
         json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()
     ]
     assert {key: value for key, value in events[-1].items() if key != "at"} == {
-        "event": "run_failed",
+        "event": "execution_failed",
         "error_type": "WorkerError",
         "cleanup_error_type": "RuntimeError",
     }
@@ -3952,30 +3960,32 @@ def test_worker_rejects_mismatched_lock_before_remote_work(
     remote_manifest: Path,
     tmp_path: Path,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="mismatch").model_copy(
+    lock = build_execution_lock(remote_spec, execution_id="mismatch").model_copy(
         update={"spec_digest": "sha256:" + "0" * 64}
     )
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
 
     with pytest.raises(
-        WorkerError, match="^manifest digest does not match the run lock$"
+        WorkerError, match="^manifest digest does not match the execution lock$"
     ):
         run_worker(remote_manifest, lock_path, tmp_path / "output")
 
 
-def test_run_lock_validation_rejects_tampered_agent_metadata(
+def test_execution_lock_validation_rejects_tampered_agent_metadata(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     reserved = lock.model_copy(
         update={"agent": lock.agent.model_copy(update={"parameters": {"version": "x"}})}
     )
     with pytest.raises(
         WorkerError,
-        match="^run lock fields do not match the resolved manifest cell$",
+        match="^execution lock fields do not match the resolved manifest cell$",
     ):
-        validate_run_lock(remote_spec, source_lock_from_spec(remote_spec), reserved)
+        validate_execution_lock(
+            remote_spec, source_lock_from_spec(remote_spec), reserved
+        )
 
     remote = remote_spec.remote
     assert remote is not None
@@ -3989,14 +3999,14 @@ def test_run_lock_validation_rejects_tampered_agent_metadata(
     tampered_lock = lock.model_copy(update={"agent": source_agent})
     with pytest.raises(
         WorkerError,
-        match="^run lock fields do not match the resolved manifest cell$",
+        match="^execution lock fields do not match the resolved manifest cell$",
     ):
-        validate_run_lock(
+        validate_execution_lock(
             remote_spec, source_lock_from_spec(remote_spec), tampered_lock
         )
 
 
-def test_run_lock_validation_reconstructs_selected_matrix_cell(
+def test_execution_lock_validation_reconstructs_selected_matrix_cell(
     remote_spec: ExperimentSpec,
 ) -> None:
     models = [
@@ -4024,35 +4034,37 @@ def test_run_lock_validation_reconstructs_selected_matrix_cell(
             )
         }
     )
-    lock = build_run_lock(
+    lock = build_execution_lock(
         spec,
         model_id="second-model",
         deployment_id="second-deployment",
         agent_id="second-agent",
-        run_id="selected-cell",
+        execution_id="selected-cell",
     )
 
-    validate_run_lock(spec, source_lock_from_spec(spec), lock)
+    validate_execution_lock(spec, source_lock_from_spec(spec), lock)
 
 
-def test_run_lock_validation_rejects_missing_trial_evidence(
+def test_execution_lock_validation_rejects_missing_trial_evidence(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock = build_run_lock(remote_spec).model_copy(update={"trial_evidence": None})
+    lock = build_execution_lock(remote_spec).model_copy(update={"trial_evidence": None})
 
     with pytest.raises(WorkerError, match="complete trial evidence policy"):
-        validate_run_lock(remote_spec, source_lock_from_spec(remote_spec), lock)
+        validate_execution_lock(remote_spec, source_lock_from_spec(remote_spec), lock)
 
 
-def test_run_lock_validation_reports_digest_and_resolution_errors(
+def test_execution_lock_validation_reports_digest_and_resolution_errors(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock = build_run_lock(remote_spec)
+    lock = build_execution_lock(remote_spec)
     bad_digest = lock.model_copy(update={"spec_digest": "sha256:" + "0" * 64})
     with pytest.raises(
-        WorkerError, match="^manifest digest does not match the run lock$"
+        WorkerError, match="^manifest digest does not match the execution lock$"
     ):
-        validate_run_lock(remote_spec, source_lock_from_spec(remote_spec), bad_digest)
+        validate_execution_lock(
+            remote_spec, source_lock_from_spec(remote_spec), bad_digest
+        )
 
     unknown_model = lock.model_copy(
         update={"model": lock.model.model_copy(update={"id": "unknown-model"})}
@@ -4060,11 +4072,11 @@ def test_run_lock_validation_reports_digest_and_resolution_errors(
     with pytest.raises(
         WorkerError,
         match=(
-            "^run lock cannot be resolved from manifest: "
+            "^execution lock cannot be resolved from manifest: "
             "unknown model profile: unknown-model$"
         ),
     ):
-        validate_run_lock(
+        validate_execution_lock(
             remote_spec, source_lock_from_spec(remote_spec), unknown_model
         )
 
@@ -4075,7 +4087,7 @@ def test_worker_requires_named_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="missing-secret")
+    lock = build_execution_lock(remote_spec, execution_id="missing-secret")
     lock_path = tmp_path / "lock.json"
     _write_lock(lock_path, lock)
     monkeypatch.delenv("HF_TOKEN", raising=False)
@@ -4092,7 +4104,7 @@ def test_worker_rejects_lock_without_endpoint_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="no-endpoint")
+    lock = build_execution_lock(remote_spec, execution_id="no-endpoint")
     lock = lock.model_copy(
         update={"deployment": lock.deployment.model_copy(update={"endpoint": None})}
     )
@@ -4100,7 +4112,7 @@ def test_worker_rejects_lock_without_endpoint_binding(
     _write_lock(lock_path, lock)
     monkeypatch.setenv("HF_TOKEN", "test-token")
 
-    with pytest.raises(WorkerError, match="^run lock fields do not match"):
+    with pytest.raises(WorkerError, match="^execution lock fields do not match"):
         run_worker(remote_manifest, lock_path, tmp_path / "output")
 
 

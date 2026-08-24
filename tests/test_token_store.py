@@ -71,13 +71,13 @@ def test_token_store_round_trip_is_sorted_and_private(tmp_path: Path) -> None:
 
 def test_store_requires_force_to_replace(tmp_path: Path) -> None:
     path = tmp_path / "stored_tokens"
-    store_harbor_hf_token("campaign", "hf_old", path=path)
+    store_harbor_hf_token("run", "hf_old", path=path)
 
     with pytest.raises(ValueError, match="--force"):
-        store_harbor_hf_token("campaign", "hf_new", path=path)
+        store_harbor_hf_token("run", "hf_new", path=path)
 
-    store_harbor_hf_token("campaign", "hf_new", replace=True, path=path)
-    assert load_harbor_hf_tokens(path) == {"campaign": "hf_new"}
+    store_harbor_hf_token("run", "hf_new", replace=True, path=path)
+    assert load_harbor_hf_tokens(path) == {"run": "hf_new"}
 
 
 def test_remove_token_preserves_other_entries(tmp_path: Path) -> None:

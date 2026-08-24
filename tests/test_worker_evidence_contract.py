@@ -86,7 +86,7 @@ def test_success_publication_failure_records_complete_redacted_side_effects(
         _publish_success(root, events, "contract-token")
 
     assert _events(events) == [
-        {"event": "run_succeeded"},
+        {"event": "execution_succeeded"},
         {"event": "evidence_finalization_failed", "error": "RuntimeError"},
     ]
     assert json.loads((root / "_FAILED").read_text(encoding="utf-8")) == {

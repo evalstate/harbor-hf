@@ -101,7 +101,7 @@ class PrivateArtifactManifest(FrozenModel):
     schema_version: Literal["harbor-hf/private-artifacts/v1"] = (
         "harbor-hf/private-artifacts/v1"
     )
-    execution_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
     trial_id: str = Field(min_length=1)
     total_bytes: int = Field(ge=0)
     entries: list[PrivateArtifactEntry]
@@ -123,10 +123,10 @@ class PrivateArtifactManifest(FrozenModel):
         return self
 
 
-class _ExecutionIdentity(BaseModel):
+class _AttemptIdentity(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
-    execution_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
     trial_id: str = Field(min_length=1)
 
 
@@ -172,7 +172,7 @@ def build_private_artifact_manifest(
     root: Path,
     *,
     strict_session: bool,
-    execution_id: str | None = None,
+    attempt_id: str | None = None,
     trial_id: str | None = None,
     session_required: bool | None = None,
     trust_rejections: bool = False,
@@ -180,7 +180,7 @@ def build_private_artifact_manifest(
     max_bundle_bytes: int = DEFAULT_MAX_PRIVATE_BUNDLE_BYTES,
     max_file_count: int = DEFAULT_MAX_PRIVATE_ARTIFACT_FILES,
 ) -> PrivateArtifactManifest:
-    identity = _artifact_identity(root, execution_id, trial_id)
+    identity = _artifact_identity(root, attempt_id, trial_id)
     entries, total_bytes = _private_artifact_entries(
         root,
         trust_rejections=trust_rejections,
@@ -198,9 +198,7 @@ def build_private_artifact_manifest(
         and _valid_jsonl_objects(root / entry.path)
     ]
     required = (
-        openclaw_execution_started(root)
-        if session_required is None
-        else session_required
+        openclaw_attempt_started(root) if session_required is None else session_required
     )
     session_requirement = PrivateArtifactRequirement(
         name="openclaw_session_jsonl",
@@ -222,10 +220,10 @@ def build_private_artifact_manifest(
         )
     if evidence_required and not evidence_requirement.satisfied:
         raise PrivateArtifactRequirementError(
-            "successful execution has no complete trial evidence bundle"
+            "successful attempt has no complete trial evidence bundle"
         )
     return PrivateArtifactManifest(
-        execution_id=identity.execution_id,
+        attempt_id=identity.attempt_id,
         trial_id=identity.trial_id,
         total_bytes=total_bytes,
         entries=entries,
@@ -336,7 +334,7 @@ def write_private_artifact_manifest(
     root: Path,
     *,
     strict_session: bool,
-    execution_id: str | None = None,
+    attempt_id: str | None = None,
     trial_id: str | None = None,
     session_required: bool | None = None,
     trust_rejections: bool = False,
@@ -347,7 +345,7 @@ def write_private_artifact_manifest(
     manifest = build_private_artifact_manifest(
         root,
         strict_session=strict_session,
-        execution_id=execution_id,
+        attempt_id=attempt_id,
         trial_id=trial_id,
         session_required=session_required,
         trust_rejections=trust_rejections,
@@ -848,7 +846,7 @@ def _trim_bundle(
     return rejected
 
 
-def openclaw_execution_started(root: Path, *, fallback_attempted: bool = False) -> bool:
+def openclaw_attempt_started(root: Path, *, fallback_attempted: bool = False) -> bool:
     readable_result_found = False
     for result_path in _trial_result_paths(root):
         try:
@@ -876,14 +874,14 @@ def _trial_result_paths(root: Path) -> list[Path]:
 
 
 def _artifact_identity(
-    root: Path, execution_id: str | None, trial_id: str | None
-) -> _ExecutionIdentity:
-    if (execution_id is None) != (trial_id is None):
+    root: Path, attempt_id: str | None, trial_id: str | None
+) -> _AttemptIdentity:
+    if (attempt_id is None) != (trial_id is None):
         raise ValueError("private artifact identity must be provided together")
-    if execution_id is not None and trial_id is not None:
-        return _ExecutionIdentity(execution_id=execution_id, trial_id=trial_id)
-    return _ExecutionIdentity.model_validate_json(
-        (root / "execution.lock.json").read_text(encoding="utf-8")
+    if attempt_id is not None and trial_id is not None:
+        return _AttemptIdentity(attempt_id=attempt_id, trial_id=trial_id)
+    return _AttemptIdentity.model_validate_json(
+        (root / "attempt.lock.json").read_text(encoding="utf-8")
     )
 
 

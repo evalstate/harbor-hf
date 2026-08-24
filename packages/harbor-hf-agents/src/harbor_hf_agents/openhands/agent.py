@@ -1,4 +1,4 @@
-"""OpenHands over the Harbor-HF sandbox inference route."""
+"""OpenHands over the Harbor-HF Job inference route."""
 
 from typing import override
 
@@ -6,13 +6,13 @@ from harbor.agents.installed.openhands import OpenHands
 from harbor.environments.base import BaseEnvironment
 
 from harbor_hf_agents.support.isolated_user import AGENT_USER
-from harbor_hf_agents.support.sandbox_chat_completions import (
-    SandboxChatCompletionsAgent,
+from harbor_hf_agents.support.job_chat_completions import (
+    JobChatCompletionsAgent,
 )
 
 
-class OpenHandsAgent(SandboxChatCompletionsAgent, OpenHands):
-    """Harbor OpenHands bound to the locked sandbox loopback inference route.
+class OpenHandsAgent(JobChatCompletionsAgent, OpenHands):
+    """Harbor OpenHands bound to the locked Job loopback inference route.
 
     Upstream OpenHands reads ``LLM_API_KEY`` and ``LLM_BASE_URL`` from the Job
     process before it starts. Execution Jobs do not receive those values. This

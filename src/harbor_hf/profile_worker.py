@@ -26,6 +26,12 @@ from harbor_hf.evidence import (
     write_checksums,
     write_json,
 )
+from harbor_hf.executions import (
+    ExecutionLock,
+    build_execution_lock,
+    execution_secret_values,
+    harbor_process_environment,
+)
 from harbor_hf.harbor_adapter import (
     FilesystemHarborExecutionAdapter,
     resolve_native_trial_root,
@@ -64,12 +70,6 @@ from harbor_hf.profiling import (
     select_profile,
 )
 from harbor_hf.provider_models import ProviderTarget
-from harbor_hf.runs import (
-    RunLock,
-    build_run_lock,
-    harbor_process_environment,
-    run_secret_values,
-)
 from harbor_hf.trial_evidence import JudgeCalls, JudgeSelection, assemble_trial_evidence
 from harbor_hf.worker import (
     EndpointManager,
@@ -152,20 +152,20 @@ def run_profile_worker(plan_path: Path, output_root: Path) -> Path:
     try:
         profile = new_unselected_profile(plan)
         bound_spec, desired_endpoint = bind_profile_target(plan)
-        run_lock = build_run_lock(
+        execution_lock = build_execution_lock(
             bound_spec,
             model_id=plan.cell.model,
             deployment_id=plan.cell.deployment,
             agent_id=plan.cell.agent,
-            run_id=f"profile-{plan.profile_id}",
+            execution_id=f"profile-{plan.profile_id}",
             allow_provider=True,
         )
         deadline = _profile_deadline(destination)
         require_executable("git")
         require_executable("uv")
-        secrets = run_secret_values(run_lock, token)
+        secrets = execution_secret_values(execution_lock, token)
         if recovery.selected is not None:
-            _require_recovered_profile_cleanup(run_lock)
+            _require_recovered_profile_cleanup(execution_lock)
             _finalize_profile(destination, secrets)
             selected_digest = canonical_digest(recovery.selected)
             (destination / "_SELECTED").write_text(
@@ -179,7 +179,7 @@ def run_profile_worker(plan_path: Path, output_root: Path) -> Path:
             )
             with _profile_transport(
                 plan,
-                run_lock,
+                execution_lock,
                 destination,
                 token,
                 deadline,
@@ -188,7 +188,7 @@ def run_profile_worker(plan_path: Path, output_root: Path) -> Path:
                 _verify_smoke(plan, transport, token, deadline)
                 points = _run_ladder(
                     plan,
-                    run_lock,
+                    execution_lock,
                     transport,
                     harbor_source,
                     token,
@@ -311,8 +311,8 @@ def _profile_deadline(destination: Path) -> float:
     return time.monotonic() + remaining
 
 
-def _require_recovered_profile_cleanup(run_lock: RunLock) -> None:
-    deployment = run_lock.deployment
+def _require_recovered_profile_cleanup(execution_lock: ExecutionLock) -> None:
+    deployment = execution_lock.deployment
     if isinstance(deployment, ProviderTarget):
         return
     endpoint = deployment.endpoint
@@ -322,7 +322,7 @@ def _require_recovered_profile_cleanup(run_lock: RunLock) -> None:
         baseline = EndpointManager(
             endpoint.namespace, endpoint.name, SubprocessRunner()
         ).describe()
-        validate_endpoint_model(run_lock, baseline)
+        validate_endpoint_model(execution_lock, baseline)
         require_paused_endpoint(baseline)
     except Exception as error:
         raise ProfileCleanupUnverified(
@@ -333,7 +333,7 @@ def _require_recovered_profile_cleanup(run_lock: RunLock) -> None:
 @contextmanager
 def _profile_transport(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     destination: Path,
     token: str,
     deadline: float,
@@ -348,11 +348,13 @@ def _profile_transport(
                 evidence_path=destination / "provider-requests.jsonl",
                 deadline=deadline,
             ) as transport,
-            _profile_judge_transport(run_lock, transport, token, deadline) as selected,
+            _profile_judge_transport(
+                execution_lock, transport, token, deadline
+            ) as selected,
         ):
             yield selected
         return
-    deployment = run_lock.deployment
+    deployment = execution_lock.deployment
     if isinstance(deployment, ProviderTarget):
         raise ProfileWorkerError("profile target changed while binding its endpoint")
     endpoint = deployment.endpoint
@@ -371,30 +373,32 @@ def _profile_transport(
             _prepare_managed_profile_endpoint(
                 provisioner,
                 desired_endpoint,
-                run_lock,
+                execution_lock,
                 endpoint,
                 token,
                 deadline,
             )
         else:
             baseline = manager.describe()
-            validate_endpoint_model(run_lock, baseline)
+            validate_endpoint_model(execution_lock, baseline)
             require_paused_endpoint(baseline)
             cleanup_required = True
-            launch_cleanup_watchdog(run_lock, endpoint, token)
+            launch_cleanup_watchdog(execution_lock, endpoint, token)
         baseline = manager.describe()
-        validate_endpoint_model(run_lock, baseline)
+        validate_endpoint_model(execution_lock, baseline)
         require_paused_endpoint(baseline)
         base_url = resume_and_probe_endpoint(
             destination,
             destination / "events.jsonl",
-            run_lock,
+            execution_lock,
             manager,
             token,
             readiness_timeout_seconds=min(3600, _remaining(deadline)),
         )
         transport = ProfileTransport.for_endpoint(base_url, endpoint.served_model_name)
-        with _profile_judge_transport(run_lock, transport, token, deadline) as selected:
+        with _profile_judge_transport(
+            execution_lock, transport, token, deadline
+        ) as selected:
             yield selected
     finally:
         if cleanup_required:
@@ -403,15 +407,15 @@ def _profile_transport(
 
 @contextmanager
 def _profile_judge_transport(
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     transport: ProfileTransport,
     token: str,
     deadline: float,
 ) -> Iterator[ProfileTransport]:
-    if not run_lock.judge_required_tasks:
+    if not execution_lock.judge_required_tasks:
         yield transport
         return
-    judge = run_lock.benchmark_judge
+    judge = execution_lock.benchmark_judge
     if judge is None:
         raise ProfileWorkerError(
             "judge-required profile run is missing its judge specification"
@@ -442,7 +446,7 @@ def _profile_judge_transport(
 def _prepare_managed_profile_endpoint(
     provisioner: EndpointProvisioner,
     desired: DesiredEndpoint,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     endpoint: EndpointRef,
     token: str,
     deadline: float,
@@ -453,9 +457,9 @@ def _prepare_managed_profile_endpoint(
             desired,
             timeout_seconds=min(900, _remaining(deadline)),
         )
-        launch_cleanup_watchdog(run_lock, endpoint, token)
+        launch_cleanup_watchdog(execution_lock, endpoint, token)
         return
-    launch_cleanup_watchdog(run_lock, endpoint, token)
+    launch_cleanup_watchdog(execution_lock, endpoint, token)
     provisioner.create_or_adopt(
         desired,
         timeout_seconds=min(900, _remaining(deadline)),
@@ -620,7 +624,7 @@ def _smoke_request(
 
 def _run_ladder(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     transport: ProfileTransport,
     harbor_source: Path,
     token: str,
@@ -641,7 +645,7 @@ def _run_ladder(
             break
         point = _obtain_point(
             plan,
-            run_lock,
+            execution_lock,
             transport,
             harbor_source,
             token,
@@ -657,7 +661,7 @@ def _run_ladder(
             _verify_smoke(plan, transport, token, deadline)
             retried_point = _obtain_point(
                 plan,
-                run_lock,
+                execution_lock,
                 transport,
                 harbor_source,
                 token,
@@ -687,7 +691,7 @@ def _run_ladder(
     points.extend(
         _run_boundary_repetitions(
             plan,
-            run_lock,
+            execution_lock,
             transport,
             harbor_source,
             token,
@@ -779,7 +783,7 @@ def _load_recoverable_points(
 
 def _run_boundary_repetitions(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     transport: ProfileTransport,
     harbor_source: Path,
     token: str,
@@ -816,7 +820,7 @@ def _run_boundary_repetitions(
                 break
             point = _obtain_point(
                 plan,
-                run_lock,
+                execution_lock,
                 transport,
                 harbor_source,
                 token,
@@ -837,7 +841,7 @@ def _run_boundary_repetitions(
 
 def _obtain_point(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     transport: ProfileTransport,
     harbor_source: Path,
     token: str,
@@ -855,7 +859,7 @@ def _obtain_point(
         return point
     result = _run_point(
         plan,
-        run_lock,
+        execution_lock,
         transport,
         harbor_source,
         token,
@@ -884,7 +888,7 @@ def _point_ladder_rate(plan: ProfilePlan, point: ProfilePoint) -> float | None:
 
 def _run_point(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     transport: ProfileTransport,
     harbor_source: Path,
     token: str,
@@ -898,7 +902,7 @@ def _run_point(
         point_root = Path(temporary) / "point"
         result = _run_staged_point(
             plan,
-            run_lock,
+            execution_lock,
             transport,
             harbor_source,
             token,
@@ -915,7 +919,7 @@ def _run_point(
 
 def _run_staged_point(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     transport: ProfileTransport,
     harbor_source: Path,
     token: str,
@@ -927,17 +931,17 @@ def _run_staged_point(
 ) -> _PointResult:
     tasks, attempts = _point_workload(plan, concurrency)
     jobs_dir = point_root / "harbor-jobs"
-    execution_root = point_root / "harbor-execution"
+    attempt_root = point_root / "harbor-execution"
     jobs_dir.mkdir(parents=True)
-    execution_root.mkdir()
+    attempt_root.mkdir()
     adapter = FilesystemHarborExecutionAdapter()
     scope = f"c{concurrency}-r{repetition}"
     compatibility_path: Path | None = None
     outcome = None
     with transport.scope(scope) as (base_url, _model_name, capability):
         prepared = adapter.prepare(
-            run_lock,
-            execution_root,
+            execution_lock,
+            attempt_root,
             jobs_dir,
             base_url,
             harbor_source,
@@ -954,16 +958,16 @@ def _run_staged_point(
             with (
                 _profile_point_judge_scope(
                     plan,
-                    run_lock,
+                    execution_lock,
                     transport,
-                    execution_root,
+                    attempt_root,
                     scope,
                     tasks,
                     attempts,
                     capability,
                 ) as (judge_api_url, judge_capability),
                 harbor_process_environment(
-                    run_lock,
+                    execution_lock,
                     token=token,
                     inference_base_url=base_url,
                     judge_api_url=judge_api_url,
@@ -976,7 +980,7 @@ def _run_staged_point(
                     prepared,
                     harbor_source,
                     jobs_dir,
-                    execution_root / "harbor.log",
+                    attempt_root / "harbor.log",
                     environment=environment,
                     timeout_seconds=timeout,
                     stream_runner=run_streaming,
@@ -1013,11 +1017,11 @@ def _run_staged_point(
         bundle = load_compatibility_bundle(compatibility_path, prepared.request)
         _assemble_profile_point_evidence(
             plan,
-            run_lock,
+            execution_lock,
             bundle,
             jobs_dir,
             compatibility_path,
-            execution_root,
+            attempt_root,
             scope,
             token,
             capability,
@@ -1042,22 +1046,22 @@ def _profile_judge_hosts(transport: ProfileTransport) -> tuple[str, ...]:
 @contextmanager
 def _profile_point_judge_scope(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     transport: ProfileTransport,
-    execution_root: Path,
+    attempt_root: Path,
     scope: str,
     tasks: dict[str, str],
     attempts: int,
     provider_capability: str | None,
 ) -> Iterator[tuple[str | None, str | None]]:
-    judged_tasks = set(tasks) & set(run_lock.judge_required_tasks or [])
+    judged_tasks = set(tasks) & set(execution_lock.judge_required_tasks or [])
     if not judged_tasks:
         yield None, None
         return
     recorder = transport.judge_recorder
     base_url = transport.judge_base_url
-    policy = run_lock.trial_evidence
-    judge = run_lock.benchmark_judge
+    policy = execution_lock.trial_evidence
+    judge = execution_lock.benchmark_judge
     if recorder is None or base_url is None or policy is None or judge is None:
         raise ProfileWorkerError("judged profile transport is incomplete")
     maximum_calls = attempts * len(judged_tasks) * policy.judge_max_calls_per_execution
@@ -1065,10 +1069,10 @@ def _profile_point_judge_scope(
         raise ProfileWorkerError("judged profile point exceeds recorder call capacity")
     identity = f"profile-{plan.profile_id}-{scope}"
     capability = recorder.register_scope(
-        execution_id=identity,
+        attempt_id=identity,
         trial_id=identity,
         model=judge.model,
-        destination=execution_root / "judge-records",
+        destination=attempt_root / "judge-records",
         policy=policy,
         known_secrets=((provider_capability,) if provider_capability else ()),
         max_calls=maximum_calls,
@@ -1081,20 +1085,20 @@ def _profile_point_judge_scope(
 
 def _assemble_profile_point_evidence(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     bundle: HarborCompatibilityBundle,
     jobs_dir: Path,
     compatibility_path: Path,
-    execution_root: Path,
+    attempt_root: Path,
     scope: str,
     token: str,
     provider_capability: str | None,
     judge_capability: str | None,
 ) -> None:
-    policy = run_lock.trial_evidence
+    policy = execution_lock.trial_evidence
     if policy is None:
         raise ProfileWorkerError("profile trial evidence policy is missing")
-    run_secrets = run_secret_values(run_lock, token)
+    run_secrets = execution_secret_values(execution_lock, token)
     base_secrets = (run_secrets,) if isinstance(run_secrets, str) else run_secrets
     secrets = tuple(
         value
@@ -1102,7 +1106,7 @@ def _assemble_profile_point_evidence(
         if value
     )
     judge_records = _split_profile_judge_records(
-        plan, run_lock, bundle, jobs_dir, execution_root, scope
+        plan, execution_lock, bundle, jobs_dir, attempt_root, scope
     )
     logical_attempts: dict[str, int] = {}
     for native in bundle.trials:
@@ -1120,12 +1124,12 @@ def _assemble_profile_point_evidence(
                 {"files": redacted},
             )
         assert_secret_absent(native_root, secrets, allow_symlinks=True)
-        judge_expected = native.task_name in (run_lock.judge_required_tasks or [])
+        judge_expected = native.task_name in (execution_lock.judge_required_tasks or [])
         assemble_trial_evidence(
             native_root,
-            campaign_id=None,
-            run_id=f"profile-{plan.profile_id}",
-            execution_id=f"profile-{plan.profile_id}-{scope}-{native.trial_id}",
+            run_id=None,
+            execution_id=f"profile-{plan.profile_id}",
+            attempt_id=f"profile-{plan.profile_id}-{scope}-{native.trial_id}",
             trial_id=native.trial_id,
             task_name=native.task_name,
             task_digest=native.task_digest,
@@ -1133,8 +1137,8 @@ def _assemble_profile_point_evidence(
             physical_attempt=1,
             judge_expected=judge_expected,
             judge_model=(
-                run_lock.benchmark_judge.model
-                if judge_expected and run_lock.benchmark_judge is not None
+                execution_lock.benchmark_judge.model
+                if judge_expected and execution_lock.benchmark_judge is not None
                 else None
             ),
             policy=policy,
@@ -1146,20 +1150,20 @@ def _assemble_profile_point_evidence(
 
 def _split_profile_judge_records(
     plan: ProfilePlan,
-    run_lock: RunLock,
+    execution_lock: ExecutionLock,
     bundle: HarborCompatibilityBundle,
     jobs_dir: Path,
-    execution_root: Path,
+    attempt_root: Path,
     scope: str,
 ) -> dict[str, Path]:
     judged = [
         trial
         for trial in bundle.trials
-        if trial.task_name in (run_lock.judge_required_tasks or [])
+        if trial.task_name in (execution_lock.judge_required_tasks or [])
     ]
     if not judged:
         return {}
-    aggregate = execution_root / "judge-records"
+    aggregate = attempt_root / "judge-records"
     summary = _profile_judge_summary(aggregate)
     assigned = _profile_judge_assignments(judged, jobs_dir)
     zero_call_trials = _profile_zero_call_trials(judged, jobs_dir)
@@ -1170,35 +1174,35 @@ def _split_profile_judge_records(
     }
     if set(exchange_dirs) != set(assigned) or summary.exchange_count != len(assigned):
         raise ProfileWorkerError("profile judge exchanges cannot be assigned exactly")
-    policy = run_lock.trial_evidence
+    policy = execution_lock.trial_evidence
     if policy is None:
         raise ProfileWorkerError("profile trial evidence policy is missing")
     _validate_profile_assignment_counts(assigned, policy.judge_max_calls_per_execution)
     grouped: dict[str, list[str]] = {}
     destinations: dict[str, Path] = {}
     for exchange_id, native in assigned.items():
-        destination = execution_root / "profile-judge-records" / native.trial_id
+        destination = attempt_root / "profile-judge-records" / native.trial_id
         destination.mkdir(parents=True, exist_ok=True)
         exchange_dir = exchange_dirs[exchange_id]
         metadata_path = exchange_dir / "exchange.json"
         exchange = JudgeExchange.model_validate_json(metadata_path.read_text())
-        execution_id = f"profile-{plan.profile_id}-{scope}-{native.trial_id}"
+        attempt_id = f"profile-{plan.profile_id}-{scope}-{native.trial_id}"
         exchange = exchange.model_copy(
-            update={"execution_id": execution_id, "trial_id": native.trial_id}
+            update={"attempt_id": attempt_id, "trial_id": native.trial_id}
         )
         write_json(metadata_path, exchange.model_dump(mode="json"))
         shutil.move(str(exchange_dir), destination / exchange_id)
         grouped.setdefault(native.trial_id, []).append(exchange_id)
         destinations[native.trial_id] = destination
     for native in zero_call_trials:
-        destination = execution_root / "profile-judge-records" / native.trial_id
+        destination = attempt_root / "profile-judge-records" / native.trial_id
         destination.mkdir(parents=True)
         destinations[native.trial_id] = destination
         grouped[native.trial_id] = []
     for trial_id, exchange_ids in grouped.items():
-        execution_id = f"profile-{plan.profile_id}-{scope}-{trial_id}"
+        attempt_id = f"profile-{plan.profile_id}-{scope}-{trial_id}"
         trial_summary = JudgeRecorderSummary(
-            execution_id=execution_id,
+            attempt_id=attempt_id,
             trial_id=trial_id,
             model=summary.model,
             exchange_count=len(exchange_ids),

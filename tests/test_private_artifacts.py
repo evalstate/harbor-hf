@@ -11,7 +11,7 @@ from harbor_hf.private_artifacts import (
     PrivateArtifactEntry,
     PrivateArtifactManifest,
     build_private_artifact_manifest,
-    openclaw_execution_started,
+    openclaw_attempt_started,
     sanitize_private_artifact_directory_files,
     sanitize_private_artifact_special_files,
     sanitize_private_artifact_tree,
@@ -21,11 +21,11 @@ from harbor_hf.private_artifacts import (
 from harbor_hf.results import ArtifactEvidence
 
 
-def _execution_root(
+def _attempt_root(
     root: Path, *, started: bool = True, with_session: bool = True
 ) -> Path:
-    (root / "execution.lock.json").write_text(
-        json.dumps({"execution_id": "exec-one", "trial_id": "trial-one"}) + "\n",
+    (root / "attempt.lock.json").write_text(
+        json.dumps({"attempt_id": "exec-one", "trial_id": "trial-one"}) + "\n",
         encoding="utf-8",
     )
     (root / "events.jsonl").write_text("{}\n", encoding="utf-8")
@@ -58,7 +58,7 @@ def _execution_root(
 def test_private_manifest_classifies_and_checksums_complete_execution(
     tmp_path: Path,
 ) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
 
     manifest = write_private_artifact_manifest(root, strict_session=True)
     written = PrivateArtifactManifest.model_validate_json(
@@ -82,7 +82,7 @@ def test_private_manifest_classifies_and_checksums_complete_execution(
 
 
 def test_successful_openclaw_execution_requires_session_jsonl(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path, with_session=False)
+    root = _attempt_root(tmp_path, with_session=False)
 
     with pytest.raises(RuntimeError, match="no session JSONL"):
         build_private_artifact_manifest(root, strict_session=True)
@@ -96,7 +96,7 @@ def test_successful_openclaw_execution_requires_session_jsonl(tmp_path: Path) ->
 def test_session_requirement_rejects_unusable_jsonl(
     tmp_path: Path, content: str
 ) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     session = next(root.rglob("session-one.jsonl"))
     session.write_text(content, encoding="utf-8")
 
@@ -108,7 +108,7 @@ def test_session_requirement_rejects_unusable_jsonl(
 
 
 def test_session_requirement_rejects_over_nested_json(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     session = next(root.rglob("session-one.jsonl"))
     session.write_text('{"nested":' * 20_000 + "{}" + "}" * 20_000 + "\n")
 
@@ -122,7 +122,7 @@ def test_session_requirement_rejects_over_nested_json(tmp_path: Path) -> None:
 def test_trajectory_sidecar_does_not_satisfy_session_requirement(
     tmp_path: Path,
 ) -> None:
-    root = _execution_root(tmp_path, with_session=False)
+    root = _attempt_root(tmp_path, with_session=False)
     sessions = (
         root / "harbor-jobs" / "job-one" / "trial-one" / "agent" / "openclaw-sessions"
     )
@@ -140,7 +140,7 @@ def test_trajectory_sidecar_does_not_satisfy_session_requirement(
 
 
 def test_session_is_not_required_before_agent_execution_starts(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path, started=False, with_session=False)
+    root = _attempt_root(tmp_path, started=False, with_session=False)
 
     manifest = build_private_artifact_manifest(root, strict_session=True)
 
@@ -149,7 +149,7 @@ def test_session_is_not_required_before_agent_execution_starts(tmp_path: Path) -
 
 
 def test_multi_step_agent_timing_requires_session_jsonl(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path, started=False, with_session=False)
+    root = _attempt_root(tmp_path, started=False, with_session=False)
     result_path = root / "harbor-jobs" / "job-one" / "trial-one" / "result.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
     result["step_results"] = [
@@ -162,7 +162,7 @@ def test_multi_step_agent_timing_requires_session_jsonl(tmp_path: Path) -> None:
 
 
 def test_null_step_results_still_requires_session_jsonl(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path, with_session=False)
+    root = _attempt_root(tmp_path, with_session=False)
     result_path = root / "harbor-jobs" / "job-one" / "trial-one" / "result.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
     result["step_results"] = None
@@ -175,7 +175,7 @@ def test_null_step_results_still_requires_session_jsonl(tmp_path: Path) -> None:
 def test_started_harbor_openclaw_request_requires_session_without_result(
     tmp_path: Path,
 ) -> None:
-    root = _execution_root(tmp_path, started=False, with_session=False)
+    root = _attempt_root(tmp_path, started=False, with_session=False)
     (root / "harbor-jobs" / "job-one" / "trial-one" / "result.json").unlink()
     (root / "harbor-request.json").write_text(
         json.dumps({"verification": {"expected_agent_name": "openclaw"}}) + "\n",
@@ -191,15 +191,15 @@ def test_started_harbor_openclaw_request_requires_session_without_result(
 
 
 def test_malformed_result_uses_explicit_attempted_fallback(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path, started=False, with_session=False)
+    root = _attempt_root(tmp_path, started=False, with_session=False)
     result_path = root / "harbor-jobs" / "job-one" / "trial-one" / "result.json"
     result_path.write_text("{", encoding="utf-8")
 
-    assert openclaw_execution_started(root, fallback_attempted=True) is True
+    assert openclaw_attempt_started(root, fallback_attempted=True) is True
 
 
 def test_private_manifest_sorts_serialized_relative_paths(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     nested = root / "foo" / "bar"
     nested.parent.mkdir()
     nested.write_text("nested\n", encoding="utf-8")
@@ -213,7 +213,7 @@ def test_private_manifest_sorts_serialized_relative_paths(tmp_path: Path) -> Non
 
 
 def test_private_manifest_enforces_file_and_bundle_size_limits(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
 
     with pytest.raises(RuntimeError, match="file size limit"):
         build_private_artifact_manifest(
@@ -231,7 +231,7 @@ def test_private_manifest_enforces_file_and_bundle_size_limits(tmp_path: Path) -
 def test_private_manifest_allows_large_direct_workspace_archive(
     tmp_path: Path,
 ) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     evidence = root / "evidence"
     evidence.mkdir()
     archive = evidence / "workspace.tar.zst"
@@ -248,7 +248,7 @@ def test_private_manifest_allows_large_direct_workspace_archive(
 
 
 def test_private_sanitizer_preserves_large_workspace_archive(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     evidence = root / "evidence"
     evidence.mkdir()
     archive = evidence / "workspace.tar.zst"
@@ -261,7 +261,7 @@ def test_private_sanitizer_preserves_large_workspace_archive(tmp_path: Path) -> 
 
 
 def test_private_manifest_rejects_symlinks(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     (root / "linked").symlink_to(root / "events.jsonl")
 
     with pytest.raises(RuntimeError, match="cannot contain symlinks"):
@@ -269,7 +269,7 @@ def test_private_manifest_rejects_symlinks(tmp_path: Path) -> None:
 
 
 def test_private_artifact_sanitizer_rejects_special_files(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     fifo = root / "runtime.pipe"
     os.mkfifo(fifo)
 
@@ -309,7 +309,7 @@ def test_special_file_sanitizer_preserves_regular_profile_evidence(
 def test_private_artifact_sanitizer_records_and_removes_rejected_files(
     tmp_path: Path,
 ) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     (root / "linked").symlink_to(root / "events.jsonl")
     oversized = root / "harbor-jobs" / "oversized.log"
     oversized.write_text("x" * 2000, encoding="utf-8")
@@ -440,7 +440,7 @@ def test_private_artifact_file_count_is_bounded(tmp_path: Path) -> None:
         build_private_artifact_manifest(
             root,
             strict_session=False,
-            execution_id="execution-one",
+            attempt_id="attempt-one",
             trial_id="trial-one",
             session_required=False,
             max_file_count=2,
@@ -450,7 +450,7 @@ def test_private_artifact_file_count_is_bounded(tmp_path: Path) -> None:
     manifest = write_private_artifact_manifest(
         root,
         strict_session=False,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         trial_id="trial-one",
         session_required=False,
         trust_rejections=True,
@@ -468,7 +468,7 @@ def test_private_artifact_manifest_is_bounded(tmp_path: Path) -> None:
         write_private_artifact_manifest(
             tmp_path,
             strict_session=False,
-            execution_id="execution-one",
+            attempt_id="attempt-one",
             trial_id="trial-one",
             session_required=False,
             max_file_bytes=256,
@@ -476,7 +476,7 @@ def test_private_artifact_manifest_is_bounded(tmp_path: Path) -> None:
 
 
 def test_private_manifest_rejects_controller_reserved_paths(tmp_path: Path) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     (root / "private-artifacts.json").write_text("x" * 200, encoding="utf-8")
 
     with pytest.raises(
@@ -493,7 +493,7 @@ def test_private_manifest_rejects_controller_reserved_paths(tmp_path: Path) -> N
 def test_private_artifact_sanitizer_removes_reserved_path_collisions(
     tmp_path: Path,
 ) -> None:
-    root = _execution_root(tmp_path)
+    root = _attempt_root(tmp_path)
     forged_manifest = root / "private-artifacts.json"
     forged_manifest.write_text("forged", encoding="utf-8")
     forged_checksums = root / "checksums.json"
@@ -577,7 +577,7 @@ def test_private_models_reject_unsafe_or_inconsistent_manifests() -> None:
         )
     with pytest.raises(ValidationError, match="sorted and unique"):
         PrivateArtifactManifest(
-            execution_id="exec-one",
+            attempt_id="exec-one",
             trial_id="trial-one",
             total_bytes=2,
             entries=[

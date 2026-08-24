@@ -199,7 +199,7 @@ def test_build_desired_endpoint_applies_documented_defaults(
 
     desired = build_desired_endpoint(
         namespace="example-org",
-        campaign_id="campaign-one",
+        run_id="run-one",
         model=remote_spec.matrix.models[0],
         deployment=deployment,
     )

@@ -13,34 +13,34 @@ from huggingface_hub import CommitOperationAdd
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import JsonValue, ValidationError
 
-from harbor_hf.campaigns import CampaignLock, build_campaign_lock, build_campaign_plan
 from harbor_hf.control import (
     ActionKind,
     ActionOutcomePayload,
     ActionReservedPayload,
-    CampaignCancellationWon,
-    CampaignConflict,
-    CampaignEvent,
-    CampaignSnapshot,
-    CampaignSubmittedPayload,
     CancellationPayload,
     ControlError,
     EventKind,
-    HubCampaignStore,
+    HubRunStore,
     LifecyclePayload,
     ManualInterventionResolutionPayload,
     Producer,
+    RunCancellationWon,
+    RunConflict,
+    RunEvent,
+    RunSnapshot,
+    RunSubmittedPayload,
     TerminalPayload,
     WaveLifecyclePayload,
     new_event,
-    project_campaign,
+    project_run,
 )
 from harbor_hf.models import ExperimentSpec
+from harbor_hf.runs import RunLock, build_run_lock, build_run_plan
 
 NOW = datetime(2026, 7, 14, 1, 2, 3, tzinfo=UTC)
 
 
-class FakeCampaignApi:
+class FakeRunApi:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.generation = 1
@@ -131,19 +131,17 @@ def _http_error(status: int) -> HfHubHTTPError:
     )
 
 
-def _lock(remote_spec: ExperimentSpec) -> CampaignLock:
-    return build_campaign_lock(
-        build_campaign_plan(remote_spec), "campaign-one", clock=lambda: NOW
-    )
+def _lock(remote_spec: ExperimentSpec) -> RunLock:
+    return build_run_lock(build_run_plan(remote_spec), "run-one", clock=lambda: NOW)
 
 
-def _submitted(lock: CampaignLock) -> CampaignEvent:
+def _submitted(lock: RunLock) -> RunEvent:
     return new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=lock.plan_digest),
+        payload=RunSubmittedPayload(plan_digest=lock.plan_digest),
         clock=lambda: NOW,
         identifier=lambda: "1" * 32,
     )
@@ -151,11 +149,11 @@ def _submitted(lock: CampaignLock) -> CampaignEvent:
 
 def test_event_payload_must_match_kind() -> None:
     with pytest.raises(ValidationError, match="payload does not match"):
-        CampaignEvent(
+        RunEvent(
             event_id="evt-" + "1" * 32,
-            subject_type="campaign",
-            subject_id="campaign",
-            kind="campaign.submitted",
+            subject_type="run",
+            subject_id="run",
+            kind="run.submitted",
             observed_at=NOW,
             producer="cli",
             payload=TerminalPayload(message="wrong"),
@@ -167,22 +165,22 @@ def test_projection_tracks_reserved_and_completed_actions(
 ) -> None:
     lock = _lock(remote_spec)
     reserved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
             action_id="act-one",
             action_key="key-one",
             action_kind="submit-wave",
-            target_ids=[lock.runs[0].shards[0].shard_id],
+            target_ids=[lock.executions[0].shards[0].shard_id],
         ),
         clock=lambda: NOW + timedelta(seconds=1),
         identifier=lambda: "2" * 32,
     )
     succeeded = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.succeeded",
         producer="reconciler",
         payload=ActionOutcomePayload(action_id="act-one", remote_id="job-one"),
@@ -190,9 +188,7 @@ def test_projection_tracks_reserved_and_completed_actions(
         identifier=lambda: "3" * 32,
     )
 
-    projection = project_campaign(
-        lock, [succeeded, _submitted(lock), reserved, reserved]
-    )
+    projection = project_run(lock, [succeeded, _submitted(lock), reserved, reserved])
 
     assert projection.status == "active"
     assert projection.event_count == 3
@@ -205,22 +201,22 @@ def test_repeated_ambiguous_outcome_preserves_new_remote_identity(
 ) -> None:
     lock = _lock(remote_spec)
     reserved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
             action_id="act-one",
             action_key="key-one",
             action_kind="submit-wave",
-            target_ids=[lock.runs[0].shards[0].shard_id],
+            target_ids=[lock.executions[0].shards[0].shard_id],
         ),
         clock=lambda: NOW + timedelta(seconds=1),
         identifier=lambda: "2" * 32,
     )
     first = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.ambiguous",
         producer="reconciler",
         payload=ActionOutcomePayload(action_id="act-one", message="job lookup failed"),
@@ -228,8 +224,8 @@ def test_repeated_ambiguous_outcome_preserves_new_remote_identity(
         identifier=lambda: "3" * 32,
     )
     second = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.ambiguous",
         producer="reconciler",
         payload=ActionOutcomePayload(
@@ -241,9 +237,9 @@ def test_repeated_ambiguous_outcome_preserves_new_remote_identity(
         identifier=lambda: "4" * 32,
     )
 
-    action = project_campaign(
-        lock, [_submitted(lock), reserved, first, second]
-    ).actions["act-one"]
+    action = project_run(lock, [_submitted(lock), reserved, first, second]).actions[
+        "act-one"
+    ]
 
     assert action.status == "ambiguous"
     assert action.remote_id == "managed-endpoint"
@@ -259,7 +255,7 @@ def test_repeated_ambiguous_outcome_preserves_new_remote_identity(
         }
     )
     with pytest.raises(ControlError, match="changed remote identity"):
-        project_campaign(lock, [_submitted(lock), reserved, first, second, conflicting])
+        project_run(lock, [_submitted(lock), reserved, first, second, conflicting])
 
 
 @pytest.mark.parametrize(
@@ -274,13 +270,13 @@ def test_projection_rejects_invalid_history(
     remote_spec: ExperimentSpec, events: object, message: str
 ) -> None:
     lock = _lock(remote_spec)
-    supplied: list[CampaignEvent]
+    supplied: list[RunEvent]
     if events == "outcome":
         supplied = [
             _submitted(lock),
             new_event(
-                subject_type="campaign",
-                subject_id=lock.campaign_id,
+                subject_type="run",
+                subject_id=lock.run_id,
                 kind="action.failed",
                 producer="reconciler",
                 payload=ActionOutcomePayload(action_id="missing"),
@@ -292,18 +288,18 @@ def test_projection_rejects_invalid_history(
         supplied = [
             _submitted(lock),
             new_event(
-                subject_type="campaign",
-                subject_id=lock.campaign_id,
-                kind="campaign.completed",
+                subject_type="run",
+                subject_id=lock.run_id,
+                kind="run.completed",
                 producer="reconciler",
                 payload=TerminalPayload(message="done"),
                 clock=lambda: NOW + timedelta(seconds=1),
                 identifier=lambda: "2" * 32,
             ),
             new_event(
-                subject_type="campaign",
-                subject_id=lock.campaign_id,
-                kind="campaign.failed",
+                subject_type="run",
+                subject_id=lock.run_id,
+                kind="run.failed",
                 producer="reconciler",
                 payload=TerminalPayload(message="late"),
                 clock=lambda: NOW + timedelta(seconds=2),
@@ -314,66 +310,64 @@ def test_projection_rejects_invalid_history(
         supplied = []
 
     with pytest.raises(ControlError, match=message):
-        project_campaign(lock, supplied)
+        project_run(lock, supplied)
 
 
-def test_hub_store_creates_and_loads_campaign(
+def test_hub_store_creates_and_loads_run(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
+    api = FakeRunApi(tmp_path)
     api.conflicts = 1
-    store = HubCampaignStore("org", api=api)
+    store = HubRunStore("org", api=api)
 
-    store.create_campaign(lock, b"kind: Experiment\n", _submitted(lock))
-    observed_lock, events = store.load_campaign(lock.campaign_id)
+    store.create_run(lock, b"kind: Experiment\n", _submitted(lock))
+    observed_lock, events = store.load_run(lock.run_id)
 
     assert observed_lock == lock
     assert events == [_submitted(lock)]
-    assert api.files[f"campaigns/{lock.campaign_id}/request.yaml"] == (
-        b"kind: Experiment\n"
-    )
+    assert api.files[f"runs/{lock.run_id}/request.yaml"] == (b"kind: Experiment\n")
     assert len(api.commits) == 1
-    snapshot = store.load_snapshot(lock.campaign_id)
+    snapshot = store.load_snapshot(lock.run_id)
     assert snapshot.lock == lock
     assert snapshot.request == b"kind: Experiment\n"
     assert snapshot.control_commit == api.head
-    with pytest.raises(CampaignConflict, match="campaign already exists"):
-        store.create_campaign(lock, b"different", _submitted(lock))
+    with pytest.raises(RunConflict, match="run already exists"):
+        store.create_run(lock, b"different", _submitted(lock))
 
 
 def test_hub_store_snapshot_reads_every_object_from_one_exact_revision(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
     request = b"kind: Experiment\nmetadata: snapshot\n"
-    store.create_campaign(lock, request, _submitted(lock))
+    store.create_run(lock, request, _submitted(lock))
     later = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.cancel-requested",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.cancel-requested",
         producer="cli",
         payload=CancellationPayload(reason="operator"),
         clock=lambda: NOW + timedelta(seconds=1),
         identifier=lambda: "0" * 32,
     )
-    api.files[f"campaigns/{lock.campaign_id}/events/{later.event_id}.json"] = (
-        json.dumps(later.model_dump(mode="json"), default=str).encode()
-    )
-    api.files[f"campaigns/{lock.campaign_id}/events/ignored.txt"] = b"not json"
+    api.files[f"runs/{lock.run_id}/events/{later.event_id}.json"] = json.dumps(
+        later.model_dump(mode="json"), default=str
+    ).encode()
+    api.files[f"runs/{lock.run_id}/events/ignored.txt"] = b"not json"
     api.info_calls.clear()
     api.list_calls.clear()
     api.tree_calls.clear()
     api.download_calls.clear()
     expected_head = api.head
 
-    snapshot = store.load_snapshot(lock.campaign_id)
+    snapshot = store.load_snapshot(lock.run_id)
 
     repository = "org/harbor-hf-coordination"
     revision = {"repo_type": "dataset", "revision": expected_head}
-    assert snapshot == CampaignSnapshot(
+    assert snapshot == RunSnapshot(
         lock=lock,
         events=[later, _submitted(lock)],
         request=request,
@@ -386,25 +380,25 @@ def test_hub_store_snapshot_reads_every_object_from_one_exact_revision(
     assert api.tree_calls == [
         (
             repository,
-            f"campaigns/{lock.campaign_id}/events",
+            f"runs/{lock.run_id}/events",
             {**revision, "recursive": True},
         )
     ]
     assert api.download_calls[0] == (
         repository,
-        f"campaigns/{lock.campaign_id}/campaign.lock.json",
+        f"runs/{lock.run_id}/run.lock.json",
         revision,
     )
     assert sorted(api.download_calls[1:3], key=lambda call: call[1]) == sorted(
         [
             (
                 repository,
-                f"campaigns/{lock.campaign_id}/events/{later.event_id}.json",
+                f"runs/{lock.run_id}/events/{later.event_id}.json",
                 revision,
             ),
             (
                 repository,
-                f"campaigns/{lock.campaign_id}/events/{_submitted(lock).event_id}.json",
+                f"runs/{lock.run_id}/events/{_submitted(lock).event_id}.json",
                 revision,
             ),
         ],
@@ -412,21 +406,21 @@ def test_hub_store_snapshot_reads_every_object_from_one_exact_revision(
     )
     assert api.download_calls[3] == (
         repository,
-        f"campaigns/{lock.campaign_id}/request.yaml",
+        f"runs/{lock.run_id}/request.yaml",
         revision,
     )
 
 
-def test_hub_store_reads_requests_lists_campaigns_and_loads_reservations(
+def test_hub_store_reads_requests_lists_runs_and_loads_reservations(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
-    store.create_campaign(lock, b"kind: Experiment\n", _submitted(lock))
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
+    store.create_run(lock, b"kind: Experiment\n", _submitted(lock))
     reserved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
@@ -442,24 +436,24 @@ def test_hub_store_reads_requests_lists_campaigns_and_loads_reservations(
         "action_id": "act-one",
         "kind": "submit-wave",
     }
-    store.reserve_action(lock.campaign_id, action, reserved)
-    api.files["campaigns/nested/invalid/campaign.lock.json"] = b"{}"
+    store.reserve_action(lock.run_id, action, reserved)
+    api.files["runs/nested/invalid/run.lock.json"] = b"{}"
 
-    assert store.load_request(lock.campaign_id) == b"kind: Experiment\n"
-    assert store.list_campaigns() == [lock.campaign_id]
-    assert store.load_action_reservations(lock.campaign_id) == [action]
+    assert store.load_request(lock.run_id) == b"kind: Experiment\n"
+    assert store.list_runs() == [lock.run_id]
+    assert store.load_action_reservations(lock.run_id) == [action]
 
 
 def test_hub_store_reserves_action_atomically_and_idempotently(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
-    store.create_campaign(lock, b"manifest", _submitted(lock))
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
+    store.create_run(lock, b"manifest", _submitted(lock))
     event = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
@@ -472,77 +466,77 @@ def test_hub_store_reserves_action_atomically_and_idempotently(
     )
     action = {"action_id": "act-one", "kind": "submit-wave"}
 
-    assert store.reserve_action(lock.campaign_id, action, event)
-    assert not store.reserve_action(lock.campaign_id, action, event)
+    assert store.reserve_action(lock.run_id, action, event)
+    assert not store.reserve_action(lock.run_id, action, event)
     conflicting = {"action_id": "act-one", "kind": "cancel-wave"}
-    with pytest.raises(CampaignConflict, match="content conflicts"):
-        store.reserve_action(lock.campaign_id, conflicting, event)
+    with pytest.raises(RunConflict, match="content conflicts"):
+        store.reserve_action(lock.run_id, conflicting, event)
 
 
 def test_hub_store_appends_event_and_rejects_duplicate(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
-    store.create_campaign(lock, b"manifest", _submitted(lock))
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
+    store.create_run(lock, b"manifest", _submitted(lock))
     event = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.failed",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.failed",
         producer="reconciler",
         payload=TerminalPayload(message="failed"),
         identifier=lambda: "5" * 32,
     )
 
-    store.append_event(lock.campaign_id, event)
-    _observed_lock, events = store.load_campaign(lock.campaign_id)
+    store.append_event(lock.run_id, event)
+    _observed_lock, events = store.load_run(lock.run_id)
 
     assert event in events
-    with pytest.raises(CampaignConflict, match="event already exists"):
-        store.append_event(lock.campaign_id, event)
+    with pytest.raises(RunConflict, match="event already exists"):
+        store.append_event(lock.run_id, event)
 
 
 def test_hub_store_ensures_identical_event_once(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
-    store.create_campaign(lock, b"manifest", _submitted(lock))
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
+    store.create_run(lock, b"manifest", _submitted(lock))
     event = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.cancel-requested",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.cancel-requested",
         producer="cli",
         payload=CancellationPayload(reason="operator"),
         identifier=lambda: "6" * 32,
     )
 
-    assert store.ensure_event(lock.campaign_id, event)
-    assert not store.ensure_event(lock.campaign_id, event)
-    assert f"campaigns/{lock.campaign_id}/cancellation.json" in api.files
+    assert store.ensure_event(lock.run_id, event)
+    assert not store.ensure_event(lock.run_id, event)
+    assert f"runs/{lock.run_id}/cancellation.json" in api.files
     with pytest.raises(ValueError, match="terminal trial events"):
-        store.ensure_events_unless_cancelled(lock.campaign_id, [event])
+        store.ensure_events_unless_cancelled(lock.run_id, [event])
     conflicting = event.model_copy(
         update={"payload": CancellationPayload(reason="different")}
     )
-    with pytest.raises(CampaignConflict, match="event conflicts"):
-        store.ensure_event(lock.campaign_id, conflicting)
+    with pytest.raises(RunConflict, match="event conflicts"):
+        store.ensure_event(lock.run_id, conflicting)
 
 
 def test_hub_store_ensures_observed_events_in_bounded_commits(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
-    store.create_campaign(lock, b"manifest", _submitted(lock))
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
+    store.create_run(lock, b"manifest", _submitted(lock))
     events = [
         new_event(
-            subject_type="campaign",
-            subject_id=lock.campaign_id,
-            kind="campaign.draining",
+            subject_type="run",
+            subject_id=lock.run_id,
+            kind="run.draining",
             producer="wave-controller",
             payload=LifecyclePayload(message=f"observation {index}"),
             identifier=lambda index=index: f"{index:032x}",
@@ -551,12 +545,12 @@ def test_hub_store_ensures_observed_events_in_bounded_commits(
     ]
     initial_commits = len(api.commits)
 
-    assert store.ensure_events(lock.campaign_id, events)
+    assert store.ensure_events(lock.run_id, events)
     assert len(api.commits) == initial_commits + 2
-    assert not store.ensure_events(lock.campaign_id, events)
+    assert not store.ensure_events(lock.run_id, events)
     assert len(api.commits) == initial_commits + 2
     assert all(
-        f"campaigns/{lock.campaign_id}/events/{event.event_id}.json" in api.files
+        f"runs/{lock.run_id}/events/{event.event_id}.json" in api.files
         for event in events
     )
 
@@ -565,18 +559,18 @@ def test_hub_store_rejects_resolution_missing_a_current_cleanup_failure(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
-    store.create_campaign(lock, b"manifest", _submitted(lock))
-    shard = lock.runs[0].shards[0]
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
+    store.create_run(lock, b"manifest", _submitted(lock))
+    shard = lock.executions[0].shards[0]
     wave_payload = WaveLifecyclePayload(
-        deployment_digest=lock.runs[0].deployment_digest,
+        deployment_digest=lock.executions[0].deployment_digest,
         provider="hf-inference-endpoints",
         shard_ids=[shard.shard_id],
     )
     for index, wave_id in enumerate(["wave-one", "wave-two"], start=1):
         store.append_event(
-            lock.campaign_id,
+            lock.run_id,
             new_event(
                 subject_type="wave",
                 subject_id=wave_id,
@@ -588,17 +582,17 @@ def test_hub_store_rejects_resolution_missing_a_current_cleanup_failure(
             ),
         )
     resolution = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-resolved",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-resolved",
         producer="cli",
         payload=ManualInterventionResolutionPayload(wave_ids=["wave-one"]),
         clock=lambda: NOW + timedelta(seconds=3),
         identifier=lambda: "3" * 32,
     )
 
-    with pytest.raises(CampaignConflict, match="verify these waves.*wave-two"):
-        store.ensure_event(lock.campaign_id, resolution)
+    with pytest.raises(RunConflict, match="verify these waves.*wave-two"):
+        store.ensure_event(lock.run_id, resolution)
 
 
 def test_hub_store_guarded_events_lose_atomically_to_concurrent_cancellation(
@@ -606,16 +600,16 @@ def test_hub_store_guarded_events_lose_atomically_to_concurrent_cancellation(
 ) -> None:
     lock = _lock(remote_spec)
     cancellation = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.cancel-requested",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.cancel-requested",
         producer="cli",
         payload=CancellationPayload(reason="operator"),
         clock=lambda: NOW + timedelta(seconds=1),
         identifier=lambda: "8" * 32,
     )
 
-    class CancellingApi(FakeCampaignApi):
+    class CancellingApi(FakeRunApi):
         inject_cancellation = False
 
         def create_commit(
@@ -623,16 +617,14 @@ def test_hub_store_guarded_events_lose_atomically_to_concurrent_cancellation(
         ) -> object:
             if self.inject_cancellation:
                 self.inject_cancellation = False
-                path = (
-                    f"campaigns/{lock.campaign_id}/events/{cancellation.event_id}.json"
-                )
+                path = f"runs/{lock.run_id}/events/{cancellation.event_id}.json"
                 self.files[path] = json.dumps(
                     cancellation.model_dump(mode="json"), default=str
                 ).encode()
-                marker_path = f"campaigns/{lock.campaign_id}/cancellation.json"
+                marker_path = f"runs/{lock.run_id}/cancellation.json"
                 self.files[marker_path] = json.dumps(
                     {
-                        "campaign_id": lock.campaign_id,
+                        "run_id": lock.run_id,
                         "event_id": cancellation.event_id,
                     }
                 ).encode()
@@ -641,11 +633,11 @@ def test_hub_store_guarded_events_lose_atomically_to_concurrent_cancellation(
             return super().create_commit(repo_id, operations, **kwargs)
 
     api = CancellingApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
-    store.create_campaign(lock, b"manifest", _submitted(lock))
+    store = HubRunStore("org", api=api)
+    store.create_run(lock, b"manifest", _submitted(lock))
     terminal = new_event(
         subject_type="trial",
-        subject_id=lock.runs[0].shards[0].trials[0].trial_id,
+        subject_id=lock.executions[0].shards[0].trials[0].trial_id,
         kind="trial.invalid",
         producer="reconciler",
         payload=LifecyclePayload(message="exhausted"),
@@ -654,10 +646,10 @@ def test_hub_store_guarded_events_lose_atomically_to_concurrent_cancellation(
     )
     api.inject_cancellation = True
 
-    with pytest.raises(CampaignCancellationWon, match="cancellation superseded"):
-        store.ensure_events_unless_cancelled(lock.campaign_id, [terminal])
+    with pytest.raises(RunCancellationWon, match="cancellation superseded"):
+        store.ensure_events_unless_cancelled(lock.run_id, [terminal])
 
-    _lock_value, events = store.load_campaign(lock.campaign_id)
+    _lock_value, events = store.load_run(lock.run_id)
     assert cancellation in events
     assert terminal not in events
 
@@ -666,21 +658,21 @@ def test_hub_store_adopts_deterministic_event_with_a_new_observation_time(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    store = HubCampaignStore("org", api=FakeCampaignApi(tmp_path))
-    store.create_campaign(lock, b"manifest", _submitted(lock))
+    store = HubRunStore("org", api=FakeRunApi(tmp_path))
+    store.create_run(lock, b"manifest", _submitted(lock))
     event = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.draining",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.draining",
         producer="reconciler",
         payload=LifecyclePayload(message="draining"),
         clock=lambda: NOW,
         identifier=lambda: "7" * 32,
     )
 
-    assert store.ensure_event(lock.campaign_id, event)
+    assert store.ensure_event(lock.run_id, event)
     assert not store.ensure_event(
-        lock.campaign_id,
+        lock.run_id,
         event.model_copy(update={"observed_at": NOW + timedelta(minutes=5)}),
     )
 
@@ -689,9 +681,9 @@ def test_hub_store_adopts_deterministic_trial_exhaustion_with_a_new_time(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    store = HubCampaignStore("org", api=FakeCampaignApi(tmp_path))
-    store.create_campaign(lock, b"manifest", _submitted(lock))
-    trial = lock.runs[0].shards[0].trials[0]
+    store = HubRunStore("org", api=FakeRunApi(tmp_path))
+    store.create_run(lock, b"manifest", _submitted(lock))
+    trial = lock.executions[0].shards[0].trials[0]
     event = new_event(
         subject_type="trial",
         subject_id=trial.trial_id,
@@ -702,9 +694,9 @@ def test_hub_store_adopts_deterministic_trial_exhaustion_with_a_new_time(
         identifier=lambda: "9" * 32,
     )
 
-    assert store.ensure_event(lock.campaign_id, event)
+    assert store.ensure_event(lock.run_id, event)
     assert not store.ensure_event(
-        lock.campaign_id,
+        lock.run_id,
         event.model_copy(update={"observed_at": NOW + timedelta(minutes=5)}),
     )
 
@@ -712,7 +704,7 @@ def test_hub_store_adopts_deterministic_trial_exhaustion_with_a_new_time(
 @pytest.mark.parametrize(
     ("kind", "producer"),
     [
-        ("campaign.draining", "wave-controller"),
+        ("run.draining", "wave-controller"),
         ("action.succeeded", "reconciler"),
     ],
 )
@@ -723,16 +715,16 @@ def test_hub_store_rejects_timestamp_conflicts_outside_reconciler_durable_events
     producer: Producer,
 ) -> None:
     lock = _lock(remote_spec)
-    store = HubCampaignStore("org", api=FakeCampaignApi(tmp_path))
-    store.create_campaign(lock, b"manifest", _submitted(lock))
+    store = HubRunStore("org", api=FakeRunApi(tmp_path))
+    store.create_run(lock, b"manifest", _submitted(lock))
     payload: LifecyclePayload | ActionOutcomePayload
     if kind == "action.succeeded":
         payload = ActionOutcomePayload(action_id="action-one")
     else:
         payload = LifecyclePayload(message="draining")
     event = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind=kind,
         producer=producer,
         payload=payload,
@@ -740,10 +732,10 @@ def test_hub_store_rejects_timestamp_conflicts_outside_reconciler_durable_events
         identifier=lambda: "8" * 32,
     )
 
-    assert store.ensure_event(lock.campaign_id, event)
-    with pytest.raises(CampaignConflict, match="event conflicts"):
+    assert store.ensure_event(lock.run_id, event)
+    with pytest.raises(RunConflict, match="event conflicts"):
         store.ensure_event(
-            lock.campaign_id,
+            lock.run_id,
             event.model_copy(update={"observed_at": NOW + timedelta(minutes=5)}),
         )
 
@@ -752,19 +744,19 @@ def test_hub_store_reports_malformed_records(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
-    store.create_campaign(lock, b"manifest", _submitted(lock))
-    api.files[f"campaigns/{lock.campaign_id}/campaign.lock.json"] = b"not-json"
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
+    store.create_run(lock, b"manifest", _submitted(lock))
+    api.files[f"runs/{lock.run_id}/run.lock.json"] = b"not-json"
 
     with pytest.raises(ControlError, match="cannot be read"):
-        store.load_campaign(lock.campaign_id)
+        store.load_run(lock.run_id)
 
 
 def test_hub_store_non_conflict_error_is_not_retried(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
-    class FailingApi(FakeCampaignApi):
+    class FailingApi(FakeRunApi):
         def create_commit(
             self, repo_id: str, operations: list[object], **kwargs: object
         ) -> object:
@@ -773,7 +765,7 @@ def test_hub_store_non_conflict_error_is_not_retried(
     lock = _lock(remote_spec)
 
     with pytest.raises(HfHubHTTPError):
-        HubCampaignStore("org", api=FailingApi(tmp_path)).create_campaign(
+        HubRunStore("org", api=FailingApi(tmp_path)).create_run(
             lock, b"manifest", _submitted(lock)
         )
 
@@ -782,20 +774,18 @@ def test_hub_store_files_are_canonical_json(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    HubCampaignStore("org", api=api).create_campaign(
-        lock, b"manifest", _submitted(lock)
-    )
-    raw = api.files[f"campaigns/{lock.campaign_id}/campaign.lock.json"]
+    api = FakeRunApi(tmp_path)
+    HubRunStore("org", api=api).create_run(lock, b"manifest", _submitted(lock))
+    raw = api.files[f"runs/{lock.run_id}/run.lock.json"]
 
     assert raw.endswith(b"\n")
     assert json.loads(raw) == lock.model_dump(mode="json")
 
 
-def test_campaign_projection_corpus_is_stable(remote_spec: ExperimentSpec) -> None:
+def test_run_projection_corpus_is_stable(remote_spec: ExperimentSpec) -> None:
     lock = _lock(remote_spec)
     submitted = _submitted(lock)
-    events: list[CampaignEvent] = [submitted]
+    events: list[RunEvent] = [submitted]
     outcomes = ["action.succeeded", "action.failed", "action.ambiguous"]
     action_kinds = ["submit-wave", "cancel-wave", "publish-results"]
     for index, (outcome, action_kind) in enumerate(
@@ -804,8 +794,8 @@ def test_campaign_projection_corpus_is_stable(remote_spec: ExperimentSpec) -> No
         action_id = f"action-{index}"
         events.append(
             new_event(
-                subject_type="campaign",
-                subject_id=lock.campaign_id,
+                subject_type="run",
+                subject_id=lock.run_id,
                 kind="action.reserved",
                 producer="reconciler",
                 payload=ActionReservedPayload(
@@ -820,8 +810,8 @@ def test_campaign_projection_corpus_is_stable(remote_spec: ExperimentSpec) -> No
         )
         events.append(
             new_event(
-                subject_type="campaign",
-                subject_id=lock.campaign_id,
+                subject_type="run",
+                subject_id=lock.run_id,
                 kind=cast(EventKind, outcome),
                 producer="reconciler",
                 payload=ActionOutcomePayload(
@@ -833,29 +823,29 @@ def test_campaign_projection_corpus_is_stable(remote_spec: ExperimentSpec) -> No
                 identifier=lambda index=index: f"{index + 10:032x}",
             )
         )
-    active = project_campaign(lock, list(reversed(events)))
+    active = project_run(lock, list(reversed(events)))
     cancelled = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.cancel-requested",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.cancel-requested",
         producer="cli",
         payload=CancellationPayload(reason="operator"),
         clock=lambda: NOW + timedelta(seconds=2),
         identifier=lambda: "a" * 32,
     )
     draining = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.draining",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.draining",
         producer="reconciler",
         payload=LifecyclePayload(message="draining"),
         clock=lambda: NOW + timedelta(seconds=3),
         identifier=lambda: "b" * 32,
     )
     manual = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-required",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-required",
         producer="reconciler",
         payload=LifecyclePayload(message="cleanup failed"),
         clock=lambda: NOW + timedelta(seconds=4),
@@ -863,9 +853,9 @@ def test_campaign_projection_corpus_is_stable(remote_spec: ExperimentSpec) -> No
     )
     projections = [
         active,
-        project_campaign(lock, [submitted, cancelled, cancelled]),
-        project_campaign(lock, [submitted, cancelled, draining, cancelled]),
-        project_campaign(lock, [submitted, cancelled, draining, manual, cancelled]),
+        project_run(lock, [submitted, cancelled, cancelled]),
+        project_run(lock, [submitted, cancelled, draining, cancelled]),
+        project_run(lock, [submitted, cancelled, draining, manual, cancelled]),
     ]
     encoded = json.dumps(
         [projection.model_dump(mode="json") for projection in projections],
@@ -874,7 +864,7 @@ def test_campaign_projection_corpus_is_stable(remote_spec: ExperimentSpec) -> No
     ).encode()
 
     assert hashlib.sha256(encoded).hexdigest() == (
-        "32b4a273d7d1c93615339d770e955e9d32b786613e55819f33b44ccd86390b40"
+        "d4351f26dff5d4dd2dbb0dfd3e25ac5039f1091e1b2f95d60d8300fe298d1f65"
     )
 
 
@@ -884,9 +874,9 @@ def test_manual_intervention_resolution_requires_manual_state(
     lock = _lock(remote_spec)
     submitted = _submitted(lock)
     resolved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-resolved",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-resolved",
         producer="cli",
         payload=ManualInterventionResolutionPayload(
             wave_ids=["wave-one"], message="cleanup verified"
@@ -898,20 +888,18 @@ def test_manual_intervention_resolution_requires_manual_state(
     with pytest.raises(
         ControlError, match="manual intervention can only be resolved while required"
     ):
-        project_campaign(lock, [submitted, resolved])
+        project_run(lock, [submitted, resolved])
 
 
-@pytest.mark.parametrize(
-    "prior_kind", ["campaign.cancel-requested", "campaign.draining"]
-)
+@pytest.mark.parametrize("prior_kind", ["run.cancel-requested", "run.draining"])
 def test_manual_intervention_resolution_preserves_cancellation(
     remote_spec: ExperimentSpec, prior_kind: str
 ) -> None:
     lock = _lock(remote_spec)
     submitted = _submitted(lock)
     prior = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind=cast(EventKind, prior_kind),
         producer="reconciler" if prior_kind.endswith("draining") else "cli",
         payload=(
@@ -923,18 +911,18 @@ def test_manual_intervention_resolution_preserves_cancellation(
         identifier=lambda: "a" * 32,
     )
     required = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-required",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-required",
         producer="reconciler",
         payload=LifecyclePayload(parent_id="wave-one", message="cleanup failed"),
         clock=lambda: NOW + timedelta(seconds=2),
         identifier=lambda: "b" * 32,
     )
     resolved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-resolved",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-resolved",
         producer="cli",
         payload=ManualInterventionResolutionPayload(
             wave_ids=["wave-one"], message="cleanup verified"
@@ -943,7 +931,7 @@ def test_manual_intervention_resolution_preserves_cancellation(
         identifier=lambda: "c" * 32,
     )
 
-    projection = project_campaign(lock, [submitted, prior, required, resolved])
+    projection = project_run(lock, [submitted, prior, required, resolved])
 
     expected = "draining" if prior_kind.endswith("draining") else "cancel_requested"
     assert projection.status == expected
@@ -955,27 +943,27 @@ def test_cancellation_during_manual_intervention_remains_requested(
     lock = _lock(remote_spec)
     submitted = _submitted(lock)
     required = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-required",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-required",
         producer="reconciler",
         payload=LifecyclePayload(parent_id="wave-one", message="cleanup failed"),
         clock=lambda: NOW + timedelta(seconds=1),
         identifier=lambda: "a" * 32,
     )
     cancelled = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.cancel-requested",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.cancel-requested",
         producer="cli",
         payload=CancellationPayload(reason="stop"),
         clock=lambda: NOW + timedelta(seconds=2),
         identifier=lambda: "b" * 32,
     )
     resolved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-resolved",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-resolved",
         producer="cli",
         payload=ManualInterventionResolutionPayload(
             wave_ids=["wave-one"], message="cleanup verified"
@@ -984,7 +972,7 @@ def test_cancellation_during_manual_intervention_remains_requested(
         identifier=lambda: "c" * 32,
     )
 
-    projection = project_campaign(lock, [submitted, required, cancelled, resolved])
+    projection = project_run(lock, [submitted, required, cancelled, resolved])
 
     assert projection.status == "cancel_requested"
 
@@ -995,37 +983,37 @@ def test_draining_during_manual_intervention_is_applied_after_resolution(
     lock = _lock(remote_spec)
     submitted = _submitted(lock)
     required = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-required",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-required",
         producer="reconciler",
         payload=LifecyclePayload(parent_id="wave-one"),
         clock=lambda: NOW + timedelta(seconds=1),
         identifier=lambda: "a" * 32,
     )
     draining = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.draining",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.draining",
         producer="reconciler",
         payload=LifecyclePayload(message="draining"),
         clock=lambda: NOW + timedelta(seconds=2),
         identifier=lambda: "b" * 32,
     )
     resolved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.manual-intervention-resolved",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.manual-intervention-resolved",
         producer="cli",
         payload=ManualInterventionResolutionPayload(wave_ids=["wave-one"]),
         clock=lambda: NOW + timedelta(seconds=3),
         identifier=lambda: "c" * 32,
     )
 
-    assert project_campaign(lock, [submitted, required, draining]).status == (
+    assert project_run(lock, [submitted, required, draining]).status == (
         "manual_intervention"
     )
-    assert project_campaign(lock, [submitted, required, draining, resolved]).status == (
+    assert project_run(lock, [submitted, required, draining, resolved]).status == (
         "draining"
     )
 
@@ -1034,12 +1022,12 @@ def test_control_store_commit_corpus_is_stable(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
     submitted = _submitted(lock)
     reserved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
@@ -1052,8 +1040,8 @@ def test_control_store_commit_corpus_is_stable(
         identifier=lambda: "d" * 32,
     )
     outcome = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.succeeded",
         producer="reconciler",
         payload=ActionOutcomePayload(
@@ -1068,10 +1056,10 @@ def test_control_store_commit_corpus_is_stable(
         "targets": ["shard-one"],
     }
 
-    store.create_campaign(lock, b"kind: Experiment\n", submitted)
-    assert store.reserve_action(lock.campaign_id, action, reserved)
-    store.append_event(lock.campaign_id, outcome)
-    observed_lock, observed_events = store.load_campaign(lock.campaign_id)
+    store.create_run(lock, b"kind: Experiment\n", submitted)
+    assert store.reserve_action(lock.run_id, action, reserved)
+    store.append_event(lock.run_id, outcome)
+    observed_lock, observed_events = store.load_run(lock.run_id)
     corpus = {
         "files": {
             path: payload.decode() for path, payload in sorted(api.files.items())
@@ -1085,7 +1073,7 @@ def test_control_store_commit_corpus_is_stable(
     ).encode()
 
     assert hashlib.sha256(encoded).hexdigest() == (
-        "db15ca34294f5b2ea5c8e816df92fa1e5f3a22337c4874d1038349ffe1407a9f"
+        "3bffb0fda3b50690488d9e7164d8c61fdbae26d95d7f62dcbb5d2f364c95788f"
     )
 
 
@@ -1095,35 +1083,31 @@ def test_control_projection_rejects_each_submission_mismatch(
     lock = _lock(remote_spec)
     submitted = _submitted(lock)
     mismatches = [
-        submitted.model_copy(update={"kind": "campaign.cancel-requested"}),
-        submitted.model_copy(update={"subject_type": "run"}),
-        submitted.model_copy(update={"subject_id": "different-campaign"}),
+        submitted.model_copy(update={"kind": "run.cancel-requested"}),
+        submitted.model_copy(update={"subject_type": "execution"}),
+        submitted.model_copy(update={"subject_id": "different-run"}),
         submitted.model_copy(
-            update={
-                "payload": CampaignSubmittedPayload(plan_digest="sha256:" + "f" * 64)
-            }
+            update={"payload": RunSubmittedPayload(plan_digest="sha256:" + "f" * 64)}
         ),
     ]
 
     for mismatch in mismatches:
         with pytest.raises(ControlError) as captured:
-            project_campaign(lock, [mismatch])
-        assert (
-            str(captured.value) == "campaign submission event does not match its lock"
-        )
+            project_run(lock, [mismatch])
+        assert str(captured.value) == "run submission event does not match its lock"
     with pytest.raises(ControlError) as captured:
-        project_campaign(lock, [])
-    assert str(captured.value) == "campaign has no submission event"
+        project_run(lock, [])
+    assert str(captured.value) == "run has no submission event"
 
 
-def test_action_reservation_validates_kind_and_campaign_separately(
+def test_action_reservation_validates_kind_and_run_separately(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    store = HubCampaignStore("org", api=FakeCampaignApi(tmp_path))
+    store = HubRunStore("org", api=FakeRunApi(tmp_path))
     outcome = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.succeeded",
         producer="reconciler",
         payload=ActionOutcomePayload(action_id="action-one"),
@@ -1131,8 +1115,8 @@ def test_action_reservation_validates_kind_and_campaign_separately(
         identifier=lambda: "f" * 32,
     )
     reservation = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
@@ -1147,7 +1131,7 @@ def test_action_reservation_validates_kind_and_campaign_separately(
 
     for invalid in [outcome, reservation.model_copy(update={"subject_id": "wrong"})]:
         with pytest.raises(ValueError) as captured:
-            store.reserve_action(lock.campaign_id, {}, invalid)
+            store.reserve_action(lock.run_id, {}, invalid)
         assert str(captured.value) == (
             "action reservation requires its reservation event"
         )
@@ -1157,30 +1141,30 @@ def test_hub_store_ensure_event_retries_parent_conflicts_with_exact_commit(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
+    api = FakeRunApi(tmp_path)
     api.conflicts = 2
-    store = HubCampaignStore("org", api=api)
+    store = HubRunStore("org", api=api)
     event = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.cancel-requested",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.cancel-requested",
         producer="cli",
         payload=CancellationPayload(reason="operator"),
         clock=lambda: NOW,
         identifier=lambda: "7" * 32,
     )
 
-    assert store.ensure_event(lock.campaign_id, event) is True
+    assert store.ensure_event(lock.run_id, event) is True
     assert len(api.info_calls) == 3
     assert api.commits == [
         {
-            "commit_message": "chore: request campaign cancellation",
+            "commit_message": "chore: request run cancellation",
             "repo_type": "dataset",
             "revision": "main",
             "parent_commit": f"{3:040x}",
         }
     ]
-    event_path = f"campaigns/{lock.campaign_id}/events/{event.event_id}.json"
+    event_path = f"runs/{lock.run_id}/events/{event.event_id}.json"
     assert json.loads(api.files[event_path]) == event.model_dump(mode="json")
 
 
@@ -1188,12 +1172,12 @@ def test_hub_store_ensure_event_has_bounded_parent_conflict_retries(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
+    api = FakeRunApi(tmp_path)
     api.conflicts = 20
-    store = HubCampaignStore("org", api=api)
+    store = HubRunStore("org", api=api)
 
     with pytest.raises(ControlError) as captured:
-        store.ensure_event(lock.campaign_id, _submitted(lock))
+        store.ensure_event(lock.run_id, _submitted(lock))
 
     assert str(captured.value) == "control repository remained contended"
     assert len(api.info_calls) == 8
@@ -1204,11 +1188,11 @@ def test_hub_store_reservation_commit_contains_action_and_event_atomically(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    store = HubCampaignStore("org", api=api)
+    api = FakeRunApi(tmp_path)
+    store = HubRunStore("org", api=api)
     event = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
@@ -1226,10 +1210,10 @@ def test_hub_store_reservation_commit_contains_action_and_event_atomically(
         "trial_ids": ["trial-one"],
     }
 
-    assert store.reserve_action(lock.campaign_id, action, event) is True
+    assert store.reserve_action(lock.run_id, action, event) is True
 
-    reservation_path = f"campaigns/{lock.campaign_id}/reservations/act-atomic.json"
-    event_path = f"campaigns/{lock.campaign_id}/events/{event.event_id}.json"
+    reservation_path = f"runs/{lock.run_id}/reservations/act-atomic.json"
+    event_path = f"runs/{lock.run_id}/events/{event.event_id}.json"
     assert set(api.files) == {reservation_path, event_path}
     assert json.loads(api.files[reservation_path]) == action
     assert json.loads(api.files[event_path]) == event.model_dump(mode="json")
@@ -1242,8 +1226,8 @@ def test_hub_store_reservation_commit_contains_action_and_event_atomically(
         }
     ]
     conflicting = {**action, "kind": "submit-wave"}
-    with pytest.raises(CampaignConflict) as captured:
-        store.reserve_action(lock.campaign_id, conflicting, event)
+    with pytest.raises(RunConflict) as captured:
+        store.reserve_action(lock.run_id, conflicting, event)
     assert str(captured.value) == "action reservation content conflicts"
 
 
@@ -1252,8 +1236,8 @@ def test_hub_store_reservation_retries_only_parent_conflicts(
 ) -> None:
     lock = _lock(remote_spec)
     event = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
@@ -1265,26 +1249,26 @@ def test_hub_store_reservation_retries_only_parent_conflicts(
         clock=lambda: NOW,
         identifier=lambda: "9" * 32,
     )
-    contended = FakeCampaignApi(tmp_path)
+    contended = FakeRunApi(tmp_path)
     contended.conflicts = 20
 
     with pytest.raises(ControlError) as captured:
-        HubCampaignStore("org", api=contended).reserve_action(
-            lock.campaign_id, {"action_id": "act-retry"}, event
+        HubRunStore("org", api=contended).reserve_action(
+            lock.run_id, {"action_id": "act-retry"}, event
         )
 
     assert str(captured.value) == "control repository remained contended"
     assert len(contended.info_calls) == 8
 
-    class FailingApi(FakeCampaignApi):
+    class FailingApi(FakeRunApi):
         def create_commit(
             self, repo_id: str, operations: list[object], **kwargs: object
         ) -> object:
             raise _http_error(500)
 
     with pytest.raises(HfHubHTTPError):
-        HubCampaignStore("org", api=FailingApi(tmp_path)).reserve_action(
-            lock.campaign_id, {"action_id": "act-retry"}, event
+        HubRunStore("org", api=FailingApi(tmp_path)).reserve_action(
+            lock.run_id, {"action_id": "act-retry"}, event
         )
 
 
@@ -1292,12 +1276,12 @@ def test_hub_store_rejects_non_object_action_reservation(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
     lock = _lock(remote_spec)
-    api = FakeCampaignApi(tmp_path)
-    path = f"campaigns/{lock.campaign_id}/reservations/act-invalid.json"
+    api = FakeRunApi(tmp_path)
+    path = f"runs/{lock.run_id}/reservations/act-invalid.json"
     api.files[path] = b"[]"
-    store = HubCampaignStore("org", api=api)
+    store = HubRunStore("org", api=api)
 
     with pytest.raises(ControlError) as captured:
-        store.load_action_reservations(lock.campaign_id)
+        store.load_action_reservations(lock.run_id)
 
     assert str(captured.value) == f"action reservation must be an object: {path}"

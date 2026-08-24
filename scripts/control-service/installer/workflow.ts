@@ -69,7 +69,7 @@ export type ConfigureProgressEvent =
   | { kind: "runtime_waiting"; elapsedMilliseconds: number }
   | { kind: "runtime_wait_complete"; elapsedMilliseconds: number }
   | { kind: "readiness_wait_started" }
-  | { kind: "readiness_rebuilding"; elapsedMilliseconds: number }
+  | { kind: "readiness_initializing"; elapsedMilliseconds: number }
   | { kind: "readiness_ready"; elapsedMilliseconds: number }
   | { kind: "readiness_timed_out"; elapsedMilliseconds: number };
 
@@ -1032,7 +1032,7 @@ async function verifyPlan(
   options: {
     expectedWriteMode?: WriteMode;
     requireAuthenticated?: boolean;
-    requireEmptyCampaigns?: boolean;
+    requireEmptyRuns?: boolean;
     pollConfigureReadiness?: boolean;
   } = {},
 ): Promise<VerificationResult> {
@@ -1144,12 +1144,12 @@ async function verifyPlan(
         });
         break;
       }
-      if (ready.status !== 503 || !exactStatus(ready.body, "rebuilding")) {
+      if (ready.status !== 200 || !exactStatus(ready.body, "initializing")) {
         throw new Error("anonymous readiness verification failed");
       }
       if (afterRequest >= nextHeartbeat) {
         reportConfigureProgress(dependencies, {
-          kind: "readiness_rebuilding",
+          kind: "readiness_initializing",
           elapsedMilliseconds: Math.max(0, afterRequest - startedAt),
         });
         nextHeartbeat = afterRequest + policy.readinessHeartbeatMilliseconds;
@@ -1187,9 +1187,9 @@ async function verifyPlan(
     }
     assertSystem(system.body, plan.source.revision, expectedWriteMode);
     authenticatedSystem = "passed";
-    if (options.requireEmptyCampaigns) {
-      const campaigns = await dependencies.http.getJson(
-        new URL("/api/v1/campaigns?limit=1", origin),
+    if (options.requireEmptyRuns) {
+      const runs = await dependencies.http.getJson(
+        new URL("/api/v1/runs?limit=1", origin),
         {
           bearer,
           timeoutMs: 10_000,
@@ -1197,13 +1197,13 @@ async function verifyPlan(
         },
       );
       if (
-        campaigns.status !== 200 ||
-        !isRecord(campaigns.body) ||
-        !Array.isArray(campaigns.body.items) ||
-        campaigns.body.items.length !== 0 ||
-        campaigns.body.next_cursor !== null
+        runs.status !== 200 ||
+        !isRecord(runs.body) ||
+        !Array.isArray(runs.body.items) ||
+        runs.body.items.length !== 0 ||
+        runs.body.next_cursor !== null
       ) {
-        throw new Error("activation requires an empty campaign projection");
+        throw new Error("activation requires an empty run projection");
       }
     }
   }
@@ -1356,7 +1356,7 @@ export async function activateInstall(
       const preflight = await verifyPlan(plan, dependencies, expectedUploadSha, {
         expectedWriteMode: currentMode,
         requireAuthenticated: true,
-        requireEmptyCampaigns: currentMode === "disabled",
+        requireEmptyRuns: currentMode === "disabled",
       });
       if (currentMode === "enabled") {
         return {

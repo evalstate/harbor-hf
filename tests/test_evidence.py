@@ -331,13 +331,14 @@ def test_json_and_event_writers_create_nested_canonical_records(
     event_path = tmp_path / "more" / "events.jsonl"
 
     write_json(json_path, {"z": 1, "a": datetime(2026, 1, 1, tzinfo=UTC)})
-    append_event(event_path, "started", run_id="run-1")
+    append_event(event_path, "started", execution_id="execution-1")
 
     assert json_path.read_text() == (
         '{\n  "a": "2026-01-01 00:00:00+00:00",\n  "z": 1\n}\n'
     )
     assert event_path.read_text() == (
-        '{"at": "2026-07-13T01:02:03+00:00", "event": "started", "run_id": "run-1"}\n'
+        '{"at": "2026-07-13T01:02:03+00:00", "event": "started", '
+        '"execution_id": "execution-1"}\n'
     )
 
 

@@ -1,8 +1,8 @@
 # Normalized Result Publication
 
 The private artifact Bucket is canonical evidence and result Datasets are
-derived indexes. Campaign reconciliation invokes publication automatically for
-a completed campaign; `harbor-hf results publish` exposes the same verified,
+derived indexes. Run reconciliation invokes publication automatically for
+a completed run; `harbor-hf results publish` exposes the same verified,
 idempotent path for explicit operation and recovery.
 
 The approved [control service
@@ -29,14 +29,14 @@ public catalog.
 
 An attempt receipt is evidence, not proof that a task has a valid result. Bucket
 publication requires exactly one selected receipt for every locked logical task.
-Each selection must pass the evidence policy in the campaign lock, match its task
-and campaign, and bind the recorded provenance. A provider-backed Pi policy may
+Each selection must pass the evidence policy in the run lock, match its task
+and run, and bind the recorded provenance. A provider-backed Pi policy may
 require finite positive `input_tokens` and `output_tokens`. The outcome name does
 not override that rule.
 
-The publisher must reject a campaign with a missing selection, duplicate selection,
+The publisher must reject a run with a missing selection, duplicate selection,
 invalid required metric, exhausted task, incomplete normalized coverage, pending
-action, or pending cleanup. Campaign completion and publication run the same pure
+action, or pending cleanup. Run completion and publication run the same pure
 selection check independently so one faulty state transition cannot publish an
 invalid result.
 
@@ -56,20 +56,20 @@ a deterministic supersession record that binds the old and new publication IDs a
 digests. The old publication remains directly readable. Result views derive which
 publication is current and which is superseded from the append-only record.
 
-Projection replay may report an old campaign or publication as invalid when its
+Projection replay may report an old run or publication as invalid when its
 historical selected attempt does not pass the read-only evidence audit. This derived
-state does not rewrite the historical campaign, attempt, receipt, result, or catalog
+state does not rewrite the historical run, attempt, receipt, result, or catalog
 object. A supersession retry adopts the existing matching record and cannot point to
 a different replacement.
 
-## Completed campaigns from before the visibility cutover
+## Completed runs from before the visibility cutover
 
-Do not edit an immutable campaign request or rerun an accepted agent to repair
+Do not edit an immutable run request or rerun an accepted agent to repair
 publication. Create a `harbor-hf/publication-correction/v1` YAML record instead:
 
 ```yaml
 schema_version: harbor-hf/publication-correction/v1
-campaign_id: 20260813T051430Z-ce313eb9cb-08a5ffd196
+run_id: 20260813T051430Z-ce313eb9cb-08a5ffd196
 source_manifest_digest: sha256:6c61df50e1239efefde3089ab9019e4e55dc671fd7f129548a437e86fd1a9f39
 source_plan_digest: sha256:ce313eb9cbdc8caca8b76383f027b17327cb294168984b6ee0bf3376ec1c0dcd
 result_dataset: example-org/example-results
@@ -86,7 +86,7 @@ harbor-hf results publish-correction CORRECTION.yaml \
 ```
 
 The command accepts only a source request without visibility fields. It checks
-the source manifest and plan digests against the immutable campaign lock, then
+the source manifest and plan digests against the immutable run lock, then
 checks both destination visibilities before it reads evidence. It uses the
 normal checksum-verifying and idempotent publisher. It does not change the old
 request, lock, evidence, agent output, or repository visibility. A current
@@ -96,13 +96,13 @@ manifest must use normal publication and cannot use this correction path.
 
 A run is publishable only when its evidence prefix has `_SUCCESS`, has no other
 top-level terminal marker, and every non-marker object is present in and matches
-`checksums.json`. The checksummed `run-summary.json` must declare that it was
+`checksums.json`. The checksummed `execution-summary.json` must declare that it was
 sanitized and must describe an ordinary, complete run. Complete means every
 logical trial reached a scored terminal outcome: a valid verifier result, or a
 zero-score failed trial after its bounded physical retry budget was exhausted.
-The checksummed `run.lock.json` must contain the same immutable `run_id`.
+The checksummed `execution.lock.json` must contain the same immutable `execution_id`.
 
-The publisher reads normalized values only from `run-summary.json`. It never
+The publisher reads normalized values only from `execution-summary.json`. It never
 copies evidence object bytes into a Dataset. Raw Harbor job trees, sessions,
 trajectories, task source, task instructions, `manifest.yaml`, `harbor.log`, and
 `artifacts.tar.gz` are not publishable artifacts. Task rows contain only a task
@@ -123,15 +123,15 @@ Common trace fields:
 | --- | --- | --- |
 | `schema_version` | string | Exact table schema version |
 | `publication_id` | string | Deterministic identity of the source run evidence |
-| `run_id` | string | Immutable run identity |
+| `execution_id` | string | Immutable run identity |
 | `source_bucket` | string | Canonical private evidence Bucket |
 | `source_prefix` | string | Canonical run evidence prefix |
 | `source_checksum` | string | Digest of the verified checksum manifest |
-| `run_lock_path` | string | Canonical path of the immutable run lock |
-| `run_lock_sha256` | string | Verified run-lock object checksum |
+| `execution_lock_path` | string | Canonical path of the immutable run lock |
+| `execution_lock_sha256` | string | Verified execution-lock object checksum |
 | `control_commit` | string | Immutable control Dataset commit used to publish |
 
-`runs` adds campaign, experiment, evaluation identity, publication role,
+`runs` adds run, experiment, evaluation identity, publication role,
 source-publication references, benchmark, result classification, completion
 times, model, deployment, agent, fixed planned-trial denominator, task-outcome
 counts, quality, and aggregate child-count fields. `trials` adds the logical
@@ -139,7 +139,7 @@ trial identity, task name and digest, attempt, selected execution, and one of
 five outcomes: `scored`, `agent_failed`, `benchmark_failed`,
 `infrastructure_exhausted`, or `unsupported`. Every non-scored trial has a zero
 reward metric and
-selects its final failed execution. `executions` adds the physical execution
+selects its final failed execution. `attempts` adds the physical execution
 identity, trial identity, attempt, runtime kind, `succeeded`, `failed`, or
 `cancelled` status, typed failure category, timestamps, retry reason, and
 optional remote Job identity. `metrics` adds a deterministic metric
@@ -155,7 +155,7 @@ model-profile revision remains available through the checksummed private run
 lock; the public row does not make an unsupported served-weight claim.
 
 The global index uses `harbor-hf/results/index/v1`. It contains one row per
-publication: run and campaign IDs, benchmark, ordinary/complete labels,
+publication: run and run IDs, benchmark, ordinary/complete labels,
 completion time, model and agent identity, result Dataset and exact revision,
 source checksum, and control commit. It contains no trial, execution, metric,
 artifact, session, or task-content data.
@@ -169,17 +169,17 @@ the denominator or suppressing valid results from the rest of the run. A run is
 no valid completed trial, missing terminal evidence, or inconsistent checksums
 is not publishable as an ordinary complete result.
 
-A recorded partial campaign may be sealed explicitly after every wave is closed:
+A recorded partial run may be sealed explicitly after every wave is closed:
 
 ```bash
-harbor-hf campaign seal CAMPAIGN_ID --namespace NAMESPACE
+harbor-hf run seal RUN_ID --namespace NAMESPACE
 ```
 
 Sealing preserves scored and exhausted outcomes and converts only `retry_wait`
 trials with a verified latest failed execution into the corresponding typed
 zero-score outcome. It refuses planned, active, cancelled, unverified, or
 all-failed runs. The operation writes canonical `_SUCCESS` run evidence without
-rewriting the immutable partial campaign summary; normal result verification
+rewriting the immutable partial run summary; normal result verification
 and publication remain unchanged.
 
 Each publication keeps its immutable index row. The publisher also rewrites
@@ -215,12 +215,12 @@ tables, receipts, Bucket evidence, sessions, and trajectories remain intact.
 Only a publication already classified as `final` can be promoted.
 
 The schema review intentionally keeps a few domain-qualified names and repeated
-fields. `logical_attempt` and `physical_attempt` preserve the campaign model's
+fields. `logical_attempt` and `physical_attempt` preserve the run model's
 benchmark-versus-infrastructure distinction. `hardware`, `model_id`,
 `deployment_id`, and `agent_id` retain resolved manifest vocabulary rather than
 creating presentation-only aliases. `result_kind` and `outcome` remain explicit
 labels so ordinary complete rows cannot be mistaken for future composite,
-manual, partial, or invalid records. `run_lock_path` and `source_checksum` are
+manual, partial, or invalid records. `execution_lock_path` and `source_checksum` are
 repeated because every row must be independently traceable without relying on a
 join or an implicit filename convention.
 
@@ -229,19 +229,19 @@ join or an implicit filename convention.
 Rows are sorted by stable IDs. Metric and artifact IDs are hashes of their
 stable owner and measurement or artifact identity. A publication ID is a hash
 of the active v1 publication contract, run ID, source location, verified source
-checksum, run-lock checksum, and normalized execution-profile digest. Contract
+checksum, execution-lock checksum, and normalized execution-profile digest. Contract
 binding gives a projection cutover a new immutable identity without rewriting
 earlier receipts, while profile normalization changes rotate identity
 automatically. `control_commit` is
 the Hub commit that last modified the immutable
-campaign lock, not the moving control-repository head. Later events and leases
+run lock, not the moving control-repository head. Later events and leases
 therefore change neither the publication identity nor its Parquet bytes.
 Active index and catalog windows keep one row per run ID, so a contract-bound
 replacement hides the prior projection without deleting its immutable files.
 Parquet files use deterministic paths:
 
 ```text
-data/<table>/schema=v1/campaign=<campaign-id>/<publication-id>.parquet
+data/<table>/schema=v1/run=<run-id>/<publication-id>.parquet
 publications/<publication-id>.json
 ```
 
@@ -255,7 +255,7 @@ referential and evidence-trace invariants.
 Every result projection records a canonical digest of the complete model,
 deployment, and agent profiles from its verified run lock after removing local
 profile IDs, endpoint resource identity, and provider admission-cost estimates.
-The cost estimates limit campaign spending but do not change inference. The
+The cost estimates limit run spending but do not change inference. The
 served model name, concurrency, retry count, routing, timeout, generation
 parameters, and agent settings remain part of the digest. Composed publications
 reference every source at an exact

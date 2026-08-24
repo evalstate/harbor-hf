@@ -1,6 +1,6 @@
 # Launch and monitoring
 
-Use the application-protected control Space for new Harbor-HF campaigns. The control API and immutable Bucket records are authoritative. HF Job logs are diagnostic and do not define campaign completion.
+Use the application-protected control Space for new Harbor-HF runs. The control API and immutable Bucket records are authoritative. HF Job logs are diagnostic and do not define run completion.
 
 ## Pre-submission checks
 
@@ -19,14 +19,14 @@ Resolve the exact benchmark and model aliases plus the harness, deployment, and 
 
 Before paid work, apply the paid-compute gate. Record the approved ceiling in micro-USD. Confirm that the cumulative authorized spend still covers every failed Job, repair, provider request, and active endpoint hour.
 
-Do not create a repository, Bucket, Space, Dataset, schedule, lease store, or status store for a campaign.
+Do not create a repository, Bucket, Space, Dataset, schedule, lease store, or status store for a run.
 
-## Campaign submission
+## Run submission
 
 Submit one profile-based request:
 
 ```bash
-uv run harbor-hf campaign submit \
+uv run harbor-hf run submit \
   --benchmark <benchmark-profile> \
   --model <model-profile> \
   --harness <harness-profile> \
@@ -37,16 +37,16 @@ uv run harbor-hf campaign submit \
   --yes
 ```
 
-Keep the campaign ID and action ID from the response. A repeated request from the same actor with the same idempotency key must adopt the campaign. It must not create another logical run.
+Keep the run ID and action ID from the response. A repeated request from the same actor with the same idempotency key must adopt the run. It must not create another logical run.
 
-The campaign lock records the resolved profile identities, exact task IDs, input digests, source revision, and cost ceiling before the control service creates physical work.
+The run lock records the resolved profile identities, exact task IDs, input digests, source revision, and cost ceiling before the control service creates physical work.
 
 ## Live monitoring
 
 Use the API projection or web console:
 
 ```bash
-uv run harbor-hf campaign status <campaign-id>
+uv run harbor-hf run status <run-id>
 uv run harbor-hf jobs
 uv run harbor-hf endpoints
 uv run harbor-hf results
@@ -84,7 +84,7 @@ A stopped Job is not enough to declare a task complete. The selected attempt rec
 Only an unsealed task whose latest receipt is an eligible infrastructure failure can receive a replacement:
 
 ```bash
-uv run harbor-hf campaign retry-infrastructure <campaign-id> \
+uv run harbor-hf run retry-infrastructure <run-id> \
   --task <task-id> \
   --reason "<infrastructure reason>" \
   --yes
@@ -97,7 +97,7 @@ A valid task never runs again. Publication recovery never runs a task.
 ## Cancellation
 
 ```bash
-uv run harbor-hf campaign cancel <run-id> --yes
+uv run harbor-hf run cancel <run-id> --yes
 ```
 
 Cancellation seals open logical tasks, suppresses queued launches that no longer have open tasks, preserves existing evidence, and continues observing already-created remote resources until cleanup is known.
@@ -111,19 +111,19 @@ For every control-owned endpoint:
 3. Record active hourly cost.
 4. Request pause at the terminal boundary.
 5. Poll until the observed ready replica count is zero.
-6. Keep the campaign incomplete while cleanup remains unverified.
+6. Keep the run incomplete while cleanup remains unverified.
 
 Do not interpret a pause request or HTTP success as zero active replicas. If the control process stops during cleanup, the durable action receipt must let the restarted process continue from the same endpoint identity.
 
 ## Completion gate
 
-A campaign is complete only when:
+A run is complete only when:
 
 - every logical task has one terminal selection
 - no control action is pending
 - every owned endpoint has verified cleanup
 - the result publication receipt is durable
 - normalized rows and catalog objects validate
-- observed spend does not exceed the campaign ceiling
+- observed spend does not exceed the run ceiling
 
 Retain Jobs, attempts, evidence, metrics, costs, endpoint receipts, publication receipts, and audit records. Do not delete legacy resources until the private consumer and uniqueness audit authorizes that exact resource.

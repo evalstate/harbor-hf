@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from harbor_hf.controller_status import ControllerCapacityEvidence
-from harbor_hf.models import CampaignControllerSpec
+from harbor_hf.models import RunControllerSpec
 
 
 class FrozenModel(BaseModel):
@@ -109,7 +109,7 @@ def assess_observed_capacity(
     remaining_trials: int,
     remaining_waves: int,
     available_seconds: int,
-    policy: CampaignControllerSpec,
+    policy: RunControllerSpec,
 ) -> ControllerCapacityEvidence | None:
     if not durations_seconds:
         return None

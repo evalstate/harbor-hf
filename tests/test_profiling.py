@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from harbor_hf.endpoints import bind_endpoint
+from harbor_hf.executions import build_execution_lock
 from harbor_hf.harbor_adapter.errors import HarborTrialFailure
 from harbor_hf.harbor_adapter.models import HarborCompatibilityTrial
 from harbor_hf.models import (
@@ -59,7 +60,6 @@ from harbor_hf.provider_models import (
     ProviderLimits,
     ProviderTarget,
 )
-from harbor_hf.runs import build_run_lock
 
 
 def test_profile_finalizer_records_special_nodes(tmp_path: Path) -> None:
@@ -895,7 +895,7 @@ def test_serving_profile_binding_fails_closed_on_concurrency(
     binding = ServingProfileBinding(
         profile_id=resolved.profile_id,
         profile_sha256="sha256:" + "9" * 64,
-        artifact_uri="hf://buckets/example-org/benchmark-runs/serving-profiles/profile-one/profile.json",
+        artifact_uri="hf://buckets/example-org/benchmark-executions/serving-profiles/profile-one/profile.json",
         concurrency=2,
         **resolved.identity.model_dump(mode="python"),
     )
@@ -916,7 +916,7 @@ def test_serving_profile_binding_fails_closed_on_workload_identity(
     binding = ServingProfileBinding(
         profile_id=resolved.profile_id,
         profile_sha256="sha256:" + "9" * 64,
-        artifact_uri="hf://buckets/example-org/benchmark-runs/serving-profiles/profile-one/profile.json",
+        artifact_uri="hf://buckets/example-org/benchmark-executions/serving-profiles/profile-one/profile.json",
         concurrency=spec.execution.concurrent_trials,
         **resolved.identity.model_dump(mode="python"),
     )
@@ -988,7 +988,7 @@ def test_managed_endpoint_binding_preserves_profile_identity(
         profile_id=resolved.profile_id,
         profile_sha256="sha256:" + "9" * 64,
         artifact_uri=(
-            "hf://buckets/example-org/benchmark-runs/serving-profiles/"
+            "hf://buckets/example-org/benchmark-executions/serving-profiles/"
             "profile-one/profile.json"
         ),
         concurrency=1,
@@ -1097,7 +1097,7 @@ def test_profile_judge_transport_uses_locked_direct_judge(
         "reasoning_effort": "xhigh",
         "strip_temperature": True,
     }
-    lock = build_run_lock(ExperimentSpec.model_validate(raw))
+    lock = build_execution_lock(ExperimentSpec.model_validate(raw))
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test-secret")
     captured: dict[str, object] = {}
 

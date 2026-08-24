@@ -1,4 +1,4 @@
-"""Run provider agents under a dedicated unprivileged sandbox account."""
+"""Run provider agents under a dedicated unprivileged task account."""
 
 from __future__ import annotations
 

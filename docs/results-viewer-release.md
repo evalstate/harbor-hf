@@ -37,7 +37,7 @@ passed after cutover at desktop and mobile viewport sizes.
 - Smoke result revision: `05720340ef06c19f035bd7a71e46cdf67d93a975`
 
 The public projection contains six complete runs, 24 logical trials, 25
-physical executions, verifier metrics, serving configuration, immutable model
+physical attempts, verifier metrics, serving configuration, immutable model
 and agent revisions, hardware metadata, safe artifact metadata, and checksummed
 provenance. Run scores are `100%`, `50%`, `50%`, `50%`, `33.3%`, and `0%`.
 
@@ -72,7 +72,7 @@ aggregates are recomputed and compared with detail tables before a detail
 response is returned.
 
 The Docker Space serves a versioned FastAPI contract and one React application.
-It provides filtered and paginated run and campaign lists, stable detail URLs,
+It provides filtered and paginated run and run lists, stable detail URLs,
 task-level comparison, deterministic server-side result sorting, ETags,
 structured errors, an OpenAPI snapshot, and fail-closed private artifact and
 trajectory routes. The responsive filter toolbar fits phone, tablet,

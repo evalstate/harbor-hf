@@ -2,8 +2,11 @@
 
 ## Status
 
-Proposed. This plan implements the [trial evidence bundle
-specification](trial-evidence-bundle.md) for new Harbor-HF executions.
+Superseded implementation record. The [trial evidence bundle
+specification](trial-evidence-bundle.md) and
+[control service specification](CONTROL_SERVICE.md) define current behavior.
+Sandbox references below describe the pre-reset runtime and are retained as
+history.
 
 The work changes evidence capture, judge transport, execution validation,
 private artifact finalization, and recovery through publication. It does not change
@@ -44,7 +47,7 @@ The current worker already preserves much of the surrounding execution state:
   and hashes.
 - `evidence.py` redacts known secret values, creates deterministic archives,
   and writes root checksum manifests.
-- campaign workers publish each physical execution under a unique Bucket path
+- run workers publish each physical execution under a unique Bucket path
   before closing the logical trial.
 - result publication checks artifact paths and sizes against checksums.
 
@@ -55,7 +58,7 @@ Four gaps prevent a complete scoring audit:
 - judge requests and responses are reduced to scorecards instead of retained;
 - the private artifact requirement model requires an OpenClaw session but does
   not require workspace and judge evidence together with verifier records for
-  scored executions.
+  scored attempts.
 
 The implementation should extend these existing boundaries. It should not add
 a second execution engine or parse agent sessions to infer workspace state, and
@@ -161,7 +164,7 @@ Every new remote benchmark execution captures `/app`. The experiment manifest
 states the root explicitly, and validation accepts only `/app`.
 
 The first implementation does not offer output-only or disabled modes. A final
-or component result cannot weaken the contract. Diagnostic campaigns use the
+or component result cannot weaken the contract. Diagnostic runs use the
 same evidence path so behavior does not diverge by publication role.
 
 ### Immutable judge route
@@ -195,7 +198,7 @@ transient disk, transfer, or recorder failure is `evidence` and can be retried.
 
 ### One active schema
 
-The experiment stays `harbor-hf/v1alpha1`, and the active run-lock identifier
+The experiment stays `harbor-hf/v1alpha1`, and the active execution-lock identifier
 stays unchanged. New writers add the required evidence policy in place.
 Generated manifests and locks change together with schemas and fixtures plus
 the corresponding docs. New execution code has no path that omits the policy.
@@ -261,7 +264,7 @@ judge.
 
 ### Resolved identities
 
-Copy the evidence policy into `RunLock` and campaign run locks. Store the exact
+Copy the evidence policy into `ExecutionLock` and run run locks. Store the exact
 resolved judge-required task names, rather than selector patterns, alongside
 the locked judge configuration.
 
@@ -269,7 +272,7 @@ The following identities must include canonical evidence policy content:
 
 - experiment digest;
 - run ID;
-- campaign plan digest;
+- run plan digest;
 - run lock digest;
 - serving-profile benchmark identity;
 - profile plan identity when profiling executes judged tasks.
@@ -281,11 +284,11 @@ evidence values must fail before endpoint resume or provider request admission.
 Update:
 
 - `src/harbor_hf/runs.py`;
-- `src/harbor_hf/campaigns.py`;
+- `src/harbor_hf/runs.py`;
 - `src/harbor_hf/profile_submission.py`;
 - `src/harbor_hf/profile_worker.py` and profile planning code where benchmark
   identity is stored;
-- campaign lock and plan JSON Schemas;
+- run lock and plan JSON Schemas;
 - digest and binding tests.
 
 Do not infer defaults while reading a locked execution. Defaults belong in
@@ -704,17 +707,17 @@ deterministic verifiers, plus missing-selection verifiers.
 ### Assembly location
 
 Run assembly after Harbor exits and the compatibility bundle validates, but
-before `_finalize_execution` redacts logs, writes private artifact manifests,
+before `_finalize_attempt` redacts logs, writes private artifact manifests,
 creates `artifacts.tar.gz`, or writes root checksums.
 
-For campaign execution, call the assembler in `_execute_trial` after
+For run execution, call the assembler in `_execute_trial` after
 `verification.json` and before `build_private_artifact_manifest`.
 
 Apply the same ordering to:
 
 - direct single runs in `worker.py`;
-- profile trial executions that produce benchmark scores;
-- recovered physical executions before adoption;
+- profile trial attempts that produce benchmark scores;
+- recovered physical attempts before adoption;
 - any correction or diagnostic path that publishes a scored Harbor trial.
 
 Use one application service function for all paths. Do not duplicate bundle
@@ -736,8 +739,8 @@ The assembler receives typed inputs:
 ```python
 assemble_trial_evidence(
     *,
-    execution: ExecutionLock,
-    run: RunLock,
+    execution: AttemptLock,
+    run: ExecutionLock,
     harbor_trial: HarborTrialRecord,
     trial_dir: Path,
     judge_records_dir: Path | None,
@@ -957,11 +960,11 @@ The next execution repeats the complete task because the original agent state
 may no longer exist. This keeps task and judge evidence bound to one physical
 execution.
 
-Use existing campaign retry limits. Add typed event reasons for `evidence-incomplete`, `secret-detected`, and
-`evidence-validated` executions.
+Use existing run retry limits. Add typed event reasons for `evidence-incomplete`, `secret-detected`, and
+`evidence-validated` attempts.
 
 If the current event enum should remain smaller, represent these as typed
-payload reasons on `execution.failed` and document the choice. Do not encode
+payload reasons on `attempt.failed` and document the choice. Do not encode
 reason details into free-form exception strings.
 
 ### Logical outcomes
@@ -992,14 +995,14 @@ Extend terminal execution recovery checks to validate:
 - required component status.
 
 Recovery must not adopt an old scored execution without the new bundle. New
-campaigns use one evidence contract. Historical completed campaigns remain
+runs use one evidence contract. Historical completed runs remain
 immutable and are handled only by historical audit tools.
 
 ## Publication changes
 
 ### Publication gate
 
-Extend `verify_campaign_artifacts` and result publication so every selected
+Extend `verify_run_artifacts` and result publication so every selected
 scored execution requires a complete trial evidence manifest.
 
 Publication checks:
@@ -1059,13 +1062,13 @@ retention command may delete only a complete execution or run prefix after it
 proves:
 
 - every referencing publication is withdrawn;
-- no campaign recovery or correction still references the prefix;
+- no run recovery or correction still references the prefix;
 - the operator named the exact immutable run or execution ID;
 - the Bucket path matches the locked artifact destination;
 - a content-free deletion record can be committed before removal.
 
 The first implementation should omit automated expiry. Measure storage growth
-from complete campaigns and define an operator retention policy before adding
+from complete runs and define an operator retention policy before adding
 lifecycle deletion. This avoids silently breaking old score audits to reduce
 Bucket usage.
 
@@ -1100,19 +1103,19 @@ Commands use local files only. Bucket download remains an explicit `hf cp` or
 Support `--format human|json|quiet` consistently with existing CLI commands.
 JSON output uses a strict result schema and never includes private file content.
 
-### Campaign artifact verification
+### Run artifact verification
 
 Extend:
 
 ```bash
-harbor-hf artifacts verify CAMPAIGN_ID --namespace NAMESPACE
+harbor-hf artifacts verify RUN_ID --namespace NAMESPACE
 ```
 
 with evidence counts and failure paths. The command should report:
 
-- planned physical executions inspected;
-- scored executions with complete bundles;
-- non-scored executions and their applicable evidence status;
+- planned physical attempts inspected;
+- scored attempts with complete bundles;
+- non-scored attempts and their applicable evidence status;
 - workspace bytes and archive bytes;
 - judge exchange counts;
 - missing or invalid requirement names;
@@ -1126,7 +1129,7 @@ cost and streaming behavior.
 
 Errors should identify:
 
-- campaign and run IDs plus trial and execution IDs;
+- run and run IDs plus trial and execution IDs;
 - failed evidence component;
 - typed reason code;
 - whether a retry is safe;
@@ -1202,7 +1205,7 @@ Cover:
 - health and unsupported routes;
 - agent and judge route namespace separation;
 - capability registration, collision, revocation, and expiry;
-- concurrent executions with no evidence mixing;
+- concurrent attempts with no evidence mixing;
 - exact incoming request byte retention;
 - exact forwarded body retention;
 - locked-model enforcement;
@@ -1344,7 +1347,7 @@ concurrency. Record the selected pool size in runtime evidence.
 ## Remote verification
 
 Local tests cannot prove the HF Job and HF Sandbox boundary. Run bounded remote
-canaries before enabling the new write contract for full campaigns.
+canaries before enabling the new write contract for full runs.
 
 ### Endpoint-backed canary
 
@@ -1381,7 +1384,7 @@ Verify:
 ### Failure canary
 
 Run a controlled task that causes one workspace capture failure and one missing
-judge selection. Confirm both create new physical executions and neither
+judge selection. Confirm both create new physical attempts and neither
 publishes the rejected score.
 
 A separate synthetic-secret canary should use a disposable fake secret, never a
@@ -1401,7 +1404,7 @@ Record:
 - canary wall time, workspace size, archive size, and capture time;
 - secret scan and deep validation results.
 
-Store this report in `docs/` or the private campaign evidence and link it from
+Store this report in `docs/` or the private run evidence and link it from
 the pull request.
 
 ## Delivery sequence
@@ -1435,7 +1438,7 @@ Deliver:
 - Harbor `/app` artifact declaration;
 - lifecycle compatibility checks;
 - workspace index, archive, validator, and restore library;
-- packaging in direct and campaign execution paths;
+- packaging in direct and run execution paths;
 - workspace private artifact classification and limits.
 
 Exit criteria:
@@ -1515,7 +1518,7 @@ Exit criteria:
 - all canaries satisfy the remote checks;
 - managed endpoints are paused with zero ready replicas;
 - no HF Job remains running;
-- new campaigns use the complete evidence path exclusively.
+- new runs use the complete evidence path exclusively.
 
 ## Repository file map
 
@@ -1532,7 +1535,7 @@ src/harbor_hf/
 ├── provider_proxy.py
 ├── recording_server.py             # New shared transport
 ├── runs.py
-├── campaigns.py
+├── runs.py
 ├── trial_evidence.py                # New schema and workspace package
 ├── worker.py
 ├── wave_worker.py
@@ -1609,7 +1612,7 @@ slices must run the full behavior and mutation gates.
 
 ## Operational limits and cost
 
-Before enabling full campaigns, measure workspace size on a representative
+Before enabling full runs, measure workspace size on a representative
 115-task ShellBench sample. Report percentiles for node count, raw bytes,
 archive bytes, capture duration, and compression ratio.
 
@@ -1617,10 +1620,10 @@ Use those measurements to confirm the proposed 100,000-node, 2 GiB workspace
 ceilings and to estimate Bucket growth. Do not lower limits based only on
 average size; one coding task may legitimately contain many generated files.
 
-The campaign planner should estimate maximum evidence storage from:
+The run planner should estimate maximum evidence storage from:
 
 ```text
-planned physical executions
+planned physical attempts
 × (workspace archive limit + judge response limits + ordinary evidence reserve)
 ```
 
@@ -1650,7 +1653,7 @@ Add content-free counters and timings to worker events:
 Do not place workspace paths, prompts, responses, scorecard reasons, or raw
 capabilities in operational events.
 
-Campaign status should summarize evidence retries separately from agent,
+Run status should summarize evidence retries separately from agent,
 benchmark, quota, and provider failures. An unusual increase in evidence
 failures should stop new wave admission after a bounded threshold and require
 operator review.
@@ -1661,7 +1664,7 @@ Before remote release, verify:
 
 - the judge recorder is reachable only through authenticated HF Job ingress;
 - route capabilities have at least 128 bits of entropy;
-- route roles and executions are isolated;
+- route roles and attempts are isolated;
 - the verifier cannot select an upstream judge host;
 - the recorder is the only component adding upstream authorization;
 - authorization and cookie headers are never serialized;
@@ -1709,7 +1712,7 @@ The implementation is complete when all of these statements are true:
 - every expected judge call has exact request and response body evidence;
 - each scorecard identifies the judge exchange it used;
 - every scored execution has a valid `harbor-hf/trial-evidence/v1` manifest;
-- evidence requirements are enforced in direct runs, campaigns, profiles,
+- evidence requirements are enforced in direct runs, runs, profiles,
   retries, recovery, and publication;
 - exact evidence containing a known injected secret never reaches the private
   Bucket;

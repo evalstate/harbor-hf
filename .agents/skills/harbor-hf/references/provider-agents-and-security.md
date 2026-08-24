@@ -7,7 +7,7 @@ and the complete custom-agent package.
 
 ## Supported boundary
 
-New provider campaigns use Harbor's public `AgentConfig.import_path`. The
+New provider runs use Harbor's public `AgentConfig.import_path`. The
 current package has separate modules for:
 
 - Hermes through Chat Completions;
@@ -71,8 +71,11 @@ trial-scoped capability. The control credential `HF_TOKEN` never enters the
 worker. The worker passes the inference credential only to the root-owned
 bridge; neither credential may enter the benchmark agent.
 
-The custom agent starts a root-owned loopback bridge through Harbor's public
-root-execution API. The bridge:
+HF Job root bootstrap starts a root-owned loopback bridge before the trusted
+worker begins. The custom agent plugin runs in trusted host Python, reads the
+root-owned non-secret route directly, and removes that route before it kills
+and awaits the exact host bridge PID. It does not stop the bridge by executing
+inside the task rootfs. The bridge:
 
 - binds to `127.0.0.1`;
 - accepts only the registry-selected API path and locked model;
@@ -81,12 +84,15 @@ root-execution API. The bridge:
 - strips client authorization;
 - rejects unexpected methods, paths, models, output-token limits, oversized
   requests, excess requests, and excess concurrency;
+- bounds accepted connections and handler threads, plus header, body, socket,
+  and upstream time;
 - logs no request or response bodies and no headers;
-- terminates after the trial.
+- terminates after the agent and before verifier execution.
 
-Run the agent as the dedicated unprivileged account. Use an isolated home and
-runtime directory. The agent receives only a localhost URL and a non-secret
-placeholder key.
+Run every task command under the dedicated unprivileged host UID/GID with empty
+supplementary groups, no Linux capabilities, and `no_new_privs`. PRoot may fake
+the image user but does not provide the security boundary. The agent receives
+only a localhost URL and a non-secret placeholder key.
 
 A paid canary must prove:
 
@@ -141,7 +147,7 @@ as permission to copy a personal credential into remote infrastructure.
 
 Record one content-free row for every provider attempt. Verify:
 
-- campaign, run, trial, execution, wave, and request identity;
+- run, run, trial, execution, wave, and request identity;
 - requested and routed provider and model;
 - selected wire API;
 - authoritative parameter fingerprint;
@@ -164,7 +170,7 @@ retry key.
 Classify provider transport failures through the locked taxonomy. A recoverable
 provider call can succeed on a later bounded attempt within the same physical
 execution. An exhausted provider transport failure may authorize a new physical
-execution only when the registry and campaign recovery policy classify it as
+execution only when the registry and run recovery policy classify it as
 infrastructure.
 
 Agent and benchmark failures remain terminal even when the last provider HTTP
@@ -239,20 +245,19 @@ Verify the exact Pi package version, model configuration, Chat Completions
 route, reasoning setting, native Pi transcript, and ATIF identity. Keep Pi
 provider files inside the isolated agent home.
 
-### Capability-scoped Sandboxes
+### Capability-scoped Jobs
 
-Verify the capability's campaign-lock digest, task and operation set before each
-Sandbox request. Confirm the remote Job's deterministic action label,
-digest-pinned image, hardware and secret names during create, adoption,
-observation and command execution. The only allowed Sandbox secrets are the
-derived `SBX_TOKEN` and, for a reviewed inference-required image, the distinct
-`HF_INFERENCE_TOKEN`.
+Verify the capability's run-lock digest, task and operation set before each
+assigned lock read, evidence upload, and receipt submission. Confirm the remote
+Job's deterministic action label, digest-pinned image, hardware, task assignment,
+and secret names during launch, adoption, and observation. A reviewed
+inference-required Job may receive `HF_INFERENCE_TOKEN`; no Job may receive
+`HF_TOKEN` or a writable canonical Bucket mount.
 
 The root bootstrap must start the bridge before removing the inference token and
-route variables from the Sandbox server environment. The benchmark agent must
-see only the loopback route and placeholder key. Commands, paths, transfer size,
-command count and lifetime cannot exceed the immutable policy. Preserve the
-opaque action ID in worker evidence, never the remote Job ID or proxy URL.
+route variables from the benchmark process environment. The benchmark agent must
+see only the loopback route and placeholder key. Job resources, task assignment,
+timeout, and evidence limits cannot exceed the immutable policy.
 
 ## Judge isolation
 
@@ -267,16 +272,16 @@ exchange ID must bind the scorecard.
 
 ## Security failure response
 
-Stop the campaign when:
+Stop the run when:
 
 - agent and bridge UIDs are equal;
 - bridge environment is readable by the agent;
 - a real credential appears in the agent environment or runtime files;
 - ingress accepts an unexpected route;
-- a Sandbox receives `HF_TOKEN` or `SBX_DL_TOKEN`;
-- the Sandbox server or benchmark agent retains the inference token or upstream
+- a Job receives `HF_TOKEN` or a writable canonical Bucket mount;
+- the benchmark agent retains the inference token or upstream
   route after root bootstrap;
-- a Sandbox image, hardware, label, filesystem root or limit differs from the
+- a Job image, hardware, label, task assignment, or limit differs from the
   immutable policy;
 - provider or judge evidence contains a capability or authorization material;
 - a session path escapes its allowed root;

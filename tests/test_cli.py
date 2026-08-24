@@ -53,7 +53,7 @@ def test_status_reads_control_api(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [("GET", "https://control.example/api/v1/system")]
 
 
-def test_campaign_submit_sends_profile_references(
+def test_run_submit_sends_profile_references(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configure(monkeypatch)
@@ -61,13 +61,13 @@ def test_campaign_submit_sends_profile_references(
 
     def request(method: str, url: str, **kwargs: object) -> httpx.Response:
         observed.update({"method": method, "url": url, **kwargs})
-        return response(202, {"campaign_id": "campaign-one", "action_id": "action-one"})
+        return response(202, {"run_id": "run-one", "action_id": "action-one"})
 
     monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
     result = runner.invoke(
         app,
         [
-            "campaign",
+            "run",
             "submit",
             "--benchmark",
             "control-smoke",
@@ -88,9 +88,9 @@ def test_campaign_submit_sends_profile_references(
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout)["campaign_id"] == "campaign-one"
+    assert json.loads(result.stdout)["run_id"] == "run-one"
     assert observed["method"] == "POST"
-    assert observed["url"] == "https://control.example/api/v1/campaigns"
+    assert observed["url"] == "https://control.example/api/v1/runs"
     assert observed["json"] == {
         "benchmark": "control-smoke",
         "model": "control-smoke",
@@ -104,7 +104,7 @@ def test_campaign_submit_sends_profile_references(
     assert headers["Idempotency-Key"] == "request-key-0001"
 
 
-def test_campaign_submit_can_start_paused(
+def test_run_submit_can_start_paused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configure(monkeypatch)
@@ -112,13 +112,13 @@ def test_campaign_submit_can_start_paused(
 
     def request(method: str, url: str, **kwargs: object) -> httpx.Response:
         observed.update({"method": method, "url": url, **kwargs})
-        return response(202, {"campaign_id": "campaign-one", "action_id": "action-one"})
+        return response(202, {"run_id": "run-one", "action_id": "action-one"})
 
     monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
     result = runner.invoke(
         app,
         [
-            "campaign",
+            "run",
             "submit",
             "--benchmark",
             "control-smoke",
@@ -148,7 +148,7 @@ def test_campaign_submit_can_start_paused(
     ("arguments", "expected"),
     [
         (
-            ["pause", "campaign-one", "--reason", "canary boundary", "--yes"],
+            ["pause", "run-one", "--reason", "canary boundary", "--yes"],
             {
                 "action": "pause",
                 "task_id": None,
@@ -159,7 +159,7 @@ def test_campaign_submit_can_start_paused(
         (
             [
                 "retry-infrastructure",
-                "campaign-one",
+                "run-one",
                 "--task",
                 "task-one",
                 "--reason",
@@ -176,7 +176,7 @@ def test_campaign_submit_can_start_paused(
         (
             [
                 "retry-infrastructure",
-                "campaign-one",
+                "run-one",
                 "--all-eligible",
                 "--reason",
                 "retry eligible infrastructure failures",
@@ -192,7 +192,7 @@ def test_campaign_submit_can_start_paused(
         (
             [
                 "resume",
-                "campaign-one",
+                "run-one",
                 "--task-limit",
                 "1",
                 "--reason",
@@ -210,7 +210,7 @@ def test_campaign_submit_can_start_paused(
         (
             [
                 "supersede",
-                "campaign-one",
+                "run-one",
                 "--publication",
                 "publication-old",
                 "--reason",
@@ -227,7 +227,7 @@ def test_campaign_submit_can_start_paused(
         ),
     ],
 )
-def test_campaign_lifecycle_actions_use_control_api(
+def test_run_lifecycle_actions_use_control_api(
     monkeypatch: pytest.MonkeyPatch,
     arguments: list[str],
     expected: dict[str, object],
@@ -237,16 +237,14 @@ def test_campaign_lifecycle_actions_use_control_api(
 
     def request(method: str, url: str, **kwargs: object) -> httpx.Response:
         observed.update({"method": method, "url": url, **kwargs})
-        return response(202, {"campaign_id": "campaign-one", "action_id": "action-one"})
+        return response(202, {"run_id": "run-one", "action_id": "action-one"})
 
     monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
-    result = runner.invoke(app, ["campaign", *arguments])
+    result = runner.invoke(app, ["run", *arguments])
 
     assert result.exit_code == 0
     assert observed["method"] == "POST"
-    assert observed["url"] == (
-        "https://control.example/api/v1/campaigns/campaign-one/actions"
-    )
+    assert observed["url"] == ("https://control.example/api/v1/runs/run-one/actions")
     assert observed["json"] == expected
 
 
@@ -256,7 +254,7 @@ def test_retry_infrastructure_requires_task_or_all_eligible(
     configure(monkeypatch)
     result = runner.invoke(
         app,
-        ["campaign", "retry-infrastructure", "campaign-one", "--yes"],
+        ["run", "retry-infrastructure", "run-one", "--yes"],
     )
     assert result.exit_code != 0
     assert json.loads(result.output) == {
@@ -264,7 +262,7 @@ def test_retry_infrastructure_requires_task_or_all_eligible(
     }
 
 
-def test_campaign_pause_endpoint_uses_confirmed_control_action(
+def test_run_pause_endpoint_uses_confirmed_control_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configure(monkeypatch)
@@ -272,15 +270,15 @@ def test_campaign_pause_endpoint_uses_confirmed_control_action(
 
     def request(method: str, url: str, **kwargs: object) -> httpx.Response:
         observed.update({"method": method, "url": url, **kwargs})
-        return response(202, {"campaign_id": "campaign-one", "action_id": "action-one"})
+        return response(202, {"run_id": "run-one", "action_id": "action-one"})
 
     monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
     result = runner.invoke(
         app,
         [
-            "campaign",
+            "run",
             "pause-endpoint",
-            "campaign-one",
+            "run-one",
             "--reason",
             "terminal cleanup",
             "--yes",
@@ -289,9 +287,7 @@ def test_campaign_pause_endpoint_uses_confirmed_control_action(
 
     assert result.exit_code == 0
     assert observed["method"] == "POST"
-    assert observed["url"] == (
-        "https://control.example/api/v1/campaigns/campaign-one/actions"
-    )
+    assert observed["url"] == ("https://control.example/api/v1/runs/run-one/actions")
     assert observed["json"] == {
         "action": "pause_endpoint",
         "task_id": None,
@@ -300,85 +296,22 @@ def test_campaign_pause_endpoint_uses_confirmed_control_action(
     }
 
 
-def test_campaign_correct_action_dispositions_sends_sorted_batch(
+def test_run_rejects_retired_action_correction_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configure(monkeypatch)
-    observed: dict[str, object] = {}
-
-    def request(method: str, url: str, **kwargs: object) -> httpx.Response:
-        observed.update({"method": method, "url": url, **kwargs})
-        return response(
-            201,
-            {
-                "batch_id": "disposition-batch-one",
-                "batch_digest": "sha256:" + "a" * 64,
-                "items": [],
-            },
-        )
-
-    monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
     result = runner.invoke(
         app,
-        [
-            "campaign",
-            "correct-action-dispositions",
-            "campaign-one",
-            "--task",
-            "task-one",
-            "--action",
-            "action-two",
-            "--action",
-            "action-one",
-            "--reason",
-            "correct proved historical observations",
-            "--idempotency-key",
-            "disposition-request-one",
-            "--yes",
-        ],
+        ["run", "correct-action-dispositions", "run-one"],
     )
+    assert result.exit_code == 2
+    assert "No such command" in result.output
 
+
+def test_run_help_omits_retired_action_correction_command() -> None:
+    result = runner.invoke(app, ["run", "--help"])
     assert result.exit_code == 0
-    assert observed["method"] == "POST"
-    assert observed["url"] == (
-        "https://control.example/api/v1/campaigns/campaign-one/tasks/"
-        "task-one/action-dispositions"
-    )
-    assert observed["json"] == {
-        "action_ids": ["action-one", "action-two"],
-        "reason": "correct proved historical observations",
-        "confirmed": True,
-    }
-    headers = cast(dict[str, str], observed["headers"])
-    assert headers["Idempotency-Key"] == "disposition-request-one"
-    assert "test-token" not in result.stdout
-
-
-def test_campaign_correct_action_dispositions_rejects_duplicates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    configure(monkeypatch)
-    result = runner.invoke(
-        app,
-        [
-            "campaign",
-            "correct-action-dispositions",
-            "campaign-one",
-            "--task",
-            "task-one",
-            "--action",
-            "action-one",
-            "--action",
-            "action-one",
-            "--reason",
-            "duplicate",
-            "--idempotency-key",
-            "disposition-request-one",
-            "--yes",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "must be unique" in result.output
+    assert "correct-action-dispositions" not in result.output
 
 
 def test_capacity_reads_control_api(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -387,7 +320,7 @@ def test_capacity_reads_control_api(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def request(method: str, url: str, **_kwargs: object) -> httpx.Response:
         calls.append((method, url))
-        return response(200, {"max_active_sandboxes": 16, "configured": True})
+        return response(200, {"max_active_jobs": 16, "configured": True})
 
     monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
     result = runner.invoke(app, ["capacity"])
@@ -395,7 +328,7 @@ def test_capacity_reads_control_api(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {
         "configured": True,
-        "max_active_sandboxes": 16,
+        "max_active_jobs": 16,
     }
     assert calls == [("GET", "https://control.example/api/v1/capacity")]
 
@@ -408,20 +341,20 @@ def test_capacity_set_sends_confirmed_cap(
 
     def request(method: str, url: str, **kwargs: object) -> httpx.Response:
         observed.update({"method": method, "url": url, **kwargs})
-        return response(200, {"max_active_sandboxes": 128, "configured": True})
+        return response(200, {"max_active_jobs": 128, "configured": True})
 
     monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
     result = runner.invoke(
         app,
-        ["capacity", "set", "--max-sandboxes", "128", "--yes"],
+        ["capacity", "set", "--max-jobs", "128", "--yes"],
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout)["max_active_sandboxes"] == 128
+    assert json.loads(result.stdout)["max_active_jobs"] == 128
     assert observed["method"] == "POST"
     assert observed["url"] == "https://control.example/api/v1/capacity"
     assert observed["json"] == {
-        "max_active_sandboxes": 128,
+        "max_active_jobs": 128,
         "confirmed": True,
     }
     headers = cast(dict[str, str], observed["headers"])
@@ -443,7 +376,7 @@ def test_cli_reports_safe_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
 
-    result = runner.invoke(app, ["campaign", "list"])
+    result = runner.invoke(app, ["run", "list"])
 
     assert result.exit_code == 1
     assert "projection is rebuilding" in result.stderr

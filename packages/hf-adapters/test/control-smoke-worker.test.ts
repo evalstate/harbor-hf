@@ -43,7 +43,7 @@ async function childResult(
 
 describe("control smoke worker", () => {
   it("uses only its scoped capability to submit canonical evidence", async () => {
-    const campaignId = "campaign-control-smoke";
+    const runId = "run-control-smoke";
     const actionId = "action-control-smoke";
     const taskId = "control-smoke-task";
     const capability = "test-worker-capability";
@@ -65,7 +65,7 @@ describe("control smoke worker", () => {
       if (request.method === "GET") {
         response.end(
           JSON.stringify({
-            campaign_id: campaignId,
+            run_id: runId,
             tasks: [{ task_id: taskId, input_digest: `sha256:${"a".repeat(64)}` }],
           }),
         );
@@ -77,7 +77,7 @@ describe("control smoke worker", () => {
         response.statusCode = 201;
         response.end(
           JSON.stringify({
-            path: workerEvidenceObjectPath(campaignId, actionId, taskId, contentDigest),
+            path: workerEvidenceObjectPath(runId, actionId, taskId, contentDigest),
             digest: contentDigest,
             size: content.byteLength,
             created: true,
@@ -88,10 +88,10 @@ describe("control smoke worker", () => {
       response.statusCode = 202;
       response.end(
         JSON.stringify({
-          campaign_id: campaignId,
+          run_id: runId,
           task_id: taskId,
           attempt_id: "worker-attempt-control-smoke",
-          status_url: `/api/v1/campaigns/${campaignId}/tasks/${taskId}`,
+          status_url: `/api/v1/runs/${runId}/tasks/${taskId}`,
           adopted: false,
         }),
       );
@@ -126,7 +126,7 @@ describe("control smoke worker", () => {
       ).toBe(true);
 
       const result = await childResult(profile.spec.job_command, {
-        HARBOR_HF_CAMPAIGN_ID: campaignId,
+        HARBOR_HF_RUN_ID: runId,
         HARBOR_HF_ACTION_ID: actionId,
         HARBOR_HF_TASK_IDS_JSON: JSON.stringify([taskId]),
         HARBOR_HF_CONTROL_URL: `http://127.0.0.1:${address.port}`,
@@ -140,7 +140,7 @@ describe("control smoke worker", () => {
       }
       expect(captured[0]).toMatchObject({
         method: "GET",
-        path: `/api/v1/campaigns/${campaignId}/lock`,
+        path: `/api/v1/runs/${runId}/lock`,
       });
 
       const evidenceUpload = captured[1]?.body;
@@ -166,7 +166,7 @@ describe("control smoke worker", () => {
       expect(manifest).toMatchObject({
         schema_version: "v1",
         kind: "worker.evidence.manifest",
-        campaign_id: campaignId,
+        run_id: runId,
         action_id: actionId,
         task_id: taskId,
       });
@@ -185,25 +185,6 @@ describe("control smoke worker", () => {
     }
   });
 
-  it("embeds the reviewed Sandbox smoke worker in its pinned profile", async () => {
-    const profile = JSON.parse(
-      await readFile(resolve("profiles/deployment/hf-cpu-sandbox-smoke.json"), "utf8"),
-    ) as { spec: { job_command: string[]; sandbox: Record<string, unknown> } };
-    const source = await readFile(
-      resolve("scripts/control-service/sandbox-smoke-worker.cjs"),
-      "utf8",
-    );
-
-    expect(profile.spec.job_command.slice(3).join("")).toBe(source);
-    expect(profile.spec.sandbox).toMatchObject({
-      hardware: "cpu-basic",
-      inference_token: "forbidden",
-      reservation_microusd: 2000,
-      active_hourly_cost_microusd: 10000,
-      max_sandboxes: 1,
-    });
-  });
-
   it.each(["HF_TOKEN", "HF_INFERENCE_TOKEN"])(
     "refuses the %s credential in a no-inference worker",
     async (credentialName) => {
@@ -212,7 +193,7 @@ describe("control smoke worker", () => {
       ) as { spec: { job_command: string[] } };
       const result = await childResult(profile.spec.job_command, {
         [credentialName]: "forbidden-test-value",
-        HARBOR_HF_CAMPAIGN_ID: "campaign-control-smoke",
+        HARBOR_HF_RUN_ID: "run-control-smoke",
         HARBOR_HF_ACTION_ID: "action-control-smoke",
         HARBOR_HF_TASK_IDS_JSON: JSON.stringify(["control-smoke-task"]),
         HARBOR_HF_CONTROL_URL: "https://control.example",
@@ -243,7 +224,7 @@ describe("control smoke worker", () => {
         await readFile(resolve("profiles/deployment/hf-cpu-smoke.json"), "utf8"),
       ) as { spec: { job_command: string[] } };
       const result = await childResult(profile.spec.job_command, {
-        HARBOR_HF_CAMPAIGN_ID: "campaign-control-smoke",
+        HARBOR_HF_RUN_ID: "run-control-smoke",
         HARBOR_HF_ACTION_ID: "action-control-smoke",
         HARBOR_HF_TASK_IDS_JSON: JSON.stringify(["control-smoke-task"]),
         HARBOR_HF_CONTROL_URL: `http://127.0.0.1:${address.port}`,

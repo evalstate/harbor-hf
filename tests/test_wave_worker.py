@@ -15,18 +15,7 @@ import pytest
 import yaml
 from conftest import with_provider_controller, write_fake_compatibility_bundle
 
-from harbor_hf.campaign_finalizer import BucketCampaignFinalizer
-from harbor_hf.campaign_observer import BucketCampaignObserver
-from harbor_hf.campaigns import (
-    CampaignLock,
-    CampaignTrialLock,
-    ProviderWaveTarget,
-    WaveLock,
-    build_campaign_lock,
-    build_campaign_plan,
-    build_wave_lock,
-)
-from harbor_hf.control import CampaignSubmittedPayload, new_event
+from harbor_hf.control import RunSubmittedPayload, new_event
 from harbor_hf.evidence import assert_secret_absent, verify_checksums, write_checksums
 from harbor_hf.harbor_adapter import HarborTrialFailure, HarborVerificationFailure
 from harbor_hf.judge_recorder import (
@@ -51,18 +40,29 @@ from harbor_hf.reconciler import (
 )
 from harbor_hf.recovery import project_recovery
 from harbor_hf.results import EvidenceSource, build_result_tables
+from harbor_hf.run_finalizer import BucketRunFinalizer
+from harbor_hf.run_observer import BucketRunObserver
+from harbor_hf.runs import (
+    ProviderWaveTarget,
+    RunLock,
+    RunTrialLock,
+    WaveLock,
+    build_run_lock,
+    build_run_plan,
+    build_wave_lock,
+)
 from harbor_hf.wave_worker import (
     WorkerError,
+    _attempt_failure_category,
+    _attempt_id,
     _execute_shard,
-    _execution_failure_category,
-    _execution_id,
     _file_digest,
-    _finalize_execution,
+    _finalize_attempt,
+    _harbor_runtime_failure_category,
     _launch_wave_watchdog,
     _overall_wave_deadline,
     _remaining_seconds,
-    _sandbox_failure_category,
-    _stage_campaign_records,
+    _stage_run_records,
     _trial_work_deadline,
     _valid_terminal_trial,
     _validate_evidence_trial_identity,
@@ -75,7 +75,7 @@ from harbor_hf.wave_worker import (
 def test_verification_failure_is_terminal_benchmark_evidence() -> None:
     error = HarborVerificationFailure("task digest does not match")
 
-    assert _execution_failure_category(error, "execution") == "benchmark"
+    assert _attempt_failure_category(error, "execution") == "benchmark"
 
 
 @pytest.mark.parametrize(
@@ -86,7 +86,7 @@ def test_missing_or_empty_reward_is_terminal_benchmark_failure(
 ) -> None:
     error = HarborTrialFailure("verifier produced no reward", exception_type)
 
-    assert _execution_failure_category(error, "execution") == "benchmark"
+    assert _attempt_failure_category(error, "execution") == "benchmark"
 
 
 def test_evidence_identity_accepts_internal_name_with_locked_digest(
@@ -129,7 +129,7 @@ def test_wrapped_endpoint_server_error_without_log_remains_agent_failure() -> No
         'provider response status=500: "500 Internal Server Error"',
     )
 
-    assert _execution_failure_category(error, "execution") == "agent"
+    assert _attempt_failure_category(error, "execution") == "agent"
 
 
 def test_plain_nonzero_agent_exit_is_agent_failure() -> None:
@@ -137,7 +137,7 @@ def test_plain_nonzero_agent_exit_is_agent_failure() -> None:
         "agent failed", "NonZeroAgentExitCodeError", "command exited with status 1"
     )
 
-    assert _execution_failure_category(error, "execution") == "agent"
+    assert _attempt_failure_category(error, "execution") == "agent"
 
 
 def test_benchmark_exception_message_does_not_trigger_transport_retry() -> None:
@@ -145,7 +145,7 @@ def test_benchmark_exception_message_does_not_trigger_transport_retry() -> None:
         "verifier failed", "AssertionError", "expected timeout handling"
     )
 
-    assert _execution_failure_category(error, "execution") == "benchmark"
+    assert _attempt_failure_category(error, "execution") == "benchmark"
 
 
 def test_remote_protocol_failure_is_retryable_infrastructure() -> None:
@@ -153,7 +153,7 @@ def test_remote_protocol_failure_is_retryable_infrastructure() -> None:
         "trial failed", "RemoteProtocolError", "incomplete chunked read"
     )
 
-    assert _execution_failure_category(error, "execution") == "transient"
+    assert _attempt_failure_category(error, "execution") == "transient"
 
 
 def test_agent_output_keywords_do_not_trigger_transport_retry() -> None:
@@ -163,7 +163,7 @@ def test_agent_output_keywords_do_not_trigger_transport_retry() -> None:
         "command asked to diagnose a timeout and quota issue; exit status 1",
     )
 
-    assert _execution_failure_category(error, "execution") == "agent"
+    assert _attempt_failure_category(error, "execution") == "agent"
 
 
 def test_openclaw_terminal_transport_log_makes_wrapped_exit_retryable(
@@ -178,7 +178,7 @@ def test_openclaw_terminal_transport_log_makes_wrapped_exit_retryable(
     error = HarborTrialFailure("agent failed", "NonZeroAgentExitCodeError")
 
     assert (
-        _execution_failure_category(error, "execution", evidence_root=tmp_path)
+        _attempt_failure_category(error, "execution", evidence_root=tmp_path)
         == "transient"
     )
 
@@ -195,7 +195,7 @@ def test_openclaw_structured_transport_timeout_is_retryable(tmp_path: Path) -> N
     error = HarborTrialFailure("agent failed", "NonZeroAgentExitCodeError")
 
     assert (
-        _execution_failure_category(error, "execution", evidence_root=tmp_path)
+        _attempt_failure_category(error, "execution", evidence_root=tmp_path)
         == "transient"
     )
 
@@ -231,13 +231,13 @@ def test_openclaw_structured_transport_timeout_is_retryable(tmp_path: Path) -> N
         ),
     ],
 )
-def test_sandbox_failure_uses_trusted_exception_evidence(
+def test_harbor_runtime_failure_uses_trusted_exception_evidence(
     tmp_path: Path, detail: str, expected: str
 ) -> None:
     error = HarborTrialFailure("sandbox failed", "SandboxError", detail)
 
     assert (
-        _execution_failure_category(error, "execution", evidence_root=tmp_path)
+        _attempt_failure_category(error, "execution", evidence_root=tmp_path)
         == expected
     )
 
@@ -263,7 +263,7 @@ def test_sandbox_failure_uses_trusted_exception_evidence(
         ),
     ],
 )
-def test_wrapped_harbor_exit_uses_sandbox_exception_evidence(
+def test_wrapped_harbor_exit_uses_runtime_exception_evidence(
     tmp_path: Path, detail: str, expected: str
 ) -> None:
     result = tmp_path / "harbor-jobs" / "job" / "trial" / "result.json"
@@ -281,7 +281,7 @@ def test_wrapped_harbor_exit_uses_sandbox_exception_evidence(
     )
 
     assert (
-        _execution_failure_category(
+        _attempt_failure_category(
             WorkerError("Harbor exited with status 1"),
             "execution",
             evidence_root=tmp_path,
@@ -290,7 +290,7 @@ def test_wrapped_harbor_exit_uses_sandbox_exception_evidence(
     )
 
 
-def test_wrapped_harbor_exit_ignores_sandbox_markers_without_sandbox_error(
+def test_wrapped_harbor_exit_ignores_runtime_markers_without_runtime_error(
     tmp_path: Path,
 ) -> None:
     result = tmp_path / "harbor-jobs" / "job" / "trial" / "result.json"
@@ -307,7 +307,7 @@ def test_wrapped_harbor_exit_ignores_sandbox_markers_without_sandbox_error(
         encoding="utf-8",
     )
 
-    assert _sandbox_failure_category(tmp_path) is None
+    assert _harbor_runtime_failure_category(tmp_path) is None
 
 
 def test_wrapped_harbor_exit_uses_preflight_harbor_log_evidence(
@@ -319,7 +319,7 @@ def test_wrapped_harbor_exit_uses_preflight_harbor_log_evidence(
     )
 
     assert (
-        _execution_failure_category(
+        _attempt_failure_category(
             WorkerError("Harbor exited with status 1"),
             "execution",
             evidence_root=tmp_path,
@@ -333,7 +333,7 @@ def test_wrapped_harbor_exit_ignores_non_utf8_result(tmp_path: Path) -> None:
     result.parent.mkdir(parents=True)
     result.write_bytes(b"\xff")
 
-    assert _sandbox_failure_category(tmp_path) is None
+    assert _harbor_runtime_failure_category(tmp_path) is None
 
 
 def test_wrapped_harbor_exit_ignores_excessively_nested_result(tmp_path: Path) -> None:
@@ -341,7 +341,7 @@ def test_wrapped_harbor_exit_ignores_excessively_nested_result(tmp_path: Path) -
     result.parent.mkdir(parents=True)
     result.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
 
-    assert _sandbox_failure_category(tmp_path) is None
+    assert _harbor_runtime_failure_category(tmp_path) is None
 
 
 def test_wrapped_harbor_exit_ignores_overlong_integer_result(tmp_path: Path) -> None:
@@ -349,7 +349,7 @@ def test_wrapped_harbor_exit_ignores_overlong_integer_result(tmp_path: Path) -> 
     result.parent.mkdir(parents=True)
     result.write_text('{"value":' + "1" * 5000 + "}", encoding="utf-8")
 
-    assert _sandbox_failure_category(tmp_path) is None
+    assert _harbor_runtime_failure_category(tmp_path) is None
 
 
 def test_openclaw_nonterminal_status_log_does_not_reclassify_agent_exit(
@@ -361,8 +361,7 @@ def test_openclaw_nonterminal_status_log_does_not_reclassify_agent_exit(
     error = HarborTrialFailure("agent failed", "NonZeroAgentExitCodeError")
 
     assert (
-        _execution_failure_category(error, "execution", evidence_root=tmp_path)
-        == "agent"
+        _attempt_failure_category(error, "execution", evidence_root=tmp_path) == "agent"
     )
 
 
@@ -371,13 +370,13 @@ def test_failed_execution_retains_malformed_compatibility_evidence(
 ) -> None:
     (tmp_path / "harbor-jobs").mkdir()
     (tmp_path / "events.jsonl").write_text("", encoding="utf-8")
-    (tmp_path / "execution.lock.json").write_text(
-        '{"execution_id":"execution-one","trial_id":"trial-one"}\n',
+    (tmp_path / "attempt.lock.json").write_text(
+        '{"attempt_id":"attempt-one","trial_id":"trial-one"}\n',
         encoding="utf-8",
     )
     (tmp_path / "harbor-compatibility.json").write_text("{", encoding="utf-8")
 
-    _finalize_execution(
+    _finalize_attempt(
         tmp_path,
         "test-token",
         strict_compatibility=False,
@@ -400,12 +399,12 @@ def test_failed_execution_recreates_rejected_jobs_symlink(tmp_path: Path) -> Non
     jobs = tmp_path / "harbor-jobs"
     jobs.symlink_to(outside, target_is_directory=True)
     (tmp_path / "events.jsonl").write_text("", encoding="utf-8")
-    (tmp_path / "execution.lock.json").write_text(
-        '{"execution_id":"execution-one","trial_id":"trial-one"}\n',
+    (tmp_path / "attempt.lock.json").write_text(
+        '{"attempt_id":"attempt-one","trial_id":"trial-one"}\n',
         encoding="utf-8",
     )
 
-    _finalize_execution(
+    _finalize_attempt(
         tmp_path,
         "test-token",
         strict_compatibility=False,
@@ -427,12 +426,12 @@ def test_failed_execution_recreates_rejected_jobs_file(tmp_path: Path) -> None:
     jobs = tmp_path / "harbor-jobs"
     jobs.write_text("collision", encoding="utf-8")
     (tmp_path / "events.jsonl").write_text("", encoding="utf-8")
-    (tmp_path / "execution.lock.json").write_text(
-        '{"execution_id":"execution-one","trial_id":"trial-one"}\n',
+    (tmp_path / "attempt.lock.json").write_text(
+        '{"attempt_id":"attempt-one","trial_id":"trial-one"}\n',
         encoding="utf-8",
     )
 
-    _finalize_execution(
+    _finalize_attempt(
         tmp_path,
         "test-token",
         strict_compatibility=False,
@@ -455,16 +454,16 @@ def test_failed_execution_prunes_unsafe_evidence_and_still_finalizes(
     jobs = tmp_path / "harbor-jobs"
     jobs.mkdir()
     (tmp_path / "events.jsonl").write_text("", encoding="utf-8")
-    (tmp_path / "execution.lock.json").write_text(
-        '{"execution_id":"execution-one","trial_id":"trial-one"}\n',
+    (tmp_path / "attempt.lock.json").write_text(
+        '{"attempt_id":"attempt-one","trial_id":"trial-one"}\n',
         encoding="utf-8",
     )
-    (jobs / "linked").symlink_to(tmp_path / "execution.lock.json")
+    (jobs / "linked").symlink_to(tmp_path / "attempt.lock.json")
     oversized = jobs / "oversized.log"
     with oversized.open("wb") as stream:
         stream.truncate(64 * 1024 * 1024 + 1)
 
-    _finalize_execution(
+    _finalize_attempt(
         tmp_path,
         "test-token",
         strict_compatibility=False,
@@ -486,8 +485,8 @@ def test_failed_execution_preserves_attempt_state_before_sanitizing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "harbor-jobs").mkdir()
-    (tmp_path / "execution.lock.json").write_text(
-        '{"execution_id":"execution-one","trial_id":"trial-one"}\n',
+    (tmp_path / "attempt.lock.json").write_text(
+        '{"attempt_id":"attempt-one","trial_id":"trial-one"}\n',
         encoding="utf-8",
     )
     (tmp_path / "harbor-request.json").write_text(
@@ -505,7 +504,7 @@ def test_failed_execution_preserves_attempt_state_before_sanitizing(
         "harbor_hf.wave_worker.sanitize_private_artifact_tree", trim_attempt_event
     )
 
-    _finalize_execution(
+    _finalize_attempt(
         tmp_path,
         "test-token",
         strict_compatibility=False,
@@ -526,8 +525,8 @@ def test_failed_execution_preserves_attempt_state_before_sanitizing(
 def test_failed_execution_sanitizes_result_before_session_probe(tmp_path: Path) -> None:
     trial = tmp_path / "harbor-jobs" / "job" / "trial"
     trial.mkdir(parents=True)
-    (tmp_path / "execution.lock.json").write_text(
-        '{"execution_id":"execution-one","trial_id":"trial-one"}\n',
+    (tmp_path / "attempt.lock.json").write_text(
+        '{"attempt_id":"attempt-one","trial_id":"trial-one"}\n',
         encoding="utf-8",
     )
     (tmp_path / "harbor-request.json").write_text(
@@ -542,7 +541,7 @@ def test_failed_execution_sanitizes_result_before_session_probe(tmp_path: Path) 
         stream.truncate(64 * 1024 * 1024 + 1)
     (trial / "result.json").symlink_to(outside)
 
-    _finalize_execution(
+    _finalize_attempt(
         tmp_path,
         "test-token",
         strict_compatibility=False,
@@ -562,8 +561,8 @@ def test_failed_execution_refreshes_compatibility_after_final_pruning(
 ) -> None:
     jobs = tmp_path / "harbor-jobs"
     jobs.mkdir()
-    (tmp_path / "execution.lock.json").write_text(
-        '{"execution_id":"execution-one","trial_id":"trial-one"}\n',
+    (tmp_path / "attempt.lock.json").write_text(
+        '{"attempt_id":"attempt-one","trial_id":"trial-one"}\n',
         encoding="utf-8",
     )
     (tmp_path / "events.jsonl").write_text("", encoding="utf-8")
@@ -579,7 +578,7 @@ def test_failed_execution_refreshes_compatibility_after_final_pruning(
 
     monkeypatch.setattr("harbor_hf.wave_worker.refresh_retained_bundle", refresh)
 
-    _finalize_execution(
+    _finalize_attempt(
         tmp_path,
         "test-token",
         strict_compatibility=False,
@@ -596,7 +595,7 @@ def test_success_rejects_malformed_compatibility_evidence(tmp_path: Path) -> Non
     (tmp_path / "harbor-compatibility.json").write_text("{", encoding="utf-8")
 
     with pytest.raises(ValueError):
-        _finalize_execution(tmp_path, "test-token", session_required=True)
+        _finalize_attempt(tmp_path, "test-token", session_required=True)
 
 
 def endpoint_snapshot(state: str, ready: int) -> dict[str, object]:
@@ -841,19 +840,17 @@ def test_provider_wave_setup_uses_the_locked_reserve(
     remote_spec: ExperimentSpec,
     tmp_path: Path,
 ) -> None:
-    _spec, campaign, wave, _manifest, _campaign_path, _wave_path = (
-        _provider_wave_inputs(
-            remote_spec,
-            tmp_path,
-            attempts=1,
-            concurrency=1,
-            provider_concurrency=1,
-        )
+    _spec, run, wave, _manifest, _run_path, _wave_path = _provider_wave_inputs(
+        remote_spec,
+        tmp_path,
+        attempts=1,
+        concurrency=1,
+        provider_concurrency=1,
     )
-    policy = campaign.controller_policy
+    policy = run.controller_policy
     assert policy is not None
 
-    overall = _overall_wave_deadline(campaign, wave, lambda: 100.0)
+    overall = _overall_wave_deadline(run, wave, lambda: 100.0)
     before_reserve_is_spent = _trial_work_deadline(overall, wave, lambda: 100.5)
     after_reserve_is_spent = _trial_work_deadline(overall, wave, lambda: 101.5)
 
@@ -862,24 +859,27 @@ def test_provider_wave_setup_uses_the_locked_reserve(
     assert after_reserve_is_spent == overall
 
 
-def test_campaign_records_can_be_staged_for_sequential_waves(
+def test_run_records_can_be_staged_for_sequential_waves(
     remote_spec: ExperimentSpec,
     tmp_path: Path,
 ) -> None:
-    _spec, campaign, wave, _manifest, _campaign_path, _wave_path = _wave_inputs(
+    _spec, run, wave, _manifest, _run_path, _wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
-    campaign_root = tmp_path / "staging" / campaign.artifact_prefix
+    run_root = tmp_path / "staging" / run.artifact_prefix
     output_root = tmp_path / "output"
 
-    _stage_campaign_records(campaign_root, campaign, wave, (), output_root)
-    _stage_campaign_records(campaign_root, campaign, wave, (), output_root)
+    _stage_run_records(run_root, run, wave, (), output_root)
+    _stage_run_records(run_root, run, wave, (), output_root)
 
-    run = wave.runs[0]
+    execution = wave.executions[0]
     assert (
-        campaign_root / "runs" / run.configuration.run_id / "run.lock.json"
+        run_root
+        / "executions"
+        / execution.configuration.execution_id
+        / "execution.lock.json"
     ).is_file()
-    assert (output_root / run.artifact_prefix / "run.lock.json").is_file()
+    assert (output_root / execution.artifact_prefix / "execution.lock.json").is_file()
 
 
 def test_wave_runs_two_attempt_shards_under_one_endpoint_startup(
@@ -887,7 +887,7 @@ def test_wave_runs_two_attempt_shards_under_one_endpoint_startup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=2, concurrency=2
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -911,7 +911,7 @@ def test_wave_runs_two_attempt_shards_under_one_endpoint_startup(
 
     destination = run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=endpoint,
@@ -967,25 +967,27 @@ def test_wave_runs_two_attempt_shards_under_one_endpoint_startup(
         "wave-summary.json",
         "wave.lock.json",
     ]
-    run = wave.runs[0]
-    run_root = output / run.artifact_prefix
-    assert json.loads((run_root / "run.lock.json").read_text()) == (
-        run.configuration.model_dump(mode="json")
+    execution = wave.executions[0]
+    execution_root = output / execution.artifact_prefix
+    assert json.loads((execution_root / "execution.lock.json").read_text()) == (
+        execution.configuration.model_dump(mode="json")
     )
-    trial_roots = sorted((run_root / "trials").iterdir())
+    trial_roots = sorted((execution_root / "trials").iterdir())
     assert len(trial_roots) == 2
     attempts = set()
     expected_trials = {
-        trial.trial_id: trial for shard in run.shards for trial in shard.shard.trials
+        trial.trial_id: trial
+        for shard in execution.shards
+        for trial in shard.shard.trials
     }
     for trial_root in trial_roots:
         verify_checksums(trial_root)
         trial = expected_trials[trial_root.name]
         assert sorted(path.name for path in trial_root.iterdir()) == [
             "_SUCCESS",
+            "attempts",
             "checksums.json",
             "events.jsonl",
-            "executions",
             "trial-summary.json",
             "trial.lock.json",
         ]
@@ -995,14 +997,14 @@ def test_wave_runs_two_attempt_shards_under_one_endpoint_startup(
         assert _event_payloads(trial_root / "events.jsonl") == [
             {"event": "trial_succeeded"}
         ]
-        execution_root = next((trial_root / "executions").iterdir())
-        verify_checksums(execution_root)
-        assert sorted(path.name for path in execution_root.iterdir()) == [
+        attempt_root = next((trial_root / "attempts").iterdir())
+        verify_checksums(attempt_root)
+        assert sorted(path.name for path in attempt_root.iterdir()) == [
             "_SUCCESS",
             "artifacts.tar.gz",
+            "attempt.lock.json",
             "checksums.json",
             "events.jsonl",
-            "execution.lock.json",
             "harbor-compatibility.json",
             "harbor-export.log",
             "harbor-job.json",
@@ -1014,18 +1016,18 @@ def test_wave_runs_two_attempt_shards_under_one_endpoint_startup(
             "private-artifacts.json",
             "verification.json",
         ]
-        execution = json.loads(
-            (execution_root / "execution.lock.json").read_text(encoding="utf-8")
+        attempt_record = json.loads(
+            (attempt_root / "attempt.lock.json").read_text(encoding="utf-8")
         )
-        attempts.add(execution["logical_attempt"])
-        assert execution == {
-            "schema_version": "harbor-hf/execution-lock/v1alpha1",
-            "execution_id": execution_root.name,
-            "created_at": execution["created_at"],
-            "campaign_id": campaign.campaign_id,
+        attempts.add(attempt_record["logical_attempt"])
+        assert attempt_record == {
+            "schema_version": "harbor-hf/attempt-lock/v1alpha1",
+            "attempt_id": attempt_root.name,
+            "created_at": attempt_record["created_at"],
+            "run_id": run.run_id,
             "wave_id": wave.wave_id,
-            "run_id": run.configuration.run_id,
-            "shard_id": execution["shard_id"],
+            "execution_id": execution.configuration.execution_id,
+            "shard_id": attempt_record["shard_id"],
             "trial_id": trial.trial_id,
             "task_name": trial.task_name,
             "task_digest": trial.task_digest,
@@ -1033,30 +1035,30 @@ def test_wave_runs_two_attempt_shards_under_one_endpoint_startup(
             "physical_attempt": 1,
             "remote_job_id": "test-wave-job",
         }
-        assert _event_payloads(execution_root / "events.jsonl") == [
-            {"event": "execution_started", "execution_id": execution_root.name},
+        assert _event_payloads(attempt_root / "events.jsonl") == [
+            {"event": "attempt_started", "attempt_id": attempt_root.name},
             {"event": "harbor_started"},
             {"event": "harbor_finished", "exit_code": 0},
             {"event": "trial_evidence_validated", "trial_id": trial.trial_id},
-            {"event": "execution_succeeded"},
+            {"event": "attempt_succeeded"},
             {"event": "secrets_redacted", "files": ["harbor.log"]},
         ]
-        assert json.loads((execution_root / "verification.json").read_text()) == {
+        assert json.loads((attempt_root / "verification.json").read_text()) == {
             "trial_count": 1,
             "trials": [{"task_name": trial.task_name, "rewards": {"reward": 1.0}}],
         }
         trial_summary = json.loads((trial_root / "trial-summary.json").read_text())
         assert trial_summary == {
             "trial_id": trial.trial_id,
-            "execution_id": execution_root.name,
-            "execution_checksum": trial_summary["execution_checksum"],
+            "attempt_id": attempt_root.name,
+            "attempt_checksum": trial_summary["attempt_checksum"],
         }
-        assert b"test-token" not in (execution_root / "artifacts.tar.gz").read_bytes()
-        assert (execution_root / "harbor.log").read_text(encoding="utf-8") == (
+        assert b"test-token" not in (attempt_root / "artifacts.tar.gz").read_bytes()
+        assert (attempt_root / "harbor.log").read_text(encoding="utf-8") == (
             "completed [REDACTED]\n"
         )
     assert attempts == {1, 2}
-    for shard in run.shards:
+    for shard in execution.shards:
         shard_root = output / shard.artifact_prefix
         verify_checksums(shard_root)
         assert sorted(path.name for path in shard_root.iterdir()) == [
@@ -1082,24 +1084,24 @@ def test_wave_runs_two_attempt_shards_under_one_endpoint_startup(
     )
     assert summary == {
         "wave_id": wave.wave_id,
-        "campaign_id": campaign.campaign_id,
+        "run_id": run.run_id,
         "shard_checksums": summary["shard_checksums"],
         "endpoint_cleanup_verified": True,
     }
     assert set(summary["shard_checksums"]) == set(wave.shard_ids)
     assert json.loads(
-        (output / campaign.artifact_prefix / "campaign.lock.json").read_text()
-    ) == campaign.model_dump(mode="json")
+        (output / run.artifact_prefix / "run.lock.json").read_text()
+    ) == run.model_dump(mode="json")
 
 
 def test_wave_rejects_missing_trial_evidence_before_remote_setup(
     remote_spec: ExperimentSpec,
     tmp_path: Path,
 ) -> None:
-    _, _, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    _, _, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
-    run = wave.runs[0]
+    run = wave.executions[0]
     legacy_run = run.model_copy(
         update={
             "configuration": run.configuration.model_copy(
@@ -1107,13 +1109,13 @@ def test_wave_rejects_missing_trial_evidence_before_remote_setup(
             )
         }
     )
-    legacy_wave = wave.model_copy(update={"runs": [legacy_run]})
+    legacy_wave = wave.model_copy(update={"executions": [legacy_run]})
     wave_path.write_text(legacy_wave.model_dump_json(), encoding="utf-8")
 
     with pytest.raises(WorkerError, match="complete trial evidence policy"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             tmp_path / "output",
         )
@@ -1134,7 +1136,7 @@ def test_judged_wave_records_and_selects_exact_exchange(
     judged_spec = remote_spec.model_copy(
         update={"benchmark": remote_spec.benchmark.model_copy(update={"judge": judge})}
     )
-    spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         judged_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1238,7 +1240,7 @@ def test_judged_wave_records_and_selects_exact_exchange(
     output = tmp_path / "output"
     run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=EndpointRunner(
@@ -1302,7 +1304,7 @@ def test_judge_excluded_task_records_deterministic_evidence(
     judged_spec = remote_spec.model_copy(
         update={"benchmark": remote_spec.benchmark.model_copy(update={"judge": judge})}
     )
-    spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         judged_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1314,7 +1316,7 @@ def test_judge_excluded_task_records_deterministic_evidence(
     output = tmp_path / "output"
     run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=EndpointRunner(
@@ -1347,7 +1349,7 @@ def test_provider_wave_runs_shards_without_endpoint_lifecycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, campaign, wave, manifest, campaign_path, wave_path = _provider_wave_inputs(
+    spec, run, wave, manifest, run_path, wave_path = _provider_wave_inputs(
         remote_spec,
         tmp_path,
         attempts=2,
@@ -1381,7 +1383,7 @@ def test_provider_wave_runs_shards_without_endpoint_lifecycle(
     output = tmp_path / "output"
     destination = run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=runner,
@@ -1403,7 +1405,7 @@ def test_provider_wave_runs_shards_without_endpoint_lifecycle(
     )
     assert all(
         trial.trial_id not in " ".join(harbor.base_urls)
-        for trial in wave.runs[0].shards[0].shard.trials
+        for trial in wave.executions[0].shards[0].shard.trials
     )
     capabilities = [
         base_url.split("/scopes/", maxsplit=1)[1].removesuffix("/v1")
@@ -1481,12 +1483,12 @@ def test_provider_wave_runs_shards_without_endpoint_lifecycle(
     assert not (destination / "endpoint.final.json").exists()
 
 
-def test_terminal_wave_evidence_closes_and_normalizes_campaign(
+def test_terminal_wave_evidence_closes_and_normalizes_run(
     remote_spec: ExperimentSpec,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=2, concurrency=2
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1499,7 +1501,7 @@ def test_terminal_wave_evidence_closes_and_normalizes_campaign(
     output = tmp_path / "output"
     run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=EndpointRunner(
@@ -1517,16 +1519,16 @@ def test_terminal_wave_evidence_closes_and_normalizes_campaign(
         identifier=IdentifierSequence(),
     )
     submitted = new_event(
-        subject_type="campaign",
-        subject_id=campaign.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=run.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
-        clock=lambda: campaign.created_at,
+        payload=RunSubmittedPayload(plan_digest=run.plan_digest),
+        clock=lambda: run.created_at,
     )
     evidence = LocalEvidence(output)
-    observed = BucketCampaignObserver(evidence).observe(campaign, spec)
-    projection = project_recovery(campaign, [submitted, *observed])
+    observed = BucketRunObserver(evidence).observe(run, spec)
+    projection = project_recovery(run, [submitted, *observed])
 
     assert projection.terminal_decision is not None
     assert projection.terminal_decision.status == "completed"
@@ -1534,31 +1536,31 @@ def test_terminal_wave_evidence_closes_and_normalizes_campaign(
         "wave.active",
         "wave.cleaning",
         "wave.closed",
-        "execution.started",
-        "execution.completed",
+        "attempt.started",
+        "attempt.completed",
     }
 
-    BucketCampaignFinalizer(evidence, evidence).finalize(
-        campaign,
+    BucketRunFinalizer(evidence, evidence).finalize(
+        run,
         spec,
         projection,
         projection.terminal_decision,
     )
-    run = campaign.runs[0]
+    execution = run.executions[0]
     tables = build_result_tables(
         evidence,
         EvidenceSource(
             bucket=spec.artifacts.bucket,
-            prefix=f"{campaign.artifact_prefix}/runs/{run.run_id}",
+            prefix=f"{run.artifact_prefix}/executions/{execution.execution_id}",
         ),
         control_commit="c" * 40,
     )
 
-    assert len(tables.runs) == 1
+    assert len(tables.executions) == 1
     assert len(tables.trials) == 2
-    assert len(tables.executions) == 2
+    assert len(tables.attempts) == 2
     assert [metric.value for metric in tables.metrics] == [1.0, 1.0]
-    assert (output / campaign.artifact_prefix / "_SUCCESS").is_file()
+    assert (output / run.artifact_prefix / "_SUCCESS").is_file()
 
 
 def test_wave_failure_still_pauses_and_publishes_failed_execution(
@@ -1566,7 +1568,7 @@ def test_wave_failure_still_pauses_and_publishes_failed_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1584,7 +1586,7 @@ def test_wave_failure_still_pauses_and_publishes_failed_execution(
     with pytest.raises(WorkerError, match="Harbor exited with status 7"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             output,
             runner=endpoint,
@@ -1603,7 +1605,7 @@ def test_wave_failure_still_pauses_and_publishes_failed_execution(
     failure = json.loads((wave_root / "_FAILED").read_text())
     assert failure == {
         "wave_id": wave.wave_id,
-        "campaign_id": "campaign-one",
+        "run_id": "run-one",
         "shard_checksums": {},
         "endpoint_cleanup_verified": True,
         "error_type": "WorkerError",
@@ -1619,10 +1621,10 @@ def test_wave_failure_still_pauses_and_publishes_failed_execution(
         },
         {"event": "wave_failed", "error_type": "WorkerError"},
     ]
-    run = wave.runs[0]
+    run = wave.executions[0]
     trial_id = run.shards[0].shard.trials[0].trial_id
-    executions = output / run.artifact_prefix / "trials" / trial_id / "executions"
-    execution = next(executions.iterdir())
+    attempts = output / run.artifact_prefix / "trials" / trial_id / "attempts"
+    execution = next(attempts.iterdir())
     assert (execution / "_FAILED").is_file()
     assert json.loads((execution / "_FAILED").read_text()) == {
         "category": "transient",
@@ -1636,10 +1638,10 @@ def test_wave_failure_still_pauses_and_publishes_failed_execution(
     }
     assert "failure.json" in json.loads((execution / "checksums.json").read_text())
     assert _event_payloads(execution / "events.jsonl") == [
-        {"event": "execution_started", "execution_id": execution.name},
+        {"event": "attempt_started", "attempt_id": execution.name},
         {"event": "harbor_started"},
         {"event": "harbor_finished", "exit_code": 7},
-        {"event": "execution_failed", "error_type": "WorkerError"},
+        {"event": "attempt_failed", "error_type": "WorkerError"},
         {"event": "secrets_redacted", "files": ["harbor.log"]},
     ]
 
@@ -1649,7 +1651,7 @@ def test_task_local_failure_does_not_abort_wave(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1674,7 +1676,7 @@ def test_task_local_failure_does_not_abort_wave(
 
     destination = run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=endpoint,
@@ -1686,22 +1688,24 @@ def test_task_local_failure_does_not_abort_wave(
 
     assert (destination / "_SUCCESS").is_file()
     assert not (destination / "_FAILED").exists()
-    run = wave.runs[0]
-    trial_id = run.shards[0].shard.trials[0].trial_id
-    executions = output / run.artifact_prefix / "trials" / trial_id / "executions"
-    execution = next(executions.iterdir())
-    assert json.loads((execution / "failure.json").read_text()) == {
+    wave_execution = wave.executions[0]
+    trial_id = wave_execution.shards[0].shard.trials[0].trial_id
+    attempts = (
+        output / wave_execution.artifact_prefix / "trials" / trial_id / "attempts"
+    )
+    attempt = next(attempts.iterdir())
+    assert json.loads((attempt / "failure.json").read_text()) == {
         "category": "benchmark",
         "error_type": "WorkerError",
         "message": "Harbor exited with status 1",
     }
     shard_root = (
         output
-        / _campaign.artifact_prefix
-        / "runs"
-        / run.configuration.run_id
+        / _run.artifact_prefix
+        / "executions"
+        / wave_execution.configuration.execution_id
         / "shards"
-        / run.shards[0].shard.shard_id
+        / wave_execution.shards[0].shard.shard_id
     )
     assert not (shard_root / "_SUCCESS").exists()
 
@@ -1711,7 +1715,7 @@ def test_missing_required_session_publishes_terminal_failed_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1721,7 +1725,7 @@ def test_missing_required_session_publishes_terminal_failed_evidence(
     with pytest.raises(WorkerError, match="no session JSONL"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             output,
             runner=EndpointRunner(
@@ -1741,10 +1745,10 @@ def test_missing_required_session_publishes_terminal_failed_evidence(
             identifier=IdentifierSequence(),
         )
 
-    run = wave.runs[0]
+    run = wave.executions[0]
     trial_id = run.shards[0].shard.trials[0].trial_id
-    executions = output / run.artifact_prefix / "trials" / trial_id / "executions"
-    execution = next(executions.iterdir())
+    attempts = output / run.artifact_prefix / "trials" / trial_id / "attempts"
+    execution = next(attempts.iterdir())
     failure = json.loads((execution / "_FAILED").read_text(encoding="utf-8"))
     private = json.loads(
         (execution / "private-artifacts.json").read_text(encoding="utf-8")
@@ -1771,7 +1775,7 @@ def test_wave_never_resumes_or_pauses_without_watchdog_lease(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    _spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1784,7 +1788,7 @@ def test_wave_never_resumes_or_pauses_without_watchdog_lease(
     with pytest.raises(WorkerError, match="lease is held"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             tmp_path / "output",
             runner=endpoint,
@@ -1817,7 +1821,7 @@ def test_wave_rejects_non_paused_endpoint_before_watchdog(
     ready: int,
     message: str,
 ) -> None:
-    _spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    _spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1833,7 +1837,7 @@ def test_wave_rejects_non_paused_endpoint_before_watchdog(
     with pytest.raises(WorkerError, match=message):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             tmp_path / "output",
             runner=endpoint,
@@ -1858,7 +1862,7 @@ def test_wave_rejects_endpoint_model_mismatch_before_watchdog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    _spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1874,7 +1878,7 @@ def test_wave_rejects_endpoint_model_mismatch_before_watchdog(
     with pytest.raises(WorkerError, match="model does not match"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             tmp_path / "output",
             runner=endpoint,
@@ -1890,7 +1894,7 @@ def test_wave_cleanup_failure_overrides_success_and_redacts_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1907,7 +1911,7 @@ def test_wave_cleanup_failure_overrides_success_and_redacts_secret(
     with pytest.raises(WorkerError, match=r"pause failed with \[REDACTED\]"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             output,
             runner=EndpointRunner(
@@ -1936,7 +1940,7 @@ def test_wave_reports_primary_and_cleanup_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -1956,7 +1960,7 @@ def test_wave_reports_primary_and_cleanup_failures(
     ):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             output,
             runner=EndpointRunner(
@@ -1983,7 +1987,7 @@ def test_wave_validates_lock_and_secret_before_remote_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    _spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.delenv("HF_TOKEN", raising=False)
@@ -1992,7 +1996,7 @@ def test_wave_validates_lock_and_secret_before_remote_work(
     with pytest.raises(WorkerError, match="required secret HF_TOKEN"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             tmp_path / "missing-token",
             runner=endpoint,
@@ -2005,7 +2009,7 @@ def test_wave_validates_lock_and_secret_before_remote_work(
     with pytest.raises(WorkerError, match="fields do not match"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             tmp_path / "tampered",
             runner=endpoint,
@@ -2020,7 +2024,7 @@ def test_wave_never_overwrites_terminal_wave_evidence(
     monkeypatch: pytest.MonkeyPatch,
     marker: str,
 ) -> None:
-    _spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    _spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -2032,7 +2036,7 @@ def test_wave_never_overwrites_terminal_wave_evidence(
     with pytest.raises(WorkerError, match="already has terminal evidence"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             tmp_path / "output",
             runner=endpoint,
@@ -2045,7 +2049,7 @@ def test_wave_duration_bound_stops_admission_and_still_pauses(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _spec, _campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    _spec, _run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -2068,7 +2072,7 @@ def test_wave_duration_bound_stops_admission_and_still_pauses(
     with pytest.raises(WorkerError, match="duration bound was reached"):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             tmp_path / "output",
             runner=endpoint,
@@ -2090,7 +2094,7 @@ def test_wave_recovery_skips_checksum_valid_terminal_trial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=2, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -2098,7 +2102,7 @@ def test_wave_recovery_skips_checksum_valid_terminal_trial(
     first_output = tmp_path / "first"
     run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         first_output,
         runner=EndpointRunner(
@@ -2115,20 +2119,20 @@ def test_wave_recovery_skips_checksum_valid_terminal_trial(
     )
     recovery = tmp_path / "recovery"
     shutil.copytree(first_output, recovery)
-    campaign_root = recovery / campaign.artifact_prefix
-    shutil.rmtree(campaign_root / "waves")
-    run = wave.runs[0]
     run_root = recovery / run.artifact_prefix
-    shutil.rmtree(run_root / "shards")
-    second_trial = run.shards[1].shard.trials[0]
-    shutil.rmtree(run_root / "trials" / second_trial.trial_id)
+    shutil.rmtree(run_root / "waves")
+    execution = wave.executions[0]
+    execution_root = recovery / execution.artifact_prefix
+    shutil.rmtree(execution_root / "shards")
+    second_trial = execution.shards[1].shard.trials[0]
+    shutil.rmtree(execution_root / "trials" / second_trial.trial_id)
     harbor = HarborStream(spec.benchmark.task_digests, expected_calls=1)
     replacement = wave.model_copy(
         update={
             "wave_id": "wave-" + "e" * 24,
             "action_id": "act-" + "e" * 24,
             "action_key": "e" * 24,
-            "artifact_prefix": f"{campaign.artifact_prefix}/waves/wave-" + "e" * 24,
+            "artifact_prefix": f"{run.artifact_prefix}/waves/wave-" + "e" * 24,
         }
     )
     replacement_path = tmp_path / "replacement-wave.lock.json"
@@ -2143,7 +2147,7 @@ def test_wave_recovery_skips_checksum_valid_terminal_trial(
     )
     run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         replacement_path,
         recovery,
         runner=EndpointRunner(
@@ -2160,12 +2164,18 @@ def test_wave_recovery_skips_checksum_valid_terminal_trial(
     )
 
     assert len(harbor.commands) == 1
-    first_trial = run.shards[0].shard.trials[0]
-    first_executions = (
-        recovery / run.artifact_prefix / "trials" / first_trial.trial_id / "executions"
+    first_trial = execution.shards[0].shard.trials[0]
+    first_attempts = (
+        recovery
+        / execution.artifact_prefix
+        / "trials"
+        / first_trial.trial_id
+        / "attempts"
     )
-    assert len(list(first_executions.iterdir())) == 1
-    events = (recovery / run.shards[0].artifact_prefix / "events.jsonl").read_text()
+    assert len(list(first_attempts.iterdir())) == 1
+    events = (
+        recovery / execution.shards[0].artifact_prefix / "events.jsonl"
+    ).read_text()
     assert "trial_recovered" in events
 
 
@@ -2174,7 +2184,7 @@ def test_retry_wave_accepts_a_valid_success_from_an_earlier_wave(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -2182,7 +2192,7 @@ def test_retry_wave_accepts_a_valid_success_from_an_earlier_wave(
     output = tmp_path / "output"
     run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=EndpointRunner(
@@ -2197,26 +2207,26 @@ def test_retry_wave_accepts_a_valid_success_from_an_earlier_wave(
         watchdog_launcher=launch_watchdog,
         identifier=IdentifierSequence(),
     )
-    run = wave.runs[0]
-    shard = run.shards[0].shard
+    execution = wave.executions[0]
+    shard = execution.shards[0].shard
     trial = shard.trials[0]
-    trial_root = output / run.artifact_prefix / "trials" / trial.trial_id
+    trial_root = output / execution.artifact_prefix / "trials" / trial.trial_id
 
     assert _valid_terminal_trial(
         trial_root,
         trial,
-        campaign_id=campaign.campaign_id,
+        run_id=run.run_id,
         wave_id=None,
-        run_id=run.configuration.run_id,
+        execution_id=execution.configuration.execution_id,
         shard_id=shard.shard_id,
     )
-    with pytest.raises(WorkerError, match="execution identity does not match"):
+    with pytest.raises(WorkerError, match="attempt identity does not match"):
         _valid_terminal_trial(
             trial_root,
             trial,
-            campaign_id=campaign.campaign_id,
+            run_id=run.run_id,
             wave_id="wave-from-another-submit-action",
-            run_id=run.configuration.run_id,
+            execution_id=execution.configuration.execution_id,
             shard_id=shard.shard_id,
         )
 
@@ -2226,7 +2236,7 @@ def test_retry_wave_accepts_a_valid_success_from_an_earlier_wave(
     [
         ("second-marker", "not a valid success"),
         ("trial-summary", "wrong trial identity"),
-        ("execution-lock", "execution identity does not match"),
+        ("execution-lock", "attempt identity does not match"),
         ("trial-evidence", "trial evidence manifest"),
         ("execution-content", "checksum validation"),
     ],
@@ -2238,7 +2248,7 @@ def test_wave_recovery_rejects_invalid_terminal_trial(
     corruption: str,
     message: str,
 ) -> None:
-    spec, campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
+    spec, run, wave, manifest, run_path, wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
     monkeypatch.setenv("HF_TOKEN", "test-token")
@@ -2246,7 +2256,7 @@ def test_wave_recovery_rejects_invalid_terminal_trial(
     output = tmp_path / "output"
     run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=EndpointRunner(
@@ -2261,13 +2271,13 @@ def test_wave_recovery_rejects_invalid_terminal_trial(
         watchdog_launcher=launch_watchdog,
         identifier=IdentifierSequence(),
     )
-    campaign_root = output / campaign.artifact_prefix
-    shutil.rmtree(campaign_root / "waves")
-    run = wave.runs[0]
+    run_root = output / run.artifact_prefix
+    shutil.rmtree(run_root / "waves")
+    run = wave.executions[0]
     shutil.rmtree(output / run.artifact_prefix / "shards")
     trial = run.shards[0].shard.trials[0]
     trial_root = output / run.artifact_prefix / "trials" / trial.trial_id
-    execution_root = next((trial_root / "executions").iterdir())
+    attempt_root = next((trial_root / "attempts").iterdir())
     if corruption == "second-marker":
         (trial_root / "_FAILED").write_text("\n", encoding="utf-8")
     elif corruption == "trial-summary":
@@ -2277,18 +2287,18 @@ def test_wave_recovery_rejects_invalid_terminal_trial(
         summary_path.write_text(json.dumps(summary), encoding="utf-8")
         write_checksums(trial_root)
     elif corruption == "execution-lock":
-        lock_path = execution_root / "execution.lock.json"
+        lock_path = attempt_root / "attempt.lock.json"
         execution = json.loads(lock_path.read_text())
-        execution["campaign_id"] = "campaign-wrong"
+        execution["run_id"] = "run-wrong"
         lock_path.write_text(json.dumps(execution), encoding="utf-8")
-        write_checksums(execution_root)
+        write_checksums(attempt_root)
         write_checksums(trial_root)
     elif corruption == "trial-evidence":
-        next(execution_root.glob("harbor-jobs/*/*/evidence/manifest.json")).unlink()
-        write_checksums(execution_root)
+        next(attempt_root.glob("harbor-jobs/*/*/evidence/manifest.json")).unlink()
+        write_checksums(attempt_root)
         write_checksums(trial_root)
     else:
-        with (execution_root / "harbor.log").open("a", encoding="utf-8") as stream:
+        with (attempt_root / "harbor.log").open("a", encoding="utf-8") as stream:
             stream.write("changed\n")
 
     endpoint = EndpointRunner(
@@ -2301,7 +2311,7 @@ def test_wave_recovery_rejects_invalid_terminal_trial(
     with pytest.raises(WorkerError, match=message):
         run_wave_worker(
             manifest,
-            campaign_path,
+            run_path,
             wave_path,
             output,
             runner=endpoint,
@@ -2320,9 +2330,9 @@ def test_wave_recovery_rejects_invalid_terminal_trial(
 
 
 @pytest.mark.parametrize("value", ["0" * 31, "0" * 33, "A" * 32, "X" * 32, "g" * 32])
-def test_execution_identifier_rejects_every_noncanonical_shape(value: str) -> None:
+def test_attempt_identifier_rejects_every_noncanonical_shape(value: str) -> None:
     with pytest.raises(WorkerError) as captured:
-        _execution_id(lambda: value)
+        _attempt_id(lambda: value)
 
     assert str(captured.value) == (
         "execution identifier must be 32 lowercase hexadecimal digits"
@@ -2330,7 +2340,7 @@ def test_execution_identifier_rejects_every_noncanonical_shape(value: str) -> No
 
 
 def test_wave_scalar_helpers_have_exact_boundary_contracts(tmp_path: Path) -> None:
-    assert _execution_id(lambda: "0123456789abcdef" * 2) == (
+    assert _attempt_id(lambda: "0123456789abcdef" * 2) == (
         "exec-0123456789abcdef0123456789abcdef"
     )
     assert _remaining_seconds(10.0, lambda: 8.01) == 2
@@ -2353,10 +2363,10 @@ def test_wave_target_and_watchdog_helpers_forward_exact_locked_identity(
 ) -> None:
     (tmp_path / "endpoint").mkdir()
     (tmp_path / "provider").mkdir()
-    _spec, _campaign, endpoint_wave, *_paths = _wave_inputs(
+    _spec, _run, endpoint_wave, *_paths = _wave_inputs(
         remote_spec, tmp_path / "endpoint", attempts=1, concurrency=1
     )
-    _provider_spec, _provider_campaign, provider_wave, *_provider_paths = (
+    _provider_spec, _provider_run, provider_wave, *_provider_paths = (
         _provider_wave_inputs(
             remote_spec,
             tmp_path / "provider",
@@ -2395,16 +2405,16 @@ def test_shard_continues_after_one_trial_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    campaign, wave = _two_trial_wave(remote_spec)
-    run = wave.runs[0]
-    shard = run.shards[0]
+    run, wave = _two_trial_wave(remote_spec)
+    execution = wave.executions[0]
+    shard = execution.shards[0]
     barrier = threading.Barrier(2)
     calls: list[tuple[str, float]] = []
     calls_lock = threading.Lock()
 
     def execute(*args: object, **kwargs: object) -> None:
         del kwargs
-        trial = cast(CampaignTrialLock, args[5])
+        trial = cast(RunTrialLock, args[5])
         trial_id = trial.trial_id
         trial_root = cast(Path, args[6])
         deadline = cast(float, args[13])
@@ -2417,16 +2427,16 @@ def test_shard_continues_after_one_trial_fails(
 
     monkeypatch.setattr("harbor_hf.wave_worker._execute_trial", execute)
     output = tmp_path / "output"
-    campaign_root = tmp_path / "staging" / campaign.artifact_prefix
+    run_root = tmp_path / "staging" / run.artifact_prefix
 
     with pytest.raises(WorkerError, match="^first trial failed$"):
         _execute_shard(
             tmp_path / "manifest.yaml",
-            campaign,
-            wave,
             run,
+            wave,
+            execution,
             shard,
-            campaign_root,
+            run_root,
             output,
             tmp_path / "harbor",
             None,
@@ -2444,9 +2454,9 @@ def test_shard_continues_after_one_trial_fails(
     )
     assert {deadline for _trial_id, deadline in calls} == {100.0}
     events = _event_payloads(
-        campaign_root
-        / "runs"
-        / run.configuration.run_id
+        run_root
+        / "executions"
+        / execution.configuration.execution_id
         / "shards"
         / shard.shard.shard_id
         / "events.jsonl"
@@ -2464,16 +2474,16 @@ def test_one_shard_runs_multiple_trials_at_configured_concurrency(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    campaign, wave = _two_trial_wave(remote_spec)
-    run = wave.runs[0]
-    shard = run.shards[0]
+    run, wave = _two_trial_wave(remote_spec)
+    execution = wave.executions[0]
+    shard = execution.shards[0]
     barrier = threading.Barrier(2)
     calls: list[tuple[str, float]] = []
     calls_lock = threading.Lock()
 
     def execute(*args: object, **kwargs: object) -> None:
         del kwargs
-        trial = cast(CampaignTrialLock, args[5])
+        trial = cast(RunTrialLock, args[5])
         trial_root = cast(Path, args[6])
         deadline = cast(float, args[13])
         with calls_lock:
@@ -2482,15 +2492,15 @@ def test_one_shard_runs_multiple_trials_at_configured_concurrency(
         (trial_root / "checksums.json").write_text("{}\n", encoding="utf-8")
 
     monkeypatch.setattr("harbor_hf.wave_worker._execute_trial", execute)
-    campaign_root = tmp_path / "staging" / campaign.artifact_prefix
+    run_root = tmp_path / "staging" / run.artifact_prefix
 
     checksum = _execute_shard(
         tmp_path / "manifest.yaml",
-        campaign,
-        wave,
         run,
+        wave,
+        execution,
         shard,
-        campaign_root,
+        run_root,
         tmp_path / "output",
         tmp_path / "harbor",
         None,
@@ -2510,9 +2520,9 @@ def test_one_shard_runs_multiple_trials_at_configured_concurrency(
     assert len(calls) == len(shard.shard.trials)
     assert {deadline for _trial_id, deadline in calls} == {100.0}
     events = _event_payloads(
-        campaign_root
-        / "runs"
-        / run.configuration.run_id
+        run_root
+        / "executions"
+        / execution.configuration.execution_id
         / "shards"
         / shard.shard.shard_id
         / "events.jsonl"
@@ -2530,47 +2540,47 @@ def test_retry_shard_executes_only_admitted_trials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    campaign, initial = _two_trial_wave(remote_spec)
-    shard = initial.runs[0].shards[0].shard
+    run, initial = _two_trial_wave(remote_spec)
+    shard = initial.executions[0].shards[0].shard
     selected = shard.trials[1]
     action = (
         plan_reconciliation(
-            campaign,
+            run,
             [
                 new_event(
-                    subject_type="campaign",
-                    subject_id=campaign.campaign_id,
-                    kind="campaign.submitted",
+                    subject_type="run",
+                    subject_id=run.run_id,
+                    kind="run.submitted",
                     producer="cli",
-                    payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
+                    payload=RunSubmittedPayload(plan_digest=run.plan_digest),
                 )
             ],
         )[1]
         .actions[0]
         .model_copy(update={"kind": "retry-shard", "trial_ids": [selected.trial_id]})
     )
-    wave = build_wave_lock(campaign, _two_trial_spec(remote_spec), action)
-    run = wave.runs[0]
-    locked_shard = run.shards[0]
+    wave = build_wave_lock(run, _two_trial_spec(remote_spec), action)
+    execution = wave.executions[0]
+    locked_shard = execution.shards[0]
     calls: list[str] = []
 
     def execute(*args: object, **kwargs: object) -> None:
         del kwargs
-        trial = cast(CampaignTrialLock, args[5])
+        trial = cast(RunTrialLock, args[5])
         trial_id = trial.trial_id
         trial_root = cast(Path, args[6])
         calls.append(trial_id)
         (trial_root / "checksums.json").write_text("{}\n", encoding="utf-8")
 
     monkeypatch.setattr("harbor_hf.wave_worker._execute_trial", execute)
-    campaign_root = tmp_path / "staging" / campaign.artifact_prefix
+    run_root = tmp_path / "staging" / run.artifact_prefix
     result = _execute_shard(
         tmp_path / "manifest.yaml",
-        campaign,
-        wave,
         run,
+        wave,
+        execution,
         locked_shard,
-        campaign_root,
+        run_root,
         tmp_path / "output",
         tmp_path / "harbor",
         None,
@@ -2586,9 +2596,9 @@ def test_retry_shard_executes_only_admitted_trials(
     assert result is None
     assert calls == [selected.trial_id]
     shard_root = (
-        campaign_root
-        / "runs"
-        / run.configuration.run_id
+        run_root
+        / "executions"
+        / execution.configuration.execution_id
         / "shards"
         / locked_shard.shard.shard_id
     )
@@ -2626,42 +2636,42 @@ def _two_trial_spec(remote_spec: ExperimentSpec) -> ExperimentSpec:
     )
 
 
-def _two_trial_wave(remote_spec: ExperimentSpec) -> tuple[CampaignLock, WaveLock]:
+def _two_trial_wave(remote_spec: ExperimentSpec) -> tuple[RunLock, WaveLock]:
     spec = _two_trial_spec(remote_spec)
-    campaign = build_campaign_lock(build_campaign_plan(spec), "campaign-two-trials")
+    run = build_run_lock(build_run_plan(spec), "run-two-trials")
     submitted = new_event(
-        subject_type="campaign",
-        subject_id=campaign.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=run.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
+        payload=RunSubmittedPayload(plan_digest=run.plan_digest),
     )
-    action = plan_reconciliation(campaign, [submitted])[1].actions[0]
-    return campaign, build_wave_lock(campaign, spec, action)
+    action = plan_reconciliation(run, [submitted])[1].actions[0]
+    return run, build_wave_lock(run, spec, action)
 
 
 def test_retry_wave_accepts_explicit_recovery_worker_revision(
     remote_spec: ExperimentSpec,
 ) -> None:
     spec = _two_trial_spec(remote_spec)
-    campaign, wave = _two_trial_wave(remote_spec)
+    run, wave = _two_trial_wave(remote_spec)
     parent = wave.remote.worker.revision
     recovery_worker = wave.remote.worker.model_copy(update={"revision": "b" * 40})
     retry = wave.model_copy(
         update={
             "action_kind": "retry-shard",
-            "trial_ids": [campaign.runs[0].shards[0].trials[0].trial_id],
+            "trial_ids": [run.executions[0].shards[0].trials[0].trial_id],
             "remote": wave.remote.model_copy(update={"worker": recovery_worker}),
             "recovery_parent_worker_revision": parent,
         }
     )
 
-    validate_wave_lock(spec, campaign, retry)
+    validate_wave_lock(spec, run, retry)
 
     with pytest.raises(WorkerError, match="does not descend"):
         validate_wave_lock(
             spec,
-            campaign,
+            run,
             retry.model_copy(update={"recovery_parent_worker_revision": "c" * 40}),
         )
 
@@ -2672,7 +2682,7 @@ def _wave_inputs(
     *,
     attempts: int,
     concurrency: int,
-) -> tuple[ExperimentSpec, CampaignLock, WaveLock, Path, Path, Path]:
+) -> tuple[ExperimentSpec, RunLock, WaveLock, Path, Path, Path]:
     spec = remote_spec.model_copy(
         update={
             "execution": remote_spec.execution.model_copy(
@@ -2684,26 +2694,26 @@ def _wave_inputs(
             )
         }
     )
-    campaign = build_campaign_lock(build_campaign_plan(spec), "campaign-one")
+    run = build_run_lock(build_run_plan(spec), "run-one")
     submitted = new_event(
-        subject_type="campaign",
-        subject_id=campaign.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=run.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
+        payload=RunSubmittedPayload(plan_digest=run.plan_digest),
     )
-    action = plan_reconciliation(campaign, [submitted])[1].actions[0]
-    wave = build_wave_lock(campaign, spec, action)
+    action = plan_reconciliation(run, [submitted])[1].actions[0]
+    wave = build_wave_lock(run, spec, action)
     manifest = root / "manifest.yaml"
     manifest.write_text(
         yaml.safe_dump(spec.model_dump(mode="json", exclude_none=True)),
         encoding="utf-8",
     )
-    campaign_path = root / "campaign.lock.json"
-    campaign_path.write_text(campaign.model_dump_json(), encoding="utf-8")
+    run_path = root / "run.lock.json"
+    run_path.write_text(run.model_dump_json(), encoding="utf-8")
     wave_path = root / "wave.lock.json"
     wave_path.write_text(wave.model_dump_json(), encoding="utf-8")
-    return spec, campaign, wave, manifest, campaign_path, wave_path
+    return spec, run, wave, manifest, run_path, wave_path
 
 
 def _provider_wave_inputs(
@@ -2713,7 +2723,7 @@ def _provider_wave_inputs(
     attempts: int,
     concurrency: int,
     provider_concurrency: int,
-) -> tuple[ExperimentSpec, CampaignLock, WaveLock, Path, Path, Path]:
+) -> tuple[ExperimentSpec, RunLock, WaveLock, Path, Path, Path]:
     model = remote_spec.matrix.models[0]
     target = ProviderTarget(
         id="hf-provider",
@@ -2752,33 +2762,33 @@ def _provider_wave_inputs(
         }
     )
     spec = with_provider_controller(spec)
-    campaign = build_campaign_lock(build_campaign_plan(spec), "campaign-one")
+    run = build_run_lock(build_run_plan(spec), "run-one")
     submitted = new_event(
-        subject_type="campaign",
-        subject_id=campaign.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=run.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
+        payload=RunSubmittedPayload(plan_digest=run.plan_digest),
     )
     context = ReconcileContext(
         deployments={
-            campaign.runs[0].deployment_digest: DeploymentAdmission(
+            run.executions[0].deployment_digest: DeploymentAdmission(
                 estimated_wave_cost_microusd=1_000_000
             )
         }
     )
-    action = plan_reconciliation(campaign, [submitted], context=context)[1].actions[0]
-    wave = build_wave_lock(campaign, spec, action)
+    action = plan_reconciliation(run, [submitted], context=context)[1].actions[0]
+    wave = build_wave_lock(run, spec, action)
     manifest = root / "manifest.yaml"
     manifest.write_text(
         yaml.safe_dump(spec.model_dump(mode="json", exclude_none=True)),
         encoding="utf-8",
     )
-    campaign_path = root / "campaign.lock.json"
-    campaign_path.write_text(campaign.model_dump_json(), encoding="utf-8")
+    run_path = root / "run.lock.json"
+    run_path.write_text(run.model_dump_json(), encoding="utf-8")
     wave_path = root / "wave.lock.json"
     wave_path.write_text(wave.model_dump_json(), encoding="utf-8")
-    return spec, campaign, wave, manifest, campaign_path, wave_path
+    return spec, run, wave, manifest, run_path, wave_path
 
 
 def _event_payloads(path: Path) -> list[dict[str, object]]:

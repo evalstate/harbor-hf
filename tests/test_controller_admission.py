@@ -5,7 +5,7 @@ from harbor_hf.controller_admission import (
     assess_observed_capacity,
     decide_remaining_time,
 )
-from harbor_hf.models import CampaignControllerSpec
+from harbor_hf.models import RunControllerSpec
 
 
 def _input(**updates: object) -> RemainingTimeInput:
@@ -21,8 +21,8 @@ def _input(**updates: object) -> RemainingTimeInput:
     return RemainingTimeInput.model_validate(values)
 
 
-def _policy() -> CampaignControllerSpec:
-    return CampaignControllerSpec(
+def _policy() -> RunControllerSpec:
+    return RunControllerSpec(
         planning_trial_seconds=100,
         headroom_factor="1.25",
         wave_reserve_seconds=50,

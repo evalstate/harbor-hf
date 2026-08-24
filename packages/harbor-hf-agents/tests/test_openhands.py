@@ -1,4 +1,4 @@
-"""Unit tests for the OpenHands sandbox inference wrapper."""
+"""Unit tests for the OpenHands job inference wrapper."""
 
 from unittest.mock import AsyncMock
 
@@ -7,11 +7,11 @@ from harbor.models.agent.context import AgentContext
 
 from harbor_hf_agents.openhands.agent import OpenHandsAgent
 
-_ROUTE = "harbor_hf_agents.support.sandbox_chat_completions.use_sandbox_inference_route"
+_ROUTE = "harbor_hf_agents.support.job_chat_completions.use_job_inference_route"
 
 
 @pytest.fixture(autouse=True)
-def no_sandbox_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_job_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_ROUTE, AsyncMock(return_value=False))
 
 
@@ -23,7 +23,7 @@ def _run_call(exec_calls: list) -> object:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_route_injects_loopback_env(
+async def test_job_route_injects_loopback_env(
     temp_dir,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -56,7 +56,7 @@ async def test_sandbox_route_injects_loopback_env(
 
 
 @pytest.mark.asyncio
-async def test_missing_sandbox_route_fails(temp_dir) -> None:
+async def test_missing_job_route_fails(temp_dir) -> None:
     agent = OpenHandsAgent(
         logs_dir=temp_dir,
         model_name="openai/openai/gpt-oss-20b:together",
@@ -65,7 +65,7 @@ async def test_missing_sandbox_route_fails(temp_dir) -> None:
     mock_env = AsyncMock()
     mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
 
-    with pytest.raises(RuntimeError, match="Sandbox inference route"):
+    with pytest.raises(RuntimeError, match="Job inference route"):
         await agent.run("solve the task", mock_env, AgentContext())
 
 

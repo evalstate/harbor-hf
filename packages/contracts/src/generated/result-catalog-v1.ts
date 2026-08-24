@@ -17,8 +17,7 @@ entries: Entry[]
 }
 export interface Entry {
 publication_id: ResultCatalogId
-campaign_id: ResultCatalogId
-run_id: (ResultCatalogId | null)
+run_id: ResultCatalogId
 published_at: string
 benchmark: NullableString
 model: NullableString

@@ -10,7 +10,7 @@ from harbor_hf.models import ExperimentSpec, MatrixRule
 from harbor_hf.task_selection import task_matches_selector
 
 
-class RunCell(BaseModel):
+class ExecutionCell(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     model: str
@@ -23,9 +23,9 @@ class ExperimentPlan(BaseModel):
 
     experiment: str
     spec_digest: str
-    run_count: int
+    execution_count: int
     logical_trial_count: int | None
-    cells: list[RunCell]
+    cells: list[ExecutionCell]
 
 
 def experiment_digest(spec: ExperimentSpec) -> str:
@@ -64,9 +64,9 @@ def is_task_pattern(task: str) -> bool:
     return any(character in task for character in "*?[")
 
 
-def resolved_cells(spec: ExperimentSpec) -> list[RunCell]:
+def resolved_cells(spec: ExperimentSpec) -> list[ExecutionCell]:
     candidates = [
-        RunCell(model=model.id, deployment=deployment.id, agent=agent.id)
+        ExecutionCell(model=model.id, deployment=deployment.id, agent=agent.id)
         for model, deployment, agent in product(
             sorted(spec.matrix.models, key=lambda profile: profile.id),
             sorted(spec.matrix.deployments, key=lambda profile: profile.id),
@@ -85,11 +85,11 @@ def resolved_cells(spec: ExperimentSpec) -> list[RunCell]:
         if not any(_rule_matches(rule, cell) for rule in spec.matrix.exclude)
     ]
     if not cells:
-        raise ValueError("matrix rules exclude every run cell")
+        raise ValueError("matrix rules exclude every execution cell")
     return cells
 
 
-def _rule_matches(rule: MatrixRule, cell: RunCell) -> bool:
+def _rule_matches(rule: MatrixRule, cell: ExecutionCell) -> bool:
     return (
         (not rule.models or cell.model in rule.models)
         and (not rule.deployments or cell.deployment in rule.deployments)
@@ -118,7 +118,7 @@ def build_plan(spec: ExperimentSpec) -> ExperimentPlan:
     return ExperimentPlan(
         experiment=spec.metadata.name,
         spec_digest=experiment_digest(spec),
-        run_count=len(cells),
+        execution_count=len(cells),
         logical_trial_count=logical_trial_count,
         cells=cells,
     )

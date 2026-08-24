@@ -55,8 +55,8 @@ export function formatConfigureProgress(event: ConfigureProgressEvent): string {
       return `Space runtime wait completed (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
     case "readiness_wait_started":
       return "Waiting for the control service to become ready...";
-    case "readiness_rebuilding":
-      return `Control projection is still rebuilding (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
+    case "readiness_initializing":
+      return `Control service is still initializing (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
     case "readiness_ready":
       return `Control service is ready (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
     case "readiness_timed_out":

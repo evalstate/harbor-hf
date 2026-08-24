@@ -28,7 +28,7 @@ from harbor_hf.results import (
 NOW = datetime(2026, 7, 14, 1, 2, 3, tzinfo=UTC)
 SOURCE = EvidenceSource(
     bucket="hf://buckets/private-evidence",
-    prefix="campaigns/campaign-mutation/runs/run-mutation",
+    prefix="runs/run-mutation/executions/run-mutation",
 )
 CONTROL_COMMIT = "c" * 40
 
@@ -67,9 +67,9 @@ def _reader() -> RecordingEvidence:
     summary = {
         "schema_version": "harbor-hf/result-evidence/v1",
         "sanitized": True,
-        "run": {
+        "execution": {
+            "execution_id": "execution-mutation",
             "run_id": "run-mutation",
-            "campaign_id": "campaign-mutation",
             "experiment": "experiment-mutation",
             "evaluation_id": "evaluation-mutation",
             "publication_role": "final",
@@ -99,7 +99,7 @@ def _reader() -> RecordingEvidence:
                 "task_name": "task-z",
                 "task_digest": "sha256:" + "2" * 64,
                 "logical_attempt": 1,
-                "selected_execution_id": "execution-z",
+                "selected_attempt_id": "attempt-z",
                 "outcome": "scored",
             },
             {
@@ -107,13 +107,13 @@ def _reader() -> RecordingEvidence:
                 "task_name": "task-a",
                 "task_digest": "sha256:" + "1" * 64,
                 "logical_attempt": 1,
-                "selected_execution_id": "execution-b",
+                "selected_attempt_id": "attempt-b",
                 "outcome": "scored",
             },
         ],
-        "executions": [
+        "attempts": [
             {
-                "execution_id": "execution-z",
+                "attempt_id": "attempt-z",
                 "trial_id": "trial-z",
                 "physical_attempt": 1,
                 "runtime_kind": "provider",
@@ -125,7 +125,7 @@ def _reader() -> RecordingEvidence:
                 "remote_job_id": None,
             },
             {
-                "execution_id": "execution-a",
+                "attempt_id": "attempt-a",
                 "trial_id": "trial-a",
                 "physical_attempt": 1,
                 "runtime_kind": "endpoint",
@@ -137,7 +137,7 @@ def _reader() -> RecordingEvidence:
                 "remote_job_id": "job-a",
             },
             {
-                "execution_id": "execution-b",
+                "attempt_id": "attempt-b",
                 "trial_id": "trial-a",
                 "physical_attempt": 2,
                 "runtime_kind": "endpoint",
@@ -167,8 +167,8 @@ def _reader() -> RecordingEvidence:
                 "aggregation": None,
             },
             {
-                "owner_type": "execution",
-                "owner_id": "execution-b",
+                "owner_type": "attempt",
+                "owner_id": "attempt-b",
                 "name": "latency",
                 "value": 1.25,
                 "unit": "seconds",
@@ -177,8 +177,8 @@ def _reader() -> RecordingEvidence:
         ],
         "artifacts": [
             {
-                "owner_type": "run",
-                "owner_id": "run-mutation",
+                "owner_type": "execution",
+                "owner_id": "execution-mutation",
                 "kind": "verification",
                 "path": "verification.json",
                 "sha256": _sha256(artifact),
@@ -188,9 +188,9 @@ def _reader() -> RecordingEvidence:
         ],
     }
     files = {
-        "run.lock.json": _json_bytes(
+        "execution.lock.json": _json_bytes(
             {
-                "run_id": "run-mutation",
+                "execution_id": "execution-mutation",
                 "evaluation_id": "evaluation-mutation",
                 "publication_role": "final",
                 "component_kind": None,
@@ -222,23 +222,23 @@ def _reader() -> RecordingEvidence:
                 },
             }
         ),
-        "run-summary.json": _json_bytes(summary),
+        "execution-summary.json": _json_bytes(summary),
         "verification.json": artifact,
         "logs/controller.jsonl": b'{"event":"complete"}\n',
     }
     bundles: dict[str, dict[str, object]] = {}
-    for execution_id, trial_id in (
-        ("execution-z", "trial-z"),
-        ("execution-b", "trial-a"),
+    for attempt_id, trial_id in (
+        ("attempt-z", "trial-z"),
+        ("attempt-b", "trial-a"),
     ):
-        prefix = f"trials/{trial_id}/executions/{execution_id}"
+        prefix = f"trials/{trial_id}/attempts/{attempt_id}"
         manifest_path = f"{prefix}/harbor-native-bundle.json"
         archive_path = f"{prefix}/artifacts.tar.gz"
-        manifest = f"manifest for {execution_id}".encode()
-        archive = f"archive for {execution_id}".encode()
+        manifest = f"manifest for {attempt_id}".encode()
+        archive = f"archive for {attempt_id}".encode()
         files[manifest_path] = manifest
         files[archive_path] = archive
-        bundles[execution_id] = {
+        bundles[attempt_id] = {
             "manifest": {
                 "path": manifest_path,
                 "digest": _sha256(manifest),
@@ -255,20 +255,20 @@ def _reader() -> RecordingEvidence:
             "request_digest": "sha256:" + "a" * 64,
             "document_count": 2,
         }
-    run_lock = files["run.lock.json"]
+    execution_lock = files["execution.lock.json"]
     files["publication-envelope.v1.json"] = _json_bytes(
         {
             "schema_version": "harbor-hf/publication-envelope/v1",
+            "execution_id": "execution-mutation",
             "run_id": "run-mutation",
-            "campaign_id": "campaign-mutation",
             "created_at": NOW.isoformat(),
             "completed_at": (NOW + timedelta(minutes=5)).isoformat(),
             "evidence_bucket": SOURCE.bucket,
             "evidence_prefix": SOURCE.prefix,
-            "run_lock": {
-                "path": "run.lock.json",
-                "digest": _sha256(run_lock),
-                "size_bytes": len(run_lock),
+            "execution_lock": {
+                "path": "execution.lock.json",
+                "digest": _sha256(execution_lock),
+                "size_bytes": len(execution_lock),
             },
             "profiles": {
                 "experiment": "sha256:" + "1" * 64,
@@ -286,9 +286,9 @@ def _reader() -> RecordingEvidence:
             "sanitizer_version": "harbor-hf/public-results/v1",
             "projection_version": "harbor-hf/results-projection/v1",
             "cleanup_outcome": "verified",
-            "executions": [
+            "attempts": [
                 {
-                    "execution_id": record["execution_id"],
+                    "attempt_id": record["attempt_id"],
                     "trial_id": record["trial_id"],
                     "physical_attempt": record["physical_attempt"],
                     "status": record["status"],
@@ -299,12 +299,12 @@ def _reader() -> RecordingEvidence:
                     "remote_job_id": record["remote_job_id"],
                     "bundle_status": (
                         "verified"
-                        if record["execution_id"] in bundles
+                        if record["attempt_id"] in bundles
                         else "not_available"
                     ),
-                    "harbor_bundle": bundles.get(record["execution_id"]),
+                    "harbor_bundle": bundles.get(record["attempt_id"]),
                 }
-                for record in summary["executions"]
+                for record in summary["attempts"]
             ],
         }
     )
@@ -327,7 +327,7 @@ def test_full_result_rows_publication_and_index_have_canonical_hashes() -> None:
     index_file = build_index_file(index_row)
 
     assert _canonical_hash(tables.model_dump(mode="json")) == (
-        "3c80ce02a6b10334c6728c8e53010d874c07337643d55175048896fe339770b6"
+        "63cb2567da9016dfd495ac8627be0c0ebad3e2c1fe9b0c30c5c533ef6ec4efc5"
     )
     assert (
         _canonical_hash(
@@ -349,40 +349,40 @@ def test_full_result_rows_publication_and_index_have_canonical_hashes() -> None:
                 "index_size": len(index_file.content),
             }
         )
-        == "6f5df2a50bb6812cac7306085b1d764a9a507ad25b35f91ab2fd05dafd091485"
+        == "9194247de0da9c669971fd57f3b9d162f11bddc84d055bd5f203df919ae990d8"
     )
     assert [_sha256(item.content) for item in publication.files] == [
-        "sha256:ebd8692bf1023e04da96035cbbf4e96d33577b4354b8ff6409b566f21a7810ba",
-        "sha256:1d365a1570af03dec46eb504b00cce6d90ccebf0ebc17b13d3fe7b362b94e7a5",
-        "sha256:32346c0ec7ba7496244917085dcda0f0d8e84dfaa1f72d22925759b43ca934d4",
-        "sha256:5900826f887dd08f156689d44d8165798a89b18b6aa8e49026ac5d8a7b20d761",
-        "sha256:e0cb775d15ea6b1f2c6de11f8c4f4315561aa770efebb1366d7eae19bf6ef61f",
-        "sha256:7fe41c48f25be922ab66e8ae8bffe7112fe710eae329e7bd2b840b38e931207a",
+        "sha256:49834aea93f12f05642a398270d416e2e08ee121ce225e3e57b766152b7b43a5",
+        "sha256:b21750d2a0af1f40fff9e5450609e2ed31684d4cc423a12bac836bf255d4120c",
+        "sha256:4b27c6f9b2a4b66b61000d9c326dde1496ef20d6432f543d231e7e34cdd7ce79",
+        "sha256:12d81e06a5befe219d872ebf1108c6cd0fc2886633f07ece9d7ccab8e0899a43",
+        "sha256:dbb144c083ec7f55ae0a93b25f465ec145466135c287fc800593368417cebec4",
+        "sha256:7613faf41a48d8da6c6d978ed9195d9b26344ff8bc8d02f46b886ceb74af4543",
     ]
 
     common = ("hf://buckets/private-evidence", SOURCE.prefix)
     assert reader.calls == [
         ("list", *common, None),
         ("read", *common, "checksums.json"),
+        ("read", *common, "execution-summary.json"),
+        ("read", *common, "execution.lock.json"),
         ("read", *common, "logs/controller.jsonl"),
         ("read", *common, "publication-envelope.v1.json"),
-        ("read", *common, "run-summary.json"),
-        ("read", *common, "run.lock.json"),
-        ("read", *common, "trials/trial-a/executions/execution-b/artifacts.tar.gz"),
+        ("read", *common, "trials/trial-a/attempts/attempt-b/artifacts.tar.gz"),
         (
             "read",
             *common,
-            "trials/trial-a/executions/execution-b/harbor-native-bundle.json",
+            "trials/trial-a/attempts/attempt-b/harbor-native-bundle.json",
         ),
-        ("read", *common, "trials/trial-z/executions/execution-z/artifacts.tar.gz"),
+        ("read", *common, "trials/trial-z/attempts/attempt-z/artifacts.tar.gz"),
         (
             "read",
             *common,
-            "trials/trial-z/executions/execution-z/harbor-native-bundle.json",
+            "trials/trial-z/attempts/attempt-z/harbor-native-bundle.json",
         ),
         ("read", *common, "verification.json"),
-        ("read", *common, "run-summary.json"),
-        ("read", *common, "run.lock.json"),
+        ("read", *common, "execution-summary.json"),
+        ("read", *common, "execution.lock.json"),
         ("read", *common, "verification.json"),
         ("read", *common, "publication-envelope.v1.json"),
     ]
@@ -403,7 +403,9 @@ def test_full_result_rows_publication_and_index_have_canonical_hashes() -> None:
             "checksum manifest is invalid",
         ),
         (
-            lambda files: files.update({"run.lock.json": b'{"run_id":"wrong"}\n'}),
+            lambda files: files.update(
+                {"execution.lock.json": b'{"execution_id":"wrong"}\n'}
+            ),
             "checksum mismatch",
         ),
     ],
@@ -425,12 +427,12 @@ def test_schema_construction_and_canonical_helpers_have_complete_outputs() -> No
     assert [(field.name, str(field.type), field.nullable) for field in fields] == [
         ("schema_version", "string", False),
         ("publication_id", "string", False),
-        ("run_id", "string", False),
+        ("execution_id", "string", False),
         ("source_bucket", "string", False),
         ("source_prefix", "string", False),
         ("source_checksum", "string", False),
-        ("run_lock_path", "string", False),
-        ("run_lock_sha256", "string", False),
+        ("execution_lock_path", "string", False),
+        ("execution_lock_sha256", "string", False),
         ("control_commit", "string", False),
     ]
     assert _field("optional", pa.int64(), nullable=True) == pa.field(

@@ -49,7 +49,7 @@ describe("run identity", () => {
         hardware: "cpu-basic",
         timeout_seconds: 1,
         trusted_worker: true,
-        sandbox_template: {
+        trial_job_template: {
           flavors: [
             {
               hardware: "cpu-basic",
@@ -60,11 +60,7 @@ describe("run identity", () => {
               active_hourly_cost_microusd: 1,
             },
           ],
-          max_sandboxes: 1,
-          max_commands: 1,
-          max_command_seconds: 1,
-          max_transfer_bytes: 1,
-          allowed_roots: ["/"],
+          max_jobs: 1,
           inference_upstream: "https://endpoints.huggingface.cloud/v1",
         },
       }),

@@ -11,8 +11,8 @@ from types import SimpleNamespace, TracebackType
 import pytest
 
 from harbor_hf import worker
+from harbor_hf.executions import build_execution_lock
 from harbor_hf.models import ExperimentSpec
-from harbor_hf.runs import build_run_lock
 from harbor_hf.worker import (
     EndpointManager,
     WorkerError,
@@ -268,10 +268,10 @@ def test_endpoint_health_route_rejects_missing_nested_route() -> None:
 def test_trial_command_rejects_task_outside_resolved_set(
     remote_spec: ExperimentSpec, tmp_path: Path
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="exact-contract")
+    lock = build_execution_lock(remote_spec, execution_id="exact-contract")
 
     with pytest.raises(
-        WorkerError, match="^wave trial is not in the resolved run task set$"
+        WorkerError, match="^wave trial is not in the resolved execution task set$"
     ):
         build_harbor_trial_command(
             lock,

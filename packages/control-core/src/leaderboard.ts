@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
-  CampaignLock,
+  RunLock,
   HarborHFLeaderboardSnapshotV1,
   HarborHFResultCatalogV1,
   PublicationReceipt,
@@ -41,7 +41,7 @@ export interface ConfigurationDigestFields {
 
 export interface LeaderboardRow {
   configuration_digest: string;
-  campaign_id: string;
+  run_id: string;
   publication_id: string;
   published_at: string;
   benchmark: string;
@@ -68,7 +68,7 @@ function requiredString(value: unknown, field: string): string {
 }
 
 function requiredProfile<K extends ResolvedProfile["kind"]>(
-  lock: CampaignLock,
+  lock: RunLock,
   kind: K,
 ): Extract<ResolvedProfile, { kind: K }> {
   const profile = lock.profiles.find(
@@ -84,9 +84,7 @@ function requiredProfile<K extends ResolvedProfile["kind"]>(
  * Trial count, reasoning, provider, and Harbor version are in on purpose.
  * Worker revision, Job IDs, and cost are out on purpose.
  */
-export function configurationDigestFields(
-  lock: CampaignLock,
-): ConfigurationDigestFields {
+export function configurationDigestFields(lock: RunLock): ConfigurationDigestFields {
   const benchmark = requiredProfile(lock, "benchmark").spec;
   const model = requiredProfile(lock, "model").spec;
   const harness = requiredProfile(lock, "harness").spec;
@@ -118,7 +116,7 @@ export function configurationDigestFields(
 }
 
 /** SHA-256 over the canonical configuration digest fields. */
-export function configurationDigest(lock: CampaignLock): string {
+export function configurationDigest(lock: RunLock): string {
   return sha256(
     canonicalJson({
       schema_version: "harbor-hf/configuration-digest/v1",
@@ -156,6 +154,7 @@ function catalogString(value: string | null, field: string): string {
 async function requirePublishedReceipt(
   store: ImmutableObjectStore,
   entry: CatalogEntry,
+  catalogBytes: Uint8Array,
 ): Promise<void> {
   const receipt = validateControlRecord<PublicationReceipt>(
     JSON.parse(new TextDecoder().decode(await store.read(entry.result_path))),
@@ -164,7 +163,8 @@ async function requirePublishedReceipt(
     receipt.kind !== "publication.receipt" ||
     receipt.publication_state !== "published" ||
     receipt.publication_id !== entry.publication_id ||
-    receipt.campaign_id !== entry.campaign_id
+    receipt.run_id !== entry.run_id ||
+    receipt.catalog_digest !== sha256(catalogBytes)
   ) {
     throw new Error(
       `leaderboard catalog ${entry.publication_id} has no matching published receipt`,
@@ -186,7 +186,7 @@ export async function encodeLeaderboardSqlite(
       );
       CREATE TABLE entries (
         configuration_digest TEXT NOT NULL PRIMARY KEY,
-        campaign_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
         publication_id TEXT NOT NULL,
         published_at TEXT NOT NULL,
         benchmark TEXT NOT NULL,
@@ -209,13 +209,13 @@ export async function encodeLeaderboardSqlite(
       .run("v1", rows.length);
     const insert = database.prepare(`
       INSERT INTO entries (
-        configuration_digest, campaign_id, publication_id, published_at,
+        configuration_digest, run_id, publication_id, published_at,
         benchmark, model, harness, inference_provider, reasoning_effort,
         harbor_version, trial_count, task_count, scored_task_count,
         primary_metric_name, primary_metric_value, primary_metric_unit,
         observed_microusd
       ) VALUES (
-        @configuration_digest, @campaign_id, @publication_id, @published_at,
+        @configuration_digest, @run_id, @publication_id, @published_at,
         @benchmark, @model, @harness, @inference_provider, @reasoning_effort,
         @harbor_version, @trial_count, @task_count, @scored_task_count,
         @primary_metric_name, @primary_metric_value, @primary_metric_unit,
@@ -239,7 +239,7 @@ function selectLeaderboardRows(rows: LeaderboardRow[]): LeaderboardRow[] {
   const ordered = [...rows].sort((left, right) => {
     const published = right.published_at.localeCompare(left.published_at);
     if (published !== 0) return published;
-    return left.campaign_id.localeCompare(right.campaign_id);
+    return left.run_id.localeCompare(right.run_id);
   });
   for (const row of ordered) {
     if (!selected.has(row.configuration_digest))
@@ -257,27 +257,24 @@ async function catalogRows(
   const objects = await store.list(CATALOG_PREFIX);
   const rows: LeaderboardRow[] = [];
   for (const object of objects) {
+    const catalogBytes = await store.read(object.key);
     const catalog = validateResultCatalog<HarborHFResultCatalogV1>(
-      JSON.parse(new TextDecoder().decode(await store.read(object.key))),
+      JSON.parse(new TextDecoder().decode(catalogBytes)),
     );
     for (const entry of catalog.entries) {
       if (!leaderboardEligible(entry)) continue;
-      await requirePublishedReceipt(store, entry);
-      const lock = await projection.campaignLock(entry.campaign_id);
-      if (!lock)
-        throw new Error(
-          `leaderboard catalog ${entry.campaign_id} has no campaign lock`,
-        );
-      const campaign = await projection.campaign(entry.campaign_id);
-      if (!campaign)
-        throw new Error(`leaderboard catalog ${entry.campaign_id} has no campaign`);
+      await requirePublishedReceipt(store, entry, catalogBytes);
+      const lock = await projection.runLock(entry.run_id);
+      if (!lock) throw new Error(`leaderboard catalog ${entry.run_id} has no run lock`);
+      const run = await projection.run(entry.run_id);
+      if (!run) throw new Error(`leaderboard catalog ${entry.run_id} has no run`);
       const fields = configurationDigestFields(lock);
       const metric = entry.primary_metric;
       if (metric === null)
         throw new Error("eligible catalog is missing a primary metric");
       rows.push({
         configuration_digest: configurationDigest(lock),
-        campaign_id: entry.campaign_id,
+        run_id: entry.run_id,
         publication_id: entry.publication_id,
         published_at: entry.published_at,
         benchmark: catalogString(entry.benchmark, "benchmark"),
@@ -295,7 +292,7 @@ async function catalogRows(
         primary_metric_name: metric.name,
         primary_metric_value: metric.value,
         primary_metric_unit: metric.unit,
-        observed_microusd: campaign.observed_microusd,
+        observed_microusd: run.observed_microusd,
       });
     }
   }
@@ -322,7 +319,7 @@ export async function refreshLeaderboardSnapshot(
     canonicalJson(
       rows.map((row) => ({
         configuration_digest: row.configuration_digest,
-        campaign_id: row.campaign_id,
+        run_id: row.run_id,
         publication_id: row.publication_id,
       })),
     ),
@@ -374,7 +371,7 @@ export async function decodeLeaderboardSqlite(
     const rows = database
       .prepare(
         `SELECT
-          configuration_digest, campaign_id, publication_id, published_at,
+          configuration_digest, run_id, publication_id, published_at,
           benchmark, model, harness, inference_provider, reasoning_effort,
           harbor_version, trial_count, task_count, scored_task_count,
           primary_metric_name, primary_metric_value, primary_metric_unit,

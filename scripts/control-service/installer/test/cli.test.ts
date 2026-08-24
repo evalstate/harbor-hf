@@ -185,10 +185,10 @@ describe("installer CLI contract", () => {
     );
     expect(
       formatConfigureProgress({
-        kind: "readiness_rebuilding",
+        kind: "readiness_initializing",
         elapsedMilliseconds: 120_000,
       }),
-    ).toBe("Control projection is still rebuilding (2m 0s elapsed).");
+    ).toBe("Control service is still initializing (2m 0s elapsed).");
     expect(
       formatConfigureProgress({
         kind: "readiness_ready",

@@ -2,13 +2,13 @@
 
 Status: implemented
 
-This specification defines how one Harbor-HF campaign identifies and loads its benchmark files. An operator selects one source in the campaign YAML. Harbor-HF resolves that request into one immutable source lock before it creates remote work.
+This specification defines how one Harbor-HF run identifies and loads its benchmark files. An operator selects one source in the run YAML. Harbor-HF resolves that request into one immutable source lock before it creates remote work.
 
 The CLI supports content-addressed Harbor packages, anonymous public Git repositories, local directories, and existing private bundles. Authenticated remote Git is prohibited even if an older pinned worker accepts its manifest shape.
 
-## Campaign YAML
+## Run YAML
 
-A campaign selects one of three sources.
+A run selects one of three sources.
 
 ### Public Git repository
 
@@ -66,7 +66,7 @@ Unknown source types and unknown fields are errors. A source object cannot combi
 
 ## Directory path
 
-`directory.path` is an operator-machine path. A relative path is resolved from the directory containing the campaign YAML. An absolute path is accepted but is less portable. Shell expansion, environment expansion, and `~` expansion do not occur.
+`directory.path` is an operator-machine path. A relative path is resolved from the directory containing the run YAML. An absolute path is accepted but is less portable. Shell expansion, environment expansion, and `~` expansion do not occur.
 
 The path must identify a real directory. The root and every descendant must be a real directory or regular file. One file may contain at most 8 GiB, all regular files together may contain at most 32 GiB, one bundle may contain at most 1,000,000 entries, the manifest may contain at most 256 MiB, and the compressed payload may contain at most 33 GiB. Harbor-HF rejects:
 
@@ -78,7 +78,7 @@ The path must identify a real directory. The root and every descendant must be a
 - files or totals that exceed the locked bundle limits
 - known credential values and high-confidence private-key material
 
-The exact requested YAML remains part of private campaign audit history. The local path does not enter the resolved source lock, remote Job command, semantic plan digest, evidence, or publication.
+The exact requested YAML remains part of private run audit history. The local path does not enter the resolved source lock, remote Job command, semantic plan digest, evidence, or publication.
 
 ## Public Git source
 
@@ -98,7 +98,7 @@ A repository that becomes unavailable after planning causes a bounded infrastruc
 
 Benchmark source resolution never contributes a Job secret name. The source models have no `credentials`, `secret_name`, token, key, header, cookie, or authorization field.
 
-Harbor-HF must not forward `GITHUB_TOKEN`, `GH_TOKEN`, an SSH key, an SSH agent, a Git credential helper, or the output of `gh auth token` to a Hugging Face Job, Sandbox, Endpoint, schedule, or remote secret store.
+Harbor-HF must not forward `GITHUB_TOKEN`, `GH_TOKEN`, an SSH key, an SSH agent, a Git credential helper, or the output of `gh auth token` to a Hugging Face Job, Endpoint, schedule, or remote secret store.
 
 Private Git may still be used on the operator machine. The operator may use an existing local checkout or use locally configured Git authentication in place, then submit that directory as a bundle. The credential remains in its original local store.
 
@@ -106,7 +106,7 @@ This boundary does not remove runtime credentials that are independently require
 
 ## Resolved source lock
 
-Planning writes one internal JSON file named `source.lock.json` with schema `harbor-hf/benchmark-source-lock/v1alpha1`. The campaign YAML remains the only author-facing file.
+Planning writes one internal JSON file named `source.lock.json` with schema `harbor-hf/benchmark-source-lock/v1alpha1`. The run YAML remains the only author-facing file.
 
 A public Git lock has this shape:
 
@@ -149,7 +149,7 @@ A package lock records the exact content-addressed package reference:
 
 The source lock never records an operator path, mutable ref, credential name, credential value, or temporary staging location.
 
-The campaign plan digest covers the complete source lock. The separate manifest digest continues to identify the exact requested YAML. Moving an unchanged directory therefore changes the manifest digest but not the source content digest or semantic campaign plan.
+The run plan digest covers the complete source lock. The separate manifest digest continues to identify the exact requested YAML. Moving an unchanged directory therefore changes the manifest digest but not the source content digest or semantic run plan.
 
 ## Benchmark bundle
 
@@ -242,14 +242,14 @@ The local uploader uses the operator's configured HF authentication in place for
 The Job input package contains:
 
 ```text
-campaign-input/
+run-input/
 ├── manifest.yaml
 ├── source.lock.json
-├── campaign.lock.json
+├── run.lock.json
 └── input-manifest.json
 ```
 
-`input-manifest.json` covers the exact bytes of the other three files. The source bundle is a separate content-addressed volume mounted read-only at a fixed path. It is not copied into every campaign input package.
+`input-manifest.json` covers the exact bytes of the other three files. The source bundle is a separate content-addressed volume mounted read-only at a fixed path. It is not copied into every run input package.
 
 For a bundle source, the controller:
 
@@ -269,19 +269,19 @@ For a Git source, the controller performs the isolated anonymous checkout and gi
 
 Validation checks the author-facing source shape. Planning resolves it and writes the source lock. Planning a directory reads local files but creates no remote resource. Submission rebuilds the bundle and requires the resulting source lock to match the approved plan before upload or Job creation.
 
-The resolved source lock participates in every run, shard, wave, and trial identity within the campaign. `task_digests` remain required for the selected task set. After loading the source, Harbor's reported task digests must match them before a trial can be accepted.
+The resolved source lock participates in every run, shard, wave, and trial identity within the run. `task_digests` remain required for the selected task set. After loading the source, Harbor's reported task digests must match them before a trial can be accepted.
 
 A controller retry, endpoint wave, or recovery attempt reuses the original source lock. It must not reread an operator directory, resolve a newer Git commit, or select another bundle.
 
 ## Retention and deletion
 
-Bundles are shared immutable inputs. Campaign locks reference them by digest. Normal campaign cleanup never deletes a referenced bundle.
+Bundles are shared immutable inputs. Run locks reference them by digest. Normal run cleanup never deletes a referenced bundle.
 
-A separate dry-run garbage collector may identify bundles unreachable from retained campaign locks. Deletion requires an explicit operator action, a fresh reachability scan, and a record of every deleted digest. Age alone is not sufficient proof that a bundle is unused.
+A separate dry-run garbage collector may identify bundles unreachable from retained run locks. Deletion requires an explicit operator action, a fresh reachability scan, and a record of every deleted digest. Age alone is not sufficient proof that a bundle is unused.
 
 ## Validation failures
 
-`campaign plan` reports the source-lock digest and source type. For a local directory it also reports the content digest, file count, uncompressed byte count, and managed Bucket destination without reading or writing that Bucket. `campaign submit --dry-run` includes the complete source lock, source-lock digest, planned bundle receipt, and runtime secret names. For a controller-backed campaign, its rendered Job command also shows the exact read-only mount.
+`run plan` reports the source-lock digest and source type. For a local directory it also reports the content digest, file count, uncompressed byte count, and managed Bucket destination without reading or writing that Bucket. `run submit --dry-run` includes the complete source lock, source-lock digest, planned bundle receipt, and runtime secret names. For a controller-backed run, its rendered Job command also shows the exact read-only mount.
 
 Planning or submission fails when:
 

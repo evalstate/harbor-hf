@@ -83,6 +83,35 @@ export function Hint({
       window.removeEventListener("scroll", updatePosition, true);
     };
   }, [open, updatePosition]);
+  useLayoutEffect(() => {
+    if (icon) return;
+    const element = anchor.current;
+    if (!element) return;
+    const owner =
+      element.parentElement?.closest<HTMLElement>("button, a, [tabindex]") ?? null;
+    if (!owner) {
+      element.tabIndex = 0;
+      return () => element.removeAttribute("tabindex");
+    }
+    element.removeAttribute("tabindex");
+    const describedBy = owner.getAttribute("aria-describedby");
+    const ids = new Set(describedBy?.split(/\s+/).filter(Boolean) ?? []);
+    ids.add(id);
+    owner.setAttribute("aria-describedby", [...ids].join(" "));
+    const showFromOwner = () => {
+      updatePosition();
+      setOpen(true);
+    };
+    const hideFromOwner = () => setOpen(false);
+    owner.addEventListener("focus", showFromOwner);
+    owner.addEventListener("blur", hideFromOwner);
+    return () => {
+      owner.removeEventListener("focus", showFromOwner);
+      owner.removeEventListener("blur", hideFromOwner);
+      if (describedBy) owner.setAttribute("aria-describedby", describedBy);
+      else owner.removeAttribute("aria-describedby");
+    };
+  }, [icon, id, updatePosition]);
   const tooltip =
     typeof document === "undefined"
       ? null
@@ -102,7 +131,7 @@ export function Hint({
           document.body,
         );
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: Keyboard focus comes from the surrounding control or optional icon button.
+    // biome-ignore lint/a11y/noStaticElementInteractions: Focus listeners are attached to the surrounding control or optional icon button.
     <span
       aria-describedby={id}
       className="relative inline-flex max-w-full items-center gap-1"

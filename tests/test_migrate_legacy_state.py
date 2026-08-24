@@ -9,7 +9,7 @@ from harbor_hf.migration import Source, canonical_bytes, digest, migrate
 
 
 def build_source(root: Path, *, valid: bool = True) -> Source:
-    data = root / "data" / "runs" / "result.parquet"
+    data = root / "data" / "executions" / "result.parquet"
     data.parent.mkdir(parents=True)
     data.write_bytes(b"normalized-result")
     publication = root / "publications" / "publication-one.json"
@@ -20,7 +20,7 @@ def build_source(root: Path, *, valid: bool = True) -> Source:
             {
                 "schema_version": "harbor-hf/result-publication/v1",
                 "publication_id": "publication-one",
-                "files": {"data/runs/result.parquet": expected},
+                "files": {"data/executions/result.parquet": expected},
             }
         ),
         encoding="utf-8",
@@ -28,14 +28,14 @@ def build_source(root: Path, *, valid: bool = True) -> Source:
     return Source("results", root, "source-head-one")
 
 
-def canonical_campaign_request() -> dict[str, object]:
+def canonical_run_request() -> dict[str, object]:
     return {
         "schema_version": "v1",
-        "kind": "campaign.request",
+        "kind": "run.request",
         "record_id": "request-one",
         "created_at": "2026-08-16T00:00:00Z",
         "actor": {"subject": "migration", "role": "migration"},
-        "campaign_id": "campaign-one",
+        "run_id": "run-one",
         "idempotency_key_digest": f"sha256:{'a' * 64}",
         "profiles": [
             {"kind": "benchmark", "alias": "benchmark-one"},
@@ -109,7 +109,7 @@ def test_migration_copies_verified_files_and_writes_control_record(
     imported = (
         destination
         / "imports/schema=v1/migration=legacy-results-one"
-        / "source=results/data/runs/result.parquet"
+        / "source=results/data/executions/result.parquet"
     )
     assert imported.read_bytes() == b"normalized-result"
     records = list((destination / "control/schema=v1/migrations").glob("*.json"))
@@ -128,12 +128,8 @@ def test_migration_builds_a_normalized_result_catalog(tmp_path: Path) -> None:
     import pyarrow.parquet as pq
 
     root = tmp_path / "source"
-    run_path = (
-        root / "data/runs/schema=v1/campaign=campaign-one/publication-one.parquet"
-    )
-    metric_path = (
-        root / "data/metrics/schema=v1/campaign=campaign-one/publication-one.parquet"
-    )
+    run_path = root / "data/executions/schema=v1/run=run-one/publication-one.parquet"
+    metric_path = root / "data/metrics/schema=v1/run=run-one/publication-one.parquet"
     run_path.parent.mkdir(parents=True)
     metric_path.parent.mkdir(parents=True)
     pq.write_table(
@@ -141,8 +137,8 @@ def test_migration_builds_a_normalized_result_catalog(tmp_path: Path) -> None:
             [
                 {
                     "publication_id": "publication-one",
-                    "campaign_id": "campaign-one",
                     "run_id": "run-one",
+                    "execution_id": "execution-one",
                     "created_at": "2026-08-15T00:00:00Z",
                     "benchmark": "benchmark-one",
                     "model_id": "model-one",
@@ -183,7 +179,7 @@ def test_migration_builds_a_normalized_result_catalog(tmp_path: Path) -> None:
         json.dumps(
             {
                 "tables": {
-                    "runs": {"path": run_path.relative_to(root).as_posix()},
+                    "executions": {"path": run_path.relative_to(root).as_posix()},
                     "metrics": {"path": metric_path.relative_to(root).as_posix()},
                 }
             }
@@ -224,16 +220,14 @@ def test_migration_promotes_explicit_canonical_control_records(
     tmp_path: Path,
 ) -> None:
     source = build_source(tmp_path / "source")
-    candidate = (
-        source.root / "canonical/control/schema=v1/campaigns/campaign-one/request.json"
-    )
+    candidate = source.root / "canonical/control/schema=v1/runs/run-one/request.json"
     candidate.parent.mkdir(parents=True)
-    candidate.write_bytes(canonical_bytes(canonical_campaign_request()))
+    candidate.write_bytes(canonical_bytes(canonical_run_request()))
     destination = tmp_path / "bucket"
 
     result = run(source, destination)
 
-    promoted = destination / "control/schema=v1/campaigns/campaign-one/request.json"
+    promoted = destination / "control/schema=v1/runs/run-one/request.json"
     assert promoted.read_bytes() == candidate.read_bytes()
     assert result["promoted_count"] == 1
 
@@ -248,7 +242,7 @@ def test_migration_promotes_service_canonical_numeric_metrics(
         "record_id": "attempt-receipt-one",
         "created_at": "2026-08-16T00:00:01Z",
         "actor": {"subject": "migration", "role": "migration"},
-        "campaign_id": "campaign-one",
+        "run_id": "run-one",
         "task_id": "task-one",
         "attempt_id": "attempt-one",
         "action_id": "action-one",
@@ -260,7 +254,7 @@ def test_migration_promotes_service_canonical_numeric_metrics(
         "metrics": {"tiny_metric": 1e-7},
     }
     candidate = source.root / (
-        "canonical/control/schema=v1/campaigns/campaign-one/tasks/"
+        "canonical/control/schema=v1/runs/run-one/tasks/"
         "task-one/attempts/attempt-one/receipt.json"
     )
     candidate.parent.mkdir(parents=True)
@@ -338,15 +332,13 @@ def test_migration_rejects_malformed_canonical_control_record(
     tmp_path: Path,
 ) -> None:
     source = build_source(tmp_path / "source")
-    candidate = (
-        source.root / "canonical/control/schema=v1/campaigns/campaign-one/request.json"
-    )
+    candidate = source.root / "canonical/control/schema=v1/runs/run-one/request.json"
     candidate.parent.mkdir(parents=True)
     candidate.write_bytes(
         canonical_bytes(
             {
                 "schema_version": "v1",
-                "kind": "campaign.request",
+                "kind": "run.request",
                 "record_id": "request-one",
                 "created_at": "2026-08-16T00:00:00Z",
                 "actor": {"subject": "migration", "role": "migration"},
@@ -359,22 +351,20 @@ def test_migration_rejects_malformed_canonical_control_record(
         run(source, destination)
 
     assert not destination.exists()
-    candidate.write_bytes(canonical_bytes(canonical_campaign_request()))
+    candidate.write_bytes(canonical_bytes(canonical_run_request()))
     result = run(source, destination)
     assert result["promoted_count"] == 1
     assert (
-        destination / "control/schema=v1/campaigns/campaign-one/request.json"
+        destination / "control/schema=v1/runs/run-one/request.json"
     ).read_bytes() == candidate.read_bytes()
 
 
 def test_migration_rejects_noncanonical_control_encoding(tmp_path: Path) -> None:
     source = build_source(tmp_path / "source")
-    candidate = (
-        source.root / "canonical/control/schema=v1/campaigns/campaign-one/request.json"
-    )
+    candidate = source.root / "canonical/control/schema=v1/runs/run-one/request.json"
     candidate.parent.mkdir(parents=True)
     candidate.write_text(
-        json.dumps(canonical_campaign_request(), indent=2),
+        json.dumps(canonical_run_request(), indent=2),
         encoding="utf-8",
     )
 
@@ -398,13 +388,11 @@ def test_migration_preflights_canonical_destination_conflicts(
     tmp_path: Path,
 ) -> None:
     source = build_source(tmp_path / "source")
-    candidate = (
-        source.root / "canonical/control/schema=v1/campaigns/campaign-one/request.json"
-    )
+    candidate = source.root / "canonical/control/schema=v1/runs/run-one/request.json"
     candidate.parent.mkdir(parents=True)
-    candidate.write_bytes(canonical_bytes(canonical_campaign_request()))
+    candidate.write_bytes(canonical_bytes(canonical_run_request()))
     destination = tmp_path / "bucket"
-    promoted = destination / "control/schema=v1/campaigns/campaign-one/request.json"
+    promoted = destination / "control/schema=v1/runs/run-one/request.json"
     promoted.parent.mkdir(parents=True)
     promoted.write_bytes(b"existing-conflict")
 
@@ -423,7 +411,7 @@ def test_migration_preflights_invalid_result_projection(tmp_path: Path) -> None:
     projection.write_text(json.dumps({"tables": {}}), encoding="utf-8")
     destination = tmp_path / "bucket"
 
-    with pytest.raises(ValueError, match="result projection has no runs table"):
+    with pytest.raises(ValueError, match="result projection has no executions table"):
         run(source, destination)
 
     assert not destination.exists()

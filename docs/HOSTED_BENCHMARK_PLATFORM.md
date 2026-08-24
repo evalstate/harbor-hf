@@ -31,7 +31,7 @@ Harbor-HF has four main responsibilities.
 
 ### Control
 
-The control service accepts a launch request and resolves approved profiles. It locks the campaign, admits cost, and records every action. It also handles cancellation and recovery. Publication and audit history use the same durable control path.
+The control service accepts a launch request and resolves approved profiles. It locks the run, admits cost, and records every action. It also handles cancellation and recovery. Publication and audit history use the same durable control path.
 
 The durable record is immutable object storage. Local databases and web sessions are disposable views that can be rebuilt or recreated.
 

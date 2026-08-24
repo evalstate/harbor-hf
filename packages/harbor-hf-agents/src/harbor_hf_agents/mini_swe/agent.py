@@ -1,14 +1,14 @@
-"""mini-swe-agent over the Harbor-HF sandbox inference route."""
+"""mini-swe-agent over the Harbor-HF Job inference route."""
 
 from harbor.agents.installed.mini_swe_agent import MiniSweAgent as HarborMiniSweAgent
 
-from harbor_hf_agents.support.sandbox_chat_completions import (
-    SandboxChatCompletionsAgent,
+from harbor_hf_agents.support.job_chat_completions import (
+    JobChatCompletionsAgent,
 )
 
 
-class MiniSweAgent(SandboxChatCompletionsAgent, HarborMiniSweAgent):
-    """Harbor mini-swe-agent bound to the locked sandbox loopback route.
+class MiniSweAgent(JobChatCompletionsAgent, HarborMiniSweAgent):
+    """Harbor mini-swe-agent bound to the locked Job loopback route.
 
     Upstream mini-swe-agent reads ``MSWEA_API_KEY`` and ``OPENAI_BASE_URL``
     from the Job process before it starts. Execution Jobs do not receive those

@@ -11,7 +11,7 @@ def test_builds_cartesian_plan() -> None:
     spec = load_experiment(EXAMPLE)
     plan = build_plan(spec)
 
-    assert plan.run_count == 2
+    assert plan.execution_count == 2
     assert plan.logical_trial_count == 2
     assert [(cell.model, cell.deployment, cell.agent) for cell in plan.cells] == [
         ("qwen36-nvfp4", "h200", "openclaw"),
@@ -60,7 +60,7 @@ def test_counts_explicit_tasks_and_attempts() -> None:
 
     plan = build_plan(explicit)
 
-    assert plan.run_count == 2
+    assert plan.execution_count == 2
     assert plan.logical_trial_count == 12
 
 

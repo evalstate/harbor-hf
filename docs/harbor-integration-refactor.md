@@ -2,8 +2,13 @@
 
 ## Status
 
+This is a historical compatibility record. The
+[control service specification](CONTROL_SERVICE.md) defines the current
+one-Job-per-attempt runtime. Sandbox references below name the older external
+Harbor environment and its completed migration work.
+
 Phases 0 through 3 are implemented by the Harbor execution adapter. New
-executions use one checksummed Harbor job config and a typed compatibility
+attempts use one checksummed Harbor job config and a typed compatibility
 bundle exported inside the pinned Harbor environment. The legacy filesystem
 reader remains available only for historical evidence.
 
@@ -24,23 +29,23 @@ rebuildable query projections.
 
 Make Harbor the single authority for benchmark configuration and trial output,
 while keeping `harbor-hf` responsible for Hugging Face infrastructure,
-campaign recovery, evidence storage, and result publication.
+run recovery, evidence storage, and result publication.
 
 The refactor must not block benchmark execution. The current pinned Harbor CLI
 and filesystem adapter remains supported until the replacement has passed local
-contract tests and remote campaign parity tests.
+contract tests and remote run parity tests.
 
 ## Current Boundary
 
 Today a `harbor-hf` worker:
 
-1. resolves campaign, model, deployment, agent, and task configuration;
+1. resolves run, model, deployment, agent, and task configuration;
 2. builds a Harbor CLI command;
 3. runs the pinned Harbor checkout as a subprocess;
 4. reads Harbor `lock.json` and `result.json` files from known paths;
 5. independently validates task identity, agent identity, exceptions, and
    verifier rewards;
-6. wraps the result in campaign execution evidence and publishes artifacts.
+6. wraps the result in run execution evidence and publishes artifacts.
 
 This works and keeps Harbor internals out of the control plane, but it copies
 knowledge of Harbor configuration fields, result fields, and directory layout.
@@ -51,7 +56,7 @@ That knowledge can drift when Harbor changes.
 The final interaction should use one small, versioned Harbor-owned contract:
 
 ```text
-harbor-hf campaign lock
+harbor-hf run lock
         |
         +-- Hugging Face infrastructure envelope
         |
@@ -75,10 +80,10 @@ Harbor remains authoritative for:
 
 `harbor-hf` remains authoritative for:
 
-- campaign, run, shard, wave, and physical execution identity;
+- run, run, shard, wave, and physical execution identity;
 - model weights, serving engine, endpoint or provider, hardware, and region;
 - HF Jobs, Sandboxes, Endpoints, Buckets, Datasets, and lifecycle cleanup;
-- cross-campaign admission, spending limits, and infrastructure retries;
+- cross-run admission, spending limits, and infrastructure retries;
 - immutable evidence publication and normalized cross-run results.
 
 The `harbor-hf` execution record references the Harbor result bundle and its
@@ -89,7 +94,7 @@ checksum. It does not maintain an independent copy of every Harbor field.
 The refactor must preserve these rules in every phase:
 
 1. Harbor performs one requested logical attempt for each assigned trial.
-2. Harbor's internal infrastructure retries are disabled for campaign work.
+2. Harbor's internal infrastructure retries are disabled for run work.
 3. `harbor-hf` creates a new physical execution for every infrastructure retry.
 4. A completed Harbor bundle is immutable and belongs to exactly one physical
    execution.
@@ -97,7 +102,7 @@ The refactor must preserve these rules in every phase:
    public result row.
 6. Secret values and unsanitized task artifacts never enter shared storage.
 7. Endpoint cleanup remains part of run correctness.
-8. Existing campaign locks and evidence remain readable throughout migration.
+8. Existing run locks and evidence remain readable throughout migration.
 
 ## Phase 0: Freeze The Existing Contract
 
@@ -112,7 +117,7 @@ Deliverables:
 - record the exact supported Harbor source commit and OpenClaw version;
 - add sanitized golden fixtures for a successful trial, handled trial failure,
   infrastructure failure, retry, and multi-step result;
-- preserve the completed remote campaign as the behavioral baseline;
+- preserve the completed remote run as the behavioral baseline;
 - document which checks are Harbor guarantees and which are additional
   `harbor-hf` policy.
 
@@ -131,7 +136,7 @@ Deliverables:
 - move command rendering, subprocess invocation, output discovery, and raw
   Harbor result loading behind that boundary;
 - return typed adapter outcomes instead of unstructured dictionaries;
-- prevent campaign, recovery, and publication modules from reading Harbor file
+- prevent run, recovery, and publication modules from reading Harbor file
   paths directly;
 - retain the current command and filesystem behavior exactly.
 
@@ -153,7 +158,7 @@ Purpose: stop reconstructing Harbor configuration in multiple places.
 
 Deliverables:
 
-- resolve each campaign assignment into one serialized Harbor job or trial
+- resolve each run assignment into one serialized Harbor job or trial
   configuration accepted by the pinned Harbor version;
 - store that exact configuration and its checksum in the private execution
   input bundle;
@@ -161,7 +166,7 @@ Deliverables:
   a second collection of command flags;
 - keep infrastructure-only values in the surrounding `harbor-hf` lock;
 - reject attempts, retries, concurrency, task selection, or agent settings that
-  disagree with campaign policy.
+  disagree with run policy.
 
 Tests:
 
@@ -197,9 +202,9 @@ Tests:
 - exporter fixtures across every supported Harbor version;
 - malformed and unknown schema tests;
 - equality tests between legacy parsing and exported bundles;
-- remote smoke comparison using separate campaign IDs.
+- remote smoke comparison using separate run IDs.
 
-Exit criteria: new executions no longer require `harbor-hf` application code to
+Exit criteria: new attempts no longer require `harbor-hf` application code to
 understand Harbor's internal directory layout.
 
 ## Phase 4: Upstream Generic Harbor Support
@@ -216,12 +221,12 @@ Upstream work:
 - upstream OpenClaw configuration upload for non-mounted environments;
 - propose a versioned execution request and result bundle owned by Harbor;
 - propose structured trial lifecycle events and an artifact-sink interface;
-- keep endpoint, campaign, Bucket, Dataset, and Hugging Face control-plane code
+- keep endpoint, run, Bucket, Dataset, and Hugging Face control-plane code
   out of Harbor core.
 
 The Harbor proposal should be useful to other remote orchestrators and storage
 backends. It must not mention `harbor-hf` state or require Harbor to understand
-campaign waves and endpoints.
+run waves and endpoints.
 
 Exit criteria: a released Harbor version can accept the execution request and
 produce the result bundle without `harbor-hf` parsing Harbor internals.
@@ -230,7 +235,7 @@ produce the result bundle without `harbor-hf` parsing Harbor internals.
 
 Status: blocked by Phase 4.
 
-Purpose: switch new campaigns to the stable upstream contract safely.
+Purpose: switch new runs to the stable upstream contract safely.
 
 Deliverables:
 
@@ -243,14 +248,14 @@ Deliverables:
 - publish equivalent result rows regardless of which supported reader produced
   the validated bundle.
 
-Exit criteria: at least two complete remote campaigns produce equivalent locks,
+Exit criteria: at least two complete remote runs produce equivalent locks,
 trial outcomes, artifact inventories, and normalized rows through both readers.
 
 ## Phase 6: Run Harbor Once Per Shard
 
 Status: planned after protocol adoption.
 
-Purpose: let Harbor own concurrent trial execution without losing campaign-level
+Purpose: let Harbor own concurrent trial execution without losing run-level
 recovery semantics.
 
 Deliverables:
@@ -261,7 +266,7 @@ Deliverables:
   they become available;
 - map every Harbor trial bundle to its `harbor-hf` physical execution ID;
 - after interruption, retain completed bundles and create new physical
-  executions only for incomplete trials;
+  attempts only for incomplete trials;
 - keep Harbor retries disabled so physical retry history remains explicit.
 
 Tests:
@@ -291,7 +296,7 @@ Deliverables:
 - compact or link checkpoints into terminal evidence under bounded retention
   rules.
 
-Exit criteria: the Milestone 8 exit criteria in the production campaign plan
+Exit criteria: the Milestone 8 exit criteria in the production run plan
 pass without Harbor-specific path scraping.
 
 ## Phase 8: Pin Released Worker Images
@@ -323,7 +328,7 @@ Purpose: finish migration without losing historical readability.
 Removal conditions:
 
 - the Harbor-owned protocol has shipped in a supported Harbor release;
-- two complete remote campaigns and one forced-recovery campaign passed parity;
+- two complete remote runs and one forced-recovery run passed parity;
 - all active worker images use the new protocol;
 - no new evidence has used the legacy writer for one release window;
 - rebuild and audit commands can still read historical legacy evidence.
@@ -336,16 +341,16 @@ Actions:
 - document the minimum supported Harbor and protocol versions.
 
 Exit criteria: all new execution data crosses one versioned Harbor boundary,
-while historical campaigns remain auditable and rebuildable.
+while historical runs remain auditable and rebuildable.
 
 ## Compatibility And Rollback
 
 - Every protocol and lock change creates a new schema version; historical bytes
   are never rewritten.
-- Campaigns remain pinned to the Harbor version and adapter selected at submit
+- Runs remain pinned to the Harbor version and adapter selected at submit
   time.
 - A failed migration rolls back by selecting the previous worker image and
-  adapter for new campaign IDs; active campaigns keep their locked runtime.
+  adapter for new run IDs; active runs keep their locked runtime.
 - Readers remain additive until the removal conditions above are met.
 - Rollback never changes endpoint cleanup, evidence checksums, or publication
   identity.
@@ -356,7 +361,7 @@ The refactor is complete when:
 
 - new `harbor-hf` code contains no Harbor output path discovery outside the
   compatibility package;
-- campaign locks contain one canonical Harbor request digest instead of copied
+- run locks contain one canonical Harbor request digest instead of copied
   Harbor configuration fields;
 - Harbor validates and emits every new trial result bundle;
 - completed trials survive shard-worker interruption without rerun;

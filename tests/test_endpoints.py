@@ -57,7 +57,7 @@ def _desired(remote_spec: ExperimentSpec) -> DesiredEndpoint:
     )
     return build_desired_endpoint(
         namespace="example-org",
-        campaign_id="campaign-one",
+        run_id="run-one",
         model=remote_spec.matrix.models[0],
         deployment=deployment,
     )
@@ -222,29 +222,29 @@ def test_deployment_digest_ignores_labels_and_prebound_endpoint_name(
     assert deployment_digest(model, deployment) != deployment_digest(model, changed)
 
 
-def test_identity_changes_by_campaign_namespace_and_deployment(
+def test_identity_changes_by_run_namespace_and_deployment(
     remote_spec: ExperimentSpec,
 ) -> None:
     digest = deployment_digest(
         remote_spec.matrix.models[0], remote_spec.matrix.deployments[0]
     )
     first = managed_endpoint_identity(
-        namespace="example-org", campaign_id="one", deployment_digest=digest
+        namespace="example-org", run_id="one", deployment_digest=digest
     )
 
     assert first == managed_endpoint_identity(
-        namespace="example-org", campaign_id="one", deployment_digest=digest
+        namespace="example-org", run_id="one", deployment_digest=digest
     )
     assert (
         first.name
         != managed_endpoint_identity(
-            namespace="example-org", campaign_id="two", deployment_digest=digest
+            namespace="example-org", run_id="two", deployment_digest=digest
         ).name
     )
     assert (
         first.name
         != managed_endpoint_identity(
-            namespace="another", campaign_id="one", deployment_digest=digest
+            namespace="another", run_id="one", deployment_digest=digest
         ).name
     )
 
@@ -258,15 +258,15 @@ def test_managed_identity_has_stable_golden_value(
 
     identity = managed_endpoint_identity(
         namespace="example-org",
-        campaign_id="campaign-one",
+        run_id="run-one",
         deployment_digest=digest,
     )
 
-    assert identity.name == "harbor-hf-a749d72f7a10956af064d48d3860ee1e23f70293"
+    assert identity.name == "harbor-hf-d55b1363431de83c411434d9bfdff591ae9e5fb5"
     assert identity.tags == [
-        "harbor-hf-campaign-27f8a68166e2255551573839",
         "harbor-hf-deployment-44eb3bf9ec103630645e99e0",
         "harbor-hf-managed",
+        "harbor-hf-run-c48aa42125ae842b1c5cd9de",
     ]
 
 
@@ -280,7 +280,7 @@ def test_rejects_unknown_endpoint_parameters(remote_spec: ExperimentSpec) -> Non
     with pytest.raises(ValidationError, match="unreported_provider_control"):
         build_desired_endpoint(
             namespace="example-org",
-            campaign_id="campaign-one",
+            run_id="run-one",
             model=remote_spec.matrix.models[0],
             deployment=deployment,
         )
@@ -294,7 +294,7 @@ def test_rejects_noncomposite_provider_region(remote_spec: ExperimentSpec) -> No
     with pytest.raises(ValueError, match="vendor-region"):
         build_desired_endpoint(
             namespace="example-org",
-            campaign_id="campaign-one",
+            run_id="run-one",
             model=remote_spec.matrix.models[0],
             deployment=deployment,
         )

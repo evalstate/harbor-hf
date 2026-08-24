@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CampaignLock, HarborHFResultCatalogV1 } from "@harbor-hf/contracts";
+import type { RunLock, HarborHFResultCatalogV1 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
   deterministicId,
@@ -51,14 +51,14 @@ function sampleLock(input: {
   trial_indices?: number[];
   worker_revision?: string;
   omit_harbor_version?: boolean;
-}): CampaignLock {
+}): RunLock {
   return {
     schema_version: "v1",
-    kind: "campaign.lock",
+    kind: "run.lock",
     record_id: "lock-leaderboard",
     created_at: "2026-08-21T00:00:00.000Z",
     actor: { subject: "test", role: "service" },
-    campaign_id: "run-leaderboard",
+    run_id: "run-leaderboard",
     profiles: [
       {
         kind: "benchmark",
@@ -132,8 +132,7 @@ function catalogEntry(
 ): HarborHFResultCatalogV1["entries"][number] {
   return {
     publication_id: "publication-test",
-    campaign_id: "campaign-test",
-    run_id: null,
+    run_id: "run-test",
     published_at: "2026-08-16T00:00:00.000Z",
     benchmark: "benchmark-test",
     model: "model-test",
@@ -261,7 +260,7 @@ describe("leaderboard configuration digest", () => {
 });
 
 describe("leaderboard eligibility", () => {
-  it("admits only final, clean, fully scored campaigns", () => {
+  it("admits only final, clean, fully scored runs", () => {
     expect(leaderboardEligible(catalogEntry())).toBe(true);
   });
 
@@ -283,7 +282,7 @@ describe("leaderboard sqlite snapshot", () => {
     const bytes = await encodeLeaderboardSqlite([
       {
         configuration_digest: digest,
-        campaign_id: "run-one",
+        run_id: "run-one",
         publication_id: "publication-one",
         published_at: "2026-08-21T00:00:00.000Z",
         benchmark: "control-smoke",
@@ -309,11 +308,9 @@ describe("leaderboard sqlite snapshot", () => {
       entry_count: 1,
     });
     expect(
-      database
-        .prepare("SELECT campaign_id, harbor_version, trial_count FROM entries")
-        .get(),
+      database.prepare("SELECT run_id, harbor_version, trial_count FROM entries").get(),
     ).toEqual({
-      campaign_id: "run-one",
+      run_id: "run-one",
       harbor_version: "0.21.0",
       trial_count: 1,
     });
@@ -337,13 +334,13 @@ describe("leaderboard sqlite snapshot", () => {
       { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
     await settle(reconciler);
-    expect(await control.projection.campaign(submitted.campaign_id)).toMatchObject({
+    expect(await control.projection.run(submitted.run_id)).toMatchObject({
       publication_status: "published",
     });
     expect(await control.store.list(LEADERBOARD_SNAPSHOT_PREFIX)).toEqual([]);
   });
 
-  it("writes a bucket sqlite snapshot for a final clean scored campaign", async () => {
+  it("writes a bucket sqlite snapshot for a final clean scored run", async () => {
     const control = await createControl(leaderboardProfiles());
     controls.push(control);
     const submitted = await control.service.submit(submission, "final-key", operator);
@@ -355,7 +352,7 @@ describe("leaderboard sqlite snapshot", () => {
       source_digest: digest,
       entries: [
         catalogEntry({
-          campaign_id: submitted.campaign_id,
+          run_id: submitted.run_id,
           publication_id: "publication-leaderboard-test",
           inference_provider: "hf-cpu-smoke",
           benchmark: "control-smoke",
@@ -380,11 +377,11 @@ describe("leaderboard sqlite snapshot", () => {
           record_id: "publication-receipt-leaderboard-test",
           created_at: "2026-08-21T00:00:00.000Z",
           actor: { subject: "harbor-hf-control", role: "service" },
-          campaign_id: submitted.campaign_id,
+          run_id: submitted.run_id,
           publication_id: "publication-leaderboard-test",
           publication_state: "published",
           object_digests: [],
-          catalog_digest: digest,
+          catalog_digest: sha256(canonicalJson(catalog)),
           error_code: null,
         }),
       ),
@@ -401,11 +398,9 @@ describe("leaderboard sqlite snapshot", () => {
     await writeFile(path, await control.store.read(snapshots[0]?.key as string));
     const database = new Database(path, { readonly: true });
     expect(
-      database
-        .prepare("SELECT campaign_id, trial_count, harbor_version FROM entries")
-        .get(),
+      database.prepare("SELECT run_id, trial_count, harbor_version FROM entries").get(),
     ).toEqual({
-      campaign_id: submitted.campaign_id,
+      run_id: submitted.run_id,
       trial_count: 1,
       harbor_version: "0.21.0",
     });
@@ -417,7 +412,7 @@ function sampleRow(
   overrides: Partial<LeaderboardRow> & Pick<LeaderboardRow, "configuration_digest">,
 ): LeaderboardRow {
   return {
-    campaign_id: "run-one",
+    run_id: "run-one",
     publication_id: "publication-one",
     published_at: "2026-08-21T00:00:00.000Z",
     benchmark: "control-smoke",
@@ -476,14 +471,14 @@ describe("leaderboard ranking and Pareto frontier", () => {
     controls.push(control);
     const older = sampleRow({
       configuration_digest: digest,
-      campaign_id: "run-old",
+      run_id: "run-old",
       publication_id: "publication-old",
       primary_metric_value: 0.2,
       observed_microusd: 10_000,
     });
     const newer = sampleRow({
       configuration_digest: digest,
-      campaign_id: "run-new",
+      run_id: "run-new",
       publication_id: "publication-new",
       primary_metric_value: 0.9,
       observed_microusd: 20_000,
@@ -540,7 +535,7 @@ async function refreshFromRows(
     actor: { subject: "harbor-hf-control", role: "service" },
     sqlite_key: sqliteKey,
     sqlite_digest: sqliteDigest,
-    source_digest: sha256(canonicalJson(rows.map((row) => row.campaign_id))),
+    source_digest: sha256(canonicalJson(rows.map((row) => row.run_id))),
     entry_count: rows.length,
   });
   await control.store.create(

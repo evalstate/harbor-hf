@@ -178,67 +178,6 @@
       "title": "BundleBenchmarkSource",
       "type": "object"
     },
-    "CampaignShardLock": {
-      "additionalProperties": false,
-      "properties": {
-        "shard_digest": {
-          "title": "Shard Digest",
-          "type": "string"
-        },
-        "shard_id": {
-          "title": "Shard Id",
-          "type": "string"
-        },
-        "trials": {
-          "items": {
-            "$ref": "#/$defs/CampaignTrialLock"
-          },
-          "title": "Trials",
-          "type": "array"
-        }
-      },
-      "required": [
-        "shard_id",
-        "shard_digest",
-        "trials"
-      ],
-      "title": "CampaignShardLock",
-      "type": "object"
-    },
-    "CampaignTrialLock": {
-      "additionalProperties": false,
-      "properties": {
-        "logical_attempt": {
-          "title": "Logical Attempt",
-          "type": "integer"
-        },
-        "task_digest": {
-          "title": "Task Digest",
-          "type": "string"
-        },
-        "task_name": {
-          "title": "Task Name",
-          "type": "string"
-        },
-        "trial_digest": {
-          "title": "Trial Digest",
-          "type": "string"
-        },
-        "trial_id": {
-          "title": "Trial Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "trial_id",
-        "trial_digest",
-        "task_name",
-        "task_digest",
-        "logical_attempt"
-      ],
-      "title": "CampaignTrialLock",
-      "type": "object"
-    },
     "DeploymentProfile": {
       "additionalProperties": false,
       "properties": {
@@ -393,6 +332,239 @@
         "image"
       ],
       "title": "EngineSpec",
+      "type": "object"
+    },
+    "ExecutionLock": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/AgentProfile"
+        },
+        "agent_setup_timeout_multiplier": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Setup Timeout Multiplier"
+        },
+        "artifact_bucket": {
+          "title": "Artifact Bucket",
+          "type": "string"
+        },
+        "artifact_prefix": {
+          "title": "Artifact Prefix",
+          "type": "string"
+        },
+        "attempts": {
+          "title": "Attempts",
+          "type": "integer"
+        },
+        "benchmark_dataset": {
+          "title": "Benchmark Dataset",
+          "type": "string"
+        },
+        "benchmark_dataset_digest": {
+          "title": "Benchmark Dataset Digest",
+          "type": "string"
+        },
+        "benchmark_judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkJudgeSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "benchmark_source": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "bundle": "#/$defs/BundleBenchmarkSource",
+                  "git": "#/$defs/GitBenchmarkSource"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/GitBenchmarkSource"
+                },
+                {
+                  "$ref": "#/$defs/BundleBenchmarkSource"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Benchmark Source"
+        },
+        "benchmark_task_digests": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Benchmark Task Digests",
+          "type": "object"
+        },
+        "benchmark_tasks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Benchmark Tasks",
+          "type": "array"
+        },
+        "component_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "base",
+                "correction"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Component Kind"
+        },
+        "concurrent_trials": {
+          "title": "Concurrent Trials",
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "deployment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeploymentProfile"
+            },
+            {
+              "$ref": "#/$defs/ProviderTarget"
+            }
+          ],
+          "title": "Deployment"
+        },
+        "evaluation_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Evaluation Id",
+          "type": "string"
+        },
+        "execution_id": {
+          "title": "Execution Id",
+          "type": "string"
+        },
+        "experiment": {
+          "title": "Experiment",
+          "type": "string"
+        },
+        "judge_required_tasks": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Judge Required Tasks"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelProfile"
+        },
+        "publication_role": {
+          "enum": [
+            "final",
+            "component",
+            "diagnostic"
+          ],
+          "title": "Publication Role",
+          "type": "string"
+        },
+        "remote": {
+          "$ref": "#/$defs/RemoteExecutionSpec"
+        },
+        "schema_version": {
+          "default": "harbor-hf/execution-lock/v1alpha1",
+          "enum": [
+            "harbor-hf/execution-lock/v1alpha1",
+            "harbor-hf/execution-lock/v1alpha2"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "serving_profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServingProfileBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "spec_digest": {
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "trial_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrialEvidencePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "execution_id",
+        "created_at",
+        "experiment",
+        "evaluation_id",
+        "publication_role",
+        "component_kind",
+        "spec_digest",
+        "benchmark_dataset",
+        "benchmark_dataset_digest",
+        "benchmark_tasks",
+        "benchmark_task_digests",
+        "model",
+        "deployment",
+        "agent",
+        "attempts",
+        "concurrent_trials",
+        "timeout_seconds",
+        "artifact_bucket",
+        "artifact_prefix",
+        "remote"
+      ],
+      "title": "ExecutionLock",
       "type": "object"
     },
     "ExplicitProviderRoute": {
@@ -782,237 +954,65 @@
       "title": "RemoteJobSpec",
       "type": "object"
     },
-    "RunLock": {
+    "RunShardLock": {
       "additionalProperties": false,
       "properties": {
-        "agent": {
-          "$ref": "#/$defs/AgentProfile"
-        },
-        "agent_setup_timeout_multiplier": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Agent Setup Timeout Multiplier"
-        },
-        "artifact_bucket": {
-          "title": "Artifact Bucket",
+        "shard_digest": {
+          "title": "Shard Digest",
           "type": "string"
         },
-        "artifact_prefix": {
-          "title": "Artifact Prefix",
+        "shard_id": {
+          "title": "Shard Id",
           "type": "string"
         },
-        "attempts": {
-          "title": "Attempts",
-          "type": "integer"
-        },
-        "benchmark_dataset": {
-          "title": "Benchmark Dataset",
-          "type": "string"
-        },
-        "benchmark_dataset_digest": {
-          "title": "Benchmark Dataset Digest",
-          "type": "string"
-        },
-        "benchmark_judge": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/BenchmarkJudgeSpec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "benchmark_source": {
-          "anyOf": [
-            {
-              "discriminator": {
-                "mapping": {
-                  "bundle": "#/$defs/BundleBenchmarkSource",
-                  "git": "#/$defs/GitBenchmarkSource"
-                },
-                "propertyName": "type"
-              },
-              "oneOf": [
-                {
-                  "$ref": "#/$defs/GitBenchmarkSource"
-                },
-                {
-                  "$ref": "#/$defs/BundleBenchmarkSource"
-                }
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Benchmark Source"
-        },
-        "benchmark_task_digests": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "title": "Benchmark Task Digests",
-          "type": "object"
-        },
-        "benchmark_tasks": {
+        "trials": {
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/RunTrialLock"
           },
-          "title": "Benchmark Tasks",
+          "title": "Trials",
           "type": "array"
-        },
-        "component_kind": {
-          "anyOf": [
-            {
-              "enum": [
-                "base",
-                "correction"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Component Kind"
-        },
-        "concurrent_trials": {
-          "title": "Concurrent Trials",
-          "type": "integer"
-        },
-        "created_at": {
-          "format": "date-time",
-          "title": "Created At",
-          "type": "string"
-        },
-        "deployment": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DeploymentProfile"
-            },
-            {
-              "$ref": "#/$defs/ProviderTarget"
-            }
-          ],
-          "title": "Deployment"
-        },
-        "evaluation_id": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-          "title": "Evaluation Id",
-          "type": "string"
-        },
-        "experiment": {
-          "title": "Experiment",
-          "type": "string"
-        },
-        "judge_required_tasks": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Judge Required Tasks"
-        },
-        "model": {
-          "$ref": "#/$defs/ModelProfile"
-        },
-        "publication_role": {
-          "enum": [
-            "final",
-            "component",
-            "diagnostic"
-          ],
-          "title": "Publication Role",
-          "type": "string"
-        },
-        "remote": {
-          "$ref": "#/$defs/RemoteExecutionSpec"
-        },
-        "run_id": {
-          "title": "Run Id",
-          "type": "string"
-        },
-        "schema_version": {
-          "default": "harbor-hf/run-lock/v1alpha1",
-          "enum": [
-            "harbor-hf/run-lock/v1alpha1",
-            "harbor-hf/run-lock/v1alpha2"
-          ],
-          "title": "Schema Version",
-          "type": "string"
-        },
-        "serving_profile": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ServingProfileBinding"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "spec_digest": {
-          "title": "Spec Digest",
-          "type": "string"
-        },
-        "timeout_seconds": {
-          "title": "Timeout Seconds",
-          "type": "integer"
-        },
-        "trial_evidence": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TrialEvidencePolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         }
       },
       "required": [
-        "run_id",
-        "created_at",
-        "experiment",
-        "evaluation_id",
-        "publication_role",
-        "component_kind",
-        "spec_digest",
-        "benchmark_dataset",
-        "benchmark_dataset_digest",
-        "benchmark_tasks",
-        "benchmark_task_digests",
-        "model",
-        "deployment",
-        "agent",
-        "attempts",
-        "concurrent_trials",
-        "timeout_seconds",
-        "artifact_bucket",
-        "artifact_prefix",
-        "remote"
+        "shard_id",
+        "shard_digest",
+        "trials"
       ],
-      "title": "RunLock",
+      "title": "RunShardLock",
+      "type": "object"
+    },
+    "RunTrialLock": {
+      "additionalProperties": false,
+      "properties": {
+        "logical_attempt": {
+          "title": "Logical Attempt",
+          "type": "integer"
+        },
+        "task_digest": {
+          "title": "Task Digest",
+          "type": "string"
+        },
+        "task_name": {
+          "title": "Task Name",
+          "type": "string"
+        },
+        "trial_digest": {
+          "title": "Trial Digest",
+          "type": "string"
+        },
+        "trial_id": {
+          "title": "Trial Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trial_id",
+        "trial_digest",
+        "task_name",
+        "task_digest",
+        "logical_attempt"
+      ],
+      "title": "RunTrialLock",
       "type": "object"
     },
     "ServingProfileBinding": {
@@ -1217,7 +1217,7 @@
       "title": "TrialEvidencePolicy",
       "type": "object"
     },
-    "WaveRunLock": {
+    "WaveExecutionLock": {
       "additionalProperties": false,
       "properties": {
         "artifact_prefix": {
@@ -1225,7 +1225,7 @@
           "type": "string"
         },
         "configuration": {
-          "$ref": "#/$defs/RunLock"
+          "$ref": "#/$defs/ExecutionLock"
         },
         "shards": {
           "items": {
@@ -1240,7 +1240,7 @@
         "configuration",
         "shards"
       ],
-      "title": "WaveRunLock",
+      "title": "WaveExecutionLock",
       "type": "object"
     },
     "WaveShardLock": {
@@ -1250,17 +1250,17 @@
           "title": "Artifact Prefix",
           "type": "string"
         },
-        "run_id": {
-          "title": "Run Id",
+        "execution_id": {
+          "title": "Execution Id",
           "type": "string"
         },
         "shard": {
-          "$ref": "#/$defs/CampaignShardLock"
+          "$ref": "#/$defs/RunShardLock"
         }
       },
       "required": [
         "artifact_prefix",
-        "run_id",
+        "execution_id",
         "shard"
       ],
       "title": "WaveShardLock",
@@ -1320,10 +1320,6 @@
       "title": "Artifact Prefix",
       "type": "string"
     },
-    "campaign_id": {
-      "title": "Campaign Id",
-      "type": "string"
-    },
     "created_at": {
       "format": "date-time",
       "title": "Created At",
@@ -1342,6 +1338,13 @@
       "minimum": 0,
       "title": "Estimated Cost Microusd",
       "type": "integer"
+    },
+    "executions": {
+      "items": {
+        "$ref": "#/$defs/WaveExecutionLock"
+      },
+      "title": "Executions",
+      "type": "array"
     },
     "manifest_digest": {
       "title": "Manifest Digest",
@@ -1375,12 +1378,9 @@
     "remote": {
       "$ref": "#/$defs/RemoteExecutionSpec"
     },
-    "runs": {
-      "items": {
-        "$ref": "#/$defs/WaveRunLock"
-      },
-      "title": "Runs",
-      "type": "array"
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
     },
     "schema_version": {
       "const": "harbor-hf/wave-lock/v1alpha1",
@@ -1442,7 +1442,7 @@
     "wave_id",
     "action_id",
     "action_key",
-    "campaign_id",
+    "run_id",
     "created_at",
     "manifest_digest",
     "plan_digest",
@@ -1455,7 +1455,7 @@
     "duration_seconds",
     "remote",
     "shard_ids",
-    "runs"
+    "executions"
   ],
   "title": "WaveLock",
   "type": "object"

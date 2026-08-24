@@ -9,7 +9,7 @@ date: "2026-07-16"
 ## Status
 
 Implemented. Phases 1 through 3 passed local contracts and a remote
-Sandbox-to-Job canary on 2026-07-16. Provider-backed campaigns use the hosted
+Sandbox-to-Job canary on 2026-07-16. Provider-backed runs use the hosted
 recorder exclusively; the loopback-only transport has been removed.
 
 ## Purpose
@@ -155,7 +155,7 @@ policy permits. Evidence is flushed before terminal markers are written.
 - expose the fixed port only on provider-backed HF Jobs;
 - derive and validate the Job ingress URL inside the remote worker;
 - perform an authenticated external readiness check;
-- replace the loopback URL passed to provider-backed Harbor executions.
+- replace the loopback URL passed to provider-backed Harbor attempts.
 
 Exit criteria: an OpenClaw tool-use canary in an HF Sandbox reaches the
 selected inference provider through the recorder and produces non-empty,
@@ -167,7 +167,7 @@ validated provider request evidence.
 - bind each capability to one physical execution and its attempt budget;
 - revoke capabilities on completion, cancellation, timeout, and wave drain;
 - redact capabilities from process output, runtime records, and artifacts;
-- reject requests for inactive or mismatched executions before forwarding.
+- reject requests for inactive or mismatched attempts before forwarding.
 
 Exit criteria: concurrent trials cannot use each other's recorder routes, and
 secret-scanning tests prove that no capability or credential reaches evidence.
@@ -178,12 +178,12 @@ secret-scanning tests prove that no capability or credential reaches evidence.
   interrupted streams, cancellation, and controller shutdown;
 - run concurrent streaming and tool-calling tests at powers-of-two concurrency;
 - verify that recorder throughput does not become the limiting benchmark
-  resource at the selected campaign concurrency;
+  resource at the selected run concurrency;
 - confirm that every successful, failed, retried, and cancelled execution has
   the expected request evidence and terminal markers;
-- run a one-task remote canary before the first full provider campaign.
+- run a one-task remote canary before the first full provider run.
 
-Exit criteria: the full provider-backed campaign can run at its selected
+Exit criteria: the full provider-backed run can run at its selected
 concurrency without connection refusals, mixed evidence, leaked secrets, or
 unclassified transport failures.
 
@@ -201,7 +201,7 @@ maintain a custom Harbor fork or an OpenClaw-only bootstrap shim.
 
 ## Remote Verification
 
-The cutover was verified with a one-task provider campaign using the exact
+The cutover was verified with a one-task provider run using the exact
 worker commit `e935d7f095ac43cf41172777054e4e4edb7da4dd`. The HF Job controller
 and OpenClaw Sandbox ran in separate environments, and the Job exposed only the
 recorder's fixed port through authenticated HF ingress.
@@ -236,7 +236,7 @@ Endpoint was created, and no HF Job remained running after completion.
   boundary;
 - concurrency tests that prove trial evidence cannot mix;
 - a remote one-task canary using the exact worker revision intended for the
-  full campaign.
+  full run.
 
 The remote canary is a release gate for this transport. A direct provider probe
 is useful diagnostics, but it does not satisfy the gate because it bypasses the
@@ -245,13 +245,13 @@ recorder and Harbor Sandbox boundary.
 ## Cutover And Rollback
 
 After local contracts and the remote canary pass, all new provider-backed
-campaigns use the hosted recorder. The loopback-only path is removed rather
+runs use the hosted recorder. The loopback-only path is removed rather
 than retained behind a compatibility flag. Existing immutable run artifacts
 remain readable because their evidence schema does not change.
 
 Rollback means reverting the worker revision and pausing new provider-backed
-campaign admission. It does not mean silently bypassing evidence capture or
-falling back to direct provider calls. Endpoint-backed campaigns are unaffected.
+run admission. It does not mean silently bypassing evidence capture or
+falling back to direct provider calls. Endpoint-backed runs are unaffected.
 
 ## Success Criteria
 
@@ -265,6 +265,6 @@ The recorder work is complete when:
   provider evidence;
 - concurrent trials remain isolated and reproducible;
 - transport failures are not scored as benchmark failures;
-- the first full provider-backed ShellBench campaign completes through the
+- the first full provider-backed ShellBench run completes through the
   recorder at the selected concurrency;
 - the implementation uses one production transport with no legacy shim.
