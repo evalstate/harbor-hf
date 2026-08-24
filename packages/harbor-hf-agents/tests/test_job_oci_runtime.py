@@ -91,6 +91,26 @@ def _image_layout(
         separators=(",", ":"),
     ).encode()
     manifest_digest = f"sha256:{hashlib.sha256(raw_manifest).hexdigest()}"
+    (blobs / manifest_digest.removeprefix("sha256:")).write_bytes(raw_manifest)
+    (image_layout / "index.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": manifest_digest,
+                        "size": len(raw_manifest),
+                        "annotations": {
+                            "org.opencontainers.image.ref.name": "task",
+                        },
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
     return image_layout, runtime._image_manifest(
         raw_manifest,
         manifest_digest,
@@ -201,6 +221,46 @@ def test_manifest_rejects_config_blob_bytes_before_copy() -> None:
 
     with pytest.raises(OciImageIntegrityError, match="compressed blobs"):
         runtime._image_manifest(raw_manifest, digest, _image_limits())
+
+
+def test_copied_layout_requires_named_oci_manifest(tmp_path: Path) -> None:
+    image_layout, manifest = _image_layout(
+        tmp_path,
+        _compressed_layer({"file": b"contents"}),
+        _image_limits(),
+    )
+
+    runtime._validate_copied_oci_manifest(image_layout, manifest, _image_limits())
+
+    index = json.loads((image_layout / "index.json").read_text(encoding="utf-8"))
+    index["manifests"][0]["mediaType"] = (
+        "application/vnd.docker.distribution.manifest.v2+json"
+    )
+    (image_layout / "index.json").write_text(
+        json.dumps(index, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    with pytest.raises(OciImageIntegrityError, match="not an OCI image manifest"):
+        runtime._validate_copied_oci_manifest(
+            image_layout,
+            manifest,
+            _image_limits(),
+        )
+
+
+def test_skopeo_copy_converts_docker_manifests_to_oci(tmp_path: Path) -> None:
+    arguments = runtime._skopeo_copy_arguments(
+        tmp_path / "auth.json",
+        "docker://example.invalid/task@sha256:" + ("a" * 64),
+        tmp_path / "image",
+    )
+
+    assert arguments[0:2] == ["skopeo", "copy"]
+    assert arguments[arguments.index("--format") : arguments.index("--format") + 2] == [
+        "--format",
+        "oci",
+    ]
+    assert "--preserve-digests" not in arguments
 
 
 def test_layer_scan_rejects_expansion_before_extraction(tmp_path: Path) -> None:

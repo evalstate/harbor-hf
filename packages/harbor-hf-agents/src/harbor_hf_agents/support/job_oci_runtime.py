@@ -34,6 +34,8 @@ _INDEX_MEDIA_TYPES = frozenset(
         "application/vnd.oci.image.index.v1+json",
     }
 )
+_OCI_IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+_OCI_REF_NAME_ANNOTATION = "org.opencontainers.image.ref.name"
 _GZIP_LAYER_MEDIA_TYPES = frozenset(
     {
         "application/vnd.docker.image.rootfs.diff.tar.gzip",
@@ -281,6 +283,24 @@ def _docker_reference(image: str) -> str:
     return f"docker://{registry}/{repository}@{digest}"
 
 
+def _skopeo_copy_arguments(
+    auth_file: Path,
+    source: str,
+    image_layout: Path,
+) -> list[str]:
+    """Build a copy command that always produces an OCI-compliant manifest."""
+    return [
+        "skopeo",
+        "copy",
+        "--authfile",
+        str(auth_file),
+        "--format",
+        "oci",
+        source,
+        f"oci:{image_layout}:task",
+    ]
+
+
 def _platform_architecture() -> str:
     machine = platform.machine().lower()
     architectures = {
@@ -474,6 +494,64 @@ def _validate_blob(image_layout: Path, descriptor: _BlobDescriptor) -> Path:
     ):
         raise OciImageIntegrityError("copied task image blob failed validation")
     return blob
+
+
+def _is_named_task_manifest(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    descriptor = cast(dict[str, object], value)
+    annotations = _optional(descriptor, "annotations")
+    return (
+        isinstance(annotations, dict)
+        and _optional(
+            cast(dict[str, object], annotations),
+            _OCI_REF_NAME_ANNOTATION,
+        )
+        == "task"
+    )
+
+
+def _validate_copied_oci_manifest(
+    image_layout: Path,
+    expected: _ImageManifest,
+    limits: ImageLimits,
+) -> None:
+    """Verify that Skopeo's named OCI manifest retains the locked image blobs."""
+    try:
+        raw_index = (image_layout / "index.json").read_bytes()
+    except OSError as error:
+        raise OciImageIntegrityError("copied task image index is missing") from error
+    index = _manifest_object(raw_index, "copied task image index")
+    if _optional(index, "schemaVersion") != 2:
+        raise OciImageIntegrityError("copied task image index has an invalid schema")
+    values = _optional(index, "manifests")
+    if not isinstance(values, list):
+        raise OciImageIntegrityError("copied task image index has no manifests")
+    matches = [
+        cast(dict[str, object], value)
+        for value in values
+        if _is_named_task_manifest(value)
+    ]
+    if len(matches) != 1:
+        raise OciImageIntegrityError(
+            "copied task image must contain exactly one named manifest"
+        )
+    descriptor_value = matches[0]
+    if _optional(descriptor_value, "mediaType") != _OCI_IMAGE_MANIFEST_MEDIA_TYPE:
+        raise OciImageIntegrityError(
+            "copied task image reference is not an OCI image manifest"
+        )
+    descriptor = _blob_descriptor(descriptor_value, "copied manifest")
+    manifest_blob = _validate_blob(image_layout, descriptor)
+    try:
+        raw_manifest = manifest_blob.read_bytes()
+    except OSError as error:
+        raise OciImageIntegrityError(
+            "copied task image manifest cannot be read"
+        ) from error
+    copied = _image_manifest(raw_manifest, descriptor.digest, limits)
+    if copied != expected:
+        raise OciImageIntegrityError("copied task image manifest changed locked blobs")
 
 
 def _scan_tar_stream(
@@ -1435,24 +1513,14 @@ class IsolatedOciRuntime:
         )
         image_layout = self.workspace / "image"
         _run_checked(
-            [
-                "skopeo",
-                "copy",
-                "--authfile",
-                str(auth_file),
-                "--preserve-digests",
-                source,
-                f"oci:{image_layout}:task",
-            ],
+            _skopeo_copy_arguments(auth_file, source, image_layout),
             environment=self._environment,
             label="task image copy",
         )
-        _validate_blob(
+        _validate_copied_oci_manifest(
             image_layout,
-            _BlobDescriptor(
-                digest=manifest_digest,
-                size=len(selected_raw),
-            ),
+            manifest,
+            self.image_limits,
         )
         archive_stats = _inspect_image_layout(
             image_layout,
