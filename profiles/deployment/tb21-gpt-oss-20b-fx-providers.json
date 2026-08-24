@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-c934be2caf8575f0b6e8b84c",
+  "record_id": "profile-d3d19dd6159ec26fbef63317",
   "created_at": "2026-08-23T00:00:00.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -13,7 +13,7 @@
     "route": "hf_job",
     "models": ["gpt-oss-20b"],
     "harnesses": ["fx"],
-    "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:c665acd07b5f0580b9e419723d49e24f521edd5c2a2d01dca4211bc590aaec30",
+    "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:1acce3723d8bf21837d13d3537b9f71ec6ba2a337a0858582215ed85daec5cb7",
     "preparation_job_command": [
       "python",
       "-m",
@@ -33,7 +33,7 @@
     "input_price_microusd_per_million_tokens": 50000,
     "output_price_microusd_per_million_tokens": 200000,
     "harbor_version": "0.22.0",
-    "worker_revision": "c13907eb83348826a18a1dfeffc591a73e5c6379",
+    "worker_revision": "2e44a79932bddc7a8c7698c60200c4cde754f40e",
     "context_window": 131072,
     "timeout_seconds": 604800,
     "preparation_timeout_seconds": 7200,
