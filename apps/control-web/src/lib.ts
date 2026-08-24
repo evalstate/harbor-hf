@@ -64,8 +64,9 @@ export const runNameClass = "block min-w-0 break-all font-mono text-xs";
 export function humanize(value: string): string {
   return value
     .replaceAll("_", " ")
+    .replaceAll("-", " ")
     .replaceAll(".", " ")
-    .replace(/^./, (letter) => letter.toUpperCase());
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 /** Operator-facing copy for sealed logical outcomes. Raw tokens like `policy` are not shown. */

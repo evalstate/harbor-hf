@@ -785,8 +785,8 @@ wheels = [
 
 [[package]]
 name = "harbor"
-version = "0.20.0"
-source = { git = "https://github.com/harbor-framework/harbor.git?rev=8e18dc8887f0371533c403a45a0aa0841e7fd0c8#8e18dc8887f0371533c403a45a0aa0841e7fd0c8" }
+version = "0.22.0"
+source = { git = "https://github.com/harbor-framework/harbor.git?rev=b37833221e27435a18d7acdd41d875cdc2831893#b37833221e27435a18d7acdd41d875cdc2831893" }
 dependencies = [
     { name = "dirhash" },
     { name = "fastapi" },
@@ -830,7 +830,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "harbor", git = "https://github.com/harbor-framework/harbor.git?rev=8e18dc8887f0371533c403a45a0aa0841e7fd0c8" },
+    { name = "harbor", git = "https://github.com/harbor-framework/harbor.git?rev=b37833221e27435a18d7acdd41d875cdc2831893" },
     { name = "mutmut", specifier = "==3.7.0" },
     { name = "pytest", specifier = ">=8.4.0" },
     { name = "pytest-asyncio", specifier = ">=1.2.0" },

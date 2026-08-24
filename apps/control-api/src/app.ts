@@ -1,11 +1,16 @@
 import { existsSync } from "node:fs";
 import { posix } from "node:path";
+import cookie from "@fastify/cookie";
+import helmet from "@fastify/helmet";
+import fastifyStatic from "@fastify/static";
+import swagger from "@fastify/swagger";
 import type {
   ActionIntent,
   ActionReceipt,
   Actor,
   AttemptSubmissionV1,
   HarborHFResultCatalogV1,
+  PublicationReceipt,
   SandboxPolicy,
 } from "@harbor-hf/contracts";
 import {
@@ -14,35 +19,33 @@ import {
   sandboxActionResultPath,
   schemas,
   sha256,
+  validateControlRecord,
   validateResultCatalog,
 } from "@harbor-hf/contracts";
 import {
+  type ActionDispositionCorrectionInput,
   ConfirmationRequiredError,
+  type ControlEvent,
   ControlNotReadyError,
   createJson,
   IdempotencyConflictError,
+  loadLatestLeaderboard,
   PolicyError,
   ProfileResolutionError,
-  SandboxActionAmbiguousError,
-  type ActionDispositionCorrectionInput,
-  type ControlEvent,
-  type WorkerCapability,
-  type WorkerOperation,
-  preparedSandboxPolicy,
   preparationRequired,
+  preparedSandboxPolicy,
+  SandboxActionAmbiguousError,
   staticSandboxPolicy,
   summarizePublishedResult,
   verifyWorkerCapability,
+  type WorkerCapability,
+  type WorkerOperation,
 } from "@harbor-hf/control-core";
-import cookie from "@fastify/cookie";
-import helmet from "@fastify/helmet";
-import fastifyStatic from "@fastify/static";
-import swagger from "@fastify/swagger";
 import Fastify, {
-  LogController,
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
+  LogController,
 } from "fastify";
 import {
   acceptedSchema,
@@ -53,11 +56,15 @@ import {
   auditSchema,
   campaignListSchema,
   campaignViewSchema,
+  capacitySchema,
   endpointSchema,
   evidenceAcceptedSchema,
   evidenceUploadSchema,
   itemList,
   jobSchema,
+  leaderboardSchema,
+  namespaceCapacityPolicySchema,
+  namespaceCapacityUpdateSchema,
   profileSchema,
   publicationSchema,
   sessionSchema,
@@ -89,6 +96,7 @@ const embeddedCookiePolicy = {
   sameSite: "none",
   secure: true,
 } as const;
+const sandboxRequestBodyLimit = 1024 * 1024;
 
 function hubJobInspectUrl(namespace: string, jobId: string): string {
   return `https://huggingface.co/jobs/${encodeURIComponent(namespace)}/${encodeURIComponent(jobId)}`;
@@ -113,9 +121,10 @@ function isWorkerCapabilityRoute(request: FastifyRequest): boolean {
   const path = request.url.split("?", 1)[0] ?? request.url;
   return (
     (request.method === "GET" &&
-      /^\/api\/v1\/campaigns\/[^/]+\/(?:lock|prepared-job(?:\/trials\/[^/]+)?)$/.test(
-        path,
-      )) ||
+      (/^\/api\/v1\/campaigns\/[^/]+$/.test(path) ||
+        /^\/api\/v1\/campaigns\/[^/]+\/(?:lock|prepared-job(?:\/trials\/[^/]+)?)$/.test(
+          path,
+        ))) ||
     (request.method === "POST" &&
       /^\/api\/v1\/campaigns\/[^/]+\/(?:prepared-job|tasks\/[^/]+\/attempts)$/.test(
         path,
@@ -154,8 +163,14 @@ function anonymousRequestLimit(path: string): readonly [string, number] {
   if (path === "/auth/callback") return ["anonymous:callback", 30];
   if (path === "/auth/logout") return ["anonymous:logout", 30];
   if (path === "/api/v1/auth/session") return ["anonymous:auth-session", 120];
+  if (path === "/api/v1/leaderboard") return ["anonymous:leaderboard", 120];
   if (path.startsWith("/api/")) return ["anonymous:api", 240];
   return ["anonymous:static", 600];
+}
+
+function isAnonymousLeaderboard(request: FastifyRequest): boolean {
+  const path = request.url.split("?", 1)[0] ?? request.url;
+  return request.method === "GET" && path === "/api/v1/leaderboard";
 }
 
 async function admitRequest(
@@ -314,19 +329,50 @@ function profileString(
   return typeof value === "string" ? value : null;
 }
 
+const localPublicationSections = [
+  "runs",
+  "trials",
+  "executions",
+  "metrics",
+  "artifacts",
+] as const;
+
+async function publicationObjectsMatch(
+  runtime: Runtime,
+  receipt: PublicationReceipt,
+): Promise<boolean> {
+  if (receipt.object_digests.length !== localPublicationSections.length) return false;
+  for (const [index, digest] of receipt.object_digests.entries()) {
+    const section = localPublicationSections[index];
+    if (!section || !digest.startsWith("sha256:")) return false;
+    const key = `results/schema=v1/rows/${section}/${digest.slice("sha256:".length)}.parquet`;
+    try {
+      if (sha256(await runtime.store.read(key)) !== digest) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]> {
   const publications = await runtime.projection.publications();
+  const projectedById = new Map(
+    publications.map((publication) => [publication.publication_id, publication]),
+  );
   const byId = new Map<string, Record<string, unknown>>(
-    publications.map((publication) => [
-      publication.publication_id,
-      {
-        publication_id: publication.publication_id,
-        campaign_id: publication.campaign_id,
-        status: publication.status,
-        catalog_digest: publication.catalog_digest,
-        published_at: publication.created_at,
-      },
-    ]),
+    publications
+      .filter((publication) => publication.status !== "published")
+      .map((publication) => [
+        publication.publication_id,
+        {
+          publication_id: publication.publication_id,
+          campaign_id: publication.campaign_id,
+          status: publication.status,
+          catalog_digest: publication.catalog_digest,
+          published_at: publication.created_at,
+        },
+      ]),
   );
   const catalogs = await runtime.store.list("results/schema=v1/catalog");
   for (const object of catalogs) {
@@ -336,6 +382,52 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
     );
     const catalog = validateResultCatalog<HarborHFResultCatalogV1>(parsed);
     for (const entry of catalog.entries) {
+      const projected = projectedById.get(entry.publication_id);
+      if (!projected) {
+        if (await runtime.projection.campaign(entry.campaign_id)) continue;
+        byId.set(entry.publication_id, {
+          ...entry,
+          status: "published",
+          catalog_digest: object.digest,
+          catalog_source_digest: catalog.source_digest,
+        });
+        continue;
+      }
+      if (
+        projected.status !== "published" ||
+        projected.catalog_digest !== object.digest
+      )
+        continue;
+      let receipt: PublicationReceipt;
+      try {
+        const receiptValue = JSON.parse(
+          new TextDecoder().decode(await runtime.store.read(entry.result_path)),
+        );
+        receipt = validateControlRecord<PublicationReceipt>(receiptValue);
+      } catch {
+        continue;
+      }
+      if (
+        receipt.kind !== "publication.receipt" ||
+        receipt.publication_id !== entry.publication_id ||
+        receipt.campaign_id !== entry.campaign_id ||
+        receipt.publication_state !== "published" ||
+        receipt.catalog_digest !== object.digest
+      )
+        continue;
+      let projectedReceipt: PublicationReceipt;
+      try {
+        projectedReceipt = validateControlRecord<PublicationReceipt>(
+          JSON.parse(projected.body),
+        );
+      } catch {
+        continue;
+      }
+      if (
+        canonicalJson(projectedReceipt) !== canonicalJson(receipt) ||
+        !(await publicationObjectsMatch(runtime, receipt))
+      )
+        continue;
       byId.set(entry.publication_id, {
         ...entry,
         status: "published",
@@ -343,6 +435,12 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
         catalog_source_digest: catalog.source_digest,
       });
     }
+  }
+  for (const supersession of await runtime.projection.publicationSupersessions()) {
+    const previous = byId.get(supersession.superseded_publication_id);
+    if (!previous) continue;
+    previous.status = "superseded";
+    previous.superseded_by_publication_id = supersession.publication_id;
   }
   for (const item of byId.values()) {
     const campaignId = typeof item.campaign_id === "string" ? item.campaign_id : null;
@@ -364,6 +462,8 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
       typeof item.publication_id === "string" ? item.publication_id : null;
     if (!publicationId) continue;
     const campaign = campaignId ? await runtime.projection.campaign(campaignId) : null;
+    if (campaign?.status === "completed-invalid" && item.status === "published")
+      item.status = "invalid";
     const projectedTasks = campaignId ? await runtime.projection.tasks(campaignId) : [];
     const projectedAttempts = campaignId
       ? await runtime.projection.campaignAttempts(campaignId)
@@ -679,6 +779,17 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     });
   };
 
+  app.addHook("onRequest", async (request) => {
+    const path = request.url.split("?", 1)[0] ?? request.url;
+    if (path.startsWith("/health/") || path === "/auth/logout") return;
+    if (path === "/api/v1/system") return;
+    if (!path.startsWith("/api/") && !path.startsWith("/auth/")) return;
+    // OAuth role lookup reads the projected ACL. Starting or completing login
+    // before replay reaches that ACL would reject an authorized identity.
+    if (runtime.projection.system().ready) return;
+    throw new ControlNotReadyError("projection is rebuilding");
+  });
+
   app.addHook("onRequest", async (request, reply) => {
     const origin = request.headers.origin;
     if (origin && origin !== runtime.config.public_origin) {
@@ -873,6 +984,19 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       }
     }
     if (!request.actor) {
+      if (isAnonymousLeaderboard(request)) {
+        if (
+          !(await admitRequest(
+            requestLimiter,
+            "anonymous:leaderboard",
+            120,
+            request,
+            reply,
+          ))
+        )
+          return;
+        return;
+      }
       if (!(await admitRequest(requestLimiter, "anonymous:api", 240, request, reply)))
         return;
       await reply.code(401).send({
@@ -1071,6 +1195,39 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
   );
 
   app.get(
+    "/api/v1/capacity",
+    {
+      schema: {
+        tags: ["system"],
+        response: { 200: namespaceCapacityPolicySchema },
+      },
+    },
+    async () => runtime.service.namespaceCapacityPolicy(),
+  );
+
+  app.post(
+    "/api/v1/capacity",
+    {
+      schema: {
+        tags: ["system"],
+        body: namespaceCapacityUpdateSchema,
+        response: {
+          200: namespaceCapacityPolicySchema,
+          503: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("capacity writes are disabled before cutover");
+      void idempotencyKey(request);
+      const body = request.body as { max_active_sandboxes: number; confirmed: true };
+      await runtime.service.setMaxActiveSandboxes(body.max_active_sandboxes);
+      return runtime.service.namespaceCapacityPolicy();
+    },
+  );
+
+  app.get(
     "/api/v1/campaigns",
     {
       schema: {
@@ -1125,6 +1282,13 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     },
     async (request, reply) => {
       const { campaign_id } = request.params as { campaign_id: string };
+      if (request.workerCapability) {
+        requireWorkerOperation(request, "campaign.read");
+        if (request.workerCapability.campaign_id !== campaign_id)
+          throw new WorkerScopeError(
+            "the worker capability does not authorize this campaign",
+          );
+      }
       const campaign = await runtime.projection.campaign(campaign_id);
       return (
         campaign ??
@@ -1136,6 +1300,28 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
           },
         })
       );
+    },
+  );
+
+  app.get(
+    "/api/v1/campaigns/:campaign_id/capacity",
+    {
+      schema: {
+        tags: ["campaigns"],
+        response: { 200: capacitySchema, 404: cleanSchema(schemas.apiError) },
+      },
+    },
+    async (request, reply) => {
+      const { campaign_id } = request.params as { campaign_id: string };
+      if (!(await runtime.projection.campaign(campaign_id)))
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "campaign was not found",
+            request_id: request.id,
+          },
+        });
+      return runtime.service.sandboxCapacityView(campaign_id);
     },
   );
 
@@ -1286,10 +1472,25 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
             required: ["sandbox_id", "state"],
             properties: { sandbox_id: { type: "string" }, state: { type: "string" } },
           },
+          202: {
+            type: "object",
+            additionalProperties: false,
+            required: ["sandbox_id", "state", "limiting_factor", "not_before"],
+            properties: {
+              sandbox_id: { type: "string" },
+              state: { const: "QUEUED" },
+              limiting_factor: {
+                anyOf: [{ type: "string" }, { type: "null" }],
+              },
+              not_before: {
+                anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+              },
+            },
+          },
         },
       },
     },
-    async (request) => {
+    async (request, reply) => {
       const { campaign_id, task_id } = request.params as {
         campaign_id: string;
         task_id: string;
@@ -1300,7 +1501,6 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         task_id,
         "sandbox.create",
       );
-      if (!runtime.sandboxes) throw new PolicyError("Sandbox gateway is unavailable");
       const target = `sandbox:${task_id}`;
       const payload = { task_id, sandbox: context.policy };
       const candidate = runtime.service.actionIntent(
@@ -1315,29 +1515,54 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         candidate,
         context.policy.max_sandboxes,
       );
-      return executeSandboxAction(
-        request,
-        campaign_id,
-        task_id,
-        "sandbox.create",
-        target,
-        payload,
-        true,
-        async (intent, adoptionOnly) => {
-          const external = await runtime.sandboxes?.lifecycle(intent, {
-            adoption_only: adoptionOnly,
-          });
-          if (!external) throw new PolicyError("Sandbox gateway is unavailable");
-          return {
-            external,
-            result: {
-              sandbox_id: intent.action_id,
-              state: external.observed_state,
-            },
-          };
-        },
-        admission.dispatch_created,
-      );
+      if (admission.status === "rejected")
+        throw new PolicyError(
+          `Sandbox admission rejected: ${admission.limiting_factor ?? "policy"}`,
+        );
+      if (!runtime.service.capacityProfile()) {
+        if (!runtime.sandboxes) throw new PolicyError("Sandbox gateway is unavailable");
+        return executeSandboxAction(
+          request,
+          campaign_id,
+          task_id,
+          "sandbox.create",
+          target,
+          payload,
+          true,
+          async (intent, adoptionOnly) => {
+            const external = await runtime.sandboxes?.lifecycle(intent, {
+              adoption_only: adoptionOnly,
+            });
+            if (!external) throw new PolicyError("Sandbox gateway is unavailable");
+            return {
+              external,
+              result: {
+                sandbox_id: intent.action_id,
+                state: external.observed_state,
+              },
+            };
+          },
+          admission.dispatch_created,
+        );
+      }
+      const row = await runtime.projection.action(candidate.action_id);
+      if (row?.receipt_body) {
+        const receipt = JSON.parse(row.receipt_body) as ActionReceipt;
+        if (receipt.outcome === "failed")
+          throw new PolicyError(
+            `Sandbox creation failed: ${receipt.error_code ?? receipt.observed_state}`,
+          );
+        return {
+          sandbox_id: candidate.action_id,
+          state: receipt.observed_state,
+        };
+      }
+      return reply.code(202).send({
+        sandbox_id: candidate.action_id,
+        state: "QUEUED",
+        limiting_factor: admission.limiting_factor,
+        not_before: admission.not_before,
+      });
     },
   );
 
@@ -1386,7 +1611,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
   app.post(
     "/api/v1/campaigns/:campaign_id/tasks/:task_id/sandboxes/:sandbox_id/exec",
     {
-      bodyLimit: 1024 * 1024,
+      bodyLimit: sandboxRequestBodyLimit,
       schema: {
         tags: ["campaigns"],
         body: {
@@ -1398,7 +1623,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
               type: "array",
               minItems: 1,
               maxItems: 128,
-              items: { type: "string", maxLength: 4096 },
+              items: { type: "string", maxLength: sandboxRequestBodyLimit },
             },
             cwd: { type: "string", minLength: 1, maxLength: 512 },
             timeout_seconds: { type: "integer", minimum: 1, maximum: 86400 },
@@ -1696,6 +1921,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
             request_id: request.id,
           },
         });
+      const exhaustion = await runtime.projection.taskExhaustion(campaign_id, task_id);
       return {
         task: detail.task,
         attempts: detail.attempts.map((attempt) => ({
@@ -1709,6 +1935,14 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
           metrics: attempt.metrics,
           created_at: attempt.created_at,
         })),
+        exhaustion: exhaustion
+          ? {
+              last_attempt_id: exhaustion.last_attempt_id,
+              attempt_count: exhaustion.attempt_count,
+              reason: exhaustion.reason,
+              created_at: exhaustion.created_at,
+            }
+          : null,
       };
     },
   );
@@ -1965,17 +2199,45 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         aliases.set(key, [...(aliases.get(key) ?? []), item.alias].sort());
       }
       return offsetPage(
-        items.map((item) =>
-          redactSandboxTopology({
+        items.map((item) => {
+          const spec = JSON.parse(item.spec_body) as Record<string, unknown>;
+          if (item.profile_kind === "capacity") delete spec.namespace;
+          return redactSandboxTopology({
             ...item,
             approved_aliases:
               aliases.get(`${item.profile_kind}:${item.profile_id}`) ?? [],
-            spec: JSON.parse(item.spec_body) as Record<string, unknown>,
-          }),
-        ),
+            spec,
+          });
+        }),
         offset,
         limit,
       );
+    },
+  );
+  app.get(
+    "/api/v1/leaderboard",
+    {
+      schema: {
+        tags: ["results"],
+        description:
+          "Official snapshot rows. Anonymous GET is allowed. Campaigns and result details stay authenticated.",
+        response: { 200: leaderboardSchema },
+      },
+    },
+    async () => {
+      const loaded = await loadLatestLeaderboard(runtime.store);
+      return {
+        snapshot: loaded.snapshot
+          ? {
+              record_id: loaded.snapshot.record_id,
+              created_at: loaded.snapshot.created_at,
+              sqlite_digest: loaded.snapshot.sqlite_digest,
+              source_digest: loaded.snapshot.source_digest,
+              entry_count: loaded.snapshot.entry_count,
+            }
+          : null,
+        items: loaded.rows,
+      };
     },
   );
   app.get(

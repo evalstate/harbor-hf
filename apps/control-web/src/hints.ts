@@ -1,5 +1,6 @@
 export const hints = {
   nav: {
+    admin: "Operator views. Campaigns, Jobs, results, profiles, and audit stay here.",
     overview:
       "Queue, active runs, recorded spend, and Endpoint cleanup risk from the control projection.",
     campaigns:
@@ -9,6 +10,8 @@ export const hints = {
       "Inference Endpoints owned by runs. Completion requires a verified pause with zero ready replicas.",
     results:
       "Published catalog scores after runs finish. Open a result for pass rate CIs, token cost, publication identity, and the Bucket prefix. This is not the live run queue.",
+    leaderboard:
+      "Official cost and score board rebuilt from the Bucket SQLite snapshot. Only final, clean, fully scored campaigns appear.",
     profiles:
       "Immutable benchmark, model, harness, deployment, and launch-policy records. Runs lock aliases at submit time.",
     audit:
@@ -83,9 +86,9 @@ export const hints = {
       "All recorded sources for this campaign: attempt receipts plus the latest hardware cost on each Job and Sandbox. Reserved is money still held against the ceiling.",
     endpointCleanup:
       "Verified pause with zero ready replicas is required before the campaign can complete.",
-    jobs: "Hugging Face Jobs launched for this campaign. Preparation and execution are separate Jobs when preparation is required.",
+    jobs: "Hugging Face Jobs launched for this campaign. Preparation and execution are separate Jobs when preparation is required. Assigned is the task count on that Job.",
     outcome:
-      "Sealed logical result for this task. Hover the badge for the exact meaning. Scored success is a verifier pass. Provider rejected the request means the inference API refused the locked call. Agent ended without a score means the agent loop finished without a pass. Infrastructure failures can be replaced; the other sealed failures cannot.",
+      "Selected sealed result for this task. A replacement Job can be assigned while this still shows Infrastructure. Hover the badge for the exact meaning. Scored success is a verifier pass. Provider rejected the request means the inference API refused the locked call. Agent ended without a score means the agent loop finished without a pass. Infrastructure failures can be replaced; the other sealed failures cannot.",
     selectedAttempt:
       "The physical attempt chosen as the logical outcome. Infrastructure replacements create a new attempt.",
     inputDigest: "Digest of the locked task input. Retries must use this same input.",
@@ -103,6 +106,8 @@ export const hints = {
     action: "Latest control action for this Job: launch, observe, or cancel.",
     observed:
       "Latest Hub stage copied onto the action receipt, such as RUNNING or COMPLETED.",
+    assigned:
+      "How many locked tasks this Job was given. A replacement uses the existing run. It does not add a second run row.",
     recorded: "When this latest Job observation was written.",
     cost: "Locked Job hardware cost from the latest observe or cancel receipt. Inference spend is on attempt receipts, not this row.",
   },
@@ -146,6 +151,20 @@ export const hints = {
       "How many locked tasks contributed a score, over the locked task count.",
     state: "Whether this publication is published, pending, or failed.",
     published: "When the catalog row was written.",
+  },
+  leaderboard: {
+    rank: "Score first, then lower observed cost. Rank is computed when the snapshot is read.",
+    model: "Locked model identity from the eligible catalog row.",
+    harness: "Locked agent wrapper. The profile alias stays in the snapshot.",
+    benchmark: "Locked benchmark identity.",
+    score: "Primary metric from the eligible catalog. Higher is better on this board.",
+    cost: "Observed campaign spend in USD from attempt and hardware receipts.",
+    trials: "Distinct trial indices in the configuration digest.",
+    reasoning: "Reasoning effort locked on the harness for this configuration.",
+    pareto:
+      "No other official row is both cheaper and higher scoring. The gold line on the plot connects these points.",
+    published: "When the winning catalog row for this configuration was written.",
+    plot: "Observed cost on X, primary metric on Y. Gold is the undominated frontier.",
   },
   profiles: {
     name: "Profile alias and content-derived profile id.",

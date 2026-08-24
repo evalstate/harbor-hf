@@ -12,6 +12,8 @@ import type {
   CampaignLock,
   CampaignRequest,
   CampaignSubmissionV1,
+  CapacityProfileObject,
+  CapacityProfileSpec,
   DeploymentProfileSpec,
   HarborHFControlRecordV1,
   HarnessProfileSpec,
@@ -20,8 +22,13 @@ import type {
   PreparedJob,
   PreparedJobSubmissionV1,
   PreparedTrial,
+  ProfilePromotion,
   PublicationReceipt,
+  PublicationSupersession,
   ResolvedProfile,
+  SandboxAdmissionGrant,
+  SandboxCapacityRelease,
+  TaskExhaustion,
   TerminalSelection,
 } from "@harbor-hf/contracts";
 import {
@@ -36,6 +43,10 @@ import {
   validatePreparedJobSubmission,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
+import {
+  attemptAdmissibility,
+  requiredPositiveMetrics,
+} from "./attempt-admissibility.js";
 import { historicalDispositionResourceMatches } from "./disposition-policy.js";
 import { EventBus, eventCursor } from "./events.js";
 import {
@@ -45,13 +56,19 @@ import {
 } from "./evidence.js";
 import {
   type LoadedProfile,
+  ProfileResolutionError,
   ProfileResolver,
   preparationRequired,
   profileSpec,
   validatePreparedCampaignProfiles,
 } from "./profiles.js";
 import type { Projection } from "./projection.js";
-import { runIdentity, runUnique, runtimeKind } from "./run-id.js";
+import { runIdentity, runtimeKind, runUnique } from "./run-id.js";
+import {
+  decideSandboxAdmission,
+  type SandboxAdmissionDecision,
+  type SandboxLimitingFactor,
+} from "./sandbox-admission.js";
 import {
   createJson,
   ImmutableConflictError,
@@ -106,6 +123,33 @@ export interface PreparedJobSubmissionResult {
   adopted: boolean;
 }
 
+export interface SandboxAdmissionResult {
+  status: "admitted" | "deferred" | "rejected";
+  dispatch_created: boolean;
+  action_id: string;
+  limiting_factor: SandboxLimitingFactor | null;
+  not_before: string | null;
+}
+
+export interface SandboxCapacityView {
+  configured: boolean;
+  profile_id: string | null;
+  namespace_limit: number | null;
+  namespace_active: number;
+  campaign_limit: number;
+  campaign_active: number;
+  hardware_limit: number | null;
+  hardware_active: number;
+  provider_limit: number;
+  provider_reserved: number;
+  start_tokens: number | null;
+  start_burst: number | null;
+  queued: number;
+  cleanup_held: number;
+  limiting_factor: SandboxLimitingFactor | null;
+  not_before: string | null;
+}
+
 export interface ActionDispositionCorrectionInput {
   action_ids: string[];
   reason: string;
@@ -145,6 +189,12 @@ function objectValue(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new PolicyError(`${label} must be an object`);
   return value as Record<string, unknown>;
+}
+
+function stringArrayValue(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+    throw new PolicyError(`${label} must be a string array`);
+  return value as string[];
 }
 
 function subsetMatches(expected: unknown, actual: unknown): boolean {
@@ -251,22 +301,65 @@ function validatePreparedEnvironment(
   value: unknown,
   taskId: string,
   maxCommandSeconds: number,
+  keepaliveSeconds: number,
 ): void {
   const environment = objectValue(value, "prepared Harbor environment lock");
   const kwargs = objectValue(environment.kwargs, "prepared Harbor environment kwargs");
+  const configuredKeepalive = kwargs.control_keepalive_seconds;
   if (
     environment.import_path !==
       "harbor_hf_agents.support.control_sandbox_environment:ControlSandboxEnvironment" ||
     environment.delete !== true ||
     kwargs.control_task_id !== taskId ||
     kwargs.control_max_command_seconds !== maxCommandSeconds ||
-    Object.keys(kwargs).length !== 2 ||
+    (configuredKeepalive !== undefined && configuredKeepalive !== keepaliveSeconds) ||
+    Object.keys(kwargs).length !== (configuredKeepalive === undefined ? 2 : 3) ||
     (Array.isArray(environment.mounts) && environment.mounts.length > 0) ||
     (environment.env &&
       objectValue(environment.env, "prepared Harbor environment variables") &&
       Object.keys(environment.env as Record<string, unknown>).length > 0)
   )
     throw new PolicyError("prepared Harbor environment does not match control policy");
+}
+
+export interface JobBudgetReservation {
+  category: string;
+  generation: number;
+  created_at: string;
+  amount_microusd: number;
+}
+
+export function executionTaskBatches(
+  taskIds: readonly string[],
+  maximumTasks: number,
+): string[][] {
+  if (!Number.isInteger(maximumTasks) || maximumTasks <= 0)
+    throw new PolicyError("execution Job capacity must be a positive integer");
+  const batches: string[][] = [];
+  for (let offset = 0; offset < taskIds.length; offset += maximumTasks)
+    batches.push(taskIds.slice(offset, offset + maximumTasks));
+  return batches;
+}
+
+export function executionReservationCategory(taskIds: readonly string[]): string {
+  const batchKey = sha256(canonicalJson(taskIds)).slice(7, 23);
+  return `execution-${batchKey}`;
+}
+
+const terminalJobStates = new Set([
+  "STOPPED",
+  "COMPLETED",
+  "CANCELLED",
+  "CANCELED",
+  "ERROR",
+]);
+
+function jobStateIsTerminal(state: string | null): boolean {
+  return state !== null && terminalJobStates.has(state.toUpperCase());
+}
+
+export function infrastructureSealReplaceable(terminalOutcome: string | null): boolean {
+  return terminalOutcome === null || terminalOutcome === "infrastructure";
 }
 
 export class ControlService {
@@ -278,6 +371,7 @@ export class ControlService {
   private preparationQueue: Promise<void> = Promise.resolve();
   private sandboxAdmissionQueue: Promise<void> = Promise.resolve();
   private dispositionQueue: Promise<void> = Promise.resolve();
+  private capacityProfileAlias: string | null = null;
   private sandboxActionFinalizationQueues = new Map<string, Promise<void>>();
 
   constructor(
@@ -300,6 +394,147 @@ export class ControlService {
     this.resolver.replacePromotedProfiles(
       await this.projection.approvedProfileAliases(),
     );
+  }
+
+  configureCapacityProfile(alias: string | null): void {
+    this.capacityProfileAlias = alias;
+  }
+
+  capacityProfile(): { profile_id: string; spec: CapacityProfileSpec } | null {
+    if (!this.capacityProfileAlias) return null;
+    const selected = this.resolver.promoted("capacity", this.capacityProfileAlias);
+    const spec = selected.profile.spec as CapacityProfileSpec;
+    if (spec.namespace !== this.namespace)
+      throw new PolicyError("capacity profile namespace does not match service");
+    const hardware = spec.hardware_limits.map((limit) => limit.hardware);
+    if (new Set(hardware).size !== hardware.length)
+      throw new PolicyError("capacity profile has duplicate hardware limits");
+    return { profile_id: selected.profile_id, spec };
+  }
+
+  requireCapacityProfile(): void {
+    if (!this.capacityProfile())
+      throw new PolicyError("write-enabled service requires a capacity profile");
+  }
+
+  capacityProfileOrNull(): { profile_id: string; spec: CapacityProfileSpec } | null {
+    if (!this.capacityProfileAlias) return null;
+    try {
+      return this.capacityProfile();
+    } catch (error) {
+      if (error instanceof PolicyError || error instanceof ProfileResolutionError)
+        return null;
+      throw error;
+    }
+  }
+
+  namespaceCapacityPolicy(): {
+    alias: string | null;
+    configured: boolean;
+    max_active_sandboxes: number | null;
+    start_burst: number | null;
+    start_refill_tokens: number | null;
+    start_refill_period_seconds: number | null;
+    profile_id: string | null;
+  } {
+    const selected = this.capacityProfileOrNull();
+    return {
+      alias: this.capacityProfileAlias,
+      configured: selected !== null,
+      max_active_sandboxes: selected ? selected.spec.max_active_sandboxes : null,
+      start_burst: selected ? selected.spec.start_burst : null,
+      start_refill_tokens: selected ? selected.spec.start_refill_tokens : null,
+      start_refill_period_seconds: selected
+        ? selected.spec.start_refill_period_seconds
+        : null,
+      profile_id: selected ? selected.profile_id : null,
+    };
+  }
+
+  /**
+   * Replace the promoted namespace Sandbox cap. The start burst and refill
+   * match the cap so the new limit can actually admit work.
+   */
+  async setMaxActiveSandboxes(maxActiveSandboxes: number): Promise<{
+    alias: string;
+    max_active_sandboxes: number;
+    start_burst: number;
+    profile_id: string;
+  }> {
+    if (
+      !Number.isInteger(maxActiveSandboxes) ||
+      maxActiveSandboxes < 1 ||
+      maxActiveSandboxes > 1024
+    )
+      throw new PolicyError("namespace Sandbox cap must be an integer from 1 to 1024");
+    const alias = this.capacityProfileAlias ?? "current";
+    this.configureCapacityProfile(alias);
+    const current = this.capacityProfileOrNull();
+    const hardwareLimits = (
+      current
+        ? current.spec.hardware_limits
+        : [
+            { hardware: "cpu-basic", max_active_sandboxes: maxActiveSandboxes },
+            { hardware: "cpu-upgrade", max_active_sandboxes: maxActiveSandboxes },
+          ]
+    ).map((limit) => ({
+      hardware: limit.hardware,
+      max_active_sandboxes: maxActiveSandboxes,
+    }));
+    const spec: CapacityProfileSpec = {
+      namespace: this.namespace,
+      max_active_sandboxes: maxActiveSandboxes,
+      hardware_limits: hardwareLimits,
+      start_burst: maxActiveSandboxes,
+      start_refill_tokens: maxActiveSandboxes,
+      start_refill_period_seconds: current
+        ? current.spec.start_refill_period_seconds
+        : 60,
+    };
+    if (current && canonicalJson(current.spec) === canonicalJson(spec))
+      return {
+        alias,
+        max_active_sandboxes: spec.max_active_sandboxes,
+        start_burst: spec.start_burst,
+        profile_id: current.profile_id,
+      };
+    const profile: CapacityProfileObject = {
+      schema_version: "v1",
+      kind: "profile.object",
+      record_id: deterministicId(
+        "profile",
+        "capacity",
+        alias,
+        sha256(canonicalJson(spec)),
+      ),
+      created_at: this.clock.now().toISOString(),
+      actor: serviceActor(),
+      profile_kind: "capacity",
+      name: alias,
+      spec,
+    };
+    const profileId = sha256(canonicalJson(profile));
+    const promotion: ProfilePromotion = {
+      schema_version: "v1",
+      kind: "profile.promotion",
+      record_id: deterministicId("promotion", "capacity", alias, profileId, "approved"),
+      created_at: this.clock.now().toISOString(),
+      actor: serviceActor(),
+      profile_kind: "capacity",
+      alias,
+      profile_id: profileId,
+      reason: `set namespace Sandbox cap to ${maxActiveSandboxes}`,
+      evidence: [sha256(canonicalJson({ max_active_sandboxes: maxActiveSandboxes }))],
+      promotion_state: "approved",
+    };
+    await this.append(profile);
+    await this.append(promotion);
+    return {
+      alias,
+      max_active_sandboxes: spec.max_active_sandboxes,
+      start_burst: spec.start_burst,
+      profile_id: profileId,
+    };
   }
 
   private assertReady(): void {
@@ -521,15 +756,31 @@ export class ControlService {
         !subsetMatches(harness.harbor_agent, agent)
       )
         throw new PolicyError("prepared Harbor agent does not match selected profiles");
+      const phaseTimeouts = [
+        input.agent_timeout_seconds,
+        input.verifier_timeout_seconds,
+        input.environment_build_timeout_seconds,
+        input.agent_setup_timeout_seconds,
+      ];
+      const maxCommandSeconds = Math.max(...phaseTimeouts);
+      const deployment = this.resolvedProfile<DeploymentProfileSpec>(
+        lock,
+        "deployment",
+      );
+      if (deployment.route !== "hf_job" || !deployment.sandbox_template)
+        throw new PolicyError("prepared campaign has no Sandbox deployment");
+      const timeoutSeconds =
+        phaseTimeouts.reduce((total, value) => total + value, 0) +
+        deployment.sandbox_template.lifetime_overhead_seconds;
+      const idleTimeoutSeconds = Math.min(
+        timeoutSeconds,
+        maxCommandSeconds + deployment.sandbox_template.idle_timeout_overhead_seconds,
+      );
       validatePreparedEnvironment(
         trialLock.environment,
         input.task_id,
-        Math.max(
-          input.agent_timeout_seconds,
-          input.verifier_timeout_seconds,
-          input.environment_build_timeout_seconds,
-          input.agent_setup_timeout_seconds,
-        ),
+        maxCommandSeconds,
+        Math.max(1, Math.min(300, Math.floor(idleTimeoutSeconds / 2))),
       );
       const existing = await this.preparedTrial(campaignId, input.task_id);
       const createdAt = existing?.created_at ?? this.clock.now().toISOString();
@@ -653,7 +904,7 @@ export class ControlService {
   async admitSandboxCreate(
     intent: ActionIntent,
     maximumSandboxes: number,
-  ): Promise<{ dispatch_created: boolean }> {
+  ): Promise<SandboxAdmissionResult> {
     const operation = this.sandboxAdmissionQueue.then(() =>
       this.admitSandboxCreateSerialized(intent, maximumSandboxes),
     );
@@ -664,19 +915,11 @@ export class ControlService {
     return operation;
   }
 
-  private async admitSandboxCreateSerialized(
-    intent: ActionIntent,
-    maximumSandboxes: number,
-  ): Promise<{ dispatch_created: boolean }> {
-    if (intent.action_kind !== "sandbox.create" || maximumSandboxes < 1)
-      throw new PolicyError("Sandbox create admission is invalid");
-    const existing = await this.projection.action(intent.action_id);
-    if (existing?.observed_state === "budget-rejected")
-      throw new PolicyError("Sandbox reservation exceeds the campaign ceiling");
-    const taskId = intent.payload.task_id;
-    if (typeof taskId !== "string")
-      throw new PolicyError("Sandbox create admission has no task ID");
-    const actions = await this.projection.campaignActions(intent.campaign_id);
+  private activeLegacySandboxCreates(
+    actions: Awaited<ReturnType<Projection["actions"]>>,
+    grantedActionIds: ReadonlySet<string>,
+    dispatchedActionIds: ReadonlySet<string>,
+  ): Array<(typeof actions)[number]> {
     const closedCreates = new Set(
       actions
         .filter(
@@ -684,14 +927,7 @@ export class ControlService {
             row.action_kind === "sandbox.close" &&
             row.receipt_body !== null &&
             row.outcome === "completed" &&
-            [
-              "CANCELED",
-              "CANCELLED",
-              "COMPLETED",
-              "DELETED",
-              "ERROR",
-              "STOPPED",
-            ].includes((row.observed_state ?? "").toUpperCase()),
+            terminalSandboxStates.has((row.observed_state ?? "").toUpperCase()),
         )
         .map((row) => {
           const recorded = JSON.parse(row.intent_body) as ActionIntent;
@@ -699,18 +935,88 @@ export class ControlService {
         })
         .filter((value): value is string => typeof value === "string"),
     );
-    const creates = actions.filter(
+    return actions.filter(
       (row) =>
         row.action_kind === "sandbox.create" &&
-        row.outcome !== "failed" &&
-        row.action_id !== intent.action_id &&
+        dispatchedActionIds.has(row.action_id) &&
+        !grantedActionIds.has(row.action_id) &&
+        !(row.receipt_body && !row.resource_id) &&
         !closedCreates.has(row.action_id),
     );
-    if (!existing && creates.length >= maximumSandboxes)
-      throw new PolicyError("Sandbox count exceeds immutable policy");
-    await this.writeAction(intent);
+  }
+
+  private async appendSandboxGrant(
+    intent: ActionIntent,
+    profileId: string,
+    hardware: string,
+    reservedProviderRequests: number,
+    previousGrantId: string | null,
+    decision: Extract<SandboxAdmissionDecision, { outcome: "admitted" }>,
+  ): Promise<SandboxAdmissionGrant> {
+    const grant: SandboxAdmissionGrant = {
+      schema_version: "v1",
+      kind: "sandbox.admission",
+      record_id: deterministicId("sandbox-admission", intent.action_id),
+      created_at: this.clock.now().toISOString(),
+      actor: serviceActor(),
+      action_id: intent.action_id,
+      campaign_id: intent.campaign_id,
+      namespace: this.namespace,
+      capacity_profile_id: profileId,
+      hardware,
+      reserved_provider_requests: reservedProviderRequests,
+      tokens_remaining: decision.tokens_remaining,
+      refill_cursor_at: decision.refill_cursor_at,
+      previous_grant_id: previousGrantId,
+    };
+    return (
+      await this.appendAdopting(grant, (recorded) => {
+        const { created_at: _recordedAt, ...recordedValue } = recorded;
+        const { created_at: _candidateAt, ...candidateValue } = grant;
+        return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+      })
+    ).record;
+  }
+
+  private async admitSandboxCreateSerialized(
+    intent: ActionIntent,
+    maximumSandboxes: number,
+  ): Promise<SandboxAdmissionResult> {
+    if (intent.action_kind !== "sandbox.create" || maximumSandboxes < 1)
+      throw new PolicyError("Sandbox create admission is invalid");
+    const taskId = intent.payload.task_id;
     const policy = intent.payload.sandbox;
-    if (!policy) throw new PolicyError("Sandbox create has no immutable policy");
+    if (typeof taskId !== "string" || !policy)
+      throw new PolicyError("Sandbox create has no immutable task policy");
+    const capacity = this.capacityProfile();
+    const existingBeforeWrite = await this.projection.action(intent.action_id);
+    if (!capacity && !existingBeforeWrite) {
+      const actions = await this.projection.campaignActions(intent.campaign_id);
+      const dispatched = await this.projection.dispatchedSandboxCreateActionIds();
+      const active = this.activeLegacySandboxCreates(actions, new Set(), dispatched);
+      if (active.length >= maximumSandboxes)
+        throw new PolicyError("Sandbox count exceeds immutable policy");
+    }
+    await this.writeAction(intent);
+    const existing = await this.projection.action(intent.action_id);
+    if (existing?.receipt_body)
+      return {
+        status: "admitted",
+        dispatch_created: Boolean(
+          await this.projection.actionDispatch(intent.action_id),
+        ),
+        action_id: intent.action_id,
+        limiting_factor: null,
+        not_before: null,
+      };
+    if (existing?.observed_state === "budget-rejected")
+      return {
+        status: "rejected",
+        dispatch_created: false,
+        action_id: intent.action_id,
+        limiting_factor: "campaign_budget",
+        not_before: null,
+      };
     if (
       !(await this.reserveSandbox(
         intent.campaign_id,
@@ -725,13 +1031,277 @@ export class ControlService {
         error_code: "campaign_ceiling_exceeded",
       });
       await this.markAdvanced(intent, receipt);
-      throw new PolicyError("Sandbox reservation exceeds the campaign ceiling");
+      return {
+        status: "rejected",
+        dispatch_created: false,
+        action_id: intent.action_id,
+        limiting_factor: "campaign_budget",
+        not_before: null,
+      };
     }
-    const dispatch = await this.dispatchAction(
-      intent,
-      new Date(this.clock.now().getTime() + 30_000).toISOString(),
+    const existingGrant = await this.projection.sandboxAdmission(intent.action_id);
+    if (
+      capacity &&
+      existingGrant &&
+      !(await this.projection.actionDispatch(intent.action_id)) &&
+      (await this.projection.hasCampaignAction(intent.campaign_id, "campaign.cancel"))
+    ) {
+      const receipt = await this.receipt(intent, {
+        outcome: "failed",
+        observed_state: "admission-rejected",
+        error_code: "campaign_cancelled",
+      });
+      await this.markAdvanced(intent, receipt);
+      return {
+        status: "rejected",
+        dispatch_created: false,
+        action_id: intent.action_id,
+        limiting_factor: "campaign_cancelled",
+        not_before: null,
+      };
+    }
+    if (capacity && !existingGrant) {
+      const activeGrants = await this.projection.activeSandboxAdmissions(
+        this.namespace,
+      );
+      const allActions = await this.projection.sandboxLifecycleActions();
+      const grantedIds = new Set(activeGrants.map((grant) => grant.action_id));
+      const dispatched = await this.projection.dispatchedSandboxCreateActionIds();
+      const legacy = this.activeLegacySandboxCreates(
+        allActions,
+        grantedIds,
+        dispatched,
+      ).filter((row) => row.action_id !== intent.action_id);
+      const campaignLegacy = legacy.filter(
+        (row) => row.campaign_id === intent.campaign_id,
+      );
+      const hardwareLegacy = legacy.filter((row) => {
+        const recorded = JSON.parse(row.intent_body) as ActionIntent;
+        return recorded.payload.sandbox?.hardware === policy.hardware;
+      });
+      const providerUnits = policy.inference_max_concurrency ?? 0;
+      const providerLimit =
+        policy.inference_max_total_concurrency ?? maximumSandboxes * providerUnits;
+      const latest = await this.projection.latestSandboxAdmission(this.namespace);
+      const decision = decideSandboxAdmission(
+        {
+          now: this.clock.now().toISOString(),
+          campaign_max_sandboxes: maximumSandboxes,
+          hardware: policy.hardware,
+          reserved_provider_requests: providerUnits,
+          campaign_max_provider_requests: providerLimit,
+          capacity: capacity.spec,
+        },
+        {
+          campaign_active_sandboxes:
+            activeGrants.filter((grant) => grant.campaign_id === intent.campaign_id)
+              .length + campaignLegacy.length,
+          namespace_active_sandboxes: activeGrants.length + legacy.length,
+          hardware_active_sandboxes:
+            activeGrants.filter((grant) => grant.hardware === policy.hardware).length +
+            hardwareLegacy.length,
+          campaign_reserved_provider_requests:
+            activeGrants
+              .filter((grant) => grant.campaign_id === intent.campaign_id)
+              .reduce((total, grant) => total + grant.reserved_provider_requests, 0) +
+            campaignLegacy.reduce((total, row) => {
+              const recorded = JSON.parse(row.intent_body) as ActionIntent;
+              return total + (recorded.payload.sandbox?.inference_max_concurrency ?? 0);
+            }, 0),
+          tokens_remaining: latest?.tokens_remaining ?? null,
+          refill_cursor_at: latest?.refill_cursor_at ?? null,
+          cancellation_requested: await this.projection.hasCampaignAction(
+            intent.campaign_id,
+            "campaign.cancel",
+          ),
+          budget_available: true,
+        },
+      );
+      if (decision.outcome !== "admitted") {
+        if (decision.outcome === "rejected") {
+          const receipt = await this.receipt(intent, {
+            outcome: "failed",
+            observed_state: "admission-rejected",
+            error_code: decision.limiting_factor,
+          });
+          await this.markAdvanced(intent, receipt);
+        }
+        return {
+          status: decision.outcome,
+          dispatch_created: false,
+          action_id: intent.action_id,
+          limiting_factor: decision.limiting_factor,
+          not_before: decision.outcome === "deferred" ? decision.not_before : null,
+        };
+      }
+      await this.appendSandboxGrant(
+        intent,
+        capacity.profile_id,
+        policy.hardware,
+        providerUnits,
+        latest?.record_id ?? null,
+        decision,
+      );
+    }
+    if (!capacity) {
+      const dispatch = await this.dispatchAction(
+        intent,
+        new Date(this.clock.now().getTime() + 30_000).toISOString(),
+      );
+      return {
+        status: "admitted",
+        dispatch_created: dispatch.created,
+        action_id: intent.action_id,
+        limiting_factor: null,
+        not_before: null,
+      };
+    }
+    return {
+      status: "admitted",
+      dispatch_created: Boolean(await this.projection.actionDispatch(intent.action_id)),
+      action_id: intent.action_id,
+      limiting_factor: null,
+      not_before: null,
+    };
+  }
+
+  async sandboxCapacityView(campaignId: string): Promise<SandboxCapacityView> {
+    const lock = await this.projection.campaignLock(campaignId);
+    if (!lock) throw new PolicyError("campaign lock is missing");
+    const deployment = profileSpec<DeploymentProfileSpec>(lock.profiles, "deployment");
+    const capacity = this.capacityProfile();
+    const activeGrants = await this.projection.activeSandboxAdmissions(this.namespace);
+    const allActions = await this.projection.sandboxLifecycleActions();
+    const grantedIds = new Set(activeGrants.map((grant) => grant.action_id));
+    const dispatched = await this.projection.dispatchedSandboxCreateActionIds();
+    const legacy = this.activeLegacySandboxCreates(allActions, grantedIds, dispatched);
+    const campaignGrants = activeGrants.filter(
+      (grant) => grant.campaign_id === campaignId,
     );
-    return { dispatch_created: dispatch.created };
+    const campaignLegacy = legacy.filter((row) => row.campaign_id === campaignId);
+    const latest = await this.projection.latestSandboxAdmission(this.namespace);
+    const queued = await this.projection.campaignPendingSandboxCreateCount(campaignId);
+    const pendingCreate =
+      await this.projection.campaignPendingSandboxCreate(campaignId);
+    const template =
+      deployment.route === "hf_job"
+        ? (deployment.sandbox_template ?? deployment.sandbox)
+        : null;
+    if (!template)
+      return {
+        configured: Boolean(capacity),
+        profile_id: capacity?.profile_id ?? null,
+        namespace_limit: capacity?.spec.max_active_sandboxes ?? null,
+        namespace_active: activeGrants.length + legacy.length,
+        campaign_limit: 0,
+        campaign_active: campaignGrants.length + campaignLegacy.length,
+        hardware_limit: null,
+        hardware_active: 0,
+        provider_limit: 0,
+        provider_reserved: 0,
+        start_tokens: capacity
+          ? (latest?.tokens_remaining ?? capacity.spec.start_burst)
+          : null,
+        start_burst: capacity?.spec.start_burst ?? null,
+        queued,
+        cleanup_held: 0,
+        limiting_factor: null,
+        not_before: null,
+      };
+    const providerReserved =
+      campaignGrants.reduce(
+        (total, grant) => total + grant.reserved_provider_requests,
+        0,
+      ) +
+      campaignLegacy.reduce((total, row) => {
+        const intent = JSON.parse(row.intent_body) as ActionIntent;
+        return total + (intent.payload.sandbox?.inference_max_concurrency ?? 0);
+      }, 0);
+    let startTokens: number | null = null;
+    let startNotBefore: string | null = null;
+    if (capacity) {
+      const now = this.clock.now().getTime();
+      const periodMs = capacity.spec.start_refill_period_seconds * 1000;
+      const previousCursor = latest ? Date.parse(latest.refill_cursor_at) : now;
+      const cursor = previousCursor;
+      const periods = Math.max(0, Math.floor((now - cursor) / periodMs));
+      startTokens = Math.min(
+        capacity.spec.start_burst,
+        (latest?.tokens_remaining ?? capacity.spec.start_burst) +
+          periods * capacity.spec.start_refill_tokens,
+      );
+      if (startTokens < 1) startNotBefore = new Date(cursor + periodMs).toISOString();
+    }
+    const campaignActive = campaignGrants.length + campaignLegacy.length;
+    const namespaceActive = activeGrants.length + legacy.length;
+    const providerLimit =
+      template.inference_max_total_concurrency ??
+      template.max_sandboxes * (template.inference_max_concurrency ?? 0);
+    const hardware =
+      campaignGrants[0]?.hardware ??
+      (campaignLegacy[0]
+        ? (JSON.parse(campaignLegacy[0].intent_body) as ActionIntent).payload.sandbox
+            ?.hardware
+        : undefined) ??
+      pendingCreate?.payload.sandbox?.hardware;
+    const hardwareLimit = hardware
+      ? (capacity?.spec.hardware_limits.find((limit) => limit.hardware === hardware)
+          ?.max_active_sandboxes ?? null)
+      : null;
+    const hardwareActive = hardware
+      ? activeGrants.filter((grant) => grant.hardware === hardware).length +
+        legacy.filter((row) => {
+          const intent = JSON.parse(row.intent_body) as ActionIntent;
+          return intent.payload.sandbox?.hardware === hardware;
+        }).length
+      : 0;
+    let limitingFactor: SandboxLimitingFactor | null = null;
+    if (await this.projection.hasCampaignAction(campaignId, "campaign.cancel"))
+      limitingFactor = "campaign_cancelled";
+    else if (campaignActive >= template.max_sandboxes)
+      limitingFactor = "campaign_sandbox_capacity";
+    else if (capacity && namespaceActive >= capacity.spec.max_active_sandboxes)
+      limitingFactor = "namespace_sandbox_capacity";
+    else if (hardwareLimit !== null && hardwareActive >= hardwareLimit)
+      limitingFactor = "hardware_sandbox_capacity";
+    else if (providerReserved >= providerLimit && providerLimit > 0)
+      limitingFactor = "provider_request_capacity";
+    else if (capacity && startTokens !== null && startTokens < 1)
+      limitingFactor = "sandbox_start_rate";
+    const cleanupHeld = [
+      ...campaignGrants.map((grant) => grant.action_id),
+      ...campaignLegacy.map((row) => row.action_id),
+    ].filter((createActionId) => {
+      const create = allActions.find((row) => row.action_id === createActionId);
+      if (!create?.resource_id) return false;
+      return allActions.some((row) => {
+        if (row.action_kind !== "sandbox.close") return false;
+        const intent = JSON.parse(row.intent_body) as ActionIntent;
+        if (intent.payload.sandbox_create_action_id !== createActionId) return false;
+        return !(
+          row.outcome === "completed" &&
+          terminalSandboxStates.has((row.observed_state ?? "").toUpperCase())
+        );
+      });
+    }).length;
+    return {
+      configured: Boolean(capacity),
+      profile_id: capacity?.profile_id ?? null,
+      namespace_limit: capacity?.spec.max_active_sandboxes ?? null,
+      namespace_active: namespaceActive,
+      campaign_limit: template.max_sandboxes,
+      campaign_active: campaignActive,
+      hardware_limit: hardwareLimit,
+      hardware_active: hardwareActive,
+      provider_limit: providerLimit,
+      provider_reserved: providerReserved,
+      start_tokens: startTokens,
+      start_burst: capacity?.spec.start_burst ?? null,
+      queued,
+      cleanup_held: cleanupHeld,
+      limiting_factor: limitingFactor,
+      not_before: startNotBefore,
+    };
   }
 
   async admitSandboxCommand(
@@ -875,6 +1445,7 @@ export class ControlService {
         idempotency_key_digest: keyDigest,
         profiles: refs as CampaignRequest["profiles"],
         ceiling_microusd: input.ceiling_microusd,
+        start_paused: input.start_paused ?? false,
       } satisfies CampaignRequest);
     const lock: CampaignLock =
       existingLock ??
@@ -889,6 +1460,7 @@ export class ControlService {
         tasks: tasks as CampaignLock["tasks"],
         ceiling_microusd: input.ceiling_microusd,
         source_revision: this.resolver.sourceRevision(),
+        start_paused: input.start_paused ?? false,
       } satisfies CampaignLock);
     const budget: BudgetEvent = {
       schema_version: "v1",
@@ -914,6 +1486,20 @@ export class ControlService {
     await this.append(request);
     await this.append(budget);
     await this.append(intent);
+    if (input.start_paused) {
+      const pausedAt = new Date(Date.parse(timestamp) + 1).toISOString();
+      await this.writeAction(
+        this.actionIntent(
+          campaignId,
+          "campaign.pause",
+          "campaign",
+          0,
+          { reason: "campaign submitted in paused state" },
+          recordActor,
+          pausedAt,
+        ),
+      );
+    }
     return {
       campaign_id: campaignId,
       action_id: actionId,
@@ -964,7 +1550,8 @@ export class ControlService {
       selected.harness === input.harness &&
       deploymentMatches &&
       selected.launch_policy === input.launch_policy &&
-      request.ceiling_microusd === input.ceiling_microusd;
+      request.ceiling_microusd === input.ceiling_microusd &&
+      (request.start_paused ?? false) === (input.start_paused ?? false);
     if (!matches)
       throw new IdempotencyConflictError(
         "idempotency key already belongs to a different campaign request",
@@ -988,7 +1575,8 @@ export class ControlService {
       selected.harness === input.harness &&
       deploymentMatches &&
       selected.launch_policy === input.launch_policy &&
-      lock.ceiling_microusd === input.ceiling_microusd;
+      lock.ceiling_microusd === input.ceiling_microusd &&
+      (lock.start_paused ?? false) === (input.start_paused ?? false);
     if (!matches)
       throw new IdempotencyConflictError(
         "idempotency key already belongs to a different campaign request",
@@ -1046,7 +1634,11 @@ export class ControlService {
       typeof intent.payload.task_id === "string" ? intent.payload.task_id : null;
     if (taskId) {
       const task = await this.projection.task(intent.campaign_id, taskId);
-      if (task?.task.terminal_outcome && intent.action_kind !== "sandbox.close")
+      if (
+        task?.task.terminal_outcome &&
+        intent.action_kind !== "sandbox.close" &&
+        !infrastructureSealReplaceable(task.task.terminal_outcome)
+      )
         throw new PolicyError(`terminal task cannot receive action: ${taskId}`);
     }
     await this.appendAdopting(intent, (recorded) => {
@@ -1145,11 +1737,15 @@ export class ControlService {
     intent: ActionIntent,
     actor: Actor,
   ): Promise<ActionReceipt> {
-    if (intent.action_kind !== "sandbox.exec")
-      throw new PolicyError("only Sandbox commands can be marked ambiguous");
+    if (
+      intent.action_kind !== "sandbox.exec" &&
+      intent.action_kind !== "sandbox.write" &&
+      intent.action_kind !== "sandbox.read"
+    )
+      throw new PolicyError("only Sandbox I/O actions can be marked ambiguous");
     const resourceId = intent.payload.resource_id;
     if (typeof resourceId !== "string")
-      throw new PolicyError("ambiguous Sandbox command has no resource identity");
+      throw new PolicyError("ambiguous Sandbox I/O action has no resource identity");
     const receipt: ActionReceipt = {
       schema_version: "v1",
       kind: "action.receipt",
@@ -1182,6 +1778,34 @@ export class ControlService {
     return appended.record;
   }
 
+  private async releaseSandboxCapacity(
+    campaignId: string,
+    createActionId: string,
+    receipt: ActionReceipt,
+    reason: SandboxCapacityRelease["release_reason"],
+  ): Promise<void> {
+    const grant = await this.projection.sandboxAdmission(createActionId);
+    if (!grant || (await this.projection.sandboxCapacityRelease(createActionId)))
+      return;
+    const release: SandboxCapacityRelease = {
+      schema_version: "v1",
+      kind: "sandbox.capacity-release",
+      record_id: deterministicId("sandbox-capacity-release", createActionId),
+      created_at: receipt.created_at,
+      actor: serviceActor(),
+      action_id: createActionId,
+      campaign_id: campaignId,
+      grant_id: grant.record_id,
+      release_reason: reason,
+      evidence_record_id: receipt.record_id,
+    };
+    await this.appendAdopting(release, (recorded) => {
+      const { created_at: _recordedAt, ...recordedValue } = recorded;
+      const { created_at: _candidateAt, ...candidateValue } = release;
+      return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+    });
+  }
+
   async markAdvanced(
     intent: ActionIntent,
     receipt: ActionReceipt,
@@ -1192,16 +1816,26 @@ export class ControlService {
     )
       throw new PolicyError("advanced action receipt does not match its intent");
     if (intent.action_kind === "sandbox.create" && !receipt.resource_id) {
+      await this.releaseSandboxCapacity(
+        intent.campaign_id,
+        intent.action_id,
+        receipt,
+        "create_failed",
+      );
       const policy = intent.payload.sandbox;
       if (!policy)
         throw new PolicyError("failed Sandbox create is missing budget identity");
-      await this.finalizeSandboxBudget(
-        intent.campaign_id,
-        intent.action_id,
-        receipt.created_at,
-        policy.reservation_microusd,
-        receipt.cost_microusd ?? 0,
+      const reservation = await this.projection.budget(
+        deterministicId("budget", intent.campaign_id, "sandbox", intent.action_id),
       );
+      if (reservation)
+        await this.finalizeSandboxBudget(
+          intent.campaign_id,
+          intent.action_id,
+          receipt.created_at,
+          policy.reservation_microusd,
+          receipt.cost_microusd ?? 0,
+        );
     } else if (
       intent.action_kind === "sandbox.close" &&
       receipt.outcome === "completed" &&
@@ -1219,6 +1853,12 @@ export class ControlService {
         receipt.created_at,
         policy.reservation_microusd,
         receipt.cost_microusd ?? policy.reservation_microusd,
+      );
+      await this.releaseSandboxCapacity(
+        intent.campaign_id,
+        createActionId,
+        receipt,
+        "sandbox_closed",
       );
     }
     const record: ActionAdvanced = {
@@ -1514,12 +2154,12 @@ export class ControlService {
     taskId: string,
     actor: Actor = serviceActor(),
   ): Promise<{ settled: number; unresolved: number }> {
-    const candidates = await this.projection.pendingDispatchedSandboxExecActions(
+    const candidates = await this.projection.pendingDispatchedSandboxCommandActions(
       campaignId,
       taskId,
     );
     if (candidates.length >= 1_025)
-      throw new PolicyError("too many ambiguous Sandbox commands for one task");
+      throw new PolicyError("too many ambiguous Sandbox I/O actions for one task");
     const campaignActions = await this.projection.campaignActions(campaignId);
     let settled = 0;
     let unresolved = 0;
@@ -1534,7 +2174,7 @@ export class ControlService {
           const createActionId = intent.payload.sandbox_create_action_id;
           const resourceId = intent.payload.resource_id;
           if (typeof createActionId !== "string" || typeof resourceId !== "string")
-            throw new PolicyError("ambiguous Sandbox command has invalid ownership");
+            throw new PolicyError("ambiguous Sandbox I/O action has invalid ownership");
           const create = await this.projection.action(createActionId);
           if (
             !create ||
@@ -1543,11 +2183,13 @@ export class ControlService {
             create.resource_id !== resourceId
           )
             throw new PolicyError(
-              "ambiguous Sandbox command has invalid create action",
+              "ambiguous Sandbox I/O action has invalid create action",
             );
           const createIntent = JSON.parse(create.intent_body) as ActionIntent;
           if (createIntent.payload.task_id !== taskId)
-            throw new PolicyError("ambiguous Sandbox command belongs to another task");
+            throw new PolicyError(
+              "ambiguous Sandbox I/O action belongs to another task",
+            );
           const close = campaignActions.find((action) => {
             if (action.action_kind !== "sandbox.close" || !action.receipt_body)
               return false;
@@ -1681,7 +2323,7 @@ export class ControlService {
     }
     const task = await this.projection.task(input.campaign_id, input.task_id);
     if (!task) throw new PolicyError(`task does not exist: ${input.task_id}`);
-    if (task.task.terminal_outcome)
+    if (!infrastructureSealReplaceable(task.task.terminal_outcome))
       throw new PolicyError(`terminal task cannot receive attempt: ${input.task_id}`);
     const campaign = await this.projection.campaign(input.campaign_id);
     if (!campaign)
@@ -1700,6 +2342,11 @@ export class ControlService {
     attempt: AttemptReceipt,
     reason: string,
   ): Promise<TerminalSelection> {
+    const lock = await this.projection.campaignLock(attempt.campaign_id);
+    if (!lock) throw new PolicyError("terminal selection has no campaign lock");
+    const validity = attemptAdmissibility(attempt, requiredPositiveMetrics(lock));
+    if (!validity.admissible && attempt.outcome !== "cancelled")
+      throw new PolicyError(`attempt is not selectable: ${validity.reason}`);
     const record: TerminalSelection = {
       schema_version: "v1",
       kind: "terminal.selection",
@@ -1721,8 +2368,350 @@ export class ControlService {
     return record;
   }
 
+  async exhaustTask(
+    attempt: AttemptReceipt,
+    reason: string,
+    attemptCount: number,
+  ): Promise<TaskExhaustion> {
+    const record: TaskExhaustion = {
+      schema_version: "v1",
+      kind: "task.exhaustion",
+      record_id: deterministicId(
+        "task-exhaustion",
+        attempt.campaign_id,
+        attempt.task_id,
+        attempt.attempt_id,
+      ),
+      created_at: this.clock.now().toISOString(),
+      actor: serviceActor(),
+      campaign_id: attempt.campaign_id,
+      task_id: attempt.task_id,
+      last_attempt_id: attempt.attempt_id,
+      attempt_count: attemptCount,
+      reason,
+    };
+    await this.append(record);
+    return record;
+  }
+
   async writePublication(record: PublicationReceipt): Promise<void> {
     await this.append(record);
+  }
+
+  async writePublicationSupersession(
+    campaignId: string,
+    publicationId: string,
+    supersededCampaignId: string,
+    supersededPublicationId: string,
+    reason: string,
+  ): Promise<PublicationSupersession> {
+    const existing = await this.projection.publicationSupersession(
+      supersededPublicationId,
+    );
+    if (existing) {
+      const record = JSON.parse(existing.body) as PublicationSupersession;
+      if (
+        record.campaign_id !== campaignId ||
+        record.publication_id !== publicationId ||
+        record.superseded_campaign_id !== supersededCampaignId ||
+        record.reason !== reason
+      )
+        throw new IdempotencyConflictError(
+          "publication supersession conflicts with durable state",
+        );
+      return record;
+    }
+    const publication = await this.projection.publication(publicationId);
+    if (publication?.campaign_id !== campaignId)
+      throw new PolicyError("replacement publication does not exist");
+    const record: PublicationSupersession = {
+      schema_version: "v1",
+      kind: "publication.supersession",
+      record_id: deterministicId(
+        "publication-supersession",
+        supersededPublicationId,
+        publicationId,
+      ),
+      created_at: publication.created_at,
+      actor: serviceActor(),
+      campaign_id: campaignId,
+      publication_id: publicationId,
+      superseded_campaign_id: supersededCampaignId,
+      superseded_publication_id: supersededPublicationId,
+      reason,
+    };
+    await this.append(record);
+    return record;
+  }
+
+  async reserveJobActions(
+    campaignId: string,
+    reservations: readonly JobBudgetReservation[],
+  ): Promise<boolean> {
+    await this.reconcileTerminalJobReservations(campaignId);
+    const operation = this.budgetQueue.then(() =>
+      this.reserveJobActionsSerialized(campaignId, reservations),
+    );
+    this.budgetQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async reserveJobActionsSerialized(
+    campaignId: string,
+    reservations: readonly JobBudgetReservation[],
+  ): Promise<boolean> {
+    const pending: Array<JobBudgetReservation & { recordId: string }> = [];
+    for (const reservation of reservations) {
+      if (reservation.amount_microusd <= 0) continue;
+      const recordId = deterministicId(
+        "budget",
+        campaignId,
+        reservation.category,
+        String(reservation.generation),
+      );
+      const existing = await this.projection.budget(recordId);
+      if (existing) {
+        if (
+          existing.campaign_id !== campaignId ||
+          existing.event_kind !== "reserve" ||
+          existing.amount_microusd !== reservation.amount_microusd
+        )
+          throw new IdempotencyConflictError(
+            "Job budget reservation conflicts with durable state",
+          );
+        continue;
+      }
+      pending.push({ ...reservation, recordId });
+    }
+    if (pending.length === 0) return true;
+
+    const campaign = await this.projection.campaign(campaignId);
+    if (!campaign) throw new PolicyError("campaign does not exist");
+    const additionalMicrousd = pending.reduce(
+      (sum, reservation) => sum + reservation.amount_microusd,
+      0,
+    );
+    const committedMicrousd = Math.max(
+      campaign.reserved_microusd,
+      campaign.observed_microusd,
+    );
+    if (committedMicrousd + additionalMicrousd > campaign.ceiling_microusd)
+      return false;
+
+    const observedOverage = Math.max(
+      0,
+      campaign.observed_microusd - campaign.reserved_microusd,
+    );
+    if (observedOverage > 0) {
+      await this.append({
+        schema_version: "v1",
+        kind: "budget.event",
+        record_id: deterministicId(
+          "budget",
+          campaignId,
+          "job-observed-overage",
+          pending.map((reservation) => reservation.recordId).join(","),
+        ),
+        created_at: pending[0]?.created_at ?? this.clock.now().toISOString(),
+        actor: serviceActor(),
+        campaign_id: campaignId,
+        event_kind: "reserve",
+        amount_microusd: observedOverage,
+      });
+    }
+    for (const reservation of pending) {
+      await this.append({
+        schema_version: "v1",
+        kind: "budget.event",
+        record_id: reservation.recordId,
+        created_at: reservation.created_at,
+        actor: serviceActor(),
+        campaign_id: campaignId,
+        event_kind: "reserve",
+        amount_microusd: reservation.amount_microusd,
+      });
+    }
+    return true;
+  }
+
+  private async releaseBudgetReservationSerialized(
+    campaignId: string,
+    reserveId: string,
+    createdAt: string,
+    amountMicrousd: number,
+  ): Promise<boolean> {
+    const existingReserve = await this.projection.budget(reserveId);
+    if (!existingReserve) return false;
+    if (
+      existingReserve.campaign_id !== campaignId ||
+      existingReserve.event_kind !== "reserve" ||
+      existingReserve.amount_microusd !== amountMicrousd
+    )
+      throw new IdempotencyConflictError(
+        "Job budget release does not match its reservation",
+      );
+    const releaseId = deterministicId("budget", campaignId, "job-release", reserveId);
+    const existingRelease = await this.projection.budget(releaseId);
+    if (existingRelease) {
+      if (
+        existingRelease.event_kind !== "release" ||
+        existingRelease.amount_microusd !== amountMicrousd
+      )
+        throw new IdempotencyConflictError(
+          "Job budget release conflicts with durable state",
+        );
+      return false;
+    }
+    await this.append({
+      schema_version: "v1",
+      kind: "budget.event",
+      record_id: releaseId,
+      created_at: createdAt,
+      actor: serviceActor(),
+      campaign_id: campaignId,
+      event_kind: "release",
+      amount_microusd: amountMicrousd,
+    });
+    return true;
+  }
+
+  private async releaseJobActionSerialized(
+    intent: ActionIntent,
+    createdAt: string,
+  ): Promise<boolean> {
+    if (intent.action_kind !== "job.launch") return false;
+    const amountMicrousd = intent.payload.reservation_microusd;
+    if (typeof amountMicrousd !== "number" || amountMicrousd <= 0) return false;
+    const priorAttemptId = intent.payload.prior_attempt_id;
+    const reserveId =
+      typeof priorAttemptId === "string"
+        ? deterministicId("budget", intent.campaign_id, "replacement", priorAttemptId)
+        : deterministicId(
+            "budget",
+            intent.campaign_id,
+            executionReservationCategory(
+              stringArrayValue(intent.payload.task_ids, "Job action task IDs"),
+            ),
+            String(intent.generation),
+          );
+    return this.releaseBudgetReservationSerialized(
+      intent.campaign_id,
+      reserveId,
+      createdAt,
+      amountMicrousd,
+    );
+  }
+
+  async releaseJobActions(
+    campaignId: string,
+    reservations: readonly JobBudgetReservation[],
+  ): Promise<void> {
+    const operation = this.budgetQueue.then(async () => {
+      for (const reservation of reservations) {
+        if (reservation.amount_microusd <= 0) continue;
+        const reserveId = deterministicId(
+          "budget",
+          campaignId,
+          reservation.category,
+          String(reservation.generation),
+        );
+        await this.releaseBudgetReservationSerialized(
+          campaignId,
+          reserveId,
+          reservation.created_at,
+          reservation.amount_microusd,
+        );
+      }
+    });
+    this.budgetQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await operation;
+  }
+
+  async releaseJobAction(intent: ActionIntent, createdAt: string): Promise<void> {
+    const operation = this.budgetQueue.then(() =>
+      this.releaseJobActionSerialized(intent, createdAt),
+    );
+    this.budgetQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await operation;
+  }
+
+  async reconcileTerminalJobReservations(campaignId: string): Promise<number> {
+    const operation = this.budgetQueue.then(async () => {
+      const actions = await this.projection.campaignActions(campaignId);
+      const terminalLaunchIds = new Set<string>();
+      for (const action of actions) {
+        if (action.action_kind !== "job.observe" || action.receipt_body === null)
+          continue;
+        const intent = JSON.parse(action.intent_body) as ActionIntent;
+        const receipt = JSON.parse(action.receipt_body) as ActionReceipt;
+        const launchActionId = intent.payload.launch_action_id;
+        if (
+          typeof launchActionId === "string" &&
+          jobStateIsTerminal(receipt.observed_state)
+        )
+          terminalLaunchIds.add(launchActionId);
+      }
+
+      let released = 0;
+      const replacementActions = new Set<string>();
+      for (const action of actions) {
+        if (action.action_kind !== "job.launch") continue;
+        const intent = JSON.parse(action.intent_body) as ActionIntent;
+        if (intent.payload.worker_role !== "execution") continue;
+        const priorAttemptId = intent.payload.prior_attempt_id;
+        if (typeof priorAttemptId === "string") replacementActions.add(priorAttemptId);
+        const receipt =
+          action.receipt_body === null
+            ? null
+            : (JSON.parse(action.receipt_body) as ActionReceipt);
+        const terminal =
+          receipt !== null &&
+          (receipt.outcome === "failed" ||
+            receipt.observed_state.startsWith("suppressed-") ||
+            terminalLaunchIds.has(action.action_id));
+        if (
+          terminal &&
+          (await this.releaseJobActionSerialized(intent, receipt.created_at))
+        )
+          released += 1;
+      }
+
+      for (const attempt of await this.projection.campaignAttempts(campaignId)) {
+        if (replacementActions.has(attempt.attempt_id)) continue;
+        const reserveId = deterministicId(
+          "budget",
+          campaignId,
+          "replacement",
+          attempt.attempt_id,
+        );
+        const reserve = await this.projection.budget(reserveId);
+        if (
+          reserve?.event_kind === "reserve" &&
+          (await this.releaseBudgetReservationSerialized(
+            campaignId,
+            reserveId,
+            attempt.created_at,
+            reserve.amount_microusd,
+          ))
+        )
+          released += 1;
+      }
+      return released;
+    });
+    this.budgetQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   async reserveReplacement(
@@ -1731,6 +2720,7 @@ export class ControlService {
     priorAttemptCompletedAt: string,
     amountMicrousd: number,
   ): Promise<boolean> {
+    await this.reconcileTerminalJobReservations(campaignId);
     const operation = this.budgetQueue.then(() =>
       this.reserveReplacementSerialized(
         campaignId,
@@ -1968,6 +2958,243 @@ export class ControlService {
     return queued;
   }
 
+  private selectedInfrastructureAttempt(detail: {
+    task: { selected_attempt_id: string | null; terminal_outcome: string | null };
+    attempts: ReadonlyArray<{
+      action_id: string;
+      attempt_id: string;
+      outcome: string;
+      replacement_eligible: number;
+      created_at: string;
+    }>;
+  }): (typeof detail.attempts)[number] | null {
+    if (!infrastructureSealReplaceable(detail.task.terminal_outcome)) return null;
+    const selected = detail.attempts.find(
+      (attempt) => attempt.attempt_id === detail.task.selected_attempt_id,
+    );
+    const prior = selected ?? detail.attempts.at(-1);
+    if (
+      !prior ||
+      prior.outcome !== "infrastructure" ||
+      prior.replacement_eligible !== 1
+    )
+      return null;
+    return prior;
+  }
+
+  private consumedInfrastructureAttempts(
+    attempts: ReadonlyArray<{ outcome: string; replacement_eligible: number }>,
+  ): number {
+    return attempts.filter(
+      (attempt) =>
+        attempt.outcome === "infrastructure" && attempt.replacement_eligible === 1,
+    ).length;
+  }
+
+  private launchStillRunning(
+    launch: {
+      action_id: string;
+      receipt_body: string | null;
+      observed_state: string | null;
+    },
+    actions: ReadonlyArray<{
+      action_id: string;
+      action_kind: string;
+      intent_body: string;
+      receipt_body: string | null;
+      observed_state: string | null;
+    }>,
+  ): boolean {
+    if (launch.receipt_body === null) return true;
+    if (jobStateIsTerminal(launch.observed_state)) return false;
+    const receipt = JSON.parse(launch.receipt_body) as ActionReceipt;
+    if (receipt.outcome === "failed") return false;
+    return !actions.some((action) => {
+      if (action.action_kind !== "job.observe" || action.receipt_body === null)
+        return false;
+      const intent = JSON.parse(action.intent_body) as ActionIntent;
+      return (
+        intent.payload.launch_action_id === launch.action_id &&
+        jobStateIsTerminal(action.observed_state)
+      );
+    });
+  }
+
+  async laterExecutionLaunchExists(
+    campaignId: string,
+    taskId: string,
+    sourceActionId: string,
+  ): Promise<boolean> {
+    const detail = await this.projection.task(campaignId, taskId);
+    const actions = await this.projection.campaignActions(campaignId);
+    for (const action of actions) {
+      if (action.action_kind !== "job.launch" || action.action_id === sourceActionId)
+        continue;
+      if (action.observed_state?.startsWith("suppressed-")) continue;
+      const intent = JSON.parse(action.intent_body) as ActionIntent;
+      if (intent.payload.worker_role === "preparation") continue;
+      if (
+        !Array.isArray(intent.payload.task_ids) ||
+        !intent.payload.task_ids.includes(taskId)
+      )
+        continue;
+      if (this.launchStillRunning(action, actions)) return true;
+      const selected = detail?.task.selected_attempt_id;
+      if (
+        selected &&
+        detail.attempts.some(
+          (attempt) =>
+            attempt.action_id === action.action_id && attempt.attempt_id === selected,
+        )
+      )
+        return true;
+    }
+    return false;
+  }
+
+  private async queueEligibleInfrastructureRetries(
+    campaignId: string,
+    lock: CampaignLock,
+    input: CampaignActionV1,
+    generation: number,
+    actor: Actor,
+  ): Promise<SubmissionResult> {
+    const expectedActionId = deterministicId(
+      "action",
+      campaignId,
+      "job.launch",
+      "eligible",
+      String(generation),
+    );
+    const existing = await this.projection.action(expectedActionId);
+    if (existing)
+      return {
+        campaign_id: campaignId,
+        action_id: expectedActionId,
+        status_url: `/api/v1/campaigns/${campaignId}`,
+        adopted: true,
+      };
+    const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
+    const deployment = this.resolvedProfile<DeploymentProfileSpec>(lock, "deployment");
+    if (deployment.route !== "hf_job")
+      throw new PolicyError("imported deployment profiles cannot launch retries");
+    const eligibleTaskIds: string[] = [];
+    for (const task of await this.projection.tasks(campaignId)) {
+      const detail = await this.projection.task(campaignId, task.task_id);
+      if (!detail) continue;
+      const priorAttempt = this.selectedInfrastructureAttempt(detail);
+      const settlement = await this.settleClosedSandboxAmbiguities(
+        campaignId,
+        task.task_id,
+        actor,
+      );
+      const unresolved = await this.projection.pendingDispatchedSandboxCommandActions(
+        campaignId,
+        task.task_id,
+      );
+      if (
+        !priorAttempt ||
+        this.consumedInfrastructureAttempts(detail.attempts) >=
+          policy.max_infrastructure_attempts ||
+        settlement.unresolved > 0 ||
+        unresolved.length > 0 ||
+        (await this.projection.retryActionForAttempt(
+          campaignId,
+          priorAttempt.attempt_id,
+        )) ||
+        (await this.laterExecutionLaunchExists(
+          campaignId,
+          task.task_id,
+          priorAttempt.action_id,
+        ))
+      )
+        continue;
+      eligibleTaskIds.push(task.task_id);
+    }
+    if (eligibleTaskIds.length === 0)
+      throw new PolicyError("no eligible infrastructure failures");
+    const prepared = preparationRequired(deployment)
+      ? await this.preparedJob(campaignId)
+      : null;
+    if (preparationRequired(deployment) && !prepared)
+      throw new PolicyError("campaign preparation is incomplete");
+    const maximumTasks = deployment.worker_max_tasks_per_job ?? eligibleTaskIds.length;
+    const batches = executionTaskBatches(eligibleTaskIds, maximumTasks);
+    const createdAt = this.clock.now().toISOString();
+    if (
+      !(await this.reserveJobActions(
+        campaignId,
+        batches.map((taskIds) => ({
+          category: executionReservationCategory(taskIds),
+          generation,
+          created_at: createdAt,
+          amount_microusd: policy.reservation_microusd,
+        })),
+      ))
+    )
+      throw new PolicyError("replacement Job would exceed the campaign ceiling");
+    const sandboxAuthorized = Boolean(
+      deployment.sandbox || deployment.sandbox_template,
+    );
+    const sandboxTimeout =
+      deployment.sandbox_template?.max_timeout_seconds ??
+      deployment.sandbox?.timeout_seconds;
+    let firstActionId: string | null = null;
+    for (const [index, taskIds] of batches.entries()) {
+      const intent = this.actionIntent(
+        campaignId,
+        "job.launch",
+        index === 0 ? "eligible" : `eligible-${index}`,
+        generation,
+        {
+          worker_role: "execution",
+          task_ids: taskIds,
+          job_image: deployment.job_image,
+          job_command: deployment.job_command,
+          hardware: deployment.hardware,
+          timeout_seconds: deployment.timeout_seconds,
+          success_without_worker_receipt: policy.success_without_worker_receipt,
+          max_infrastructure_attempts: policy.max_infrastructure_attempts,
+          required_positive_metrics: policy.required_positive_metrics ?? [],
+          reservation_microusd: policy.reservation_microusd,
+          trusted_worker: deployment.trusted_worker,
+          ...(deployment.route === "hf_job" &&
+          typeof deployment.active_hourly_cost_microusd === "number"
+            ? { active_hourly_cost_microusd: deployment.active_hourly_cost_microusd }
+            : {}),
+          ...(deployment.worker_revision
+            ? { worker_revision: deployment.worker_revision }
+            : {}),
+          inference_token: deployment.inference_token ?? "forbidden",
+          ...(deployment.inference_token === "required"
+            ? {
+                inference_max_requests: deployment.inference_max_requests,
+                inference_max_concurrency: deployment.inference_max_concurrency,
+                inference_timeout_seconds: deployment.inference_timeout_seconds,
+                inference_max_output_tokens: deployment.inference_max_output_tokens,
+              }
+            : {}),
+          campaign_lock_digest: sha256(canonicalJson(lock)),
+          ...(prepared ? { prepared_job_digest: sha256(canonicalJson(prepared)) } : {}),
+          ...(deployment.sandbox ? { sandbox: deployment.sandbox } : {}),
+          ...(sandboxAuthorized ? { sandbox_authorized: true } : {}),
+          ...(sandboxTimeout ? { sandbox_timeout_seconds: sandboxTimeout } : {}),
+          reason: input.reason ?? null,
+        },
+        actor,
+      );
+      await this.writeAction(intent);
+      firstActionId ??= intent.action_id;
+    }
+    if (!firstActionId) throw new PolicyError("no eligible infrastructure failures");
+    return {
+      campaign_id: campaignId,
+      action_id: firstActionId,
+      status_url: `/api/v1/campaigns/${campaignId}`,
+      adopted: false,
+    };
+  }
+
   async campaignAction(
     campaignId: string,
     raw: unknown,
@@ -1999,6 +3226,57 @@ export class ControlService {
     if (!lock) throw new PolicyError("campaign lock does not exist");
     const generation =
       Number.parseInt(sha256(idempotencyKey).slice(-8), 16) % 1_000_001;
+    if (
+      input.action === "pause" ||
+      input.action === "resume" ||
+      (input.action === "supersede" && input.publication_id)
+    ) {
+      const actionKind =
+        input.action === "pause"
+          ? "campaign.pause"
+          : input.action === "resume"
+            ? "campaign.resume"
+            : "publication.supersede";
+      const actionTarget =
+        input.action === "supersede" ? (input.publication_id as string) : "campaign";
+      const expectedActionId = deterministicId(
+        "action",
+        campaignId,
+        actionKind,
+        actionTarget,
+        String(generation),
+      );
+      const existing = await this.projection.action(expectedActionId);
+      if (existing) {
+        const recorded = JSON.parse(existing.intent_body) as ActionIntent;
+        const expectedPayload: ActionIntent["payload"] =
+          input.action === "pause"
+            ? { reason: input.reason ?? null }
+            : input.action === "resume"
+              ? {
+                  reason: input.reason ?? null,
+                  ...(input.task_limit ? { task_limit: input.task_limit } : {}),
+                }
+              : {
+                  publication_id: actionTarget,
+                  reason: input.reason ?? null,
+                };
+        if (
+          recorded.action_kind !== actionKind ||
+          recorded.target !== actionTarget ||
+          canonicalJson(recorded.payload) !== canonicalJson(expectedPayload)
+        )
+          throw new IdempotencyConflictError(
+            `idempotency key belongs to a different ${input.action} action`,
+          );
+        return {
+          campaign_id: campaignId,
+          action_id: expectedActionId,
+          status_url: `/api/v1/campaigns/${campaignId}`,
+          adopted: true,
+        };
+      }
+    }
     if (input.action === "retry_infrastructure" && input.task_id) {
       const expectedActionId = deterministicId(
         "action",
@@ -2042,9 +3320,63 @@ export class ControlService {
         await this.settleClosedSandboxAmbiguities(campaignId, taskId, actor);
       kind = "campaign.cancel";
       payload = { task_id: input.task_id ?? null, reason: input.reason ?? null };
+    } else if (input.action === "pause") {
+      if (campaign.status === "completed" || campaign.status === "failed")
+        throw new PolicyError("terminal campaign cannot be paused");
+      kind = "campaign.pause";
+      payload = { reason: input.reason ?? null };
+    } else if (input.action === "resume") {
+      if (!campaign.paused) throw new PolicyError("campaign is not paused");
+      if (campaign.pending_actions > 0)
+        throw new PolicyError("campaign cannot resume while actions are pending");
+      await this.reconcileTerminalJobReservations(campaignId);
+      const deployment = profileSpec<DeploymentProfileSpec>(
+        lock.profiles,
+        "deployment",
+      );
+      if (deployment.route !== "hf_job")
+        throw new PolicyError("imported campaigns cannot resume execution Jobs");
+      if (preparationRequired(deployment)) {
+        const prepared = await this.preparedJob(campaignId);
+        if (!prepared) throw new PolicyError("campaign preparation is incomplete");
+      }
+      const unresolvedTasks = (await this.projection.tasks(campaignId)).filter(
+        (task) => !task.terminal_outcome,
+      );
+      const unresolvedTaskIds = (
+        input.task_limit ? unresolvedTasks.slice(0, input.task_limit) : unresolvedTasks
+      ).map((task) => task.task_id);
+      if (unresolvedTaskIds.length === 0)
+        throw new PolicyError("campaign has no unresolved tasks to resume");
+      const maximumTasks =
+        deployment.worker_max_tasks_per_job ?? unresolvedTaskIds.length;
+      const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
+      const reservationCreatedAt = this.clock.now().toISOString();
+      const reserved = await this.reserveJobActions(
+        campaignId,
+        executionTaskBatches(unresolvedTaskIds, maximumTasks).map((taskIds) => ({
+          category: executionReservationCategory(taskIds),
+          generation,
+          created_at: reservationCreatedAt,
+          amount_microusd: policy.reservation_microusd,
+        })),
+      );
+      if (!reserved)
+        throw new PolicyError("resumed execution would exceed the campaign ceiling");
+      kind = "campaign.resume";
+      payload = {
+        reason: input.reason ?? null,
+        ...(input.task_limit ? { task_limit: input.task_limit } : {}),
+      };
     } else if (input.action === "publish") {
-      if (campaign.terminal_tasks !== campaign.total_tasks)
-        throw new PolicyError("campaign cannot publish before every task is terminal");
+      if (
+        campaign.terminal_tasks !== campaign.total_tasks ||
+        campaign.admissible_tasks !== campaign.total_tasks ||
+        campaign.exhausted_tasks > 0
+      )
+        throw new PolicyError(
+          "campaign cannot publish before every task has an admissible selection",
+        );
       if (campaign.pending_actions > 0 || campaign.cleanup_pending)
         throw new PolicyError(
           "campaign cannot publish while actions or endpoint cleanup are pending",
@@ -2054,6 +3386,25 @@ export class ControlService {
       kind = "publication.publish";
       target = "results";
       payload = {};
+    } else if (input.action === "supersede") {
+      if (!input.publication_id)
+        throw new PolicyError("supersession requires the old publication ID");
+      const current = await this.projection.campaignPublication(campaignId);
+      if (current?.status !== "published")
+        throw new PolicyError("replacement campaign is not published");
+      const previous = await this.projection.publication(input.publication_id);
+      if (previous?.status !== "published")
+        throw new PolicyError("superseded publication does not exist");
+      if (await this.projection.publicationSupersession(input.publication_id))
+        throw new PolicyError("publication is already superseded");
+      if (previous.campaign_id === campaignId)
+        throw new PolicyError("publication cannot supersede itself");
+      kind = "publication.supersede";
+      target = input.publication_id;
+      payload = {
+        publication_id: input.publication_id,
+        reason: input.reason ?? null,
+      };
     } else if (input.action === "pause_endpoint") {
       const endpoints = (await this.projection.endpoints()).filter(
         (endpoint) => endpoint.campaign_id === campaignId && !endpoint.cleanup_verified,
@@ -2069,16 +3420,19 @@ export class ControlService {
       payload = { endpoint_id: endpoint.endpoint_id };
     } else {
       if (!input.task_id)
-        throw new PolicyError("infrastructure retry requires a task ID");
+        return this.queueEligibleInfrastructureRetries(
+          campaignId,
+          lock,
+          input,
+          generation,
+          actor,
+        );
       const task = await this.projection.task(campaignId, input.task_id);
       if (!task) throw new PolicyError("retry task does not exist");
-      if (task.task.terminal_outcome)
+      if (!infrastructureSealReplaceable(task.task.terminal_outcome))
         throw new PolicyError("terminal tasks cannot be retried");
-      const priorAttempt = task.attempts.at(-1);
-      if (
-        priorAttempt?.outcome !== "infrastructure" ||
-        priorAttempt.replacement_eligible !== 1
-      )
+      const priorAttempt = this.selectedInfrastructureAttempt(task);
+      if (!priorAttempt)
         throw new PolicyError(
           "infrastructure retry requires an eligible infrastructure failure",
         );
@@ -2086,7 +3440,14 @@ export class ControlService {
         campaignId,
         priorAttempt.attempt_id,
       );
-      if (existingRetry)
+      if (
+        existingRetry ||
+        (await this.laterExecutionLaunchExists(
+          campaignId,
+          input.task_id,
+          priorAttempt.action_id,
+        ))
+      )
         throw new PolicyError("infrastructure retry is already recorded");
       const deployment = this.resolvedProfile<DeploymentProfileSpec>(
         lock,
@@ -2095,7 +3456,10 @@ export class ControlService {
       if (deployment.route !== "hf_job")
         throw new PolicyError("imported deployment profiles cannot launch retries");
       const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
-      if (task.attempts.length >= policy.max_infrastructure_attempts)
+      if (
+        this.consumedInfrastructureAttempts(task.attempts) >=
+        policy.max_infrastructure_attempts
+      )
         throw new PolicyError("infrastructure retry budget is exhausted");
       retryReservation = {
         attemptId: priorAttempt.attempt_id,
@@ -2112,13 +3476,13 @@ export class ControlService {
         input.task_id,
         actor,
       );
-      const unresolved = await this.projection.pendingDispatchedSandboxExecActions(
+      const unresolved = await this.projection.pendingDispatchedSandboxCommandActions(
         campaignId,
         input.task_id,
       );
       if (settlement.unresolved > 0 || unresolved.length > 0)
         throw new PolicyError(
-          "infrastructure retry requires terminal Sandbox command recovery",
+          "infrastructure retry requires terminal Sandbox I/O action recovery",
         );
       const sandboxAuthorized = Boolean(
         deployment.sandbox || deployment.sandbox_template,
@@ -2136,6 +3500,7 @@ export class ControlService {
         timeout_seconds: deployment.timeout_seconds,
         success_without_worker_receipt: policy.success_without_worker_receipt,
         max_infrastructure_attempts: policy.max_infrastructure_attempts,
+        required_positive_metrics: policy.required_positive_metrics ?? [],
         reservation_microusd: policy.reservation_microusd,
         trusted_worker: deployment.trusted_worker,
         ...(deployment.route === "hf_job" &&
@@ -2173,6 +3538,21 @@ export class ControlService {
       ))
     )
       throw new PolicyError("replacement Job would exceed the campaign ceiling");
+    let actionTimestamp = this.clock.now().toISOString();
+    if (kind === "campaign.pause" || kind === "campaign.resume") {
+      const latestLifecycle = (await this.projection.campaignActions(campaignId)).find(
+        (action) =>
+          action.action_kind === "campaign.pause" ||
+          action.action_kind === "campaign.resume",
+      );
+      if (
+        latestLifecycle &&
+        Date.parse(latestLifecycle.created_at) >= Date.parse(actionTimestamp)
+      )
+        actionTimestamp = new Date(
+          Date.parse(latestLifecycle.created_at) + 1,
+        ).toISOString();
+    }
     const intent = this.actionIntent(
       campaignId,
       kind,
@@ -2180,6 +3560,7 @@ export class ControlService {
       generation,
       payload,
       actor,
+      actionTimestamp,
     );
     const adopted = Boolean(await this.projection.action(intent.action_id));
     await this.writeAction(intent);

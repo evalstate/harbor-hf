@@ -174,13 +174,13 @@ describe("projection replay", () => {
     await control.service.writeAction(undispatched);
 
     expect(
-      await control.projection.pendingDispatchedSandboxExecActions(
+      await control.projection.pendingDispatchedSandboxCommandActions(
         submitted.campaign_id,
         "task-001",
       ),
     ).toEqual([command]);
     expect(
-      await control.projection.pendingDispatchedSandboxExecActions(
+      await control.projection.pendingDispatchedSandboxCommandActions(
         submitted.campaign_id,
         "another-task",
       ),
@@ -211,7 +211,7 @@ describe("projection replay", () => {
       "Sandbox command count exceeds immutable policy",
     );
     expect(
-      await control.projection.pendingDispatchedSandboxExecActions(
+      await control.projection.pendingDispatchedSandboxCommandActions(
         submitted.campaign_id,
         "task-001",
       ),
@@ -324,6 +324,7 @@ describe("projection replay", () => {
       observed_state: "ERROR",
       resource_id: resourceId,
       cost_microusd: 40_000,
+      assigned_tasks: 1,
     });
     expect(jobs[0]?.created_at).toBe("2026-08-21T10:04:40.000Z");
     expect(await control.projection.jobs(100, 0, submitted.campaign_id)).toHaveLength(

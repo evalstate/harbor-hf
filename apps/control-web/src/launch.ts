@@ -96,12 +96,21 @@ export function profileLabel(
     return typeof spec.model_id === "string" ? spec.model_id : alias;
   if (kind === "harness") {
     const agent = typeof spec.agent === "string" ? spec.agent : alias;
+    if (agent === "dsh" || agent.startsWith("dsh-") || alias.startsWith("dsh"))
+      return "DeepSeek Harness";
     if (agent === "opencode") return "OpenCode";
+    if (agent === "fx") return "FX";
     if (agent === "pi") return "Pi";
     if (agent === "control-smoke") return "Control smoke";
     return humanize(agent);
   }
   return alias;
+}
+
+/** Operator-facing harness name. Profile aliases such as `dsh` stay as data. */
+export function labeledHarness(value: string | null | undefined): string {
+  if (!value) return "—";
+  return profileLabel("harness", value, { agent: value });
 }
 
 export function selectHarnessAlias(

@@ -23,6 +23,28 @@ function system(writeMode: "disabled" | "enabled" = "enabled") {
   };
 }
 
+test("starts OAuth directly from every guest admin link", async ({ page }) => {
+  await page.route("**/api/v1/auth/session", (route) =>
+    route.fulfill({
+      status: 401,
+      json: { authenticated: false, login_url: "/auth/login" },
+    }),
+  );
+  await page.route("**/api/v1/leaderboard", (route) =>
+    route.fulfill({ json: { snapshot: null, items: [] } }),
+  );
+  let loginUrl = "";
+  await page.route("**/auth/login**", (route) => {
+    loginUrl = route.request().url();
+    return route.fulfill({ status: 204 });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText(/admin views require/i)).toHaveCount(0);
+  await page.getByRole("link", { name: "Overview" }).click();
+  await expect.poll(() => loginUrl).toContain("/auth/login?return_to=%2Foverview");
+});
+
 test("shows the operational overview on desktop and mobile", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),
@@ -35,7 +57,7 @@ test("shows the operational overview on desktop and mobile", async ({ page }) =>
     route.fulfill({ json: { items: [], next_cursor: null } }),
   );
   await page.route("**/api/v1/events", (route) => route.abort());
-  await page.goto("/");
+  await page.goto("/overview");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await expect(page.getByText("All observed endpoints safe")).toBeVisible();
   await expect(page.getByText("test-revision-0123456789abcdef")).toBeVisible();
@@ -49,7 +71,7 @@ test("shows the operational overview on desktop and mobile", async ({ page }) =>
   ).toBe(true);
 });
 
-test("disables campaign launch and keeps account details compact", async ({ page }) => {
+test("disables campaign launch and omits account details", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),
   );
@@ -62,12 +84,10 @@ test("disables campaign launch and keeps account details compact", async ({ page
   await page.route("**/api/v1/events", (route) => route.abort());
   await page.goto("/runs");
   await expect(page.getByRole("button", { name: "Start a run" })).toBeDisabled();
-  const details = page.getByRole("button", { name: "Account and session details" });
-  const guidance = page.getByText(/role grants permission/i);
-  await expect(guidance).toBeHidden();
-  await details.focus();
-  await expect(guidance).toBeVisible();
-  await expect(page.getByText(/session expires/i)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Account and session details" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
 });
 
 test("requires confirmation before starting a run", async ({ page }) => {
@@ -175,17 +195,21 @@ test("shows campaign failures as errors rather than missing data", async ({ page
     route.fulfill({ json: session }),
   );
   await page.route("**/api/v1/system", (route) => route.fulfill({ json: system() }));
-  await page.route("**/api/v1/campaigns/campaign-error", (route) =>
-    route.fulfill({
-      status: 403,
-      json: {
-        error: {
-          code: "access_denied",
-          message: "access denied",
-          request_id: "browser-request-id",
-        },
+  const forbidden = {
+    status: 403,
+    json: {
+      error: {
+        code: "access_denied",
+        message: "access denied",
+        request_id: "browser-request-id",
       },
-    }),
+    },
+  };
+  await page.route("**/api/v1/campaigns/campaign-error", (route) =>
+    route.fulfill(forbidden),
+  );
+  await page.route("**/api/v1/campaigns/campaign-error/capacity", (route) =>
+    route.fulfill(forbidden),
   );
   await page.route("**/api/v1/campaigns/campaign-error/tasks**", (route) =>
     route.fulfill({ json: { items: [], next_cursor: null } }),
@@ -195,4 +219,193 @@ test("shows campaign failures as errors rather than missing data", async ({ page
   await expect(page.getByText("Forbidden")).toBeVisible();
   await expect(page.getByText(/browser-request-id/)).toBeVisible();
   await expect(page.getByText("Run not found")).toHaveCount(0);
+});
+
+test("shows the official leaderboard table and cost-score plot", async ({ page }) => {
+  await page.route("**/api/v1/auth/session", (route) =>
+    route.fulfill({ json: session }),
+  );
+  await page.route("**/api/v1/system", (route) => route.fulfill({ json: system() }));
+  await page.route("**/api/v1/leaderboard", (route) =>
+    route.fulfill({
+      json: {
+        snapshot: {
+          record_id: "leaderboard-snapshot-one",
+          created_at: "2026-08-21T00:00:00.000Z",
+          sqlite_digest: "sha256:sqlite",
+          source_digest: "sha256:source",
+          entry_count: 1,
+        },
+        items: [
+          {
+            rank: 1,
+            pareto: true,
+            configuration_digest: "sha256:strong",
+            campaign_id: "run-strong",
+            publication_id: "publication-strong",
+            published_at: "2026-08-21T00:00:00.000Z",
+            benchmark: "terminal-bench-2-1",
+            model: "openai/gpt-oss-20b",
+            harness: "opencode",
+            inference_provider: "together",
+            reasoning_effort: "off",
+            harbor_version: "0.21.0",
+            trial_count: 1,
+            task_count: 2,
+            scored_task_count: 2,
+            primary_metric_name: "mean_reward",
+            primary_metric_value: 0.9,
+            primary_metric_unit: "score",
+            observed_microusd: 40_000,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/v1/events", (route) => route.abort());
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Leaderboard" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "openai/gpt-oss-20b", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Primary" })).toContainText(
+    "Admin",
+  );
+  await expect(page.getByRole("link", { name: "Overview" })).toHaveAttribute(
+    "href",
+    "/overview",
+  );
+  await expect(
+    page.getByRole("img", { name: /cost versus score, with the pareto frontier/i }),
+  ).toBeVisible();
+});
+
+test("shows complete run Jobs with sticky, filterable table headers", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/auth/session", (route) =>
+    route.fulfill({ json: session }),
+  );
+  await page.route("**/api/v1/system", (route) =>
+    route.fulfill({ json: system("enabled") }),
+  );
+  await page.route("**/api/v1/campaigns/run-table", (route) =>
+    route.fulfill({
+      json: {
+        campaign_id: "run-table",
+        created_at: "2026-08-24T00:00:00.000Z",
+        status: "active",
+        ceiling_microusd: 1_000_000,
+        reserved_microusd: 500_000,
+        observed_microusd: 100_000,
+        total_tasks: 30,
+        terminal_tasks: 2,
+        admissible_tasks: 1,
+        invalid_selected_tasks: 0,
+        exhausted_tasks: 1,
+        successful_tasks: 1,
+        pending_actions: 8,
+        replacement_assigned_tasks: 0,
+        replacement_recorded_tasks: 0,
+        publication_status: null,
+        cleanup_pending: false,
+        cancellation_requested: false,
+        paused: false,
+      },
+    }),
+  );
+  await page.route("**/api/v1/campaigns/run-table/capacity", (route) =>
+    route.fulfill({
+      json: {
+        campaign_active: 4,
+        campaign_limit: 16,
+        namespace_active: 4,
+        namespace_limit: 128,
+        provider_reserved: 4,
+        provider_limit: 16,
+        start_tokens: 120,
+        start_burst: 128,
+        queued: 0,
+        cleanup_held: 0,
+        limiting_factor: null,
+      },
+    }),
+  );
+  await page.route("**/api/v1/campaigns/run-table/tasks**", (route) =>
+    route.fulfill({
+      json: {
+        items: Array.from({ length: 30 }, (_, index) => ({
+          campaign_id: "run-table",
+          task_id: `task-${String(index + 1).padStart(2, "0")}`,
+          terminal_outcome:
+            index === 0 ? "complete" : index === 1 ? "infrastructure" : null,
+          selected_attempt_id: index < 2 ? `attempt-${index + 1}` : null,
+          input_digest: `sha256:${String(index).padStart(64, "0")}`,
+        })),
+        next_cursor: null,
+      },
+    }),
+  );
+  await page.route("**/api/v1/jobs**", (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    const jobs = [
+      {
+        action_id: "action-job-1",
+        campaign_id: "run-table",
+        action_kind: "job.observe",
+        generation: 2,
+        target: "job-one",
+        outcome: "completed",
+        observed_state: "RUNNING",
+        resource_id: "job-one",
+        created_at: "2026-08-24T00:03:00.000Z",
+        inspect_url: "https://huggingface.co/jobs/job-one",
+        cost_microusd: 1_000,
+        assigned_tasks: 20,
+      },
+      {
+        action_id: "action-job-2",
+        campaign_id: "run-table",
+        action_kind: "job.observe",
+        generation: 3,
+        target: "job-two",
+        outcome: "completed",
+        observed_state: "ERROR",
+        resource_id: "job-two",
+        created_at: "2026-08-24T00:02:00.000Z",
+        inspect_url: "https://huggingface.co/jobs/job-two",
+        cost_microusd: 2_000,
+        assigned_tasks: 10,
+      },
+    ];
+    return route.fulfill({
+      json: cursor
+        ? { items: [jobs[1]], next_cursor: null }
+        : { items: [jobs[0]], next_cursor: "page-2" },
+    });
+  });
+  await page.route("**/api/v1/events", (route) => route.abort());
+
+  await page.goto("/runs/run-table");
+  await expect(page.getByRole("heading", { name: "Physical HF Jobs" })).toBeVisible();
+  await expect(page.getByText("2 Jobs recorded, 1 active.")).toBeVisible();
+  await page.getByLabel("Filter observed state").fill("error");
+  await expect(page.getByText("1 of 2 rows")).toBeVisible();
+  await expect(page.getByText("Running", { exact: true })).toHaveCount(0);
+
+  await page.getByText("Observed", { exact: true }).hover();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+  await expect(page.getByRole("tooltip")).toHaveCSS("opacity", "1");
+  await expect(page.getByRole("tooltip")).toContainText("Latest Hub stage");
+
+  const header = page.locator("thead").nth(1);
+  await header.scrollIntoViewIfNeeded();
+  await expect(header).toHaveCSS("position", "sticky");
+  await header
+    .locator("..")
+    .locator("..")
+    .evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+  await expect(header).toBeInViewport();
 });

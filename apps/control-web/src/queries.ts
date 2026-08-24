@@ -4,8 +4,10 @@ import type {
   AuditResponse,
   Campaign,
   CampaignList,
+  Capacity,
   EndpointList,
   JobList,
+  Leaderboard,
   ProfileList,
   ResultDetail,
   ResultList,
@@ -21,12 +23,15 @@ export const keys = {
   system: ["system"] as const,
   campaigns: ["campaigns"] as const,
   campaign: (id: string) => ["campaign", id] as const,
+  capacity: (id: string) => ["capacity", id] as const,
   tasks: (id: string) => ["tasks", id] as const,
   task: (campaign: string, task: string) => ["task", campaign, task] as const,
   jobs: ["jobs"] as const,
+  campaignJobs: (id: string) => ["campaign-jobs", id] as const,
   endpoints: ["endpoints"] as const,
   profiles: ["profiles"] as const,
   results: ["results"] as const,
+  leaderboard: ["leaderboard"] as const,
   result: (id: string) => ["result", id] as const,
   audit: ["audit"] as const,
 };
@@ -120,6 +125,15 @@ export const useCampaign = (id: string) =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
+export const useCapacity = (id: string) =>
+  useQuery({
+    queryKey: keys.capacity(id),
+    queryFn: () =>
+      request<Capacity>(`/api/v1/campaigns/${encodeURIComponent(id)}/capacity`),
+    enabled: Boolean(id),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+  });
 export const useTasks = (id: string, cursor?: string) =>
   useQuery({
     queryKey: [...keys.tasks(id), cursor ?? null],
@@ -144,22 +158,37 @@ export const useTask = (campaign: string, task: string) =>
   });
 export const JOBS_REFRESH_INTERVAL_MS = 10_000;
 
-export const useJobs = (cursor?: string, campaignId?: string) =>
+export const useJobs = (cursor?: string) =>
   useQuery({
-    queryKey: [...keys.jobs, campaignId ?? null, cursor ?? null],
-    queryFn: () =>
-      request<JobList>(
-        collectionUrl("/api/v1/jobs", cursor, undefined, {
-          campaign_id: campaignId,
-        }),
-      ),
+    queryKey: [...keys.jobs, cursor ?? null],
+    queryFn: () => request<JobList>(collectionUrl("/api/v1/jobs", cursor)),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
     staleTime: 5_000,
     refetchInterval: JOBS_REFRESH_INTERVAL_MS,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
-    enabled: campaignId === undefined || Boolean(campaignId),
+  });
+export const useCampaignJobs = (campaignId: string) =>
+  useQuery({
+    queryKey: keys.campaignJobs(campaignId),
+    queryFn: async (): Promise<JobList> => ({
+      items: await collectPagedItems((cursor) =>
+        request<JobList>(
+          collectionUrl("/api/v1/jobs", cursor, 100, {
+            campaign_id: campaignId,
+          }),
+        ),
+      ),
+      next_cursor: null,
+    }),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+    staleTime: 5_000,
+    refetchInterval: JOBS_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    enabled: Boolean(campaignId),
   });
 export const useEndpoints = (cursor?: string) =>
   useQuery({
@@ -168,10 +197,39 @@ export const useEndpoints = (cursor?: string) =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
+export async function collectPagedItems<T>(
+  loadPage: (cursor?: string) => Promise<{ items: T[]; next_cursor: string | null }>,
+  maxPages = 20,
+): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await loadPage(cursor);
+    items.push(...result.items);
+    if (!result.next_cursor) return items;
+    cursor = result.next_cursor;
+  }
+  throw new Error("paged list exceeded the page limit");
+}
+
 export const useProfiles = (cursor?: string) =>
   useQuery({
     queryKey: [...keys.profiles, cursor ?? null],
     queryFn: () => request<ProfileList>(collectionUrl("/api/v1/profiles", cursor, 100)),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+  });
+
+/** Load every profile page. Launch needs models and harnesses that sort after deployments. */
+export const useAllProfiles = () =>
+  useQuery({
+    queryKey: [...keys.profiles, "all"],
+    queryFn: async () => ({
+      items: await collectPagedItems((cursor) =>
+        request<ProfileList>(collectionUrl("/api/v1/profiles", cursor, 100)),
+      ),
+      next_cursor: null,
+    }),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
@@ -187,6 +245,13 @@ export const useResults = (cursor?: string, filters: ResultFilters = {}) =>
           filters as Record<string, string | undefined>,
         ),
       ),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+  });
+export const useLeaderboard = () =>
+  useQuery({
+    queryKey: keys.leaderboard,
+    queryFn: () => request<Leaderboard>("/api/v1/leaderboard"),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
@@ -216,19 +281,28 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
   const affected: QueryKey[] = [keys.audit];
   const campaignId = stringData(event, "campaign_id");
   const taskId = stringData(event, "task_id");
-  if (event.type.startsWith("profile.")) affected.push(keys.profiles);
-  if (event.type === "publication.receipt") affected.push(keys.results);
+  if (event.type.startsWith("profile.")) {
+    affected.push(keys.profiles);
+    if (stringData(event, "profile_kind") === "capacity") affected.push(["capacity"]);
+  }
+  if (event.type === "publication.receipt")
+    affected.push(keys.results, keys.leaderboard);
   if (
     event.type.startsWith("campaign.") ||
     event.type.startsWith("budget.") ||
     event.type.startsWith("attempt.") ||
     event.type.startsWith("terminal.") ||
     event.type.startsWith("action.") ||
+    event.type.startsWith("sandbox.") ||
     event.type === "publication.receipt"
   ) {
     affected.push(keys.campaigns);
     if (campaignId) {
-      affected.push(keys.campaign(campaignId), keys.tasks(campaignId));
+      affected.push(
+        keys.campaign(campaignId),
+        keys.capacity(campaignId),
+        keys.tasks(campaignId),
+      );
       if (taskId) affected.push(keys.task(campaignId, taskId));
     } else {
       affected.push(["campaign"], ["tasks"], ["task"]);
@@ -237,9 +311,13 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
   if (event.type.startsWith("action.")) {
     const actionKind = stringData(event, "action_kind") ?? "";
     if (actionKind.startsWith("endpoint.")) affected.push(keys.endpoints);
-    else if (actionKind.startsWith("job.") || actionKind.startsWith("sandbox."))
+    else if (actionKind.startsWith("job.") || actionKind.startsWith("sandbox.")) {
       affected.push(keys.jobs);
-    else affected.push(keys.jobs, keys.endpoints);
+      affected.push(campaignId ? keys.campaignJobs(campaignId) : ["campaign-jobs"]);
+    } else {
+      affected.push(keys.jobs, keys.endpoints);
+      affected.push(campaignId ? keys.campaignJobs(campaignId) : ["campaign-jobs"]);
+    }
   }
   return affected;
 }

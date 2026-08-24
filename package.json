@@ -13,6 +13,7 @@
   "scripts": {
     "build": "npm run generate && tsc -b && npm run build -w @harbor-hf/control-web",
     "bundle:space": "tsx scripts/control-service/bundle-space.ts",
+    "deploy:space": "tsx scripts/control-service/deploy-space.ts",
     "check:generated": "npm run generate && git diff --exit-code -- docs/control-api-v1.openapi.json apps/control-web/src/generated/api.ts packages/contracts/src/generated",
     "format": "biome format --write .",
     "format:check": "biome format .",

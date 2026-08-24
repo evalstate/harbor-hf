@@ -16,10 +16,17 @@ export const campaignViewSchema = {
     "observed_microusd",
     "total_tasks",
     "terminal_tasks",
+    "admissible_tasks",
+    "invalid_selected_tasks",
+    "exhausted_tasks",
     "successful_tasks",
     "pending_actions",
+    "replacement_assigned_tasks",
+    "replacement_recorded_tasks",
     "publication_status",
     "cleanup_pending",
+    "cancellation_requested",
+    "paused",
   ],
   properties: {
     campaign_id: { type: "string" },
@@ -30,10 +37,91 @@ export const campaignViewSchema = {
     observed_microusd: integer,
     total_tasks: integer,
     terminal_tasks: integer,
+    admissible_tasks: integer,
+    invalid_selected_tasks: integer,
+    exhausted_tasks: integer,
     successful_tasks: integer,
     pending_actions: integer,
+    replacement_assigned_tasks: integer,
+    replacement_recorded_tasks: integer,
     publication_status: nullableString,
     cleanup_pending: { type: "boolean" },
+    cancellation_requested: { type: "boolean" },
+    paused: { type: "boolean" },
+  },
+} as const;
+
+export const namespaceCapacityPolicySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "alias",
+    "configured",
+    "max_active_sandboxes",
+    "start_burst",
+    "start_refill_tokens",
+    "start_refill_period_seconds",
+    "profile_id",
+  ],
+  properties: {
+    alias: nullableString,
+    configured: { type: "boolean" },
+    max_active_sandboxes: nullableInteger,
+    start_burst: nullableInteger,
+    start_refill_tokens: nullableInteger,
+    start_refill_period_seconds: nullableInteger,
+    profile_id: nullableString,
+  },
+} as const;
+
+export const namespaceCapacityUpdateSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["max_active_sandboxes", "confirmed"],
+  properties: {
+    max_active_sandboxes: { type: "integer", minimum: 1, maximum: 1024 },
+    confirmed: { const: true },
+  },
+} as const;
+
+export const capacitySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "configured",
+    "profile_id",
+    "namespace_limit",
+    "namespace_active",
+    "campaign_limit",
+    "campaign_active",
+    "hardware_limit",
+    "hardware_active",
+    "provider_limit",
+    "provider_reserved",
+    "start_tokens",
+    "start_burst",
+    "queued",
+    "cleanup_held",
+    "limiting_factor",
+    "not_before",
+  ],
+  properties: {
+    configured: { type: "boolean" },
+    profile_id: nullableString,
+    namespace_limit: nullableInteger,
+    namespace_active: integer,
+    campaign_limit: integer,
+    campaign_active: integer,
+    hardware_limit: nullableInteger,
+    hardware_active: integer,
+    provider_limit: integer,
+    provider_reserved: integer,
+    start_tokens: nullableInteger,
+    start_burst: nullableInteger,
+    queued: integer,
+    cleanup_held: integer,
+    limiting_factor: nullableString,
+    not_before: nullableString,
   },
 } as const;
 
@@ -228,10 +316,26 @@ export const attemptSchema = {
 export const taskDetailSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["task", "attempts"],
+  required: ["task", "attempts", "exhaustion"],
   properties: {
     task: taskSchema,
     attempts: { type: "array", items: attemptSchema },
+    exhaustion: {
+      anyOf: [
+        { type: "null" },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["last_attempt_id", "attempt_count", "reason", "created_at"],
+          properties: {
+            last_attempt_id: { type: "string" },
+            attempt_count: integer,
+            reason: { type: "string" },
+            created_at: { type: "string", format: "date-time" },
+          },
+        },
+      ],
+    },
   },
 } as const;
 
@@ -265,11 +369,17 @@ export const actionSchema = {
 export const jobSchema = {
   type: "object",
   additionalProperties: false,
-  required: [...actionSchema.required, "inspect_url", "cost_microusd"],
+  required: [
+    ...actionSchema.required,
+    "inspect_url",
+    "cost_microusd",
+    "assigned_tasks",
+  ],
   properties: {
     ...actionSchema.properties,
     inspect_url: nullableString,
     cost_microusd: integer,
+    assigned_tasks: integer,
   },
 } as const;
 
@@ -441,10 +551,90 @@ export const publicationSchema = {
     agent: nullableString,
     source_revision: nullableString,
     catalog_source_digest: nullableString,
+    superseded_by_publication_id: nullableString,
     profile_ids: {
       type: "object",
       additionalProperties: { type: "string" },
     },
+  },
+} as const;
+
+export const leaderboardRowSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "rank",
+    "pareto",
+    "configuration_digest",
+    "campaign_id",
+    "publication_id",
+    "published_at",
+    "benchmark",
+    "model",
+    "harness",
+    "inference_provider",
+    "reasoning_effort",
+    "harbor_version",
+    "trial_count",
+    "task_count",
+    "scored_task_count",
+    "primary_metric_name",
+    "primary_metric_value",
+    "primary_metric_unit",
+    "observed_microusd",
+  ],
+  properties: {
+    rank: integer,
+    pareto: { type: "boolean" },
+    configuration_digest: { type: "string" },
+    campaign_id: { type: "string" },
+    publication_id: { type: "string" },
+    published_at: { type: "string", format: "date-time" },
+    benchmark: { type: "string" },
+    model: { type: "string" },
+    harness: { type: "string" },
+    inference_provider: { type: "string" },
+    reasoning_effort: { type: "string" },
+    harbor_version: { type: "string" },
+    trial_count: integer,
+    task_count: integer,
+    scored_task_count: integer,
+    primary_metric_name: { type: "string" },
+    primary_metric_value: { type: "number" },
+    primary_metric_unit: { type: "string" },
+    observed_microusd: integer,
+  },
+} as const;
+
+export const leaderboardSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["snapshot", "items"],
+  properties: {
+    snapshot: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "record_id",
+            "created_at",
+            "sqlite_digest",
+            "source_digest",
+            "entry_count",
+          ],
+          properties: {
+            record_id: { type: "string" },
+            created_at: { type: "string", format: "date-time" },
+            sqlite_digest: { type: "string" },
+            source_digest: { type: "string" },
+            entry_count: integer,
+          },
+        },
+        { type: "null" },
+      ],
+    },
+    items: { type: "array", items: leaderboardRowSchema },
   },
 } as const;
 

@@ -3,6 +3,7 @@ import {
   approvedAlias,
   doubleReservationMicrousd,
   firstCompatibleLaunchSelection,
+  labeledHarness,
   profileLabel,
   selectDeploymentAlias,
   selectHarnessAlias,
@@ -123,6 +124,22 @@ describe("launch helpers", () => {
     });
   });
 
+  it("labels DeepSeek Harness instead of the dsh alias", () => {
+    expect(profileLabel("harness", "dsh", { agent: "dsh" })).toBe("DeepSeek Harness");
+    expect(
+      profileLabel("harness", "dsh-high-deepseek-v4-flash-0731-together", {
+        agent: "dsh",
+      }),
+    ).toBe("DeepSeek Harness");
+    expect(labeledHarness("dsh")).toBe("DeepSeek Harness");
+    expect(labeledHarness(null)).toBe("—");
+  });
+
+  it("labels FX instead of title-casing the alias", () => {
+    expect(profileLabel("harness", "fx", { agent: "fx" })).toBe("FX");
+    expect(labeledHarness("fx")).toBe("FX");
+  });
+
   it("labels Terminal-Bench 2.1 by source tasks and trials, not logical attempts", () => {
     expect(
       profileLabel("benchmark", "terminal-bench-2-1-official-5", {
@@ -144,7 +161,7 @@ describe("launch helpers", () => {
       profileLabel("benchmark", "control-smoke", {
         task_ids: ["control-smoke-task"],
       }),
-    ).toBe("Control-smoke · 1 task");
+    ).toBe("Control Smoke · 1 task");
   });
 
   it("treats a providers deployment as providers after the API redacts the router URL", () => {

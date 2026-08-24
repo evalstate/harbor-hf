@@ -22,6 +22,25 @@ describe("control API configuration", () => {
     expect(config.oauth?.callback_url).toBe("https://control.example/auth/callback");
   });
 
+  it("loads the nonsecret capacity profile alias", () => {
+    const config = loadConfig({
+      ...environment,
+      HARBOR_HF_CAPACITY_PROFILE_ALIAS: "capacity-current",
+    });
+
+    expect(config.capacity_profile_alias).toBe("capacity-current");
+    expect(config.max_active_sandboxes).toBe(16);
+  });
+
+  it("loads an explicit namespace Sandbox cap", () => {
+    const config = loadConfig({
+      ...environment,
+      HARBOR_HF_MAX_ACTIVE_SANDBOXES: "128",
+    });
+
+    expect(config.max_active_sandboxes).toBe(128);
+  });
+
   it("loads a distinct worker inference credential without exposing it elsewhere", () => {
     const config = loadConfig({
       ...environment,

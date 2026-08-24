@@ -14,6 +14,7 @@ import subprocess
 import tarfile
 import tempfile
 import threading
+import time
 from collections import deque
 from collections.abc import Iterator
 from contextlib import suppress
@@ -89,6 +90,11 @@ _POLICY_FAILURES = {
     "ModelNotFoundError",
 }
 _INFRASTRUCTURE_MARKERS = ("Sandbox", "Connection", "Network", "HTTP")
+_ENVIRONMENT_SETUP_ERRORS = {
+    "AddTestsDirError",
+    "DownloadEnvironmentDirError",
+    "DownloadVerifierDirError",
+}
 
 
 @dataclass(frozen=True)
@@ -114,6 +120,10 @@ class WorkerConfig:
     output_price: int
     job_config: dict[str, Any]
     tasks: tuple[LockedTask, ...]
+
+
+class TrialIntegrityError(RuntimeError):
+    """Reject a trial whose durable output cannot be trusted or adopted."""
 
 
 def _required(name: str) -> str:
@@ -328,8 +338,12 @@ def _job_config(config: WorkerConfig, task: LockedTask, root: Path) -> Path:
 
 
 def _result_path(root: Path, task: LockedTask) -> Path | None:
-    matches = list((root / "jobs" / task.task_id).glob("*/result.json"))
+    matches = _result_paths(root, task)
     return matches[0] if len(matches) == 1 else None
+
+
+def _result_paths(root: Path, task: LockedTask) -> list[Path]:
+    return list((root / "jobs" / task.task_id).glob("*/result.json"))
 
 
 def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
@@ -360,6 +374,8 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
     )
     if name in {"AgentTimeoutError", "VerifierTimeoutError"}:
         return "benchmark_timeout", False
+    if name in _ENVIRONMENT_SETUP_ERRORS:
+        return "infrastructure", True
     if name == TransientProviderError.__name__:
         return "infrastructure", True
     if name == ProviderPolicyError.__name__:
@@ -522,6 +538,50 @@ def _upload_evidence(
     return manifest_digest, str(uploaded_manifest["path"])
 
 
+def _transient_control_failure(error: BaseException) -> bool:
+    text = str(error)
+    return isinstance(error, TimeoutError) or any(
+        marker in text
+        for marker in (
+            "HTTP 429",
+            "HTTP 500",
+            "HTTP 502",
+            "HTTP 503",
+            "HTTP 504",
+            "request failed",
+        )
+    )
+
+
+def _upload_failure_note(
+    config: WorkerConfig, task: LockedTask, error: BaseException
+) -> tuple[str, str]:
+    """Upload a tiny note when the trial archive cannot be stored."""
+    client = _ControlClient(config.campaign_id, task.task_id)
+    note = _canonical_json(
+        {
+            "schema_version": "v1",
+            "kind": "worker.evidence.upload_failure",
+            "task_id": task.task_id,
+            "error": _redact_text(str(error), limit=500),
+        }
+    )
+    digest = _digest(note)
+    uploaded = client.request(
+        "POST",
+        f"{client.prefix}/attempts",
+        body={
+            "operation": "upload_evidence",
+            "action_id": config.action_id,
+            "digest": digest,
+            "content_base64": base64.b64encode(note).decode(),
+        },
+        idempotency_key=f"evidence-failure-{config.action_id}-{task.task_id}",
+        timeout=120.0,
+    )
+    return digest, str(uploaded["path"])
+
+
 def _submit_attempt(
     config: WorkerConfig,
     task: LockedTask,
@@ -531,9 +591,14 @@ def _submit_attempt(
     evidence_path: str,
     *,
     timed_out: bool = False,
+    outcome_override: tuple[str, bool] | None = None,
 ) -> None:
-    outcome, replacement = _exception_outcome(result, stderr, timed_out=timed_out)
+    outcome, replacement = outcome_override or _exception_outcome(
+        result, stderr, timed_out=timed_out
+    )
     metrics, _ = _metrics(result)
+    if metrics.get("input_tokens", 0) <= 0 or metrics.get("output_tokens", 0) <= 0:
+        replacement = True
     client = _ControlClient(config.campaign_id, task.task_id)
     client.request(
         "POST",
@@ -655,6 +720,31 @@ def _redact_pending_output(
     return "".join(redacted), pending
 
 
+def _redact_text(value: str, *, limit: int) -> str:
+    redacted = value
+    sensitive_values = _sensitive_output_values()
+    marker = _redaction_marker(sensitive_values)
+    for sensitive in sensitive_values:
+        redacted = redacted.replace(sensitive, marker)
+    return redacted[:limit]
+
+
+def _log_harbor_exception(task: LockedTask, result: dict[str, Any]) -> None:
+    """Copy Harbor's exception into Job logs without the traceback."""
+    exception = result.get("exception_info")
+    if not isinstance(exception, dict):
+        return
+    message = str(exception.get("exception_message") or "")
+    _log(
+        {
+            "status": "harbor_exception",
+            "task_id": task.task_id,
+            "exception_type": exception.get("exception_type"),
+            "exception_message": _redact_text(message, limit=2000),
+        }
+    )
+
+
 def _run_logged_command(  # noqa: C901 -- bounded streaming and process cleanup
     command: list[str], timeout_seconds: int
 ) -> tuple[str, bool]:
@@ -753,7 +843,51 @@ def _run_logged_command(  # noqa: C901 -- bounded streaming and process cleanup
     return "".join(chunks), timed_out
 
 
+def _rate_limited(text: str) -> bool:
+    lowered = text.lower()
+    return "429" in text or "rate limit" in lowered
+
+
+def _record_pre_receipt_failure(
+    config: WorkerConfig, task: LockedTask, error: BaseException
+) -> None:
+    """Store an infrastructure receipt when Harbor never produced a trial result."""
+    digest, evidence_path = _upload_failure_note(config, task, error)
+    _submit_attempt(
+        config,
+        task,
+        None,
+        str(error),
+        digest,
+        evidence_path,
+        outcome_override=("infrastructure", True),
+    )
+
+
 def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
+    try:
+        return _run_task_once(config, task, root)
+    except BaseException as error:
+        if (
+            not isinstance(error, TrialIntegrityError)
+            and _result_path(root, task) is None
+        ):
+            try:
+                _record_pre_receipt_failure(config, task, error)
+            except BaseException as record_error:
+                _log(
+                    {
+                        "status": "pre_receipt_record_failed",
+                        "task_id": task.task_id,
+                        "error": _redact_text(str(record_error), limit=500),
+                    }
+                )
+        raise
+
+
+def _run_task_once(  # noqa: C901 -- retry and integrity checks are explicit
+    config: WorkerConfig, task: LockedTask, root: Path
+) -> str:
     path = _job_config(config, task, root)
     _log(
         {
@@ -762,37 +896,90 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
             "timeout_seconds": task.timeout_seconds,
         }
     )
-    output, timed_out = _run_logged_command(
-        ["harbor", "run", "--config", str(path), "--yes"],
-        task.timeout_seconds + 600,
-    )
-    result_path = _result_path(root, task)
+    output = ""
+    timed_out = False
+    result_path: Path | None = None
+    for attempt in range(3):
+        output, timed_out = _run_logged_command(
+            ["harbor", "run", "--config", str(path), "--yes"],
+            task.timeout_seconds + 600,
+        )
+        result_path = _result_path(root, task)
+        if result_path or not _rate_limited(output) or attempt == 2:
+            break
+        delay = min(30.0, float(2 ** (attempt + 2)))
+        _log(
+            {
+                "status": "harbor_rate_limited",
+                "task_id": task.task_id,
+                "attempt": attempt + 1,
+                "delay_seconds": delay,
+            }
+        )
+        time.sleep(delay)
     if not result_path:
+        if len(_result_paths(root, task)) > 1:
+            raise TrialIntegrityError("Harbor wrote multiple trial results")
         raise RuntimeError("Harbor did not write a trial result")
     observed_lock_path = result_path.parent / "lock.json"
     if not observed_lock_path.is_file():
-        raise RuntimeError("Harbor did not write a trial lock")
-    observed_lock = TrialLock.model_validate_json(observed_lock_path.read_text())
+        raise TrialIntegrityError("Harbor did not write a trial lock")
+    try:
+        observed_lock = TrialLock.model_validate_json(observed_lock_path.read_text())
+    except (OSError, ValueError) as error:
+        raise TrialIntegrityError("Harbor wrote an invalid trial lock") from error
     if observed_lock != task.trial_lock:
-        raise RuntimeError("executed Harbor trial lock differs from preparation")
-    result = json.loads(result_path.read_text())
+        raise TrialIntegrityError("executed Harbor trial lock differs from preparation")
+    try:
+        result = json.loads(result_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise TrialIntegrityError("Harbor wrote an invalid trial result") from error
+    if not isinstance(result, dict):
+        raise TrialIntegrityError("Harbor wrote an invalid trial result")
     sensitive_values = _sensitive_output_values()
-    if result_path:
-        for trial_path in result_path.parent.rglob("*"):
-            metadata_leaked = _path_metadata_contains_sensitive_value(
-                result_path.parent, trial_path, sensitive_values
+    for trial_path in result_path.parent.rglob("*"):
+        metadata_leaked = _path_metadata_contains_sensitive_value(
+            result_path.parent, trial_path, sensitive_values
+        )
+        content_leaked = (
+            trial_path.is_file()
+            and not trial_path.is_symlink()
+            and _path_contains_sensitive_value(trial_path, sensitive_values)
+        )
+        if metadata_leaked or content_leaked:
+            raise TrialIntegrityError(
+                "sensitive worker setting leaked into trial evidence"
             )
-            content_leaked = (
-                trial_path.is_file()
-                and not trial_path.is_symlink()
-                and _path_contains_sensitive_value(trial_path, sensitive_values)
-            )
-            if metadata_leaked or content_leaked:
-                raise RuntimeError(
-                    "sensitive worker setting leaked into trial evidence"
-                )
+    _log_harbor_exception(task, result)
+    _deliver_trial(config, task, root, result_path, result, output, timed_out)
+    return task.task_id
+
+
+def _deliver_trial(
+    config: WorkerConfig,
+    task: LockedTask,
+    root: Path,
+    result_path: Path,
+    result: dict[str, Any],
+    output: str,
+    timed_out: bool,
+) -> None:
     archive = _archive_trial(root, task, result_path, output)
-    digest, evidence_path = _upload_evidence(config, task, archive)
+    outcome_override: tuple[str, bool] | None = None
+    try:
+        digest, evidence_path = _upload_evidence(config, task, archive)
+    except (RuntimeError, TimeoutError) as error:
+        if not _transient_control_failure(error):
+            raise
+        _log(
+            {
+                "status": "evidence_upload_failed",
+                "task_id": task.task_id,
+                "error": _redact_text(str(error), limit=500),
+            }
+        )
+        digest, evidence_path = _upload_failure_note(config, task, error)
+        outcome_override = ("infrastructure", True)
     _submit_attempt(
         config,
         task,
@@ -801,8 +988,23 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
         digest,
         evidence_path,
         timed_out=timed_out,
+        outcome_override=outcome_override,
     )
-    return task.task_id
+
+
+def _campaign_stopped(config: WorkerConfig) -> bool:
+    client = _ControlClient(config.campaign_id, config.tasks[0].task_id)
+    try:
+        campaign = client.request(
+            "GET",
+            f"/api/v1/campaigns/{config.campaign_id}",
+            idempotency_key=f"campaign-state-{config.action_id}",
+            timeout=60.0,
+        )
+    except RuntimeError:
+        _log({"status": "campaign_state_unavailable"})
+        return True
+    return bool(campaign["cancellation_requested"] or campaign["paused"])
 
 
 def _fill_available_slots(
@@ -814,6 +1016,8 @@ def _fill_available_slots(
     width: int,
 ) -> None:
     while len(futures) < width:
+        if _campaign_stopped(config):
+            return
         try:
             task = next(pending)
         except StopIteration:
@@ -833,7 +1037,6 @@ def _run_assigned_tasks(
         futures: dict[concurrent.futures.Future[str], LockedTask] = {}
 
         _fill_available_slots(executor, futures, pending, config, root, width)
-        accepting = True
         while futures:
             done, _ = concurrent.futures.wait(
                 futures, return_when=concurrent.futures.FIRST_COMPLETED
@@ -844,10 +1047,7 @@ def _run_assigned_tasks(
                     completed.append(future.result())
                 except BaseException as error:
                     failures.append(error)
-            if failures:
-                accepting = False
-            if accepting:
-                _fill_available_slots(executor, futures, pending, config, root, width)
+            _fill_available_slots(executor, futures, pending, config, root, width)
 
     return completed, failures
 
@@ -874,11 +1074,30 @@ def main() -> None:  # noqa: C901 -- bounded orchestration
     with tempfile.TemporaryDirectory(prefix="harbor-hf-control-worker-") as temporary:
         root = Path(temporary)
         completed, failures = _run_assigned_tasks(config, root)
-        if failures:
+        leaked = [
+            error for error in failures if "worker capability leaked" in str(error)
+        ]
+        if leaked:
             raise RuntimeError(
-                f"{len(failures)} control worker task(s) failed before receipt; "
-                f"first={type(failures[0]).__name__}"
-            ) from failures[0]
+                f"{len(leaked)} control worker task(s) leaked a capability"
+            ) from leaked[0]
+        integrity_failures = [
+            error for error in failures if isinstance(error, TrialIntegrityError)
+        ]
+        if integrity_failures:
+            raise RuntimeError(
+                f"{len(integrity_failures)} control worker task(s) failed integrity"
+            ) from integrity_failures[0]
+        if failures:
+            _log(
+                {
+                    "status": "task_failures_before_receipt",
+                    "campaign_id": config.campaign_id,
+                    "action_id": config.action_id,
+                    "count": len(failures),
+                    "first": type(failures[0]).__name__,
+                }
+            )
         _log(
             {
                 "status": "complete",

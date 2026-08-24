@@ -25,6 +25,7 @@ import {
   type CampaignAction,
   type CampaignList,
   type CampaignSubmission,
+  type Capacity,
   type EndpointList,
   type JobList,
   type ProfileList,
@@ -38,9 +39,11 @@ import { useControlState } from "./control-state";
 import { hints } from "./hints";
 import {
   approvedAlias,
+  counted,
   doubleReservationMicrousd,
   firstCompatibleLaunchSelection,
   harnessAgent,
+  labeledHarness,
   profileLabel,
   REASONING_OPTIONS,
   selectDeploymentAlias,
@@ -61,9 +64,12 @@ import {
 } from "./lib";
 import {
   keys,
+  useAllProfiles,
   useAudit,
   useCampaign,
+  useCampaignJobs,
   useCampaigns,
+  useCapacity,
   useEndpoints,
   useJobs,
   useProfiles,
@@ -105,11 +111,25 @@ function campaignHasSealedFailures(campaign: CampaignRow): boolean {
   );
 }
 
+function campaignIsRecovering(campaign: CampaignRow): boolean {
+  return (
+    campaign.pending_actions > 0 &&
+    campaign.total_tasks > 0 &&
+    campaign.terminal_tasks === campaign.total_tasks
+  );
+}
+
 function campaignResultStatus(campaign: CampaignRow): string {
+  if (campaignIsRecovering(campaign)) return "active";
+  if (campaign.status === "failed") return "error";
+  if (campaign.status === "completed-invalid") return "warning";
   return campaignHasSealedFailures(campaign) ? "warning" : campaign.status;
 }
 
 function campaignStatusLabel(campaign: CampaignRow): string {
+  if (campaignIsRecovering(campaign)) return "Replacement in progress";
+  if (campaign.status === "completed-invalid") return "Completed with invalid results";
+  if (campaign.status === "failed") return "Failed safely";
   return campaignHasSealedFailures(campaign)
     ? "Completed with failures"
     : humanize(campaign.status);
@@ -119,10 +139,22 @@ function campaignStatusNote(campaign: CampaignRow): string {
   const publication = campaign.publication_status
     ? humanize(campaign.publication_status)
     : "Not published";
+  if (campaignIsRecovering(campaign)) {
+    const assigned = campaign.replacement_assigned_tasks;
+    const recorded = campaign.replacement_recorded_tasks;
+    const pending = campaign.pending_actions;
+    if (assigned > 0)
+      return `${recorded} of ${assigned} replacement tasks recorded. ${counted(pending, "pending action")} on this run.`;
+    return `${counted(pending, "pending action")} on this run. This is not a new run.`;
+  }
   if (campaign.status === "cancelled") {
     const cancelled = campaign.total_tasks - campaign.successful_tasks;
     return `${publication}. ${cancelled} sealed ${cancelled === 1 ? "task" : "tasks"} cancelled.`;
   }
+  if (campaign.status === "failed")
+    return `${publication}. ${campaign.exhausted_tasks} exhausted ${campaign.exhausted_tasks === 1 ? "task" : "tasks"}.`;
+  if (campaign.status === "completed-invalid")
+    return `${publication}. ${campaign.invalid_selected_tasks} invalid selected ${campaign.invalid_selected_tasks === 1 ? "attempt" : "attempts"}.`;
   if (campaign.status !== "completed") return publication;
   if (campaign.successful_tasks === campaign.total_tasks) return publication;
   const failed = campaign.total_tasks - campaign.successful_tasks;
@@ -185,6 +217,16 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
       ),
     },
     {
+      accessorKey: "assigned_tasks",
+      header: () => <Hint text={hints.jobs.assigned}>Assigned</Hint>,
+      cell: ({ getValue }) => {
+        const value = getValue();
+        if (typeof value !== "number")
+          throw new Error("Job assigned task count is missing");
+        return counted(value, "task");
+      },
+    },
+    {
       accessorKey: "cost_microusd",
       header: () => <Hint text={hints.jobs.cost}>Cost</Hint>,
       cell: ({ getValue }) => {
@@ -201,21 +243,83 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   ];
 }
 
+function jobIsActive(job: JobRow): boolean {
+  const state = String(job.observed_state ?? "pending").toUpperCase();
+  return (
+    !["CANCELED", "CANCELLED", "COMPLETED", "DELETED", "ERROR", "STOPPED"].includes(
+      state,
+    ) && !state.startsWith("SUPPRESSED-")
+  );
+}
+
+function ReplacementProgress({
+  campaign,
+  capacity,
+}: {
+  campaign: CampaignRow;
+  capacity: Capacity | undefined;
+}) {
+  const assigned = campaign.replacement_assigned_tasks;
+  const recorded = campaign.replacement_recorded_tasks;
+  const active = capacity?.campaign_active;
+  const queued = capacity?.queued;
+  const burst = capacity?.start_burst;
+  return (
+    <Card className="my-6 border-cyan-500/40 bg-cyan-950/20">
+      <h2 className="text-base font-semibold text-cyan-100">
+        Replacement Job on this run
+      </h2>
+      <p className="mt-2 text-sm text-cyan-100">
+        {assigned > 0
+          ? `${recorded} of ${assigned} assigned tasks have a replacement receipt. This is not a new run.`
+          : "A replacement Job is queued on this run. The run list does not add a second row."}
+      </p>
+      {typeof active === "number" ? (
+        <p className="mt-2 text-sm text-cyan-100/80">
+          {counted(active, "sandbox")} active
+          {typeof queued === "number" ? `, ${counted(queued, "queued create")}` : ""}.
+          {typeof burst === "number"
+            ? ` The start burst is ${burst}, so only a few sandboxes look alive at once.`
+            : " Only the live sandbox window looks alive."}
+        </p>
+      ) : null}
+      <p className="mt-2 text-sm text-cyan-100/80">
+        The task list still shows selected seals. Rows stay Infrastructure until a
+        replacement attempt is chosen.
+      </p>
+      {assigned > 0 ? (
+        <div className="mt-4">
+          <Progress
+            label={`${recorded}/${assigned} replacement receipts`}
+            value={(recorded / assigned) * 100}
+          />
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
 function CampaignJobs({ campaignId }: { campaignId: string }) {
-  const query = useJobs(undefined, campaignId);
+  const query = useCampaignJobs(campaignId);
+  const jobs = query.data?.items ?? [];
+  const active = jobs.filter(jobIsActive).length;
   return (
     <section className="mt-8">
       <h2 className="text-lg font-semibold text-white">
-        <Hint text={hints.campaign.jobs}>Jobs</Hint>
+        <Hint text={hints.campaign.jobs}>Physical HF Jobs</Hint>
       </h2>
       <p className="mb-4 mt-1 text-sm text-slate-400">
-        HF Jobs launched for this campaign, with Hub inspect links, latest observed
-        state, and recorded hardware cost.
+        {query.data
+          ? `${counted(jobs.length, "Job")} recorded, ${active} active. `
+          : null}
+        A Job is a remote worker process that can run many logical tasks through several
+        Sandboxes. Assigned is the task count on that Job, not a count of active
+        processes.
       </p>
       <QueryContent query={query}>
         <DataTable
           columns={jobColumns(false)}
-          data={query.data?.items ?? []}
+          data={jobs}
           empty="No Jobs have been launched"
         />
       </QueryContent>
@@ -614,7 +718,7 @@ export function OverviewPage() {
 function LaunchPanel({ onClose }: { onClose(): void }) {
   const navigate = useNavigate();
   const client = useQueryClient();
-  const profiles = useProfiles();
+  const profiles = useAllProfiles();
   const { writesAllowed, writeMode } = useControlState();
   const ceilingEdited = useRef(false);
   const form = useForm<z.infer<typeof launchSchema>>({
@@ -1041,7 +1145,7 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
                 </div>
                 <div>
                   <dt className="text-slate-500">Locked harness</dt>
-                  <dd className="font-mono text-xs">{resolved?.harness}</dd>
+                  <dd>{labeledHarness(values.harnessAgent)}</dd>
                 </div>
                 <div>
                   <dt className="text-slate-500">Locked deployment</dt>
@@ -1134,18 +1238,36 @@ export function CampaignsPage() {
         ),
       },
       {
+        accessorFn: (row) => {
+          const recovering =
+            campaignIsRecovering(row) && row.replacement_assigned_tasks > 0;
+          return recovering
+            ? `${row.replacement_recorded_tasks}/${row.replacement_assigned_tasks} replacement tasks`
+            : `${row.terminal_tasks}/${row.total_tasks} tasks`;
+        },
         id: "progress",
         header: () => <Hint text={hints.campaign.logicalTasks}>Logical progress</Hint>,
-        cell: ({ row }) => (
-          <Progress
-            label={`${row.original.terminal_tasks}/${row.original.total_tasks} tasks`}
-            value={
-              row.original.total_tasks
-                ? (row.original.terminal_tasks / row.original.total_tasks) * 100
-                : 0
-            }
-          />
-        ),
+        cell: ({ row }) => {
+          const recovering =
+            campaignIsRecovering(row.original) &&
+            row.original.replacement_assigned_tasks > 0;
+          const done = recovering
+            ? row.original.replacement_recorded_tasks
+            : row.original.terminal_tasks;
+          const total = recovering
+            ? row.original.replacement_assigned_tasks
+            : row.original.total_tasks;
+          return (
+            <Progress
+              label={
+                recovering
+                  ? `${done}/${total} replacement tasks`
+                  : `${row.original.terminal_tasks}/${row.original.total_tasks} tasks`
+              }
+              value={total ? (done / total) * 100 : 0}
+            />
+          );
+        },
       },
       {
         accessorKey: "observed_microusd",
@@ -1209,15 +1331,18 @@ export function CampaignPage() {
   const { campaignId = "" } = useParams();
   const navigation = useCursorNavigation();
   const campaign = useCampaign(campaignId);
+  const capacity = useCapacity(campaignId);
   const tasks = useTasks(campaignId, navigation.cursor);
   const client = useQueryClient();
   const { writesAllowed, writeMode } = useControlState();
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelAcknowledged, setCancelAcknowledged] = useState(false);
+  const [retryOpen, setRetryOpen] = useState(false);
   const closeCancel = () => {
     setCancelOpen(false);
     setCancelAcknowledged(false);
   };
+  const closeRetry = () => setRetryOpen(false);
   const cancel = useMutation({
     mutationFn: () =>
       actOnCampaign(campaignId, {
@@ -1228,6 +1353,19 @@ export function CampaignPage() {
       } as CampaignAction),
     onSuccess: () => {
       closeCancel();
+      return client.invalidateQueries({ queryKey: keys.campaign(campaignId) });
+    },
+  });
+  const retryInfrastructure = useMutation({
+    mutationFn: () =>
+      actOnCampaign(campaignId, {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry eligible infrastructure failures",
+        confirmed: true,
+      } as CampaignAction),
+    onSuccess: () => {
+      closeRetry();
       return client.invalidateQueries({ queryKey: keys.campaign(campaignId) });
     },
   });
@@ -1284,23 +1422,71 @@ export function CampaignPage() {
         titleClassName="break-all font-mono text-lg sm:text-xl"
         description="Run lock, logical outcomes, cost and publication state."
         action={
-          !campaignIsFinished(item.status) ? (
+          <div className="flex flex-wrap gap-2">
             <Button
-              variant="destructive"
-              disabled={!writesAllowed || cancel.isPending}
+              disabled={!writesAllowed || retryInfrastructure.isPending}
               title={
                 writesAllowed
-                  ? "Cancel this run"
-                  : `Cancellation is unavailable while write mode is ${writeMode}`
+                  ? "Retry eligible infrastructure failures"
+                  : `Retry is unavailable while write mode is ${writeMode}`
               }
-              onClick={() => setCancelOpen(true)}
+              onClick={() => setRetryOpen(true)}
             >
-              <PauseCircle size={16} />
-              Cancel run
+              <RefreshCw size={16} />
+              Retry infrastructure failures
             </Button>
-          ) : undefined
+            {!campaignIsFinished(item.status) ? (
+              <Button
+                variant="destructive"
+                disabled={!writesAllowed || cancel.isPending}
+                title={
+                  writesAllowed
+                    ? "Cancel this run"
+                    : `Cancellation is unavailable while write mode is ${writeMode}`
+                }
+                onClick={() => setCancelOpen(true)}
+              >
+                <PauseCircle size={16} />
+                Cancel run
+              </Button>
+            ) : null}
+          </div>
         }
       />
+      {retryOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4">
+          <Card
+            className="w-full max-w-lg border-cyan-500/40"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="retry-infra-title"
+            aria-describedby="retry-infra-effect"
+          >
+            <h2 id="retry-infra-title" className="text-lg font-semibold text-white">
+              Retry infrastructure failures?
+            </h2>
+            <p id="retry-infra-effect" className="mt-2 text-sm text-slate-300">
+              This queues replacement Jobs only for eligible infrastructure failures.
+              Scored misses and other sealed outcomes stay sealed.
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={closeRetry}
+                disabled={retryInfrastructure.isPending}
+              >
+                Keep sealed
+              </Button>
+              <Button
+                disabled={!writesAllowed || retryInfrastructure.isPending}
+                onClick={() => retryInfrastructure.mutate()}
+              >
+                {retryInfrastructure.isPending ? "Retrying…" : "Confirm retry"}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      ) : null}
       {cancelOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4">
           <Card
@@ -1372,7 +1558,7 @@ export function CampaignPage() {
         <Stat
           label="Logical tasks"
           value={`${item.terminal_tasks}/${item.total_tasks}`}
-          note={`${item.pending_actions} pending actions`}
+          note={`${item.admissible_tasks} valid, ${item.exhausted_tasks} exhausted, ${item.pending_actions} pending actions`}
           icon={Clock3}
           hint={hints.campaign.logicalTasks}
         />
@@ -1391,21 +1577,97 @@ export function CampaignPage() {
           hint={hints.campaign.endpointCleanup}
         />
       </div>
+      {campaignIsRecovering(item) ? (
+        <ReplacementProgress campaign={item} capacity={capacity.data} />
+      ) : null}
+      {item.invalid_selected_tasks > 0 || item.exhausted_tasks > 0 ? (
+        <Card className="my-6 border-amber-800 bg-amber-950/30">
+          <p className="text-sm text-amber-200">
+            This campaign cannot publish a valid result. It has{" "}
+            {item.invalid_selected_tasks} invalid selected attempts and{" "}
+            {item.exhausted_tasks} exhausted tasks.
+          </p>
+        </Card>
+      ) : null}
+      <CampaignJobs campaignId={campaignId} />
       <Card className="my-6">
         <Progress
           label="Terminal logical outcomes"
           value={item.total_tasks ? (item.terminal_tasks / item.total_tasks) * 100 : 0}
         />
       </Card>
-      <QueryContent query={tasks}>
-        <DataTable
-          columns={columns}
-          data={tasks.data?.items ?? []}
-          empty="No tasks are locked"
-        />
-        <CursorPager navigation={navigation} nextCursor={tasks.data?.next_cursor} />
-      </QueryContent>
-      <CampaignJobs campaignId={campaignId} />
+      {capacity.data ? (
+        <Card className="my-6">
+          <h2 className="text-base font-semibold text-white">Sandbox capacity</h2>
+          <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <dt className="text-slate-500">Campaign</dt>
+              <dd className="mt-1">
+                {capacity.data.campaign_active}/{capacity.data.campaign_limit} active
+              </dd>
+            </div>
+            <div>
+              <dt className="text-slate-500">Namespace</dt>
+              <dd className="mt-1">
+                {`${capacity.data.namespace_active}/${capacity.data.namespace_limit ?? "unconfigured"} active`}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-slate-500">Provider requests</dt>
+              <dd className="mt-1">
+                {capacity.data.provider_reserved}/{capacity.data.provider_limit}{" "}
+                reserved
+              </dd>
+            </div>
+            <div>
+              <dt className="text-slate-500">Start tokens</dt>
+              <dd className="mt-1">
+                {capacity.data.start_tokens ?? "unconfigured"}/
+                {capacity.data.start_burst ?? "unconfigured"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-slate-500">Queued creates</dt>
+              <dd className="mt-1">{capacity.data.queued}</dd>
+            </div>
+            <div>
+              <dt className="text-slate-500">Cleanup-held slots</dt>
+              <dd className="mt-1">{capacity.data.cleanup_held}</dd>
+            </div>
+            <div className="sm:col-span-2">
+              <dt className="text-slate-500">Current limit</dt>
+              <dd className="mt-1">
+                {capacity.data.limiting_factor
+                  ? humanize(capacity.data.limiting_factor)
+                  : "None"}
+              </dd>
+            </div>
+          </dl>
+        </Card>
+      ) : null}
+      <section className="mt-8">
+        <h2 className="text-lg font-semibold text-white">
+          <Hint text={hints.campaign.logicalTasks}>Logical benchmark tasks</Hint>
+        </h2>
+        <p className="mb-4 mt-1 text-sm text-slate-400">
+          One row per locked benchmark case. A task keeps one selected sealed outcome,
+          even when multiple Jobs or attempts worked on it.
+        </p>
+        <QueryContent query={tasks}>
+          {campaignIsRecovering(item) ? (
+            <p className="mb-3 text-sm text-slate-400">
+              Outcome is the selected seal. A replacement Job can be assigned to a row
+              that still shows Infrastructure.
+            </p>
+          ) : null}
+          <DataTable
+            columns={columns}
+            data={tasks.data?.items ?? []}
+            empty="No tasks are locked"
+          />
+          <CursorPager navigation={navigation} nextCursor={tasks.data?.next_cursor} />
+        </QueryContent>
+      </section>
     </QueryContent>
   );
 }
@@ -1647,9 +1909,13 @@ export function ResultsPage() {
     {
       accessorKey: "agent",
       header: () => <Hint text={hints.results.agent}>Agent</Hint>,
-      cell: ({ row }) => String(row.original.agent ?? row.original.harness ?? "—"),
+      cell: ({ row }) => labeledHarness(row.original.agent ?? row.original.harness),
     },
     {
+      accessorFn: (row) =>
+        row.primary_metric
+          ? `${row.primary_metric.value.toFixed(4)} ${row.primary_metric.unit}`
+          : "—",
       id: "score",
       header: () => <Hint text={hints.results.primaryMetric}>Primary metric</Hint>,
       cell: ({ row }) => {
@@ -1658,11 +1924,17 @@ export function ResultsPage() {
       },
     },
     {
+      accessorFn: (row) => formatPassRate(row),
       id: "pass_rate",
       header: () => <Hint text={hints.results.passRate}>Pass rate</Hint>,
       cell: ({ row }) => formatPassRate(row.original),
     },
     {
+      accessorFn: (row) =>
+        row.inference_cost_microusd === null ||
+        row.inference_cost_microusd === undefined
+          ? "—"
+          : formatMoney(row.inference_cost_microusd),
       id: "inference_cost",
       header: () => <Hint text={hints.results.tokenCost}>Token cost</Hint>,
       cell: ({ row }) =>
@@ -1920,6 +2192,8 @@ export function ResultPage() {
       cell: ({ row }) => formatMoney(row.original.cost_microusd),
     },
     {
+      accessorFn: (row) =>
+        `${formatTokens(row.input_tokens)} in / ${formatTokens(row.output_tokens)} out`,
       id: "tokens",
       header: () => <Hint text={hints.results.taskTokens}>Tokens</Hint>,
       cell: ({ row }) =>
@@ -2023,10 +2297,17 @@ export function ResultPage() {
         <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-3">
           <ResultField label="Model" value={item.model} />
           <ResultField label="Benchmark" value={item.benchmark} />
-          <ResultField label="Agent" value={item.agent ?? item.harness} />
+          <ResultField
+            label="Agent"
+            value={labeledHarness(item.agent ?? item.harness)}
+          />
           <ResultField label="Outcome" value={item.run_outcome} />
           <ResultField label="Quality" value={item.quality} />
           <ResultField label="Status" value={item.status} />
+          <ResultField
+            label="Superseded by"
+            value={item.superseded_by_publication_id}
+          />
           <ResultField label="Model revision" value={item.model_revision} />
           <ResultField label="Benchmark revision" value={item.benchmark_revision} />
           <ResultField label="Harness revision" value={item.harness_revision} />
@@ -2094,7 +2375,15 @@ export function ProfilesPage() {
       header: () => <Hint text={hints.profiles.name}>Name</Hint>,
       cell: ({ row }) => (
         <div>
-          <div className="font-medium">{row.original.name}</div>
+          <div className="font-medium">
+            {row.original.profile_kind === "harness"
+              ? labeledHarness(
+                  typeof row.original.spec.agent === "string"
+                    ? row.original.spec.agent
+                    : row.original.name,
+                )
+              : row.original.name}
+          </div>
           <div className="font-mono text-xs text-slate-500">
             {shortId(row.original.profile_id)}
           </div>
@@ -2155,6 +2444,12 @@ export function AuditPage() {
       cell: ({ getValue }) => <Badge>{humanize(String(getValue()))}</Badge>,
     },
     {
+      accessorFn: (row) => {
+        const campaignId = row.data.campaign_id;
+        return typeof campaignId === "string"
+          ? campaignId
+          : String(row.data.record_id ?? row.id);
+      },
       id: "record_id",
       header: () => <Hint text={hints.audit.identity}>Identity</Hint>,
       meta: { className: "min-w-0" },
@@ -2170,6 +2465,7 @@ export function AuditPage() {
       },
     },
     {
+      accessorFn: (row) => String(row.data.digest ?? "—"),
       id: "digest",
       header: () => <Hint text={hints.audit.digest}>Digest</Hint>,
       cell: ({ row }) => (
@@ -2193,13 +2489,15 @@ export function AuditPage() {
   );
 }
 
+export { LeaderboardPage } from "./leaderboard-page";
+
 export function NotFoundPage() {
   return (
     <Empty>
       <p>That control view does not exist.</p>
       <Link
         className="mt-4 inline-flex items-center gap-2 text-cyan-300 hover:underline"
-        to="/"
+        to="/overview"
       >
         Return to overview <ArrowRight size={15} />
       </Link>

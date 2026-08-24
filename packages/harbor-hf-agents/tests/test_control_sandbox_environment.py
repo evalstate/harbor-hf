@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 import shlex
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 from harbor.models.task.config import EnvironmentConfig
@@ -142,8 +145,207 @@ async def test_routes_harbor_operations_through_worker_capability(
     assert default_command["timeout_seconds"] == 900
 
 
+@pytest.mark.asyncio
+async def test_keeps_an_idle_sandbox_alive_through_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    FakeClient.calls.clear()
+    FakeClient.idempotency_keys.clear()
+    for key, value in {
+        "HARBOR_HF_CONTROL_URL": "https://control.example",
+        "HARBOR_HF_WORKER_CAPABILITY": "capability",
+        "HARBOR_HF_CAMPAIGN_ID": "campaign-1",
+        "HARBOR_HF_ACTION_ID": "action-attempt-1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(control, "_ControlClient", FakeClient)
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir()
+    environment = control.ControlSandboxEnvironment(
+        environment_dir=environment_dir,
+        environment_name="source-task",
+        session_id="trial-1__env",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=EnvironmentConfig(
+            docker_image="example.invalid/task:tag",
+            workdir="/app",
+        ),
+        control_task_id="source-task-trial-1",
+        control_max_command_seconds=900,
+    )
+    environment._keepalive_seconds = 0.01
+    monkeypatch.setattr(environment, "_upload_environment_dir_after_start", _noop)
+
+    await environment.start(force_build=False)
+    for _ in range(100):
+        observations = [
+            call
+            for call in FakeClient.calls
+            if call[0] == "POST" and call[1].endswith("/observe")
+        ]
+        if len(observations) >= 2:
+            break
+        await control.asyncio.sleep(0.01)
+    await environment.stop(delete=True)
+
+    observation_keys = [
+        key
+        for call, key in zip(FakeClient.calls, FakeClient.idempotency_keys, strict=True)
+        if call[0] == "POST" and call[1].endswith("/observe")
+    ]
+    assert len(observation_keys) >= 2
+    assert len(set(observation_keys)) == len(observation_keys)
+
+
+@pytest.mark.asyncio
+async def test_waits_for_queued_sandbox_admission_with_one_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class QueuedClient(FakeClient):
+        create_calls = 0
+
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            body: dict[str, object] | None = None,
+            idempotency_key: str,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            if path.endswith("/sandboxes"):
+                self.calls.append((method, path, body))
+                self.idempotency_keys.append(idempotency_key)
+                self.__class__.create_calls += 1
+                if self.__class__.create_calls == 1:
+                    return {
+                        "sandbox_id": "sandbox-1",
+                        "state": "QUEUED",
+                        "limiting_factor": "namespace_sandbox_capacity",
+                        "not_before": None,
+                    }
+                return {"sandbox_id": "sandbox-1", "state": "STARTING"}
+            return super().request(
+                method,
+                path,
+                body=body,
+                idempotency_key=idempotency_key,
+                **kwargs,
+            )
+
+    FakeClient.calls.clear()
+    FakeClient.idempotency_keys.clear()
+    QueuedClient.create_calls = 0
+    for key, value in {
+        "HARBOR_HF_CONTROL_URL": "https://control.example",
+        "HARBOR_HF_WORKER_CAPABILITY": "capability",
+        "HARBOR_HF_CAMPAIGN_ID": "campaign-1",
+        "HARBOR_HF_ACTION_ID": "action-attempt-1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(control, "_ControlClient", QueuedClient)
+    monkeypatch.setattr(control.asyncio, "sleep", _noop_sleep)
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir()
+    environment = control.ControlSandboxEnvironment(
+        environment_dir=environment_dir,
+        environment_name="source-task",
+        session_id="trial-1__env",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=EnvironmentConfig(
+            docker_image="example.invalid/task:tag",
+            workdir="/app",
+        ),
+        control_task_id="source-task-trial-1",
+        control_max_command_seconds=900,
+    )
+    monkeypatch.setattr(environment, "_upload_environment_dir_after_start", _noop)
+
+    await environment.start(force_build=False)
+
+    create_keys = [
+        key
+        for (method, path, _body), key in zip(
+            FakeClient.calls, FakeClient.idempotency_keys, strict=True
+        )
+        if method == "POST" and path.endswith("/sandboxes")
+    ]
+    assert len(create_keys) == 2
+    assert len(set(create_keys)) == 1
+
+
 async def _noop() -> None:
     return None
+
+
+async def _noop_sleep(_delay: float) -> None:
+    return None
+
+
+def test_retries_http_500_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in {
+        "HARBOR_HF_CONTROL_URL": "https://control.example",
+        "HARBOR_HF_WORKER_CAPABILITY": "capability",
+        "HARBOR_HF_CAMPAIGN_ID": "campaign-1",
+        "HARBOR_HF_ACTION_ID": "action-attempt-1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    attempts = {"count": 0}
+
+    def urlopen(_request: object, timeout: float = 0) -> io.BytesIO:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise HTTPError(
+                "https://control.example/api",
+                500,
+                "Internal Server Error",
+                {"Retry-After": "0"},
+                io.BytesIO(b'{"error":{"code":"internal_error"}}'),
+            )
+        return io.BytesIO(json.dumps({"path": "evidence/note"}).encode())
+
+    monkeypatch.setattr(control, "urlopen", urlopen)
+    monkeypatch.setattr(control.time, "sleep", lambda _delay: None)
+    client = control._ControlClient("campaign-1", "task-1")
+
+    assert client.request(
+        "POST",
+        "/api/v1/campaigns/campaign-1/tasks/task-1/attempts",
+        body={"operation": "upload_evidence"},
+        idempotency_key="evidence-1",
+    ) == {"path": "evidence/note"}
+    assert attempts["count"] == 2
+
+
+def test_retries_control_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in {
+        "HARBOR_HF_CONTROL_URL": "https://control.example",
+        "HARBOR_HF_WORKER_CAPABILITY": "capability",
+        "HARBOR_HF_CAMPAIGN_ID": "campaign-1",
+        "HARBOR_HF_ACTION_ID": "action-attempt-1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    attempts = {"count": 0}
+
+    def urlopen(_request: object, timeout: float = 0) -> io.BytesIO:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise TimeoutError("timed out")
+        return io.BytesIO(json.dumps({"path": "evidence/note"}).encode())
+
+    monkeypatch.setattr(control, "urlopen", urlopen)
+    monkeypatch.setattr(control.time, "sleep", lambda _delay: None)
+    client = control._ControlClient("campaign-1", "task-1")
+
+    assert client.request(
+        "POST",
+        "/api/v1/campaigns/campaign-1/tasks/task-1/attempts",
+        body={"operation": "upload_evidence"},
+        idempotency_key="evidence-1",
+    ) == {"path": "evidence/note"}
+    assert attempts["count"] == 2
 
 
 def test_preflight_rejects_broad_hf_token(monkeypatch: pytest.MonkeyPatch) -> None:

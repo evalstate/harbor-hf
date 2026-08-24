@@ -1,5 +1,10 @@
-import type { ActionIntent } from "@harbor-hf/contracts";
-import { canonicalJson, sha256 } from "@harbor-hf/contracts";
+import type {
+  ActionIntent,
+  ProfileObject,
+  ProfilePromotion,
+  SandboxPolicy,
+} from "@harbor-hf/contracts";
+import { canonicalJson, deterministicId, sha256 } from "@harbor-hf/contracts";
 import {
   FilesystemObjectStore,
   Projection,
@@ -45,7 +50,51 @@ async function setup() {
   return { service, projection };
 }
 
-async function campaign(service: Service) {
+async function configureCapacity(service: Service): Promise<void> {
+  const createdAt = "2026-08-22T00:00:00.000Z";
+  const spec = {
+    namespace: "test",
+    max_active_sandboxes: 2,
+    hardware_limits: [{ hardware: "cpu-basic", max_active_sandboxes: 1 }],
+    start_burst: 2,
+    start_refill_tokens: 1,
+    start_refill_period_seconds: 60,
+  };
+  const profile: ProfileObject = {
+    schema_version: "v1",
+    kind: "profile.object",
+    record_id: deterministicId(
+      "profile",
+      "capacity",
+      "prepared-capacity",
+      sha256(canonicalJson(spec)),
+    ),
+    created_at: createdAt,
+    actor: { subject: "test", role: "service" },
+    profile_kind: "capacity",
+    name: "prepared-capacity",
+    spec,
+  };
+  const promotion: ProfilePromotion = {
+    schema_version: "v1",
+    kind: "profile.promotion",
+    record_id: deterministicId("profile-promotion", "capacity", "current"),
+    created_at: createdAt,
+    actor: { subject: "operator", role: "operator" },
+    profile_kind: "capacity",
+    alias: "current",
+    profile_id: sha256(canonicalJson(profile)),
+    promotion_state: "approved",
+    reason: "test capacity policy",
+    evidence: [],
+  };
+  await service.append(profile);
+  await service.append(promotion);
+  await service.refreshProfileResolver();
+  service.configureCapacityProfile("current");
+}
+
+async function campaign(service: Service, idempotencyKey = "prepared-campaign") {
   const submitted = await service.submit(
     {
       benchmark: "prepared-benchmark",
@@ -56,7 +105,7 @@ async function campaign(service: Service) {
       ceiling_microusd: 1_000_000,
       confirmed: true,
     },
-    "prepared-campaign",
+    idempotencyKey,
     { subject: "operator", role: "operator" },
   );
   const lock = await service.projection.campaignLock(submitted.campaign_id);
@@ -141,6 +190,7 @@ function trialPayload(inputDigest: string) {
         kwargs: {
           control_task_id: "task-001-trial-1",
           control_max_command_seconds: 900,
+          control_keepalive_seconds: 300,
         },
       },
       verifier: { disable: false },
@@ -193,6 +243,52 @@ async function settle(reconciler: Reconciler, rounds: number): Promise<void> {
 }
 
 describe("prepared Harbor jobs", () => {
+  it("reports hardware capacity before a queued campaign gets a Sandbox", async () => {
+    const { service } = await setup();
+    await configureCapacity(service);
+    const first = await campaign(service, "hardware-view-first");
+    const queued = await campaign(service, "hardware-view-queued");
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"d".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 3_600,
+      idle_timeout_seconds: 600,
+      inference_token: "forbidden",
+      reservation_microusd: 100,
+      active_hourly_cost_microusd: 10_000,
+      max_sandboxes: 2,
+      max_commands: 128,
+      max_command_seconds: 3_600,
+      max_transfer_bytes: 67_108_864,
+      allowed_roots: ["/app", "/logs", "/tmp"],
+    };
+    const create = (campaignId: string) =>
+      service.actionIntent(campaignId, "sandbox.create", "task-001-trial-1", 0, {
+        task_id: "task-001-trial-1",
+        sandbox: policy,
+      });
+    const firstIntent = create(first.campaignId);
+    const queuedIntent = create(queued.campaignId);
+
+    await expect(service.admitSandboxCreate(firstIntent, 2)).resolves.toEqual(
+      expect.objectContaining({ status: "admitted" }),
+    );
+    await expect(service.admitSandboxCreate(queuedIntent, 2)).resolves.toEqual(
+      expect.objectContaining({
+        status: "deferred",
+        limiting_factor: "hardware_sandbox_capacity",
+      }),
+    );
+
+    await expect(service.sandboxCapacityView(queued.campaignId)).resolves.toEqual(
+      expect.objectContaining({
+        hardware_limit: 1,
+        hardware_active: 1,
+        limiting_factor: "hardware_sandbox_capacity",
+      }),
+    );
+  });
+
   it("stores one exact immutable Harbor lock before execution", async () => {
     const { service } = await setup();
     const { campaignId, lock, launch } = await campaign(service);
@@ -303,6 +399,99 @@ describe("prepared Harbor jobs", () => {
     expect(execution?.payload.prepared_job_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
+  it("prepares a start-paused campaign and adopts its repeated resume", async () => {
+    const { service, projection } = await setup();
+    const submitted = await service.submit(
+      {
+        benchmark: "prepared-benchmark",
+        model: "prepared-model",
+        harness: "prepared-harness",
+        deployment: "prepared-deployment",
+        launch_policy: "prepared-policy",
+        ceiling_microusd: 1_000_000,
+        start_paused: true,
+        confirmed: true,
+      },
+      "prepared-paused-campaign",
+      { subject: "operator", role: "operator" },
+    );
+    const actions = new PreparationActions();
+    const reconciler = new Reconciler(
+      service,
+      projection,
+      actions,
+      new ResultPublisher(service.store, projection, service),
+      {
+        interval_ms: 100,
+        observation_interval_ms: 0,
+        worker_receipt_grace_ms: 0,
+        batch_size: 16,
+      },
+    );
+    await settle(reconciler, 5);
+    const lock = await projection.campaignLock(submitted.campaign_id);
+    if (!lock) throw new Error("campaign lock is missing");
+    const preparation = (await projection.campaignActions(submitted.campaign_id))
+      .map((row) => JSON.parse(row.intent_body) as ActionIntent)
+      .find(
+        (intent) =>
+          intent.action_kind === "job.launch" &&
+          intent.payload.worker_role === "preparation",
+      );
+    if (!preparation) throw new Error("preparation launch is missing");
+    const task = lock.tasks[0];
+    if (!task) throw new Error("campaign task is missing");
+    await service.submitPreparedJob(
+      submitted.campaign_id,
+      preparation.action_id,
+      trialPayload(task.input_digest),
+    );
+    await service.submitPreparedJob(
+      submitted.campaign_id,
+      preparation.action_id,
+      finalizePayload(lock.created_at),
+    );
+    actions.prepared = true;
+    await settle(reconciler, 5);
+
+    expect(await service.preparedJob(submitted.campaign_id)).not.toBeNull();
+    expect(await projection.campaign(submitted.campaign_id)).toMatchObject({
+      status: "paused",
+      paused: true,
+      terminal_tasks: 0,
+    });
+    expect(
+      actions.intents.filter(
+        (intent) =>
+          intent.action_kind === "job.launch" &&
+          intent.payload.worker_role === "execution",
+      ),
+    ).toHaveLength(0);
+
+    const first = await service.campaignAction(
+      submitted.campaign_id,
+      { action: "resume", task_limit: 1, confirmed: true },
+      "prepared-paused-resume",
+      { subject: "operator", role: "operator" },
+    );
+    const repeated = await service.campaignAction(
+      submitted.campaign_id,
+      { action: "resume", task_limit: 1, confirmed: true },
+      "prepared-paused-resume",
+      { subject: "operator", role: "operator" },
+    );
+    expect(repeated).toMatchObject({ action_id: first.action_id, adopted: true });
+    await settle(reconciler, 4);
+
+    expect(
+      actions.intents.filter(
+        (intent) =>
+          intent.action_kind === "job.launch" &&
+          intent.payload.worker_role === "execution",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("stops preparation after its configured attempt limit", async () => {
     const { service, projection } = await setup();
     const submitted = await service.submit(
@@ -366,6 +555,20 @@ describe("prepared Harbor jobs", () => {
     ).rejects.toThrow("task source does not match");
   });
 
+  it("accepts a historical prepared environment without explicit keepalive", async () => {
+    const { service } = await setup();
+    const { campaignId, lock, launch } = await campaign(service);
+    const task = lock.tasks[0];
+    if (!task) throw new Error("campaign task is missing");
+    const payload = trialPayload(task.input_digest);
+    delete (payload.trial_lock.environment.kwargs as Record<string, unknown>)
+      .control_keepalive_seconds;
+
+    await expect(
+      service.submitPreparedJob(campaignId, launch.action_id, payload),
+    ).resolves.toMatchObject({ phase: "trial", adopted: false });
+  });
+
   it("rejects a prepared command limit that differs from task timeouts", async () => {
     const { service } = await setup();
     const { campaignId, lock, launch } = await campaign(service);
@@ -375,6 +578,21 @@ describe("prepared Harbor jobs", () => {
     (
       payload.trial_lock.environment.kwargs as Record<string, unknown>
     ).control_max_command_seconds = 899;
+
+    await expect(
+      service.submitPreparedJob(campaignId, launch.action_id, payload),
+    ).rejects.toThrow("environment does not match control policy");
+  });
+
+  it("rejects a prepared keepalive that differs from task timeouts", async () => {
+    const { service } = await setup();
+    const { campaignId, lock, launch } = await campaign(service);
+    const task = lock.tasks[0];
+    if (!task) throw new Error("campaign task is missing");
+    const payload = trialPayload(task.input_digest);
+    (
+      payload.trial_lock.environment.kwargs as Record<string, unknown>
+    ).control_keepalive_seconds = 299;
 
     await expect(
       service.submitPreparedJob(campaignId, launch.action_id, payload),

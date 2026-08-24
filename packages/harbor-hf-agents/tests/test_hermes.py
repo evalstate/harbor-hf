@@ -31,7 +31,7 @@ class TestHermesRunCommands:
     def _get_run_call(self, exec_calls):
         """Find the exec call containing the main hermes run command."""
         for call in exec_calls:
-            if "hermes --yolo chat" in call.kwargs["command"]:
+            if "hermes --yolo --cli chat" in call.kwargs["command"]:
                 return call
         raise AssertionError("No hermes run command found in exec calls")
 
@@ -69,7 +69,7 @@ class TestHermesRunCommands:
         await agent.run("do something", mock_env, AsyncMock())
 
         run_call = self._get_run_call(mock_env.exec.call_args_list)
-        assert "--provider custom" in run_call.kwargs["command"]
+        assert "--provider openai-api" in run_call.kwargs["command"]
 
     @pytest.mark.asyncio
     async def test_anthropic_token_fallback(self, temp_dir, monkeypatch):
@@ -134,7 +134,7 @@ class TestHermesRunCommands:
         await agent.run("do something", mock_env, AsyncMock())
         run_call = self._get_run_call(mock_env.exec.call_args_list)
         run_cmd = run_call.kwargs["command"]
-        assert "hermes --yolo chat" in run_cmd
+        assert "hermes --yolo --cli chat" in run_cmd
         assert "-q" in run_cmd
         assert "-Q" in run_cmd
         assert "tee /logs/agent/hermes.txt" in run_cmd
@@ -185,7 +185,7 @@ class TestHermesRunCommands:
         )
         assert config["model"] == {
             "default": "routed-model",
-            "provider": "custom",
+            "provider": "openai-api",
             "base_url": "http://127.0.0.1:18080/v1",
             "api_key": "harbor-local-inference-bridge",
         }
@@ -263,14 +263,15 @@ class TestHermesRunCommands:
         assert "HF_TOKEN" not in run_call.kwargs["env"]
         assert "HF_INFERENCE_TOKEN" not in run_call.kwargs["env"]
         assert "runuser -u harbor-agent" in run_call.kwargs["command"]
-        assert "--provider custom" in run_call.kwargs["command"]
+        assert "--provider openai-api" in run_call.kwargs["command"]
         assert "--model routed-model" in run_call.kwargs["command"]
         config_call = next(
             call
             for call in mock_env.exec.call_args_list
             if "config.yaml" in call.kwargs["command"]
         )
-        assert "provider: custom" in config_call.kwargs["command"]
+        assert "provider: openai-api" in config_call.kwargs["command"]
+        assert "$HOME/.hermes/config.yaml" in config_call.kwargs["command"]
         assert "scoped-route-capability" not in config_call.kwargs["command"]
         root_calls = [
             call
@@ -303,10 +304,22 @@ class TestHermesInstall:
         await agent.install(AsyncMock())
 
         root_command = agent.exec_as_root.await_args.kwargs["command"]
-        assert "curl git passwd ripgrep util-linux xz-utils" in root_command
+        assert (
+            "curl git libatomic1 passwd ripgrep tar util-linux xz-utils" in root_command
+        )
+        assert "node-v26.7.0-linux-x64.tar.xz" in root_command
+        assert 'PATH="/opt/harbor-hf-node/bin:$PATH"' in root_command
+        assert "node --version && npm --version" in root_command
         command = agent.exec_as_agent.await_args.kwargs["command"]
         assert f"hermes-agent/{revision}/scripts/install.sh" in command
         assert f"--commit {revision}" in command
+        assert "--skip-browser" in command
+        assert "--skip-computer-use" in command
+        assert "--hermes-home /tmp/hermes" in command
+        assert "--dir /tmp/hermes/hermes-agent" in command
+        assert "$HOME/.local/bin/hermes" in command
+        assert "|| true" in command
+        assert "hermes --version" in command
         assert "--branch" not in command
 
     @pytest.mark.asyncio

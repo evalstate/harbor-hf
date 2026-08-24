@@ -1,14 +1,16 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Route, Routes, useLocation } from "react-router-dom";
+import { type ReactNode, useEffect } from "react";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, type SessionResponse, signOut } from "./api";
 import { ControlStateProvider, type DisplayActor } from "./control-state";
-import { Layout } from "./layout";
+import { Layout, loginHref } from "./layout";
 import {
   AuditPage,
   CampaignPage,
   CampaignsPage,
   EndpointsPage,
   JobsPage,
+  LeaderboardPage,
   NotFoundPage,
   OverviewPage,
   ProfilesPage,
@@ -17,15 +19,40 @@ import {
   TaskPage,
 } from "./pages";
 import { keys, useLiveUpdates, useSession, useSystem } from "./queries";
-import { Button, Card, ErrorNotice, Loading, QueryContent } from "./ui";
+import { ErrorNotice, Loading, QueryContent } from "./ui";
+
+function isPublicBoard(path: string): boolean {
+  return path === "/" || path === "/leaderboard";
+}
+
+function GuestShell({ children }: { children: ReactNode }) {
+  return (
+    <Layout
+      actor={null}
+      writeMode="unknown"
+      live={null}
+      serviceError={null}
+      onSignOut={() => undefined}
+      signingOut={false}
+    >
+      {children}
+    </Layout>
+  );
+}
+
+function LoginRedirect({ returnTo }: { returnTo: string }) {
+  const href = loginHref(returnTo);
+  useEffect(() => {
+    window.location.replace(href);
+  }, [href]);
+  return <Loading />;
+}
 
 function AuthenticatedApp({
   actor,
-  expiresAt,
   sessionError,
 }: {
   actor: DisplayActor;
-  expiresAt?: string | undefined;
   sessionError: unknown;
 }) {
   const client = useQueryClient();
@@ -51,31 +78,40 @@ function AuthenticatedApp({
         actor={actor}
         writeMode={writeMode}
         live={live}
-        sessionExpiresAt={expiresAt}
         serviceError={sessionError ?? (system.data ? system.error : null)}
         onSignOut={() => logout.mutate()}
         signingOut={logout.isPending}
       >
-        {system.data ? (
-          <Routes>
-            <Route path="/" element={<OverviewPage />} />
-            <Route path="/runs" element={<CampaignsPage />} />
-            <Route path="/runs/:campaignId" element={<CampaignPage />} />
-            <Route path="/runs/:campaignId/tasks/:taskId" element={<TaskPage />} />
-            <Route path="/campaigns" element={<CampaignsPage />} />
-            <Route path="/campaigns/:campaignId" element={<CampaignPage />} />
-            <Route path="/campaigns/:campaignId/tasks/:taskId" element={<TaskPage />} />
-            <Route path="/jobs" element={<JobsPage />} />
-            <Route path="/endpoints" element={<EndpointsPage />} />
-            <Route path="/results" element={<ResultsPage />} />
-            <Route path="/results/:publicationId" element={<ResultPage />} />
-            <Route path="/profiles" element={<ProfilesPage />} />
-            <Route path="/audit" element={<AuditPage />} />
-            <Route path="*" element={<NotFoundPage />} />
-          </Routes>
-        ) : (
-          <QueryContent query={system}>{null}</QueryContent>
-        )}
+        <Routes>
+          <Route path="/" element={<LeaderboardPage />} />
+          <Route path="/leaderboard" element={<Navigate to="/" replace />} />
+          {system.data ? (
+            <>
+              <Route path="/overview" element={<OverviewPage />} />
+              <Route path="/runs" element={<CampaignsPage />} />
+              <Route path="/runs/:campaignId" element={<CampaignPage />} />
+              <Route path="/runs/:campaignId/tasks/:taskId" element={<TaskPage />} />
+              <Route path="/campaigns" element={<CampaignsPage />} />
+              <Route path="/campaigns/:campaignId" element={<CampaignPage />} />
+              <Route
+                path="/campaigns/:campaignId/tasks/:taskId"
+                element={<TaskPage />}
+              />
+              <Route path="/jobs" element={<JobsPage />} />
+              <Route path="/endpoints" element={<EndpointsPage />} />
+              <Route path="/results" element={<ResultsPage />} />
+              <Route path="/results/:publicationId" element={<ResultPage />} />
+              <Route path="/profiles" element={<ProfilesPage />} />
+              <Route path="/audit" element={<AuditPage />} />
+              <Route path="*" element={<NotFoundPage />} />
+            </>
+          ) : (
+            <Route
+              path="*"
+              element={<QueryContent query={system}>{null}</QueryContent>}
+            />
+          )}
+        </Routes>
       </Layout>
     </ControlStateProvider>
   );
@@ -91,54 +127,42 @@ export default function App() {
       </div>
     );
 
+  const actor =
+    session.data?.authenticated === true && session.data.actor
+      ? session.data.actor
+      : null;
+
+  if (actor) {
+    return <AuthenticatedApp actor={actor} sessionError={session.error} />;
+  }
+
+  if (isPublicBoard(location.pathname)) {
+    if (location.pathname === "/leaderboard") return <Navigate to="/" replace />;
+    return (
+      <GuestShell>
+        <LeaderboardPage />
+      </GuestShell>
+    );
+  }
+
   const unauthorized =
     (session.error instanceof ApiError && session.error.status === 401) ||
     session.data?.authenticated === false;
   if (unauthorized) {
     // Private Space embeds add signed query parameters that must not enter OAuth state.
-    const returnTo = location.pathname;
-    return (
-      <main className="grid min-h-screen place-items-center bg-slate-950 p-6 text-slate-100">
-        <Card className="max-w-md text-center">
-          <div className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-cyan-400 text-xl font-black text-slate-950">
-            H
-          </div>
-          <h1 className="mt-5 text-xl font-semibold">Harbor-HF Control</h1>
-          <p className="mt-2 text-sm leading-6 text-slate-400">
-            Your session expired, was revoked, or was lost during a service restart.
-            Sign in again to continue on this page.
-          </p>
-          <a
-            className="mt-6 inline-block"
-            href={`/auth/login?return_to=${encodeURIComponent(returnTo)}`}
-          >
-            <Button>Sign in with Hugging Face</Button>
-          </a>
-        </Card>
-      </main>
-    );
+    return <LoginRedirect returnTo={location.pathname} />;
   }
 
-  if (!session.data?.authenticated || !session.data.actor) {
-    const error =
-      session.error ?? new Error("The control service could not verify your session.");
-    return (
-      <main className="grid min-h-screen place-items-center bg-slate-950 p-6 text-slate-100">
-        <div className="w-full max-w-xl">
-          <ErrorNotice error={error} retry={() => void session.refetch()} />
-          <p className="mt-4 text-center text-sm text-slate-500">
-            A temporary failure does not end an existing 12-hour session.
-          </p>
-        </div>
-      </main>
-    );
-  }
-
+  const error =
+    session.error ?? new Error("The control service could not verify your session.");
   return (
-    <AuthenticatedApp
-      actor={session.data.actor}
-      expiresAt={session.data.expires_at}
-      sessionError={session.error}
-    />
+    <GuestShell>
+      <div className="mx-auto mt-16 w-full max-w-xl">
+        <ErrorNotice error={error} retry={() => void session.refetch()} />
+        <p className="mt-4 text-center text-sm text-slate-500">
+          A temporary failure does not end an existing 12-hour session.
+        </p>
+      </div>
+    </GuestShell>
   );
 }

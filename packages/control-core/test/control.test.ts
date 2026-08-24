@@ -7,7 +7,10 @@ import type {
   AttemptReceipt,
   BudgetEvent,
   EndpointResource,
+  ProfileObject,
+  ProfilePromotion,
   SandboxPolicy,
+  TerminalSelection,
 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
@@ -32,7 +35,11 @@ import {
   Reconciler,
 } from "../src/reconciler.js";
 import { runIdentity, runUnique } from "../src/run-id.js";
-import { type AttemptInput, ControlService } from "../src/service.js";
+import {
+  type AttemptInput,
+  ControlService,
+  executionReservationCategory,
+} from "../src/service.js";
 
 const controls: TestControl[] = [];
 afterEach(async () =>
@@ -54,6 +61,63 @@ async function settle(reconciler: Reconciler, rounds = 8): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await reconciler.tick();
 }
 
+async function configureCapacity(
+  control: TestControl,
+  input: {
+    maximum?: number;
+    hardwareMaximum?: number;
+    burst?: number;
+  } = {},
+): Promise<void> {
+  const createdAt = "2026-08-22T00:00:00.000Z";
+  const spec = {
+    namespace: "test",
+    max_active_sandboxes: input.maximum ?? 2,
+    hardware_limits: [
+      {
+        hardware: "cpu-basic",
+        max_active_sandboxes: input.hardwareMaximum ?? 2,
+      },
+    ],
+    start_burst: input.burst ?? 2,
+    start_refill_tokens: 1,
+    start_refill_period_seconds: 60,
+  };
+  const profile: ProfileObject = {
+    schema_version: "v1",
+    kind: "profile.object",
+    record_id: deterministicId(
+      "profile",
+      "capacity",
+      "capacity-test",
+      sha256(canonicalJson(spec)),
+    ),
+    created_at: createdAt,
+    actor: { subject: "test", role: "service" },
+    profile_kind: "capacity",
+    name: "capacity-test",
+    spec,
+  };
+  const profileId = sha256(canonicalJson(profile));
+  const promotion: ProfilePromotion = {
+    schema_version: "v1",
+    kind: "profile.promotion",
+    record_id: deterministicId("profile-promotion", "capacity", "current"),
+    created_at: createdAt,
+    actor: operator,
+    profile_kind: "capacity",
+    alias: "current",
+    profile_id: profileId,
+    promotion_state: "approved",
+    reason: "test capacity policy",
+    evidence: [],
+  };
+  await control.service.append(profile);
+  await control.service.append(promotion);
+  await control.service.refreshProfileResolver();
+  control.service.configureCapacityProfile("current");
+}
+
 async function putEvidenceReference(
   control: TestControl,
   label: string,
@@ -71,6 +135,7 @@ async function appendClosedSandboxAmbiguity(
   taskId: string,
   label: string,
   closeMode: "historical" | "service" | "none" = "historical",
+  commandKind: "sandbox.exec" | "sandbox.read" | "sandbox.write" = "sandbox.exec",
 ): Promise<ActionIntent> {
   const policy: SandboxPolicy = {
     image: `registry.example/sandbox@sha256:${"f".repeat(64)}`,
@@ -101,20 +166,28 @@ async function appendClosedSandboxAmbiguity(
     resource_id: resourceId,
   });
   await control.service.markAdvanced(create, createReceipt);
+  const commandPayload = {
+    task_id: taskId,
+    sandbox_create_action_id: create.action_id,
+    resource_id: resourceId,
+    sandbox: policy,
+    ...(commandKind === "sandbox.exec"
+      ? { command: ["true"] as [string], cwd: "/app", timeout_seconds: 30 }
+      : commandKind === "sandbox.read"
+        ? { path: "/tmp/result.json" }
+        : {
+            path: "/tmp/input.json",
+            content_digest: sha256("sandbox input"),
+            content_size: 13,
+            mode: "0600",
+          }),
+  };
   const command = control.service.actionIntent(
     campaignId,
-    "sandbox.exec",
+    commandKind,
     `sandbox-command-${label}`,
     0,
-    {
-      task_id: taskId,
-      sandbox_create_action_id: create.action_id,
-      resource_id: resourceId,
-      sandbox: policy,
-      command: ["true"],
-      cwd: "/app",
-      timeout_seconds: 30,
-    },
+    commandPayload,
   );
   await control.service.writeAction(command);
   await control.service.dispatchAction(command, "2026-08-20T00:00:00.000Z");
@@ -255,6 +328,47 @@ async function putWorkerEvidence(
 }
 
 describe("control service", () => {
+  it("fails closed when a configured capacity profile is not approved", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    control.service.configureCapacityProfile("missing-capacity");
+
+    expect(() => control.service.requireCapacityProfile()).toThrow(
+      "unapproved capacity profile",
+    );
+  });
+
+  it("replaces the promoted namespace Sandbox cap and start pacing", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    control.service.configureCapacityProfile("current");
+    await configureCapacity(control, { maximum: 2, hardwareMaximum: 2, burst: 1 });
+
+    const first = await control.service.setMaxActiveSandboxes(8);
+    expect(first.max_active_sandboxes).toBe(8);
+    expect(first.start_burst).toBe(8);
+    const selected = control.service.capacityProfile();
+    expect(selected?.spec.max_active_sandboxes).toBe(8);
+    expect(selected?.spec.start_burst).toBe(8);
+    expect(selected?.spec.start_refill_tokens).toBe(8);
+    expect(selected?.spec.hardware_limits).toEqual([
+      { hardware: "cpu-basic", max_active_sandboxes: 8 },
+    ]);
+    expect(control.service.namespaceCapacityPolicy()).toMatchObject({
+      alias: "current",
+      configured: true,
+      max_active_sandboxes: 8,
+      start_burst: 8,
+      profile_id: first.profile_id,
+    });
+
+    const second = await control.service.setMaxActiveSandboxes(8);
+    expect(second.profile_id).toBe(first.profile_id);
+    await expect(control.service.setMaxActiveSandboxes(0)).rejects.toThrow(
+      "namespace Sandbox cap must be an integer from 1 to 1024",
+    );
+  });
+
   it("adopts idempotent submissions and completes a control smoke campaign", async () => {
     const control = await createTestControl();
     controls.push(control);
@@ -735,7 +849,7 @@ describe("control service", () => {
     expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
       status: "cancelled",
       terminal_tasks: 1,
-      publication_status: "published",
+      publication_status: null,
     });
   });
 
@@ -800,6 +914,386 @@ describe("control service", () => {
       status: "cancelled",
       terminal_tasks: 1,
       pending_actions: 0,
+      publication_status: null,
+    });
+  });
+
+  it("starts paused and reserves each resumed execution within the ceiling", async () => {
+    const control = await createTestControl(3, 1, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 12, start_paused: true },
+      "paused-campaign-key",
+      operator,
+    );
+    const launches: string[][] = [];
+    const noop = new NoopActions();
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch")
+          launches.push([...(intent.payload.task_ids ?? [])]);
+        return noop.execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 6);
+    expect(launches).toEqual([]);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "paused",
+      paused: true,
+      terminal_tasks: 0,
+      reserved_microusd: 0,
+    });
+
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", task_limit: 1, confirmed: true },
+      "resume-one-task-key",
+      operator,
+    );
+    await settle(reconciler, 8);
+    expect(launches).toEqual([["task-001"]]);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      terminal_tasks: 1,
+      paused: false,
+      reserved_microusd: 0,
+    });
+
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "pause", confirmed: true },
+      "pause-after-canary-key",
+      operator,
+    );
+    await settle(reconciler, 3);
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", confirmed: true },
+      "resume-then-pause-key",
+      operator,
+    );
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "pause", confirmed: true },
+      "pause-before-resume-dispatch-key",
+      operator,
+    );
+    await settle(reconciler, 5);
+    expect(launches).toEqual([["task-001"]]);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "paused",
+      reserved_microusd: 0,
+      pending_actions: 0,
+    });
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", confirmed: true },
+      "resume-remaining-key",
+      operator,
+    );
+    await settle(reconciler, 10);
+
+    expect(launches).toEqual([["task-001"], ["task-002", "task-003"]]);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "completed",
+      terminal_tasks: 3,
+      admissible_tasks: 3,
+      reserved_microusd: 0,
+      publication_status: "published",
+    });
+  });
+
+  it("reconciles a historical terminal Job reservation before resume", async () => {
+    const control = await createTestControl(1, 1, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 6, start_paused: true },
+      "historical-job-reservation-key",
+      operator,
+    );
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 3);
+    const generation = 7;
+    const createdAt = "2026-08-22T12:00:00.000Z";
+    await control.service.append({
+      schema_version: "v1",
+      kind: "budget.event",
+      record_id: deterministicId(
+        "budget",
+        result.campaign_id,
+        executionReservationCategory(["task-001"]),
+        String(generation),
+      ),
+      created_at: createdAt,
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      event_kind: "reserve",
+      amount_microusd: 6,
+    });
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      generation,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        reservation_microusd: 6,
+      },
+    );
+    await control.service.writeAction(launch);
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "RUNNING",
+      resource_id: "historical-job",
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+    const observe = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      "historical-job",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        launch_action_id: launch.action_id,
+      },
+    );
+    await control.service.writeAction(observe);
+    const observeReceipt = await control.service.receipt(observe, {
+      outcome: "completed",
+      observed_state: "COMPLETED",
+      resource_id: "historical-job",
+    });
+    await control.service.markAdvanced(observe, observeReceipt);
+
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", task_limit: 1, confirmed: true },
+      "historical-job-reservation-resume-key",
+      operator,
+    );
+    expect(
+      await control.service.reconcileTerminalJobReservations(result.campaign_id),
+    ).toBe(0);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      reserved_microusd: 6,
+      pending_actions: 1,
+    });
+  });
+
+  it("orders same-millisecond pause and resume actions causally", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "same-millisecond-lifecycle-campaign",
+      operator,
+    );
+    const fixed = new Date("2026-08-22T12:00:00.000Z");
+    const clock = vi.spyOn(control.service.clock, "now").mockReturnValue(fixed);
+    const pause = await control.service.campaignAction(
+      result.campaign_id,
+      { action: "pause", confirmed: true },
+      "same-millisecond-pause",
+      operator,
+    );
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 3);
+    const resume = await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", confirmed: true },
+      "same-millisecond-resume",
+      operator,
+    );
+    clock.mockRestore();
+    const pauseRow = await control.projection.action(pause.action_id);
+    const resumeRow = await control.projection.action(resume.action_id);
+
+    expect(Date.parse(resumeRow?.created_at ?? "")).toBeGreaterThan(
+      Date.parse(pauseRow?.created_at ?? ""),
+    );
+    expect(await control.projection.campaignPaused(result.campaign_id)).toBe(false);
+  });
+
+  it("reuses released Job reservations within the campaign ceiling", async () => {
+    const control = await createTestControl(2, 1, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 6, start_paused: true },
+      "paused-ceiling-campaign-key",
+      operator,
+    );
+    const launches: string[][] = [];
+    const noop = new NoopActions();
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      {
+        execute: async (intent): Promise<ExternalActionResult> => {
+          if (intent.action_kind === "job.launch")
+            launches.push([...(intent.payload.task_ids ?? [])]);
+          return noop.execute(intent);
+        },
+      },
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 4);
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", task_limit: 1, confirmed: true },
+      "paused-ceiling-canary-key",
+      operator,
+    );
+    await settle(reconciler, 8);
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "pause", confirmed: true },
+      "paused-ceiling-pause-key",
+      operator,
+    );
+    await settle(reconciler, 3);
+
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", confirmed: true },
+      "paused-ceiling-second-resume-key",
+      operator,
+    );
+    await settle(reconciler, 10);
+    expect(launches).toEqual([["task-001"], ["task-002"]]);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "completed",
+      paused: false,
+      terminal_tasks: 2,
+      reserved_microusd: 0,
+      pending_actions: 0,
+    });
+  });
+
+  it("defers an invalid active attempt replacement while paused", async () => {
+    const control = await createTestControl(1, 2, 6, false, "forbidden", undefined, [
+      "input_tokens",
+      "output_tokens",
+    ]);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 12 },
+      "pause-invalid-attempt-key",
+      operator,
+    );
+    let launches = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          launches += 1;
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `pause-invalid-job-${launches}`,
+          };
+        }
+        if (intent.action_kind === "job.observe") {
+          const launchActionId = String(intent.payload.launch_action_id);
+          if (
+            !(await control.projection.attemptForActionTask(launchActionId, "task-001"))
+          ) {
+            const evidence = await putEvidenceReference(
+              control,
+              `pause-invalid-evidence-${launches}`,
+            );
+            await control.service.attempt({
+              campaign_id: result.campaign_id,
+              task_id: "task-001",
+              attempt_id: `pause-invalid-attempt-${launches}`,
+              action_id: launchActionId,
+              outcome: launches === 1 ? "agent" : "complete",
+              replacement_eligible: false,
+              ...evidence,
+              cost_microusd: 0,
+              metrics:
+                launches === 1
+                  ? { input_tokens: 0, output_tokens: 0 }
+                  : { input_tokens: 8, output_tokens: 2, reward: 1 },
+              completed_at: `2026-08-16T00:00:0${launches}.000Z`,
+            });
+          }
+          return {
+            outcome: "completed",
+            observed_state: "COMPLETED",
+            resource_id: `pause-invalid-job-${launches}`,
+          };
+        }
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 2);
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "pause", confirmed: true },
+      "pause-invalid-boundary-key",
+      operator,
+    );
+    await settle(reconciler, 6);
+
+    expect(launches).toBe(1);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "paused",
+      paused: true,
+      terminal_tasks: 0,
+      reserved_microusd: 0,
+      pending_actions: 0,
+    });
+    expect(
+      (await control.projection.campaignActions(result.campaign_id)).filter(
+        (action) =>
+          action.action_kind === "job.launch" &&
+          JSON.parse(action.intent_body).payload.prior_attempt_id,
+      ),
+    ).toHaveLength(0);
+
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", confirmed: true },
+      "resume-invalid-attempt-key",
+      operator,
+    );
+    await settle(reconciler, 10);
+
+    expect(launches).toBe(2);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "completed",
+      admissible_tasks: 1,
+      reserved_microusd: 0,
       publication_status: "published",
     });
   });
@@ -859,6 +1353,217 @@ describe("control service", () => {
       status: "cancelled",
       terminal_tasks: 1,
     });
+  });
+
+  it("suppresses a granted create when cancellation arrives before dispatch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await configureCapacity(control, { maximum: 1, hardwareMaximum: 1, burst: 1 });
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 1_000 },
+      "capacity-cancel-before-dispatch",
+      operator,
+    );
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"d".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 3_600,
+      idle_timeout_seconds: 600,
+      inference_token: "forbidden",
+      reservation_microusd: 100,
+      active_hourly_cost_microusd: 0,
+      max_sandboxes: 1,
+      max_commands: 8,
+      max_command_seconds: 600,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/logs"],
+    };
+    const create = control.service.actionIntent(
+      result.campaign_id,
+      "sandbox.create",
+      "task-001",
+      0,
+      { task_id: "task-001", sandbox: policy },
+    );
+    await expect(control.service.admitSandboxCreate(create, 1)).resolves.toEqual(
+      expect.objectContaining({ status: "admitted", dispatch_created: false }),
+    );
+    const cancel = control.service.actionIntent(
+      result.campaign_id,
+      "campaign.cancel",
+      "campaign",
+      0,
+      { reason: "test cancellation" },
+    );
+    await control.service.writeAction(cancel);
+
+    await expect(control.service.admitSandboxCreate(create, 1)).resolves.toEqual(
+      expect.objectContaining({
+        status: "rejected",
+        limiting_factor: "campaign_cancelled",
+      }),
+    );
+    expect(await control.projection.actionDispatch(create.action_id)).toBeNull();
+    expect(
+      await control.projection.sandboxCapacityRelease(create.action_id),
+    ).toMatchObject({ release_reason: "create_failed" });
+  });
+
+  it("does not count a definitive no-resource legacy create as active", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    await configureCapacity(control, { maximum: 1, hardwareMaximum: 1, burst: 1 });
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 1_000 },
+      "capacity-legacy-no-resource",
+      operator,
+    );
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"d".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 3_600,
+      idle_timeout_seconds: 600,
+      inference_token: "forbidden",
+      reservation_microusd: 100,
+      active_hourly_cost_microusd: 0,
+      max_sandboxes: 1,
+      max_commands: 8,
+      max_command_seconds: 600,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/logs"],
+    };
+    control.service.configureCapacityProfile(null);
+    const legacy = control.service.actionIntent(
+      result.campaign_id,
+      "sandbox.create",
+      "task-001",
+      0,
+      { task_id: "task-001", sandbox: policy },
+    );
+    await control.service.writeAction(legacy);
+    await control.service.reserveSandbox(
+      result.campaign_id,
+      legacy.action_id,
+      legacy.created_at,
+      policy.reservation_microusd,
+    );
+    await control.service.dispatchAction(legacy, legacy.created_at);
+    const receipt = await control.service.receipt(legacy, {
+      outcome: "completed",
+      observed_state: "suppressed-cancelled-not-found",
+      resource_id: null,
+    });
+    await control.service.markAdvanced(legacy, receipt);
+    control.service.configureCapacityProfile("current");
+    const next = control.service.actionIntent(
+      result.campaign_id,
+      "sandbox.create",
+      "task-002",
+      0,
+      { task_id: "task-002", sandbox: policy },
+    );
+
+    await expect(control.service.admitSandboxCreate(next, 1)).resolves.toEqual(
+      expect.objectContaining({ status: "admitted" }),
+    );
+  });
+
+  it("serializes namespace admission and releases capacity after verified close", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    await configureCapacity(control, { maximum: 1, hardwareMaximum: 1, burst: 2 });
+    const first = await control.service.submit(
+      { ...submission, ceiling_microusd: 1_000 },
+      "capacity-first",
+      operator,
+    );
+    const second = await control.service.submit(
+      { ...submission, ceiling_microusd: 1_000 },
+      "capacity-second",
+      operator,
+    );
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"d".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 3_600,
+      idle_timeout_seconds: 600,
+      inference_token: "forbidden",
+      reservation_microusd: 100,
+      active_hourly_cost_microusd: 0,
+      max_sandboxes: 2,
+      max_commands: 8,
+      max_command_seconds: 600,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/logs"],
+    };
+    const create = (campaignId: string, taskId: string) =>
+      control.service.actionIntent(campaignId, "sandbox.create", taskId, 0, {
+        task_id: taskId,
+        sandbox: policy,
+      });
+    const firstIntent = create(first.campaign_id, "task-001");
+    const secondIntent = create(second.campaign_id, "task-001");
+
+    await expect(control.service.admitSandboxCreate(firstIntent, 2)).resolves.toEqual(
+      expect.objectContaining({ status: "admitted" }),
+    );
+    await expect(control.service.admitSandboxCreate(secondIntent, 2)).resolves.toEqual(
+      expect.objectContaining({
+        status: "deferred",
+        limiting_factor: "namespace_sandbox_capacity",
+      }),
+    );
+    expect(
+      await control.projection.sandboxAdmission(firstIntent.action_id),
+    ).not.toBeNull();
+    expect(
+      await control.projection.sandboxAdmission(secondIntent.action_id),
+    ).toBeNull();
+    await expect(control.service.admitSandboxCreate(firstIntent, 2)).resolves.toEqual(
+      expect.objectContaining({ status: "admitted" }),
+    );
+    expect(await control.projection.activeSandboxAdmissions("test")).toHaveLength(1);
+
+    const createReceipt = await control.service.receipt(firstIntent, {
+      outcome: "created",
+      observed_state: "RUNNING",
+      resource_id: "sandbox-capacity-resource",
+    });
+    await control.service.markAdvanced(firstIntent, createReceipt);
+    const close = control.service.actionIntent(
+      first.campaign_id,
+      "sandbox.close",
+      "sandbox-capacity-resource",
+      0,
+      {
+        task_id: "task-001",
+        sandbox_create_action_id: firstIntent.action_id,
+        resource_id: "sandbox-capacity-resource",
+        sandbox: policy,
+      },
+    );
+    await control.service.writeAction(close);
+    const closeReceipt = await control.service.receipt(close, {
+      outcome: "completed",
+      observed_state: "CANCELED",
+      resource_id: "sandbox-capacity-resource",
+      cost_microusd: 0,
+    });
+    await control.service.markAdvanced(close, closeReceipt);
+
+    expect(
+      await control.projection.sandboxCapacityRelease(firstIntent.action_id),
+    ).toMatchObject({ release_reason: "sandbox_closed" });
+    await expect(control.service.admitSandboxCreate(secondIntent, 2)).resolves.toEqual(
+      expect.objectContaining({ status: "admitted" }),
+    );
+    const rebuilt = await Projection.open(join(control.root, "capacity-replay.sqlite"));
+    await rebuilt.rebuild(control.store);
+    expect(await rebuilt.sandboxCapacityRelease(firstIntent.action_id)).toMatchObject({
+      release_reason: "sandbox_closed",
+    });
+    expect(await rebuilt.activeSandboxAdmissions("test")).toHaveLength(1);
+    await rebuilt.close();
   });
 
   it("serializes the campaign-wide active Sandbox limit", async () => {
@@ -956,9 +1661,12 @@ describe("control service", () => {
     });
     await control.service.markAdvanced(recoveredClose, recoveredCloseReceipt);
 
-    await expect(control.service.admitSandboxCreate(loser, 1)).resolves.toEqual({
-      dispatch_created: true,
-    });
+    await expect(control.service.admitSandboxCreate(loser, 1)).resolves.toEqual(
+      expect.objectContaining({
+        status: "admitted",
+        dispatch_created: true,
+      }),
+    );
   });
 
   it("closes active Sandboxes before sealing campaign cancellation", async () => {
@@ -1178,6 +1886,206 @@ describe("control service", () => {
     );
   });
 
+  it("allows Sandbox work on a replaceable infrastructure seal", async () => {
+    const control = await createTestControl(1, 2, 0);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "infrastructure-sandbox-work-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "infrastructure-sandbox-work-evidence",
+    );
+    const sealed = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-infrastructure-sandbox-work",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    await control.service.append({
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: deterministicId(
+        "terminal",
+        result.campaign_id,
+        "task-001",
+        sealed.attempt_id,
+      ),
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: sealed.attempt_id,
+      outcome: "infrastructure",
+      reason: "infrastructure seal",
+    });
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"f".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 600,
+      idle_timeout_seconds: 300,
+      inference_token: "forbidden",
+      reservation_microusd: 0,
+      active_hourly_cost_microusd: 0,
+      max_sandboxes: 1,
+      max_commands: 8,
+      max_command_seconds: 300,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/tmp"],
+    };
+    await expect(
+      control.service.writeAction(
+        control.service.actionIntent(
+          result.campaign_id,
+          "sandbox.create",
+          "task-001",
+          0,
+          { task_id: "task-001", sandbox: policy },
+        ),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("closes admitted Sandboxes after one task becomes terminal", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    await configureCapacity(control, { maximum: 2, hardwareMaximum: 2 });
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 1_000 },
+      "terminal-task-sandbox-cleanup-key",
+      operator,
+    );
+    const admissionRow = await control.projection.action(result.action_id);
+    if (!admissionRow) throw new Error("admission action is missing");
+    const admission = JSON.parse(admissionRow.intent_body) as ActionIntent;
+    const admissionReceipt = await control.service.receipt(admission, {
+      outcome: "completed",
+      observed_state: "admitted",
+    });
+    await control.service.markAdvanced(admission, admissionReceipt);
+    const taskId = "task-001";
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"f".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 600,
+      idle_timeout_seconds: 300,
+      inference_token: "forbidden",
+      reservation_microusd: 100,
+      active_hourly_cost_microusd: 100,
+      max_sandboxes: 2,
+      max_commands: 8,
+      max_command_seconds: 300,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/tmp"],
+    };
+    const create = control.service.actionIntent(
+      result.campaign_id,
+      "sandbox.create",
+      taskId,
+      0,
+      { task_id: taskId, sandbox: policy },
+    );
+    await expect(control.service.admitSandboxCreate(create, 2)).resolves.toEqual(
+      expect.objectContaining({ status: "admitted" }),
+    );
+    const createReceipt = await control.service.receipt(create, {
+      outcome: "created",
+      observed_state: "RUNNING",
+      resource_id: "terminal-task-sandbox-resource",
+    });
+    await control.service.markAdvanced(create, createReceipt);
+
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      taskId,
+      0,
+      { task_ids: [taskId] },
+    );
+    await control.service.writeAction(launch);
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "completed",
+      observed_state: "imported",
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+    const evidence = await putEvidenceReference(
+      control,
+      "terminal-task-sandbox-cleanup-evidence",
+    );
+    const attempt = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: taskId,
+      attempt_id: "terminal-task-sandbox-cleanup-attempt",
+      action_id: launch.action_id,
+      outcome: "complete",
+      replacement_eligible: false,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: { reward: 1 },
+      completed_at: "2026-08-23T00:00:00.000Z",
+    });
+    await control.service.selectTerminal(attempt, "valid worker outcome");
+
+    const observed: string[] = [];
+    const noop = new NoopActions();
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        observed.push(intent.action_kind);
+        if (intent.action_kind === "sandbox.close")
+          return {
+            outcome: "completed",
+            observed_state: "CANCELED",
+            resource_id: "terminal-task-sandbox-resource",
+            cost_microusd: 25,
+          };
+        return noop.execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 8);
+
+    expect(observed).toContain("sandbox.close");
+    expect(await control.projection.activeSandboxAdmissions("test")).toHaveLength(0);
+    expect(
+      await control.projection.sandboxCapacityRelease(create.action_id),
+    ).toMatchObject({ release_reason: "sandbox_closed" });
+    const campaign = await control.projection.campaign(result.campaign_id);
+    expect(campaign).toMatchObject({
+      terminal_tasks: 1,
+      reserved_microusd: 0,
+    });
+    expect(campaign?.observed_microusd).toBeLessThanOrEqual(
+      policy.reservation_microusd,
+    );
+  });
+
   it("closes active Sandboxes before normal publication", async () => {
     const control = await createTestControl();
     controls.push(control);
@@ -1385,8 +2293,898 @@ describe("control service", () => {
       [{ outcome: "infrastructure", replacement_eligible: 1 }],
     );
     expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
-      status: "completed",
+      status: "failed",
       terminal_tasks: 1,
+      exhausted_tasks: 1,
+      publication_status: null,
+    });
+    const detail = await control.projection.task(result.campaign_id, "task-001");
+    expect(detail?.attempts).toMatchObject([
+      { outcome: "infrastructure", replacement_eligible: 1 },
+    ]);
+    expect(detail?.task).toMatchObject({
+      terminal_outcome: "infrastructure",
+      selected_attempt_id: null,
+    });
+  });
+
+  it("keeps a campaign active when one task is exhausted and others remain", async () => {
+    const control = await createTestControl(
+      2,
+      1,
+      0,
+      true,
+      "forbidden",
+      undefined,
+      [],
+      1,
+    );
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "partial-exhaustion-key",
+      operator,
+    );
+    let launches = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          launches += 1;
+          if (launches === 1)
+            return {
+              outcome: "failed",
+              observed_state: "job-create-failed",
+              error_code: "jobs-api-unavailable",
+            };
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-remaining-${launches}`,
+          };
+        }
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: "job-remaining",
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 12);
+    expect(launches).toBe(2);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "active",
+      terminal_tasks: 1,
+      exhausted_tasks: 1,
+      publication_status: null,
+    });
+    expect(
+      (await control.projection.task(result.campaign_id, "task-001"))?.task
+        .terminal_outcome,
+    ).toBe("infrastructure");
+    expect(
+      (await control.projection.task(result.campaign_id, "task-002"))?.task
+        .terminal_outcome,
+    ).toBeNull();
+  });
+
+  it("closes undispatched Sandbox creates after pause", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "pause-suppress-sandbox-key",
+      operator,
+    );
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "pause", confirmed: true },
+      "pause-suppress-sandbox-action",
+      operator,
+    );
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"d".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 3_600,
+      idle_timeout_seconds: 600,
+      inference_token: "forbidden",
+      reservation_microusd: 0,
+      active_hourly_cost_microusd: 0,
+      max_sandboxes: 1,
+      max_commands: 8,
+      max_command_seconds: 600,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/logs"],
+    };
+    const create = control.service.actionIntent(
+      result.campaign_id,
+      "sandbox.create",
+      "task-001",
+      0,
+      {
+        task_id: "task-001",
+        sandbox: policy,
+      },
+    );
+    await control.service.writeAction(create);
+    expect(
+      await control.service.reserveSandbox(
+        result.campaign_id,
+        create.action_id,
+        create.created_at,
+        policy.reservation_microusd,
+      ),
+    ).toBe(true);
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "sandbox.create")
+          throw new Error("paused campaign must not create a Sandbox");
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 6);
+    const row = await control.projection.action(create.action_id);
+    expect(row?.observed_state).toBe("suppressed-paused");
+    expect(row?.receipt_body).not.toBeNull();
+  });
+
+  it("closes leftover Sandbox creates after the worker Job ends", async () => {
+    const control = await createTestControl(
+      2,
+      1,
+      0,
+      true,
+      "forbidden",
+      undefined,
+      [],
+      1,
+    );
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "terminal-job-suppress-sandbox-key",
+      operator,
+    );
+    const launchActionId = deterministicId(
+      "action",
+      result.campaign_id,
+      "job.launch",
+      "campaign-tasks",
+      "0",
+    );
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"e".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 3_600,
+      idle_timeout_seconds: 600,
+      inference_token: "forbidden",
+      reservation_microusd: 0,
+      active_hourly_cost_microusd: 0,
+      max_sandboxes: 1,
+      max_commands: 8,
+      max_command_seconds: 600,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/logs"],
+    };
+    const create = control.service.actionIntent(
+      result.campaign_id,
+      "sandbox.create",
+      "task-002",
+      0,
+      {
+        task_id: "task-002",
+        sandbox: policy,
+      },
+      { subject: `worker:${launchActionId}`, role: "service" },
+    );
+    await control.service.writeAction(create);
+    expect(
+      await control.service.reserveSandbox(
+        result.campaign_id,
+        create.action_id,
+        create.created_at,
+        policy.reservation_microusd,
+      ),
+    ).toBe(true);
+    let launches = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "sandbox.create")
+          throw new Error("terminal Job must not create a leftover Sandbox");
+        if (intent.action_kind === "job.launch") {
+          launches += 1;
+          if (launches === 1)
+            return {
+              outcome: "failed",
+              observed_state: "job-create-failed",
+              error_code: "jobs-api-unavailable",
+            };
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-follow-up-${launches}`,
+          };
+        }
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: intent.payload.resource_id as string,
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 8);
+    expect((await control.projection.action(create.action_id))?.observed_state).toBe(
+      "suppressed-terminal-job",
+    );
+    expect(launches).toBe(2);
+  });
+
+  it("closes leftover Sandbox I/O after pause so a later resume can launch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, start_paused: true },
+      "pause-suppress-sandbox-io-key",
+      operator,
+    );
+    const observes = Array.from({ length: 20 }, (_, index) =>
+      control.service.actionIntent(
+        result.campaign_id,
+        "sandbox.exec",
+        `leftover-exec-${index}`,
+        0,
+        {
+          task_id: "task-001",
+          command: ["true"],
+          sandbox_create_action_id: "missing-create",
+        },
+      ),
+    );
+    for (const exec of observes) await control.service.writeAction(exec);
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      {
+        execute: async (intent): Promise<ExternalActionResult> => {
+          if (intent.action_kind === "sandbox.exec")
+            throw new Error("paused campaign must not run leftover Sandbox I/O");
+          return new NoopActions().execute(intent);
+        },
+      },
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 6);
+    expect(
+      (await control.projection.campaignActions(result.campaign_id)).filter(
+        (action) =>
+          action.action_kind === "sandbox.exec" &&
+          action.observed_state === "suppressed-paused",
+      ),
+    ).toHaveLength(20);
+    await control.service.campaignAction(
+      result.campaign_id,
+      { action: "resume", confirmed: true },
+      "pause-suppress-sandbox-io-resume",
+      operator,
+    );
+    let launches = 0;
+    const running: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          launches += 1;
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: "job-after-io-drain",
+          };
+        }
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: "job-after-io-drain",
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const resumed = new Reconciler(
+      control.service,
+      control.projection,
+      running,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(resumed, 8);
+    expect(launches).toBe(1);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      paused: false,
+      status: "active",
+    });
+  });
+
+  it("observes a finished Job before leftover Sandbox I/O fills the batch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "observe-before-leftover-io-key",
+      operator,
+    );
+    const leftovers = Array.from({ length: 20 }, (_, index) =>
+      control.service.actionIntent(
+        result.campaign_id,
+        "sandbox.exec",
+        `leftover-starved-exec-${index}`,
+        0,
+        {
+          task_id: "task-001",
+          command: ["true"],
+          sandbox_create_action_id: "missing-create",
+        },
+      ),
+    );
+    for (const exec of leftovers) await control.service.writeAction(exec);
+    let observes = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "sandbox.exec")
+          throw new Error("leftover Sandbox I/O must not run before Job observe");
+        if (intent.action_kind === "job.launch")
+          return {
+            outcome: "created",
+            observed_state: "SCHEDULING",
+            resource_id: `job-starved-observe-${intent.generation}`,
+          };
+        if (intent.action_kind === "job.observe") {
+          observes += 1;
+          return {
+            outcome: "completed",
+            observed_state: "ERROR",
+            resource_id: String(intent.payload.resource_id),
+          };
+        }
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 4);
+    expect(observes).toBeGreaterThan(0);
+    expect(
+      (await control.projection.campaignActions(result.campaign_id)).some(
+        (action) =>
+          action.action_kind === "job.observe" && action.observed_state === "ERROR",
+      ),
+    ).toBe(true);
+  });
+
+  it("requeues Job observe after a non-terminal observe never wrote the next one", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "requeue-broken-observe-key",
+      operator,
+    );
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch")
+          return {
+            outcome: "created",
+            observed_state: "SCHEDULING",
+            resource_id: "job-broken-observe-chain",
+          };
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "ERROR",
+            resource_id: "job-broken-observe-chain",
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    let observe:
+      | Awaited<ReturnType<typeof control.projection.campaignActions>>[number]
+      | undefined;
+    for (let round = 0; round < 8 && !observe; round += 1) {
+      await reconciler.tick();
+      observe = (await control.projection.campaignActions(result.campaign_id)).find(
+        (action) =>
+          action.action_kind === "job.observe" && action.receipt_body === null,
+      );
+    }
+    expect(observe).toBeDefined();
+    await control.service.receipt(JSON.parse(observe?.intent_body ?? "null"), {
+      outcome: "completed",
+      observed_state: "SCHEDULING",
+      resource_id: "job-broken-observe-chain",
+    });
+    await settle(reconciler, 3);
+    expect(
+      (await control.projection.campaignActions(result.campaign_id)).some(
+        (action) =>
+          action.action_kind === "job.observe" && action.observed_state === "ERROR",
+      ),
+    ).toBe(true);
+  });
+
+  it("relaunches tasks left open after an execution Job errors", async () => {
+    const control = await createTestControl(2, 2, 0, false, "forbidden", undefined, [
+      "input_tokens",
+      "output_tokens",
+    ]);
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "error-job-follow-up-key",
+      operator,
+    );
+    const launchActionId = deterministicId(
+      "action",
+      result.campaign_id,
+      "job.launch",
+      "campaign-tasks",
+      "0",
+    );
+    const policy: SandboxPolicy = {
+      image: `registry.example/sandbox@sha256:${"f".repeat(64)}`,
+      hardware: "cpu-basic",
+      timeout_seconds: 3_600,
+      idle_timeout_seconds: 600,
+      inference_token: "forbidden",
+      reservation_microusd: 0,
+      active_hourly_cost_microusd: 0,
+      max_sandboxes: 1,
+      max_commands: 8,
+      max_command_seconds: 600,
+      max_transfer_bytes: 1_048_576,
+      allowed_roots: ["/app", "/logs"],
+    };
+    for (const taskId of ["task-001", "task-002"]) {
+      const create = control.service.actionIntent(
+        result.campaign_id,
+        "sandbox.create",
+        taskId,
+        0,
+        { task_id: taskId, sandbox: policy },
+        { subject: `worker:${launchActionId}`, role: "service" },
+      );
+      await control.service.writeAction(create);
+      expect(
+        await control.service.reserveSandbox(
+          result.campaign_id,
+          create.action_id,
+          create.created_at,
+          policy.reservation_microusd,
+        ),
+      ).toBe(true);
+    }
+    const followUps: string[][] = [];
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "sandbox.create")
+          throw new Error("errored Job must not create a leftover Sandbox");
+        if (intent.action_kind === "job.launch") {
+          if (intent.generation === 0)
+            return {
+              outcome: "created",
+              observed_state: "RUNNING",
+              resource_id: "job-error-original",
+            };
+          followUps.push([...(intent.payload.task_ids ?? [])]);
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-error-follow-up-${intent.generation}`,
+          };
+        }
+        if (intent.action_kind === "job.observe") {
+          const sourceLaunch = String(intent.payload.launch_action_id);
+          if (sourceLaunch === launchActionId) {
+            for (const taskId of ["task-001", "task-002"]) {
+              if (
+                !(await control.projection.attemptForActionTask(sourceLaunch, taskId))
+              ) {
+                const evidence = await putEvidenceReference(
+                  control,
+                  `error-job-evidence-${taskId}`,
+                );
+                await control.service.attempt({
+                  campaign_id: result.campaign_id,
+                  task_id: taskId,
+                  attempt_id: `error-job-attempt-${taskId}`,
+                  action_id: sourceLaunch,
+                  outcome: "agent",
+                  replacement_eligible: true,
+                  ...evidence,
+                  cost_microusd: 0,
+                  metrics: { input_tokens: 0, output_tokens: 0 },
+                  completed_at: "2026-08-23T00:00:00.000Z",
+                });
+              }
+            }
+            return {
+              outcome: "completed",
+              observed_state: "ERROR",
+              resource_id: "job-error-original",
+            };
+          }
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: String(intent.payload.resource_id),
+          };
+        }
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 10);
+    expect(followUps).toEqual([["task-001", "task-002"]]);
+    const creates = (
+      await control.projection.campaignActions(result.campaign_id)
+    ).filter((action) => action.action_kind === "sandbox.create");
+    expect(creates.map((action) => action.observed_state)).toEqual([
+      "suppressed-terminal-job",
+      "suppressed-terminal-job",
+    ]);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "active",
+      terminal_tasks: 0,
+    });
+  });
+
+  it("abandons open tasks after a Job later errors despite an earlier COMPLETED observe", async () => {
+    const control = await createTestControl(2, 1, 0, false);
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "completed-then-error-abandon-key",
+      operator,
+    );
+    const resourceId = "job-completed-then-error";
+    const running: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch")
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: resourceId,
+          };
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: resourceId,
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      running,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(reconciler, 6);
+    const launchRow = (
+      await control.projection.campaignActions(result.campaign_id)
+    ).find((action) => action.action_kind === "job.launch");
+    if (!launchRow) throw new Error("execution launch is missing");
+    const completed = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      resourceId,
+      80,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001", "task-002"],
+        launch_action_id: launchRow.action_id,
+      },
+    );
+    await control.service.writeAction(completed);
+    await control.service.markAdvanced(
+      completed,
+      await control.service.receipt(completed, {
+        outcome: "completed",
+        observed_state: "COMPLETED",
+        resource_id: resourceId,
+      }),
+    );
+    expect(
+      await control.projection.abandonedUnresolvedTaskIds(result.campaign_id),
+    ).toEqual(["task-001", "task-002"]);
+    const errored = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      resourceId,
+      81,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001", "task-002"],
+        launch_action_id: launchRow.action_id,
+      },
+    );
+    await control.service.writeAction(errored);
+    await control.service.markAdvanced(
+      errored,
+      await control.service.receipt(errored, {
+        outcome: "completed",
+        observed_state: "ERROR",
+        resource_id: resourceId,
+      }),
+    );
+    expect(
+      await control.projection.abandonedUnresolvedTaskIds(result.campaign_id),
+    ).toEqual(["task-001", "task-002"]);
+  });
+
+  it("retries zero-token outcomes and fails closed after the attempt limit", async () => {
+    const control = await createTestControl(1, 2, 0, false, "forbidden", undefined, [
+      "input_tokens",
+      "output_tokens",
+    ]);
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "zero-token-attempts-key",
+      operator,
+    );
+    let launches = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          launches += 1;
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-zero-${launches}`,
+          };
+        }
+        if (intent.action_kind === "job.observe") {
+          const launchActionId = String(intent.payload.launch_action_id);
+          if (
+            !(await control.projection.attemptForActionTask(launchActionId, "task-001"))
+          ) {
+            const evidence = await putEvidenceReference(
+              control,
+              `zero-token-evidence-${launches}`,
+            );
+            await control.service.attempt({
+              campaign_id: result.campaign_id,
+              task_id: "task-001",
+              attempt_id: `zero-token-attempt-${launches}`,
+              action_id: launchActionId,
+              outcome: launches === 1 ? "agent" : "benchmark_timeout",
+              replacement_eligible: false,
+              ...evidence,
+              cost_microusd: 0,
+              metrics: { input_tokens: 0, output_tokens: 0 },
+              completed_at: `2026-08-16T00:00:0${launches}.000Z`,
+            });
+          }
+          return {
+            outcome: "completed",
+            observed_state: "COMPLETED",
+            resource_id: `job-zero-${launches}`,
+          };
+        }
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 20);
+
+    expect(launches).toBe(2);
+    expect(await control.projection.campaignAttempts(result.campaign_id)).toHaveLength(
+      2,
+    );
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "failed",
+      terminal_tasks: 1,
+      admissible_tasks: 0,
+      invalid_selected_tasks: 0,
+      exhausted_tasks: 1,
+      publication_status: null,
+    });
+    expect(
+      await control.projection.taskExhaustion(result.campaign_id, "task-001"),
+    ).toMatchObject({ attempt_count: 2 });
+  });
+
+  it("replays a historical zero-token selection as completed-invalid", async () => {
+    const control = await createTestControl(1, 1, 0, false, "forbidden", undefined, [
+      "input_tokens",
+      "output_tokens",
+    ]);
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "historical-invalid-selection-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      { task_ids: ["task-001"] },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "historical-invalid-selection-evidence",
+    );
+    const attempt = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "historical-invalid-attempt",
+      action_id: launch.action_id,
+      outcome: "agent",
+      replacement_eligible: false,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: { input_tokens: 0, output_tokens: 0 },
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    const selection: TerminalSelection = {
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: deterministicId("terminal", attempt.attempt_id),
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "historical-import", role: "migration" },
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: attempt.attempt_id,
+      outcome: attempt.outcome,
+      reason: "historical selection retained for audit",
+    };
+    await control.store.create(
+      controlRecordPath(selection),
+      new TextEncoder().encode(canonicalJson(selection)),
+    );
+    const rebuilt = await Projection.open(`${control.root}/historical-invalid.sqlite`);
+
+    await rebuilt.rebuild(control.store);
+
+    expect(await rebuilt.campaign(result.campaign_id)).toMatchObject({
+      status: "completed-invalid",
+      terminal_tasks: 1,
+      admissible_tasks: 0,
+      invalid_selected_tasks: 1,
+      publication_status: null,
+    });
+    await rebuilt.close();
+  });
+
+  it("retries a worker-reported cancellation without selecting it", async () => {
+    const control = await createTestControl(1, 2, 0, false, "forbidden", undefined, [
+      "input_tokens",
+      "output_tokens",
+    ]);
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "worker-cancelled-attempt-key",
+      operator,
+    );
+    let launches = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          launches += 1;
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-cancelled-${launches}`,
+          };
+        }
+        if (intent.action_kind === "job.observe") {
+          const launchActionId = String(intent.payload.launch_action_id);
+          if (
+            !(await control.projection.attemptForActionTask(launchActionId, "task-001"))
+          ) {
+            const evidence = await putEvidenceReference(
+              control,
+              `worker-cancelled-evidence-${launches}`,
+            );
+            await control.service.attempt({
+              campaign_id: result.campaign_id,
+              task_id: "task-001",
+              attempt_id: `worker-cancelled-attempt-${launches}`,
+              action_id: launchActionId,
+              outcome: launches === 1 ? "cancelled" : "complete",
+              replacement_eligible: false,
+              ...evidence,
+              cost_microusd: 0,
+              metrics:
+                launches === 1
+                  ? { input_tokens: 0, output_tokens: 0 }
+                  : { input_tokens: 10, output_tokens: 2, reward: 1 },
+              completed_at: `2026-08-16T00:00:0${launches}.000Z`,
+            });
+          }
+          return {
+            outcome: "completed",
+            observed_state: "COMPLETED",
+            resource_id: `job-cancelled-${launches}`,
+          };
+        }
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 20);
+
+    expect(launches).toBe(2);
+    const task = await control.projection.task(result.campaign_id, "task-001");
+    expect(task?.task.selected_attempt_id).toBe("worker-cancelled-attempt-2");
+    expect(task?.attempts).toMatchObject([
+      { outcome: "cancelled", replacement_eligible: 0 },
+      { outcome: "complete", replacement_eligible: 0 },
+    ]);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      status: "completed",
+      admissible_tasks: 1,
+      invalid_selected_tasks: 0,
       publication_status: "published",
     });
   });
@@ -1885,6 +3683,11 @@ describe("control service", () => {
         status: "completed",
         terminal_tasks: 1,
       });
+      expect(
+        (await control.projection.campaignActions(result.campaign_id)).filter(
+          (action) => action.action_kind === "job.launch",
+        ),
+      ).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1971,7 +3774,87 @@ describe("control service", () => {
     });
     expect(await control.projection.actionAdvanced(command.action_id)).toBe(true);
     expect(
-      await control.projection.pendingDispatchedSandboxExecActions(
+      await control.projection.pendingDispatchedSandboxCommandActions(
+        result.campaign_id,
+        "task-001",
+      ),
+    ).toEqual([]);
+  });
+
+  it("settles dispatched Sandbox reads and writes when their Sandboxes close", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "close-settles-file-actions-campaign-key",
+      operator,
+    );
+
+    for (const [label, actionKind] of [
+      ["read", "sandbox.read"],
+      ["write", "sandbox.write"],
+    ] as const) {
+      const action = await appendClosedSandboxAmbiguity(
+        control,
+        result.campaign_id,
+        "task-001",
+        label,
+        "service",
+        actionKind,
+      );
+      expect(await control.projection.action(action.action_id)).toMatchObject({
+        outcome: "failed",
+        observed_state: "AMBIGUOUS",
+      });
+      expect(await control.projection.actionAdvanced(action.action_id)).toBe(true);
+    }
+
+    expect(
+      await control.projection.pendingDispatchedSandboxCommandActions(
+        result.campaign_id,
+        "task-001",
+      ),
+    ).toEqual([]);
+  });
+
+  it("reconciles a dispatched Sandbox file action after its Sandbox closed", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "reconcile-closed-file-action-campaign-key",
+      operator,
+    );
+    const action = await appendClosedSandboxAmbiguity(
+      control,
+      result.campaign_id,
+      "task-001",
+      "reconcile-read",
+      "historical",
+      "sandbox.read",
+    );
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      {
+        interval_ms: 100,
+        observation_interval_ms: 0,
+        batch_size: 16,
+        dispatch_adoption_delay_ms: 0,
+      },
+    );
+
+    await settle(reconciler);
+
+    expect(await control.projection.action(action.action_id)).toMatchObject({
+      outcome: "failed",
+      observed_state: "AMBIGUOUS",
+    });
+    expect(await control.projection.actionAdvanced(action.action_id)).toBe(true);
+    expect(
+      await control.projection.pendingDispatchedSandboxCommandActions(
         result.campaign_id,
         "task-001",
       ),
@@ -2050,7 +3933,7 @@ describe("control service", () => {
     });
     const pendingQuery = vi.spyOn(
       control.projection,
-      "pendingDispatchedSandboxExecActions",
+      "pendingDispatchedSandboxCommandActions",
     );
     let closeCompleted = false;
     const closeCompletion = control.service
@@ -2070,7 +3953,7 @@ describe("control service", () => {
     });
     expect(await control.projection.actionAdvanced(command.action_id)).toBe(true);
     expect(
-      await control.projection.pendingDispatchedSandboxExecActions(
+      await control.projection.pendingDispatchedSandboxCommandActions(
         result.campaign_id,
         "task-001",
       ),
@@ -2234,7 +4117,7 @@ describe("control service", () => {
       "retry",
     );
     expect(
-      await control.projection.pendingDispatchedSandboxExecActions(
+      await control.projection.pendingDispatchedSandboxCommandActions(
         result.campaign_id,
         "task-001",
       ),
@@ -2261,7 +4144,7 @@ describe("control service", () => {
     });
     expect(await control.projection.actionAdvanced(command.action_id)).toBe(true);
     expect(
-      await control.projection.pendingDispatchedSandboxExecActions(
+      await control.projection.pendingDispatchedSandboxCommandActions(
         result.campaign_id,
         "task-001",
       ),
@@ -2297,7 +4180,10 @@ describe("control service", () => {
       observed_state: "AMBIGUOUS",
     });
     expect(
-      await rebuilt.pendingDispatchedSandboxExecActions(result.campaign_id, "task-001"),
+      await rebuilt.pendingDispatchedSandboxCommandActions(
+        result.campaign_id,
+        "task-001",
+      ),
     ).toEqual([]);
     await rebuilt.close();
   });
@@ -2961,6 +4847,518 @@ describe("control service", () => {
     });
   });
 
+  it("retries a sealed infrastructure outcome and accepts a replacement attempt", async () => {
+    const control = await createTestControl(1, 2, 150_000);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "sealed-infrastructure-retry-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 150_000,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "sealed-infrastructure-retry-evidence",
+    );
+    const attempt = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-sealed-infrastructure",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    await control.service.append({
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: deterministicId(
+        "terminal",
+        result.campaign_id,
+        "task-001",
+        attempt.attempt_id,
+      ),
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: attempt.attempt_id,
+      outcome: "infrastructure",
+      reason: "historical infrastructure seal",
+    });
+    expect(
+      (await control.projection.task(result.campaign_id, "task-001"))?.task,
+    ).toMatchObject({ terminal_outcome: "infrastructure" });
+
+    const retry = await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: "task-001",
+        reason: "retry sealed infrastructure",
+        confirmed: true,
+      },
+      "sealed-infrastructure-retry-key",
+      operator,
+    );
+    const replacementEvidence = await putEvidenceReference(
+      control,
+      "sealed-infrastructure-replacement-evidence",
+    );
+    const replacement = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-sealed-infrastructure-replacement",
+      action_id: retry.action_id,
+      outcome: "complete",
+      replacement_eligible: false,
+      ...replacementEvidence,
+      cost_microusd: 0,
+      metrics: { input_tokens: 1, output_tokens: 1 },
+      completed_at: "2026-08-16T00:00:03.000Z",
+    });
+    await control.service.selectTerminal(replacement, "replacement scored");
+    expect(
+      (await control.projection.task(result.campaign_id, "task-001"))?.task,
+    ).toMatchObject({
+      terminal_outcome: "complete",
+      selected_attempt_id: replacement.attempt_id,
+    });
+  });
+
+  it("retries every eligible infrastructure task when no task is specified", async () => {
+    const control = await createTestControl(2, 2, 150_000);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "batch-infrastructure-retry-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_ids: ["task-001", "task-002"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 150_000,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "batch-infrastructure-retry-evidence",
+    );
+    for (const [index, taskId] of ["task-001", "task-002"].entries()) {
+      await control.service.attempt({
+        campaign_id: result.campaign_id,
+        task_id: taskId,
+        attempt_id: `attempt-batch-infrastructure-${index + 1}`,
+        action_id: launch.action_id,
+        outcome: "infrastructure",
+        replacement_eligible: true,
+        ...evidence,
+        cost_microusd: 0,
+        metrics: {},
+        completed_at: "2026-08-16T00:00:01.000Z",
+      });
+    }
+
+    const retry = await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry eligible infrastructure failures",
+        confirmed: true,
+      },
+      "batch-infrastructure-retry-key",
+      operator,
+    );
+    const retryRow = await control.projection.action(retry.action_id);
+    expect(retryRow).toMatchObject({ action_kind: "job.launch" });
+    expect(JSON.parse(retryRow?.intent_body ?? "{}")).toMatchObject({
+      payload: { task_ids: ["task-001", "task-002"] },
+    });
+    const launches = (
+      await control.projection.campaignActions(result.campaign_id)
+    ).filter((action) => action.action_kind === "job.launch");
+    expect(launches).toHaveLength(2);
+    expect(
+      await control.service.campaignAction(
+        result.campaign_id,
+        {
+          action: "retry_infrastructure",
+          task_id: null,
+          reason: "retry eligible infrastructure failures",
+          confirmed: true,
+        },
+        "batch-infrastructure-retry-key",
+        operator,
+      ),
+    ).toMatchObject({ action_id: retry.action_id, adopted: true });
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "COMPLETED",
+      resource_id: "batch-original-job",
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      replacement_assigned_tasks: 2,
+      replacement_recorded_tasks: 0,
+    });
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-batch-replacement-1",
+      action_id: retry.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:03.000Z",
+    });
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      replacement_assigned_tasks: 2,
+      replacement_recorded_tasks: 1,
+    });
+  });
+
+  it("retries after an unselected policy receipt on an infrastructure seal", async () => {
+    const control = await createTestControl(1, 2, 0);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "unselected-policy-retry-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "unselected-policy-retry-evidence",
+    );
+    const sealed = await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-unselected-policy-infra",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    await control.service.append({
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: deterministicId(
+        "terminal",
+        result.campaign_id,
+        "task-001",
+        sealed.attempt_id,
+      ),
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: sealed.attempt_id,
+      outcome: "infrastructure",
+      reason: "infrastructure seal",
+    });
+    const failedLaunch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "eligible",
+      1,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(failedLaunch);
+    const failedReceipt = await control.service.receipt(failedLaunch, {
+      outcome: "created",
+      observed_state: "RUNNING",
+      resource_id: "unselected-policy-job",
+    });
+    await control.service.markAdvanced(failedLaunch, failedReceipt);
+    const failedObserve = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      "unselected-policy-job",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        launch_action_id: failedLaunch.action_id,
+        success_without_worker_receipt: false,
+      },
+    );
+    await control.service.writeAction(failedObserve);
+    await control.service.markAdvanced(
+      failedObserve,
+      await control.service.receipt(failedObserve, {
+        outcome: "completed",
+        observed_state: "COMPLETED",
+        resource_id: "unselected-policy-job",
+      }),
+    );
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-unselected-policy",
+      action_id: failedLaunch.action_id,
+      outcome: "policy",
+      replacement_eligible: false,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:02.000Z",
+    });
+    expect(
+      (await control.projection.task(result.campaign_id, "task-001"))?.task,
+    ).toMatchObject({ terminal_outcome: "infrastructure" });
+    const retry = await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry after unselected policy receipt",
+        confirmed: true,
+      },
+      "unselected-policy-retry-key",
+      operator,
+    );
+    expect(await control.projection.action(retry.action_id)).toMatchObject({
+      action_kind: "job.launch",
+    });
+  });
+
+  it("dispatches an infrastructure retry after tasks are already sealed", async () => {
+    const control = await createTestControl(1, 2, 0);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 180_000_000 },
+      "sealed-retry-dispatch-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(launch);
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "ERROR",
+      resource_id: "sealed-retry-dispatch-job",
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+    const observe = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      "sealed-retry-dispatch-job",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        launch_action_id: launch.action_id,
+        success_without_worker_receipt: false,
+      },
+    );
+    await control.service.writeAction(observe);
+    const observeReceipt = await control.service.receipt(observe, {
+      outcome: "completed",
+      observed_state: "ERROR",
+      resource_id: "sealed-retry-dispatch-job",
+    });
+    await control.service.markAdvanced(observe, observeReceipt);
+    const evidence = await putEvidenceReference(
+      control,
+      "sealed-retry-dispatch-evidence",
+    );
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-sealed-retry-dispatch",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    const launches: string[][] = [];
+    const noop = new NoopActions();
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      {
+        execute: async (intent): Promise<ExternalActionResult> => {
+          if (intent.action_kind === "job.launch")
+            launches.push([...(intent.payload.task_ids ?? [])]);
+          return noop.execute(intent);
+        },
+      },
+      new ResultPublisher(control.store, control.projection, control.service),
+      {
+        interval_ms: 100,
+        observation_interval_ms: 0,
+        batch_size: 16,
+        dispatch_adoption_delay_ms: 0,
+      },
+    );
+    await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry sealed infrastructure",
+        confirmed: true,
+      },
+      "sealed-retry-dispatch-key",
+      operator,
+    );
+    await settle(reconciler, 4);
+    expect(launches.length).toBeGreaterThan(0);
+    expect(launches.every((taskIds) => taskIds.join() === "task-001")).toBe(true);
+  });
+
+  it("releases a terminal Job reservation before retrying infrastructure", async () => {
+    const control = await createTestControl(1, 2, 150_000);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 150_000 },
+      "terminal-reservation-retry-campaign-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.campaign_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        max_infrastructure_attempts: 2,
+        reservation_microusd: 150_000,
+      },
+    );
+    await control.service.append({
+      schema_version: "v1",
+      kind: "budget.event",
+      record_id: deterministicId(
+        "budget",
+        result.campaign_id,
+        executionReservationCategory(["task-001"]),
+        "0",
+      ),
+      created_at: "2026-08-16T00:00:00.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: result.campaign_id,
+      event_kind: "reserve",
+      amount_microusd: 150_000,
+    });
+    await control.service.writeAction(launch);
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "ERROR",
+      resource_id: "terminal-reservation-job",
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+    const observe = control.service.actionIntent(
+      result.campaign_id,
+      "job.observe",
+      "terminal-reservation-job",
+      0,
+      {
+        worker_role: "execution",
+        task_ids: ["task-001"],
+        launch_action_id: launch.action_id,
+      },
+    );
+    await control.service.writeAction(observe);
+    const observeReceipt = await control.service.receipt(observe, {
+      outcome: "failed",
+      observed_state: "ERROR",
+      resource_id: "terminal-reservation-job",
+    });
+    await control.service.markAdvanced(observe, observeReceipt);
+    const evidence = await putEvidenceReference(
+      control,
+      "terminal-reservation-retry-evidence",
+    );
+    await control.service.attempt({
+      campaign_id: result.campaign_id,
+      task_id: "task-001",
+      attempt_id: "attempt-terminal-reservation",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      reserved_microusd: 150_000,
+    });
+
+    await control.service.campaignAction(
+      result.campaign_id,
+      {
+        action: "retry_infrastructure",
+        task_id: null,
+        reason: "retry after terminal Job reservation",
+        confirmed: true,
+      },
+      "terminal-reservation-retry-key",
+      operator,
+    );
+    expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
+      reserved_microusd: 150_000,
+    });
+  });
+
   it("includes observed overage when admitting a replacement", async () => {
     const control = await createTestControl(1, 2, 50);
     controls.push(control);
@@ -3068,7 +5466,7 @@ describe("control service", () => {
     });
   });
 
-  it("does not launch a replacement Job without another budget reservation", async () => {
+  it("releases each failed Job reservation before reserving its replacement", async () => {
     const control = await createTestControl(1, 2, 6);
     controls.push(control);
     const result = await control.service.submit(
@@ -3099,11 +5497,12 @@ describe("control service", () => {
 
     await settle(reconciler, 12);
 
-    expect(launches).toBe(1);
+    expect(launches).toBe(2);
     expect(await control.projection.campaign(result.campaign_id)).toMatchObject({
-      status: "completed",
-      reserved_microusd: 6,
+      status: "failed",
+      reserved_microusd: 0,
       terminal_tasks: 1,
+      exhausted_tasks: 1,
     });
   });
 
@@ -3403,6 +5802,173 @@ describe("control service", () => {
       }),
     ).rejects.toThrow("worker attempt cost exceeds the campaign ceiling");
     expect(await control.projection.attemptById("over-budget-attempt")).toBeNull();
+  });
+
+  it("records publication supersession without changing either publication", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    const oldCampaign = await control.service.submit(
+      submission,
+      "supersession-old-campaign",
+      operator,
+    );
+    await settle(reconciler, 8);
+    const oldPublication = await control.projection.campaignPublication(
+      oldCampaign.campaign_id,
+    );
+    expect(oldPublication?.status).toBe("published");
+    const oldBody = oldPublication?.body;
+
+    const newCampaign = await control.service.submit(
+      submission,
+      "supersession-new-campaign",
+      operator,
+    );
+    await settle(reconciler, 8);
+    const newPublication = await control.projection.campaignPublication(
+      newCampaign.campaign_id,
+    );
+    expect(newPublication?.status).toBe("published");
+
+    const supersedeAction = await control.service.campaignAction(
+      newCampaign.campaign_id,
+      {
+        action: "supersede",
+        publication_id: oldPublication?.publication_id,
+        reason: "replacement publication validated",
+        confirmed: true,
+      },
+      "supersede-publication-key",
+      operator,
+    );
+    await reconciler.tick();
+    expect(
+      (await control.projection.action(supersedeAction.action_id))?.receipt_body,
+    ).not.toBeNull();
+    const repeated = await control.service.writePublicationSupersession(
+      newCampaign.campaign_id,
+      newPublication?.publication_id ?? "missing-publication",
+      oldCampaign.campaign_id,
+      oldPublication?.publication_id ?? "missing-publication",
+      "replacement publication validated",
+    );
+    expect(repeated.record_id).toMatch(/^publication-supersession-/);
+    await settle(reconciler, 2);
+    expect(canonicalJson(repeated).trimEnd()).toBe(
+      (
+        await control.projection.publicationSupersession(
+          oldPublication?.publication_id ?? "missing-publication",
+        )
+      )?.body,
+    );
+
+    expect(await control.projection.publicationSupersessions()).toMatchObject([
+      {
+        publication_id: newPublication?.publication_id,
+        superseded_campaign_id: oldCampaign.campaign_id,
+        superseded_publication_id: oldPublication?.publication_id,
+      },
+    ]);
+    expect(
+      (await control.projection.campaignPublication(oldCampaign.campaign_id))?.body,
+    ).toBe(oldBody);
+    const adoptedSupersession = await control.service.campaignAction(
+      newCampaign.campaign_id,
+      {
+        action: "supersede",
+        publication_id: oldPublication?.publication_id,
+        reason: "replacement publication validated",
+        confirmed: true,
+      },
+      "supersede-publication-key",
+      operator,
+    );
+    expect(adoptedSupersession).toMatchObject({
+      action_id: supersedeAction.action_id,
+      adopted: true,
+    });
+
+    const laterCampaign = await control.service.submit(
+      submission,
+      "supersession-later-campaign",
+      operator,
+    );
+    await settle(reconciler, 8);
+    await expect(
+      control.service.campaignAction(
+        laterCampaign.campaign_id,
+        {
+          action: "supersede",
+          publication_id: oldPublication?.publication_id,
+          reason: "second replacement must fail",
+          confirmed: true,
+        },
+        "duplicate-supersession-key",
+        operator,
+      ),
+    ).rejects.toThrow("publication is already superseded");
+  });
+
+  it("rebuilds supersession after publications regardless of object path order", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    const published: Array<{ campaign_id: string; publication_id: string }> = [];
+    for (const key of ["ordered-supersession-a", "ordered-supersession-b"]) {
+      const campaign = await control.service.submit(submission, key, operator);
+      await settle(reconciler, 8);
+      const publication = await control.projection.campaignPublication(
+        campaign.campaign_id,
+      );
+      if (!publication) throw new Error("publication is missing");
+      published.push({
+        campaign_id: campaign.campaign_id,
+        publication_id: publication.publication_id,
+      });
+    }
+    const [replacement, previous] = published.sort((left, right) =>
+      left.campaign_id.localeCompare(right.campaign_id),
+    );
+    if (!replacement || !previous) throw new Error("test publications are missing");
+    await control.service.campaignAction(
+      replacement.campaign_id,
+      {
+        action: "supersede",
+        publication_id: previous.publication_id,
+        reason: "verify replay order independence",
+        confirmed: true,
+      },
+      "ordered-supersession-action",
+      operator,
+    );
+    await settle(reconciler, 3);
+    expect(replacement.campaign_id < previous.campaign_id).toBe(true);
+    const rebuilt = await Projection.open(`${control.root}/supersession-order.sqlite`);
+
+    await rebuilt.rebuild(control.store);
+
+    expect(await rebuilt.publicationSupersessions()).toMatchObject([
+      {
+        campaign_id: replacement.campaign_id,
+        publication_id: replacement.publication_id,
+        superseded_campaign_id: previous.campaign_id,
+        superseded_publication_id: previous.publication_id,
+      },
+    ]);
+    await rebuilt.close();
   });
 
   it("recovers publication after a crash between terminal selection and intent", async () => {

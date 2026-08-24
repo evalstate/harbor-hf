@@ -9,8 +9,12 @@ import {
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
-const WORKER_REVISION = "eec0829abf75e8d3f271c8114462a2ffc3dfecbf";
-const PREVIOUS_WORKER_REVISION = "422cf445ce04cfc8f331ddeebfd88f6bc2c5eae9";
+const WORKER_REVISION = "66d85304eb0c0fcf0c955a35522001decb499e9e";
+const FX_WORKER_REVISION = "9cd5bfbb6b340684b5d4098f1d5122e6c00baafc";
+const DEEPSEEK_WORKER_REVISION = "3a6af70769288614b58fc10ca764c528305bf496";
+const HARBOR_SOURCE =
+  "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
+const BRIDGE_REVISION = "c5ffef26652129bc3354be5b3bc9c9ba8110629b";
 const BRIDGE_DIGESTS = [
   "a67e6442b5a9be11591699aaf8a861c021ac1e49c10bcd09992ab562098ea2eb",
   "ec80056b2eba539040bd411848b8e09f5dfce2066f715f814f40c8d909222da4",
@@ -42,6 +46,7 @@ function protectedDeployment(spec: Record<string, unknown>): Record<string, unkn
     preparation_job_command: _preparationCommand,
     job_command: _jobCommand,
     worker_revision: _workerRevision,
+    harbor_version: _harborVersion,
     worker_concurrency: _workerConcurrency,
     worker_max_tasks_per_job: _workerCapacity,
     sandbox_template: sandboxValue,
@@ -50,6 +55,7 @@ function protectedDeployment(spec: Record<string, unknown>): Record<string, unkn
   const {
     root_bootstrap_command: _bootstrapCommand,
     max_sandboxes: _maxSandboxes,
+    inference_max_total_concurrency: _inferenceTotal,
     ...protectedSandbox
   } = record(sandboxValue);
   return { ...protectedSpec, sandbox_template: protectedSandbox };
@@ -168,7 +174,16 @@ describe("Terminal-Bench 2.1 profiles", () => {
       [replacement, 1, 1, 1],
       [diagnostic, 89, 8, 16],
     ] as const) {
-      expect(spec.worker_revision).toBe(WORKER_REVISION);
+      expect(spec.worker_revision).toBe(DEEPSEEK_WORKER_REVISION);
+      expect(spec.harbor_version).toBe("0.22.0");
+      expect((spec.preparation_job_command as string[]).join("\n")).toContain(
+        HARBOR_SOURCE,
+      );
+      expect((spec.job_command as string[]).join("\n")).toContain(HARBOR_SOURCE);
+      expect((spec.preparation_job_command as string[]).join("\n")).not.toContain(
+        "harbor==",
+      );
+      expect((spec.job_command as string[]).join("\n")).not.toContain("harbor==");
       expect(spec.worker_max_tasks_per_job).toBe(capacity);
       expect(spec.worker_concurrency).toBe(concurrency);
 
@@ -176,10 +191,11 @@ describe("Terminal-Bench 2.1 profiles", () => {
       const jobCommand = (spec.job_command as string[]).join("\n");
       const sandbox = record(spec.sandbox_template);
       const bootstrapCommand = (sandbox.root_bootstrap_command as string[]).join("\n");
-      for (const command of [preparationCommand, jobCommand, bootstrapCommand]) {
-        expect(command).toContain(WORKER_REVISION);
-        expect(command).not.toContain(PREVIOUS_WORKER_REVISION);
+      for (const command of [preparationCommand, jobCommand]) {
+        expect(command).toContain(DEEPSEEK_WORKER_REVISION);
+        expect(command).not.toContain(BRIDGE_REVISION);
       }
+      expect(bootstrapCommand).toContain(BRIDGE_REVISION);
       for (const digest of BRIDGE_DIGESTS) expect(bootstrapCommand).toContain(digest);
 
       expect(spec.inference_token).toBe("forbidden");
@@ -188,6 +204,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
         "deepseek-ai/DeepSeek-V4-Flash-0731:together",
       );
       expect(sandbox.max_sandboxes).toBe(maxSandboxes);
+      expect(sandbox.inference_max_total_concurrency).toBe(maxSandboxes);
       expect(bootstrapCommand).not.toContain("HF_TOKEN=");
     }
   });
@@ -200,8 +217,8 @@ describe("Terminal-Bench 2.1 profiles", () => {
     const replacement = record(replacementProfile.spec);
     const diagnostic = record(diagnosticProfile.spec);
 
-    expect(replacementProfile.record_id).toBe("profile-ff9e906d69e089a009d00fe8");
-    expect(diagnosticProfile.record_id).toBe("profile-ede7617f34276455bde5e8b5");
+    expect(replacementProfile.record_id).toBe("profile-9b1754162d643cd43f0c6eb1");
+    expect(diagnosticProfile.record_id).toBe("profile-49541f39549599a0a12777f5");
     const immutableIds = new Map(
       (await loadBuiltInProfiles("profiles")).map((item) => [
         item.profile.name,
@@ -209,10 +226,10 @@ describe("Terminal-Bench 2.1 profiles", () => {
       ]),
     );
     expect(immutableIds.get("tb21-replacement")).toBe(
-      "sha256:485dc1ad6c00550478db1b2cba6f0fcacc579e49244fd9cc1cdddf56014abcea",
+      "sha256:beb8167aec481e08ce6cbabfc0e93d32f14fba8b4fb8ff0302999708b245f3f4",
     );
     expect(immutableIds.get("tb21-diagnostic-1")).toBe(
-      "sha256:60fdb06aa333652caf69506586d724e4f2b766c427f70f0f38c718b44d59604a",
+      "sha256:2b51928ce4349f64a7bc22aee7a83e7859a93b80fd2adbfc55e78af2c8aae59b",
     );
     expect(replacement).toEqual({
       ...canary,
@@ -232,6 +249,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(spec.max_campaign_ceiling_microusd).toBe(maximum);
       expect(spec.success_without_worker_receipt).toBe(false);
       expect(spec.publication_role).toBe("diagnostic");
+      expect(spec.required_positive_metrics).toEqual(["input_tokens", "output_tokens"]);
     }
   });
 
@@ -301,5 +319,103 @@ describe("Terminal-Bench 2.1 profiles", () => {
     expect(record(deployment.sandbox_template).inference_upstream).toBe(
       "https://router.huggingface.co/v1",
     );
+  });
+
+  it("pins gpt-oss-20b Chat Completions harnesses without Harbor name", async () => {
+    const model = record((await profile("model", "gpt-oss-20b")).spec);
+    const expected = [
+      ["qwen-code", "harbor_hf_agents.qwen_code.agent:QwenCodeAgent", "0.21.15"],
+      ["fx", "harbor_hf_agents.fx.agent:FxAgent", "0.0.5"],
+      ["mini-swe-agent", "harbor_hf_agents.mini_swe.agent:MiniSweAgent", "2.4.6"],
+      ["kimi-code", "harbor_hf_agents.kimi_code.agent:KimiCodeAgent", "0.38.0"],
+      ["openhands", "harbor_hf_agents.openhands.agent:OpenHandsAgent", "1.6.0"],
+      ["pi", "harbor_hf_agents.pi.agent:PiAgent", "0.84.2"],
+      [
+        "hermes",
+        "harbor_hf_agents.hermes.agent:HermesAgent",
+        "b6bcb3e791c673e63974029bbab40cc9326803ff",
+      ],
+      ["openclaw", "harbor_hf_agents.openclaw.agent:OpenClawAgent", "2026.7.1-2"],
+    ] as const;
+    for (const [name, importPath, revision] of expected) {
+      const harness = record((await profile("harness", name)).spec);
+      const harborAgent = record(harness.harbor_agent);
+      expect(harness.agent).toBe(name);
+      expect(harness.revision).toBe(revision);
+      expect(harness.reasoning_effort).toBe("off");
+      expect(harborAgent.import_path).toBe(importPath);
+      expect(harborAgent.model_name).toBe(model.harbor_model_name);
+      expect(harborAgent).not.toHaveProperty("name");
+      if (name === "hermes" || name === "openhands") {
+        expect(harborAgent.override_setup_timeout_sec).toBe(1800);
+      }
+    }
+  });
+
+  it("pins gpt-oss-20b provider deployments to the Chat Completions worker zip", async () => {
+    const pin = WORKER_REVISION;
+    for (const harness of [
+      "qwen-code",
+      "mini-swe-agent",
+      "kimi-code",
+      "openhands",
+      "pi",
+      "hermes",
+      "openclaw",
+    ]) {
+      const deployment = record(
+        (await profile("deployment", `tb21-gpt-oss-20b-${harness}-providers`)).spec,
+      );
+      expect(deployment.models).toEqual(["gpt-oss-20b"]);
+      expect(deployment.harnesses).toEqual([harness]);
+      expect(deployment.worker_revision).toBe(pin);
+      expect(deployment.harbor_version).toBe("0.22.0");
+      expect(deployment.inference_provider).toBe("together");
+      const jobCommand = (deployment.job_command as string[]).join("\n");
+      expect(jobCommand).toContain(pin);
+      expect(jobCommand).toContain(HARBOR_SOURCE);
+      expect(jobCommand).not.toContain("harbor==");
+    }
+    const fx = record(
+      (await profile("deployment", "tb21-gpt-oss-20b-fx-providers")).spec,
+    );
+    expect(fx.models).toEqual(["gpt-oss-20b"]);
+    expect(fx.harnesses).toEqual(["fx"]);
+    expect(fx.worker_revision).toBe(FX_WORKER_REVISION);
+    expect(fx.harbor_version).toBe("0.22.0");
+    const fxJob = (fx.job_command as string[]).join("\n");
+    expect(fxJob).toContain(FX_WORKER_REVISION);
+    expect(fxJob).toContain(HARBOR_SOURCE);
+    expect(fxJob).not.toContain("harbor==");
+  });
+
+  it("installs Harbor from a pinned git commit on every Terminal-Bench deployment", async () => {
+    const names = [
+      "tb21-deepseek-v4-flash-canary",
+      "tb21-deepseek-v4-flash-official-5",
+      "tb21-deepseek-v4-flash-replacement",
+      "tb21-deepseek-v4-flash-diagnostic-1",
+      "tb21-deepseek-v4-flash-dsh-providers",
+      "tb21-gpt-oss-20b-dsh-providers",
+      "tb21-gpt-oss-20b-opencode-providers",
+      "tb21-gpt-oss-20b-qwen-code-providers",
+      "tb21-gpt-oss-20b-fx-providers",
+      "tb21-gpt-oss-20b-mini-swe-agent-providers",
+      "tb21-gpt-oss-20b-pi-providers",
+      "tb21-gpt-oss-20b-kimi-code-providers",
+      "tb21-gpt-oss-20b-hermes-providers",
+      "tb21-gpt-oss-20b-openhands-providers",
+      "tb21-gpt-oss-20b-openclaw-providers",
+    ];
+    for (const name of names) {
+      const deployment = record((await profile("deployment", name)).spec);
+      const preparation = (deployment.preparation_job_command as string[]).join("\n");
+      const job = (deployment.job_command as string[]).join("\n");
+      expect(deployment.harbor_version).toBe("0.22.0");
+      for (const command of [preparation, job]) {
+        expect(command).toContain(HARBOR_SOURCE);
+        expect(command).not.toContain("harbor==");
+      }
+    }
   });
 });

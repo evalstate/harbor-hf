@@ -14,6 +14,8 @@ app = typer.Typer(
 )
 campaign_app = typer.Typer(no_args_is_help=True, help="Submit and inspect campaigns.")
 app.add_typer(campaign_app, name="campaign")
+capacity_app = typer.Typer(help="Inspect and set the shared namespace Sandbox cap.")
+app.add_typer(capacity_app, name="capacity")
 
 
 def _base_url() -> str:
@@ -79,6 +81,44 @@ def _echo(value: object) -> None:
     typer.echo(json.dumps(value, indent=2, sort_keys=True))
 
 
+@capacity_app.callback(invoke_without_command=True)
+def capacity(ctx: typer.Context) -> None:
+    """Show the shared namespace Sandbox cap."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _echo(_request("GET", "/api/v1/capacity"))
+
+
+@capacity_app.command("set")
+def capacity_set(
+    max_sandboxes: Annotated[int, typer.Option("--max-sandboxes", min=1, max=1024)],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm the namespace Sandbox cap change."),
+    ] = False,
+) -> None:
+    """Replace the promoted namespace Sandbox cap and start pacing."""
+    if not yes:
+        typer.confirm(
+            f"Set the namespace Sandbox cap to {max_sandboxes}? "
+            "Existing campaigns keep their locked per-run Sandbox and worker limits.",
+            abort=True,
+        )
+    key = str(uuid4())
+    typer.echo(json.dumps({"idempotency_key": key}), err=True)
+    _echo(
+        _request(
+            "POST",
+            "/api/v1/capacity",
+            payload={
+                "max_active_sandboxes": max_sandboxes,
+                "confirmed": True,
+            },
+            idempotency_key=key,
+        )
+    )
+
+
 @app.command("status")
 def status() -> None:
     """Show control-service readiness and write mode."""
@@ -106,6 +146,7 @@ def campaign_submit(
     launch_policy: Annotated[str, typer.Option("--launch-policy")],
     deployment: Annotated[str | None, typer.Option("--deployment")] = None,
     idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
+    start_paused: Annotated[bool, typer.Option("--start-paused")] = False,
     yes: Annotated[
         bool,
         typer.Option("--yes", help="Confirm the resolved launch and cost ceiling."),
@@ -130,6 +171,8 @@ def campaign_submit(
         "ceiling_microusd": ceiling_microusd,
         "confirmed": True,
     }
+    if start_paused:
+        payload["start_paused"] = True
     _echo(_request("POST", "/api/v1/campaigns", payload=payload, idempotency_key=key))
 
 
@@ -139,6 +182,8 @@ def _campaign_action(
     *,
     task_id: str | None = None,
     reason: str | None = None,
+    task_limit: int | None = None,
+    publication_id: str | None = None,
     yes: bool,
 ) -> None:
     if not yes:
@@ -150,16 +195,21 @@ def _campaign_action(
         typer.confirm(prompt, abort=True)
     key = str(uuid4())
     typer.echo(json.dumps({"idempotency_key": key}), err=True)
+    payload: dict[str, object] = {
+        "action": action,
+        "task_id": task_id,
+        "reason": reason,
+        "confirmed": True,
+    }
+    if task_limit is not None:
+        payload["task_limit"] = task_limit
+    if publication_id is not None:
+        payload["publication_id"] = publication_id
     _echo(
         _request(
             "POST",
             f"/api/v1/campaigns/{campaign_id}/actions",
-            payload={
-                "action": action,
-                "task_id": task_id,
-                "reason": reason,
-                "confirmed": True,
-            },
+            payload=payload,
             idempotency_key=key,
         )
     )
@@ -175,18 +225,65 @@ def campaign_cancel(
     _campaign_action(campaign_id, "cancel", reason=reason, yes=yes)
 
 
+@campaign_app.command("pause")
+def campaign_pause(
+    campaign_id: Annotated[str, typer.Argument()],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Stop new task admission at the next durable task boundary."""
+    _campaign_action(campaign_id, "pause", reason=reason, yes=yes)
+
+
+@campaign_app.command("resume")
+def campaign_resume(
+    campaign_id: Annotated[str, typer.Argument()],
+    task_limit: Annotated[int | None, typer.Option("--task-limit", min=1)] = None,
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Resume unresolved tasks without repeating completed tasks."""
+    _campaign_action(
+        campaign_id,
+        "resume",
+        task_limit=task_limit,
+        reason=reason,
+        yes=yes,
+    )
+
+
+@campaign_app.command("supersede")
+def campaign_supersede(
+    campaign_id: Annotated[str, typer.Argument()],
+    publication_id: Annotated[str, typer.Option("--publication")],
+    reason: Annotated[str, typer.Option("--reason")],
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Mark an older publication superseded after this campaign publishes."""
+    _campaign_action(
+        campaign_id,
+        "supersede",
+        publication_id=publication_id,
+        reason=reason,
+        yes=yes,
+    )
+
+
 @campaign_app.command("retry-infrastructure")
 def campaign_retry_infrastructure(
     campaign_id: Annotated[str, typer.Argument()],
-    task_id: Annotated[str, typer.Option("--task")],
+    task_id: Annotated[str | None, typer.Option("--task")] = None,
+    all_eligible: Annotated[bool, typer.Option("--all-eligible")] = False,
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
     """Request a bounded infrastructure-only replacement."""
+    if all_eligible == bool(task_id):
+        _fail("provide exactly one of --task or --all-eligible")
     _campaign_action(
         campaign_id,
         "retry_infrastructure",
-        task_id=task_id,
+        task_id=None if all_eligible else task_id,
         reason=reason,
         yes=yes,
     )

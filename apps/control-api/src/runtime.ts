@@ -46,6 +46,7 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
   const projection = await Projection.open(config.projection_path);
   const profiles = await loadBuiltInProfiles(config.profiles_root);
   const service = new ControlService(config.namespace, store, projection, profiles);
+  service.configureCapacityProfile(config.capacity_profile_alias);
   const authStore = await AuthStore.open(config.auth_path);
   const auth = new AuthenticationService(
     config.auth_mode,
@@ -86,6 +87,11 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
       await auth.initialize();
       await projection.rebuild(store);
       await service.initialize(profiles);
+      if (config.write_mode !== "disabled") {
+        if (!service.capacityProfileOrNull())
+          await service.setMaxActiveSandboxes(config.max_active_sandboxes);
+        service.requireCapacityProfile();
+      }
       if (
         !(await projection.latestAcl()) &&
         config.bootstrap_operator_subjects.length > 0

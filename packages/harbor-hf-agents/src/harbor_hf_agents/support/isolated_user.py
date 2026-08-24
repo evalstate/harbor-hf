@@ -8,7 +8,7 @@ from typing import Any
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
 
-_AGENT_USER = "harbor-agent"
+AGENT_USER = "harbor-agent"
 _AGENT_HOME = "/tmp/harbor-agent-home"
 
 
@@ -22,12 +22,12 @@ class IsolatedProviderAgent(BaseInstalledAgent):
             environment,
             command=(
                 "set -euo pipefail; "
-                f"if ! id -u {_AGENT_USER} >/dev/null 2>&1; then "
+                f"if ! id -u {AGENT_USER} >/dev/null 2>&1; then "
                 f"useradd --create-home --home-dir {_AGENT_HOME} "
-                f"--shell /bin/bash {_AGENT_USER}; fi; "
-                f"install -d -m 0750 -o {_AGENT_USER} -g {_AGENT_USER} "
+                f"--shell /bin/bash {AGENT_USER}; fi; "
+                f"install -d -m 0750 -o {AGENT_USER} -g {AGENT_USER} "
                 f"{_AGENT_HOME} /logs/agent; "
-                f"chown -R {_AGENT_USER}:{_AGENT_USER} "
+                f"chown -R {AGENT_USER}:{AGENT_USER} "
                 f"/app /logs/agent {_AGENT_HOME}; "
                 "if [ -d /app/data ]; then "
                 "chown -R root:root /app/data; "
@@ -50,10 +50,10 @@ class IsolatedProviderAgent(BaseInstalledAgent):
     ) -> Any:  # noqa: ANN401 -- Harbor API
         await self._ensure_isolated_agent_user(environment)
         wrapped = (
-            f"runuser -u {_AGENT_USER} -- env "
+            f"runuser -u {AGENT_USER} -- env "
             f"HOME={shlex.quote(_AGENT_HOME)} "
             f"NVM_DIR={shlex.quote(_AGENT_HOME + '/.nvm')} "
-            f"USER={_AGENT_USER} LOGNAME={_AGENT_USER} "
+            f"USER={AGENT_USER} LOGNAME={AGENT_USER} "
             f"/bin/bash -lc {shlex.quote(command)}"
         )
         return await super().exec_as_root(

@@ -1,0 +1,24 @@
+"""Kimi Code over the Harbor-HF sandbox inference route."""
+
+from harbor.agents.installed.kimi_code import KimiCode
+
+from harbor_hf_agents.support.sandbox_chat_completions import (
+    SandboxChatCompletionsAgent,
+)
+
+
+class KimiCodeAgent(SandboxChatCompletionsAgent, KimiCode):
+    """Harbor Kimi Code bound to the locked sandbox loopback inference route.
+
+    Upstream Kimi Code reads ``KIMI_MODEL_API_KEY`` and ``KIMI_MODEL_BASE_URL``
+    from the process environment. Execution Jobs do not receive those values.
+    This wrapper loads ``/run/harbor-hf-inference.json`` and injects the
+    placeholder Chat Completions route.
+    """
+
+    route_base_url_key = "KIMI_MODEL_BASE_URL"
+    route_api_key_key = "KIMI_MODEL_API_KEY"
+    route_label = "Kimi Code"
+
+    def extend_route_env(self, env: dict[str, str]) -> None:
+        env["KIMI_MODEL_NAME"] = self.allowed_model_id()

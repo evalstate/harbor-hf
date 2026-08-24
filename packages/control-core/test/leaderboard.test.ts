@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CampaignLock, HarborHFResultCatalogV1 } from "@harbor-hf/contracts";
-import { canonicalJson } from "@harbor-hf/contracts";
+import {
+  canonicalJson,
+  deterministicId,
+  sha256,
+  validateLeaderboardSnapshot,
+} from "@harbor-hf/contracts";
 import { NoopActions } from "@harbor-hf/hf-adapters";
 import {
   createTestControl,
@@ -16,8 +21,13 @@ import {
   configurationDigest,
   configurationDigestFields,
   encodeLeaderboardSqlite,
+  LEADERBOARD_RECEIPT_PREFIX,
   LEADERBOARD_SNAPSHOT_PREFIX,
+  type LeaderboardRow,
   leaderboardEligible,
+  loadLatestLeaderboard,
+  paretoFrontier,
+  rankLeaderboardRows,
   refreshLeaderboardSnapshot,
 } from "../src/leaderboard.js";
 import type { LoadedProfile } from "../src/profiles.js";
@@ -402,3 +412,140 @@ describe("leaderboard sqlite snapshot", () => {
     database.close();
   });
 });
+
+function sampleRow(
+  overrides: Partial<LeaderboardRow> & Pick<LeaderboardRow, "configuration_digest">,
+): LeaderboardRow {
+  return {
+    campaign_id: "run-one",
+    publication_id: "publication-one",
+    published_at: "2026-08-21T00:00:00.000Z",
+    benchmark: "control-smoke",
+    model: "model-a",
+    harness: "harness-a",
+    inference_provider: "together",
+    reasoning_effort: "off",
+    harbor_version: "0.21.0",
+    trial_count: 1,
+    task_count: 2,
+    scored_task_count: 2,
+    primary_metric_name: "mean_reward",
+    primary_metric_value: 0.5,
+    primary_metric_unit: "score",
+    observed_microusd: 100_000,
+    ...overrides,
+  };
+}
+
+describe("leaderboard ranking and Pareto frontier", () => {
+  it("keeps cheaper equal scores and higher scores at the same cost", () => {
+    const cheap = sampleRow({
+      configuration_digest: "sha256:cheap",
+      observed_microusd: 50_000,
+      primary_metric_value: 0.4,
+    });
+    const mid = sampleRow({
+      configuration_digest: "sha256:mid",
+      observed_microusd: 100_000,
+      primary_metric_value: 0.8,
+    });
+    const expensive = sampleRow({
+      configuration_digest: "sha256:expensive",
+      observed_microusd: 200_000,
+      primary_metric_value: 0.8,
+    });
+    const dominated = sampleRow({
+      configuration_digest: "sha256:dominated",
+      observed_microusd: 150_000,
+      primary_metric_value: 0.3,
+    });
+    expect([...paretoFrontier([cheap, mid, expensive, dominated])].sort()).toEqual([
+      "sha256:cheap",
+      "sha256:mid",
+    ]);
+    expect(rankLeaderboardRows([cheap, mid, expensive, dominated])).toEqual([
+      { ...mid, rank: 1, pareto: true },
+      { ...expensive, rank: 2, pareto: false },
+      { ...cheap, rank: 3, pareto: true },
+      { ...dominated, rank: 4, pareto: false },
+    ]);
+  });
+
+  it("reads the latest snapshot receipt and ranks its sqlite rows", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const older = sampleRow({
+      configuration_digest: digest,
+      campaign_id: "run-old",
+      publication_id: "publication-old",
+      primary_metric_value: 0.2,
+      observed_microusd: 10_000,
+    });
+    const newer = sampleRow({
+      configuration_digest: digest,
+      campaign_id: "run-new",
+      publication_id: "publication-new",
+      primary_metric_value: 0.9,
+      observed_microusd: 20_000,
+    });
+    const first = await refreshFromRows(control, [older], "2026-08-21T00:00:00.000Z");
+    const second = await refreshFromRows(control, [newer], "2026-08-21T01:00:00.000Z");
+    expect(first.entry_count).toBe(1);
+    const loaded = await loadLatestLeaderboard(control.store);
+    expect(loaded.snapshot?.record_id).toBe(second.record_id);
+    expect(loaded.rows).toEqual([{ ...newer, rank: 1, pareto: true }]);
+  });
+
+  it("rejects a snapshot whose sqlite bytes do not match the receipt digest", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const sqliteDigest = sha256(new Uint8Array([9, 9, 9]));
+    const sqliteKey = `${LEADERBOARD_SNAPSHOT_PREFIX}${sqliteDigest.slice("sha256:".length)}/leaderboard.sqlite`;
+    await control.store.create(sqliteKey, new Uint8Array([1, 2, 3]));
+    const receipt = validateLeaderboardSnapshot({
+      schema_version: "v1",
+      kind: "leaderboard.snapshot",
+      record_id: deterministicId("leaderboard-snapshot", sqliteDigest),
+      created_at: "2026-08-21T00:00:00.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      sqlite_key: sqliteKey,
+      sqlite_digest: sqliteDigest,
+      source_digest: sha256(canonicalJson(["run-one"])),
+      entry_count: 1,
+    });
+    await control.store.create(
+      `${LEADERBOARD_RECEIPT_PREFIX}${receipt.record_id}.json`,
+      new TextEncoder().encode(canonicalJson(receipt)),
+    );
+    await expect(loadLatestLeaderboard(control.store)).rejects.toThrow(
+      "leaderboard snapshot digest mismatch",
+    );
+  });
+});
+
+async function refreshFromRows(
+  control: TestControl,
+  rows: LeaderboardRow[],
+  createdAt: string,
+) {
+  const bytes = await encodeLeaderboardSqlite(rows);
+  const sqliteDigest = sha256(bytes);
+  const sqliteKey = `${LEADERBOARD_SNAPSHOT_PREFIX}${sqliteDigest.slice("sha256:".length)}/leaderboard.sqlite`;
+  await control.store.create(sqliteKey, bytes);
+  const receipt = validateLeaderboardSnapshot({
+    schema_version: "v1",
+    kind: "leaderboard.snapshot",
+    record_id: deterministicId("leaderboard-snapshot", sqliteDigest, createdAt),
+    created_at: createdAt,
+    actor: { subject: "harbor-hf-control", role: "service" },
+    sqlite_key: sqliteKey,
+    sqlite_digest: sqliteDigest,
+    source_digest: sha256(canonicalJson(rows.map((row) => row.campaign_id))),
+    entry_count: rows.length,
+  });
+  await control.store.create(
+    `${LEADERBOARD_RECEIPT_PREFIX}${receipt.record_id}.json`,
+    new TextEncoder().encode(canonicalJson(receipt)),
+  );
+  return receipt;
+}

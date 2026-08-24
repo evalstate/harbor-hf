@@ -285,6 +285,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            alias: string | null;
+                            configured: boolean;
+                            max_active_sandboxes: number | null;
+                            start_burst: number | null;
+                            start_refill_tokens: number | null;
+                            start_refill_period_seconds: number | null;
+                            profile_id: string | null;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        max_active_sandboxes: number;
+                        /** @enum {unknown} */
+                        confirmed: true;
+                    };
+                };
+            };
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            alias: string | null;
+                            configured: boolean;
+                            max_active_sandboxes: number | null;
+                            start_burst: number | null;
+                            start_refill_tokens: number | null;
+                            start_refill_period_seconds: number | null;
+                            profile_id: string | null;
+                        };
+                    };
+                };
+                /** @description Default Response */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                code: string;
+                                message: string;
+                                request_id: string;
+                                fields?: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns": {
         parameters: {
             query?: never;
@@ -321,10 +417,17 @@ export interface paths {
                                 observed_microusd: number;
                                 total_tasks: number;
                                 terminal_tasks: number;
+                                admissible_tasks: number;
+                                invalid_selected_tasks: number;
+                                exhausted_tasks: number;
                                 successful_tasks: number;
                                 pending_actions: number;
+                                replacement_assigned_tasks: number;
+                                replacement_recorded_tasks: number;
                                 publication_status: string | null;
                                 cleanup_pending: boolean;
+                                cancellation_requested: boolean;
+                                paused: boolean;
                             }[];
                             next_cursor: string | null;
                         };
@@ -350,6 +453,8 @@ export interface paths {
                         launch_policy: string;
                         ceiling_microusd: number;
                         confirmed: boolean;
+                        /** @default false */
+                        start_paused?: boolean;
                     };
                 };
             };
@@ -410,10 +515,89 @@ export interface paths {
                             observed_microusd: number;
                             total_tasks: number;
                             terminal_tasks: number;
+                            admissible_tasks: number;
+                            invalid_selected_tasks: number;
+                            exhausted_tasks: number;
                             successful_tasks: number;
                             pending_actions: number;
+                            replacement_assigned_tasks: number;
+                            replacement_recorded_tasks: number;
                             publication_status: string | null;
                             cleanup_pending: boolean;
+                            cancellation_requested: boolean;
+                            paused: boolean;
+                        };
+                    };
+                };
+                /** @description Default Response */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                code: string;
+                                message: string;
+                                request_id: string;
+                                fields?: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    campaign_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            configured: boolean;
+                            profile_id: string | null;
+                            namespace_limit: number | null;
+                            namespace_active: number;
+                            campaign_limit: number;
+                            campaign_active: number;
+                            hardware_limit: number | null;
+                            hardware_active: number;
+                            provider_limit: number;
+                            provider_reserved: number;
+                            start_tokens: number | null;
+                            start_burst: number | null;
+                            queued: number;
+                            cleanup_held: number;
+                            limiting_factor: string | null;
+                            not_before: string | null;
                         };
                     };
                 };
@@ -682,6 +866,21 @@ export interface paths {
                         "application/json": {
                             sandbox_id: string;
                             state: string;
+                        };
+                    };
+                };
+                /** @description Default Response */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            sandbox_id: string;
+                            /** @enum {unknown} */
+                            state: "QUEUED";
+                            limiting_factor: string | null;
+                            not_before: string | null;
                         };
                     };
                 };
@@ -997,6 +1196,13 @@ export interface paths {
                                 /** Format: date-time */
                                 created_at: string;
                             }[];
+                            exhaustion: null | {
+                                last_attempt_id: string;
+                                attempt_count: number;
+                                reason: string;
+                                /** Format: date-time */
+                                created_at: string;
+                            };
                         };
                     };
                 };
@@ -1166,10 +1372,12 @@ export interface paths {
                 content: {
                     "application/json": {
                         /** @enum {unknown} */
-                        action: "cancel" | "retry_infrastructure" | "publish" | "pause_endpoint";
+                        action: "cancel" | "retry_infrastructure" | "publish" | "pause_endpoint" | "pause" | "resume" | "supersede";
                         task_id?: string | null;
                         reason?: string | null;
                         confirmed: boolean;
+                        task_limit?: number | null;
+                        publication_id?: string | null;
                     };
                 };
             };
@@ -1369,6 +1577,7 @@ export interface paths {
                                 created_at: string;
                                 inspect_url: string | null;
                                 cost_microusd: number;
+                                assigned_tasks: number;
                             }[];
                             next_cursor: string | null;
                         };
@@ -1490,6 +1699,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/leaderboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Official snapshot rows. Anonymous GET is allowed. Campaigns and result details stay authenticated. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            snapshot: {
+                                record_id: string;
+                                /** Format: date-time */
+                                created_at: string;
+                                sqlite_digest: string;
+                                source_digest: string;
+                                entry_count: number;
+                            } | null;
+                            items: {
+                                rank: number;
+                                pareto: boolean;
+                                configuration_digest: string;
+                                campaign_id: string;
+                                publication_id: string;
+                                /** Format: date-time */
+                                published_at: string;
+                                benchmark: string;
+                                model: string;
+                                harness: string;
+                                inference_provider: string;
+                                reasoning_effort: string;
+                                harbor_version: string;
+                                trial_count: number;
+                                task_count: number;
+                                scored_task_count: number;
+                                primary_metric_name: string;
+                                primary_metric_value: number;
+                                primary_metric_unit: string;
+                                observed_microusd: number;
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/results": {
         parameters: {
             query?: never;
@@ -1581,6 +1857,7 @@ export interface paths {
                                 agent?: string | null;
                                 source_revision?: string | null;
                                 catalog_source_digest?: string | null;
+                                superseded_by_publication_id?: string | null;
                                 profile_ids?: {
                                     [key: string]: string;
                                 };
@@ -1679,6 +1956,7 @@ export interface paths {
                             agent?: string | null;
                             source_revision?: string | null;
                             catalog_source_digest?: string | null;
+                            superseded_by_publication_id?: string | null;
                             profile_ids?: {
                                 [key: string]: string;
                             };

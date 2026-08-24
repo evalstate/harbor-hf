@@ -148,7 +148,7 @@ class HermesAgent(IsolatedProviderAgent):
 
     @override
     def get_version_command(self) -> str | None:
-        return 'export PATH="$HOME/.local/bin:$PATH"; hermes version'
+        return 'export PATH="$HOME/.local/bin:$PATH"; hermes --version'
 
     @staticmethod
     def _installation_spec(version: str | None) -> tuple[str, str]:
@@ -163,12 +163,28 @@ class HermesAgent(IsolatedProviderAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
+        """Install Hermes under the isolated agent user.
+
+        Hermes requires Node >= 26. Task images ship an older apt Node, so the
+        installer downloads Node 26 and then exits 127 when ``tar xf`` cannot
+        extract ``.tar.xz``. Preinstall that Node as root and install
+        ``libatomic1`` so the official binary can start. install.sh links
+        ``hermes`` after a mandatory browser ``npm install``. Link the venv
+        launcher ourselves if that npm step fails.
+        """
         installer_url, revision_flag = self._installation_spec(self._version)
         await self.exec_as_root(
             environment,
             command=(
+                "set -euo pipefail; "
+                'export PATH="/opt/harbor-hf-node/bin:$PATH"; '
                 "apt-get update && apt-get install -y --no-install-recommends "
-                "curl git passwd ripgrep util-linux xz-utils"
+                "curl git libatomic1 passwd ripgrep tar util-linux xz-utils && "
+                "mkdir -p /opt/harbor-hf-node && "
+                "curl -fsSL "
+                "https://nodejs.org/dist/v26.7.0/node-v26.7.0-linux-x64.tar.xz "
+                "| tar -xJ -C /opt/harbor-hf-node --strip-components=1 && "
+                "node --version && npm --version"
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
@@ -176,13 +192,27 @@ class HermesAgent(IsolatedProviderAgent):
             environment,
             command=(
                 "set -euo pipefail; "
-                f"curl -fsSL {shlex.quote(installer_url)} | "
-                f"bash -s -- --skip-setup{revision_flag} && "
-                'export PATH="$HOME/.local/bin:$PATH" && '
-                'export HERMES_HOME="${HERMES_HOME:-/tmp/hermes}" && '
+                "export HERMES_HOME=/tmp/hermes; "
+                'export PATH="/opt/harbor-hf-node/bin:$HOME/.local/bin:'
+                '$HERMES_HOME/bin:$PATH"; '
                 'mkdir -p "$HERMES_HOME" "$HERMES_HOME/sessions" '
-                '"$HERMES_HOME/skills" "$HERMES_HOME/memories" && '
-                "hermes version"
+                '"$HERMES_HOME/skills" "$HERMES_HOME/memories" '
+                '"$HOME/.local/bin"; '
+                f"curl -fsSL {shlex.quote(installer_url)} | "
+                "bash -s -- --skip-setup --skip-browser --skip-computer-use "
+                "--hermes-home /tmp/hermes --dir /tmp/hermes/hermes-agent "
+                f"{revision_flag} || true; "
+                "if ! command -v hermes >/dev/null; then "
+                "test -x /tmp/hermes/hermes-agent/venv/bin/python; "
+                "test -f /tmp/hermes/hermes-agent/hermes; "
+                "printf '%s\\n' '#!/bin/bash' "
+                "'exec /tmp/hermes/hermes-agent/venv/bin/python "
+                '/tmp/hermes/hermes-agent/hermes "$@"\' '
+                '> "$HOME/.local/bin/hermes"; '
+                'chmod +x "$HOME/.local/bin/hermes"; '
+                "fi; "
+                "command -v hermes >/dev/null; "
+                "hermes --version"
             ),
         )
 
@@ -210,9 +240,11 @@ class HermesAgent(IsolatedProviderAgent):
         if custom_base_url is not None:
             if custom_api_key is None:
                 raise ValueError("custom Hermes endpoint requires a local API key")
+            # Hermes honors OPENAI_BASE_URL only for openai-api. The older
+            # `custom` CLI slug is no longer a first-class --provider value.
             value["model"] = {
                 "default": model,
-                "provider": "custom",
+                "provider": "openai-api",
                 "base_url": custom_base_url,
                 "api_key": custom_api_key,
             }
@@ -570,7 +602,7 @@ class HermesAgent(IsolatedProviderAgent):
                 allowed_model=model,
             )
 
-        hermes_provider_flag: str | None = "custom" if bridged else None
+        hermes_provider_flag: str | None = "openai-api" if bridged else None
         use_native = bridged
         if not bridged and provider in _NATIVE_PROVIDERS:
             native_flag, key_names = _NATIVE_PROVIDERS[provider]
@@ -622,7 +654,7 @@ class HermesAgent(IsolatedProviderAgent):
             )
 
         if bridged:
-            hermes_provider_flag = "custom"
+            hermes_provider_flag = "openai-api"
             cli_model = model
             config_yaml = self._build_config_yaml(
                 cli_model,
@@ -637,8 +669,10 @@ class HermesAgent(IsolatedProviderAgent):
         await self.exec_as_agent(
             environment,
             command=(
-                "set -euo pipefail; mkdir -p /tmp/hermes /logs/agent; umask 077; "
-                f"printf %s {shlex.quote(config_yaml)} > /tmp/hermes/config.yaml"
+                "set -euo pipefail; umask 077; "
+                'mkdir -p /tmp/hermes "$HOME/.hermes" /logs/agent; '
+                f"printf %s {shlex.quote(config_yaml)} > /tmp/hermes/config.yaml; "
+                'cp /tmp/hermes/config.yaml "$HOME/.hermes/config.yaml"'
             ),
             env=env,
             timeout_sec=10,
@@ -657,7 +691,7 @@ class HermesAgent(IsolatedProviderAgent):
 
         cli_parts = [
             'export PATH="$HOME/.local/bin:$PATH"',
-            "hermes --yolo chat",
+            "hermes --yolo --cli chat",
             '-q "$HARBOR_INSTRUCTION"',
             "-Q",
             f"--model {shlex.quote(cli_model)}",

@@ -5,6 +5,7 @@ import type {
   OperatorAcl,
   ProfileObject,
   ProfilePromotion,
+  PublicationReceipt,
 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
@@ -12,9 +13,16 @@ import {
   deterministicId,
   sandboxActionResultPath,
   sha256,
+  validateLeaderboardSnapshot,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
-import { mintWorkerCapability } from "@harbor-hf/control-core";
+import {
+  encodeLeaderboardSqlite,
+  LEADERBOARD_RECEIPT_PREFIX,
+  LEADERBOARD_SNAPSHOT_PREFIX,
+  loadLatestLeaderboard,
+  mintWorkerCapability,
+} from "@harbor-hf/control-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { AuthenticationService, AuthStore, safeReturnPath } from "../src/auth.js";
@@ -34,12 +42,16 @@ afterEach(async () => {
 async function setup(
   writeMode: AppConfig["write_mode"] = "enabled",
   seed?: (runtime: Runtime) => Promise<void>,
+  capacityProfileAlias: string | null = null,
+  seedCapacity = true,
 ): Promise<{
   runtime: Runtime;
   app: Awaited<ReturnType<typeof buildApp>>;
 }> {
   const root = await mkdtemp(join(tmpdir(), "hhf-api-"));
   roots.push(root);
+  const selectedCapacityAlias =
+    capacityProfileAlias ?? (writeMode === "disabled" ? null : "capacity-test");
   const bucket = join(root, "bucket");
   await mkdir(bucket);
   const config: AppConfig = {
@@ -52,6 +64,8 @@ async function setup(
     projection_path: join(root, "projection.sqlite"),
     auth_path: join(root, "auth.sqlite"),
     profiles_root: resolve("profiles"),
+    capacity_profile_alias: selectedCapacityAlias,
+    max_active_sandboxes: 16,
     web_root: join(root, "web"),
     auth_mode: "development",
     write_mode: writeMode,
@@ -66,6 +80,12 @@ async function setup(
     bootstrap_operator_subjects: [],
   };
   const runtime = await createRuntime(config);
+  if (selectedCapacityAlias && seedCapacity)
+    for (const record of capacityRecords())
+      await runtime.store.create(
+        controlRecordPath(record),
+        new TextEncoder().encode(canonicalJson(record)),
+      );
   if (seed) await seed(runtime);
   runtimes.push(runtime);
   const app = await buildApp(runtime);
@@ -96,6 +116,7 @@ function sandboxDeploymentRecords(): Array<ProfileObject | ProfilePromotion> {
     inference_api: "chat-completions" as const,
     inference_max_requests: 256,
     inference_max_concurrency: 1,
+    inference_max_total_concurrency: 1,
     inference_timeout_seconds: 1_800,
     inference_max_output_tokens: 32_768,
     root_bootstrap_command: ["/opt/worker/start-root-services"],
@@ -207,7 +228,111 @@ function sandboxDeploymentRecords(): Array<ProfileObject | ProfilePromotion> {
   return [profile, promotion, benchmarkProfile, benchmarkPromotion];
 }
 
+function capacityRecords(): Array<ProfileObject | ProfilePromotion> {
+  const spec = {
+    namespace: "test",
+    max_active_sandboxes: 1,
+    hardware_limits: [{ hardware: "cpu-upgrade", max_active_sandboxes: 1 }],
+    start_burst: 1,
+    start_refill_tokens: 1,
+    start_refill_period_seconds: 60,
+  };
+  const profile: ProfileObject = {
+    schema_version: "v1",
+    kind: "profile.object",
+    record_id: deterministicId(
+      "profile",
+      "capacity",
+      "capacity-test",
+      sha256(canonicalJson(spec)),
+    ),
+    created_at: "2026-08-18T00:00:00.000Z",
+    actor: { subject: "profile-import", role: "migration" },
+    profile_kind: "capacity",
+    name: "capacity-test",
+    spec,
+  };
+  const profileId = sha256(canonicalJson(profile));
+  const promotion: ProfilePromotion = {
+    schema_version: "v1",
+    kind: "profile.promotion",
+    record_id: deterministicId(
+      "promotion",
+      "capacity",
+      "capacity-test",
+      profileId,
+      "approved",
+    ),
+    created_at: "2026-08-18T00:00:01.000Z",
+    actor: { subject: "profile-operator", role: "operator" },
+    profile_kind: "capacity",
+    alias: "capacity-test",
+    profile_id: profileId,
+    promotion_state: "approved",
+    reason: "approved after capacity review",
+    evidence: [sha256("capacity-canary-evidence")],
+  };
+  return [profile, promotion];
+}
+
 describe("control API", () => {
+  it("answers liveness before the projection rebuild finishes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hhf-api-"));
+    roots.push(root);
+    const bucket = join(root, "bucket");
+    await mkdir(bucket);
+    const runtime = await createRuntime({
+      node_env: "test",
+      port: 7860,
+      namespace: "test",
+      bucket_id: "test/artifacts",
+      bucket_root: bucket,
+      store_mode: "filesystem",
+      projection_path: join(root, "projection.sqlite"),
+      auth_path: join(root, "auth.sqlite"),
+      profiles_root: resolve("profiles"),
+      capacity_profile_alias: null,
+      max_active_sandboxes: 16,
+      web_root: join(root, "web"),
+      auth_mode: "development",
+      write_mode: "disabled",
+      public_origin: "http://127.0.0.1:7860",
+      oauth: null,
+      hf_token: "test-token-not-a-real-credential",
+      hf_inference_token: null,
+      reconcile_interval_ms: 60_000,
+      observe_interval_ms: 0,
+      worker_receipt_grace_ms: 0,
+      source_revision: "test-revision",
+      bootstrap_operator_subjects: [],
+    });
+    runtimes.push(runtime);
+    const app = await buildApp(runtime);
+    expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(
+      200,
+    );
+    expect((await app.inject({ method: "GET", url: "/health/ready" })).statusCode).toBe(
+      503,
+    );
+    const campaigns = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
+    expect(campaigns.statusCode).toBe(503);
+    expect(campaigns.json()).toMatchObject({
+      error: { code: "control_not_ready" },
+    });
+    const login = await app.inject({
+      method: "GET",
+      url: "/auth/login?return_to=%2Foverview",
+    });
+    expect(login.statusCode).toBe(503);
+    expect(login.json()).toMatchObject({
+      error: { code: "control_not_ready" },
+    });
+    expect((await app.inject({ method: "POST", url: "/auth/logout" })).statusCode).toBe(
+      204,
+    );
+    await app.close();
+  });
+
   it("reports liveness and projection readiness separately", async () => {
     const { app } = await setup();
     expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(
@@ -216,6 +341,90 @@ describe("control API", () => {
     const ready = await app.inject({ method: "GET", url: "/health/ready" });
     expect(ready.statusCode).toBe(200);
     expect(ready.json()).toEqual({ status: "ready" });
+    await app.close();
+  });
+
+  it("returns an unavailable capacity view for campaigns without Sandboxes", async () => {
+    const { app } = await setup();
+    const submission = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "no-sandbox-capacity" },
+      payload: input,
+    });
+    const campaignId = submission.json().campaign_id as string;
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${campaignId}/capacity`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      configured: true,
+      campaign_limit: 0,
+      campaign_active: 0,
+      provider_limit: 0,
+    });
+    await app.close();
+  });
+
+  it("reads and replaces the namespace Sandbox cap", async () => {
+    const { app } = await setup();
+    const initial = await app.inject({ method: "GET", url: "/api/v1/capacity" });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toMatchObject({
+      alias: "capacity-test",
+      configured: true,
+      max_active_sandboxes: 1,
+      start_burst: 1,
+    });
+
+    const updated = await app.inject({
+      method: "POST",
+      url: "/api/v1/capacity",
+      headers: { "idempotency-key": "capacity-set-128" },
+      payload: { max_active_sandboxes: 128, confirmed: true },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      alias: "capacity-test",
+      configured: true,
+      max_active_sandboxes: 128,
+      start_burst: 128,
+      start_refill_tokens: 128,
+    });
+
+    const repeated = await app.inject({
+      method: "GET",
+      url: "/api/v1/capacity",
+    });
+    expect(repeated.json().max_active_sandboxes).toBe(128);
+    await app.close();
+  });
+
+  it("seeds a missing namespace Sandbox cap from the service default", async () => {
+    const { app } = await setup("enabled", undefined, "current", false);
+    const response = await app.inject({ method: "GET", url: "/api/v1/capacity" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      alias: "current",
+      configured: true,
+      max_active_sandboxes: 16,
+      start_burst: 16,
+      start_refill_tokens: 16,
+    });
+    await app.close();
+  });
+
+  it("rejects a namespace Sandbox cap change when writes are disabled", async () => {
+    const { app } = await setup("disabled");
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/capacity",
+      headers: { "idempotency-key": "capacity-disabled" },
+      payload: { max_active_sandboxes: 128, confirmed: true },
+    });
+    expect(response.statusCode).toBe(503);
     await app.close();
   });
 
@@ -492,6 +701,7 @@ describe("control API", () => {
       observed_state: "ERROR",
       resource_id: resourceId,
       cost_microusd: 40_000,
+      assigned_tasks: 1,
       inspect_url: `https://huggingface.co/jobs/test/${resourceId}`,
     });
     const scoped = await app.inject({
@@ -625,6 +835,12 @@ describe("control API", () => {
         error: { code: "authentication_required" },
       });
     }
+    const leaderboard = await app.inject({
+      method: "GET",
+      url: "/api/v1/leaderboard",
+    });
+    expect(leaderboard.statusCode).toBe(200);
+    expect(leaderboard.json()).toEqual({ snapshot: null, items: [] });
     const session = await app.inject({
       method: "GET",
       url: "/api/v1/auth/session",
@@ -1006,6 +1222,146 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("hides a local publication when its committed row objects are missing", async () => {
+    const { runtime, app } = await setup();
+    const submission = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "missing-publication-rows-campaign" },
+      payload: input,
+    });
+    const campaignId = submission.json().campaign_id as string;
+    const publicationId = deterministicId("publication", campaignId);
+    const resultPath = `results/schema=v1/publications/${publicationId}/receipt.json`;
+    const catalog = {
+      schema_version: "v1",
+      kind: "result.catalog",
+      record_id: deterministicId("result-catalog", publicationId),
+      created_at: "2026-08-16T00:00:01.000Z",
+      source_digest: `sha256:${"b".repeat(64)}`,
+      entries: [
+        {
+          publication_id: publicationId,
+          campaign_id: campaignId,
+          run_id: campaignId,
+          published_at: "2026-08-16T00:00:01.000Z",
+          benchmark: "control-smoke",
+          model: "control-smoke",
+          harness: "control-smoke",
+          inference_provider: "test-provider",
+          run_outcome: "complete",
+          quality: "clean",
+          publication_role: "diagnostic",
+          task_count: 1,
+          scored_task_count: 1,
+          strict_pass_count: 1,
+          primary_metric: { name: "mean_reward", value: 1, unit: "score" },
+          result_path: resultPath,
+        },
+      ],
+    };
+    const catalogBytes = new TextEncoder().encode(canonicalJson(catalog));
+    const catalogDigest = sha256(catalogBytes);
+    const receipt: PublicationReceipt = {
+      schema_version: "v1",
+      kind: "publication.receipt",
+      record_id: deterministicId("publication-receipt", publicationId),
+      created_at: "2026-08-16T00:00:01.000Z",
+      actor: { subject: "harbor-hf-control", role: "service" },
+      campaign_id: campaignId,
+      publication_id: publicationId,
+      publication_state: "published",
+      object_digests: [
+        `sha256:${"1".repeat(64)}`,
+        `sha256:${"2".repeat(64)}`,
+        `sha256:${"3".repeat(64)}`,
+        `sha256:${"4".repeat(64)}`,
+        `sha256:${"5".repeat(64)}`,
+      ],
+      catalog_digest: catalogDigest,
+      error_code: null,
+    };
+    await runtime.store.create(
+      resultPath,
+      new TextEncoder().encode(canonicalJson(receipt)),
+    );
+    await runtime.store.create(
+      `results/schema=v1/catalog/records/${catalog.record_id}.json`,
+      catalogBytes,
+    );
+    await runtime.service.writePublication(receipt);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/results" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().items).toEqual([]);
+    await app.close();
+  });
+
+  it("reads ranked leaderboard rows from the latest Bucket snapshot", async () => {
+    const { runtime, app } = await setup("disabled");
+    expect(await loadLatestLeaderboard(runtime.store)).toEqual({
+      snapshot: null,
+      rows: [],
+    });
+    const empty = await app.inject({ method: "GET", url: "/api/v1/leaderboard" });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ snapshot: null, items: [] });
+
+    const row = {
+      configuration_digest: `sha256:${"b".repeat(64)}`,
+      campaign_id: "run-leaderboard",
+      publication_id: "publication-leaderboard",
+      published_at: "2026-08-21T00:00:00.000Z",
+      benchmark: "control-smoke",
+      model: "control-smoke",
+      harness: "control-smoke",
+      inference_provider: "hf-cpu-smoke",
+      reasoning_effort: "off",
+      harbor_version: "0.21.0",
+      trial_count: 1,
+      task_count: 1,
+      scored_task_count: 1,
+      primary_metric_name: "mean_reward",
+      primary_metric_value: 1,
+      primary_metric_unit: "score",
+      observed_microusd: 2500,
+    };
+    const bytes = await encodeLeaderboardSqlite([row]);
+    const sqliteDigest = sha256(bytes);
+    const sqliteKey = `${LEADERBOARD_SNAPSHOT_PREFIX}${sqliteDigest.slice("sha256:".length)}/leaderboard.sqlite`;
+    await runtime.store.create(sqliteKey, bytes);
+    const receipt = validateLeaderboardSnapshot({
+      schema_version: "v1",
+      kind: "leaderboard.snapshot",
+      record_id: deterministicId("leaderboard-snapshot", sqliteDigest),
+      created_at: row.published_at,
+      actor: { subject: "harbor-hf-control", role: "service" },
+      sqlite_key: sqliteKey,
+      sqlite_digest: sqliteDigest,
+      source_digest: sha256(canonicalJson([row.campaign_id])),
+      entry_count: 1,
+    });
+    await runtime.store.create(
+      `${LEADERBOARD_RECEIPT_PREFIX}${receipt.record_id}.json`,
+      new TextEncoder().encode(canonicalJson(receipt)),
+    );
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/leaderboard" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      snapshot: {
+        record_id: receipt.record_id,
+        created_at: receipt.created_at,
+        sqlite_digest: receipt.sqlite_digest,
+        source_digest: receipt.source_digest,
+        entry_count: 1,
+      },
+      items: [{ ...row, rank: 1, pareto: true }],
+    });
+    await app.close();
+  });
+
   it("accepts idempotent trusted-worker attempt receipts", async () => {
     const { runtime, app } = await setup();
     const campaign = await app.inject({
@@ -1174,6 +1530,111 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("queues capacity-controlled Sandbox creates and reports the limiting state", async () => {
+    const records = sandboxDeploymentRecords();
+    const { runtime, app } = await setup(
+      "enabled",
+      async (seedRuntime) => {
+        for (const record of records)
+          await seedRuntime.store.create(
+            controlRecordPath(record),
+            new TextEncoder().encode(canonicalJson(record)),
+          );
+      },
+      "capacity-test",
+    );
+    const submission = await app.inject({
+      method: "POST",
+      url: "/api/v1/campaigns",
+      headers: { "idempotency-key": "capacity-campaign-key" },
+      payload: {
+        ...input,
+        deployment: "hf-sandbox-test",
+        ceiling_microusd: 20_000_000,
+      },
+    });
+    const campaignId = submission.json().campaign_id as string;
+    await runtime.reconciler.tick();
+    const lock = await runtime.projection.campaignLock(campaignId);
+    const launch = (await runtime.projection.campaignActions(campaignId)).find(
+      (action) => action.action_kind === "job.launch",
+    );
+    if (!lock || !launch) throw new Error("campaign launch is missing");
+    const capability = mintWorkerCapability(runtime.config.hf_token ?? "", {
+      namespace: runtime.config.namespace,
+      campaign_id: campaignId,
+      campaign_lock_digest: sha256(canonicalJson(lock)),
+      action_id: launch.action_id,
+      task_ids: ["control-smoke-task"],
+      operations: ["campaign.read", "sandbox.create", "sandbox.close"],
+      expires_at: Math.floor(Date.now() / 1000) + 60,
+    });
+    const headers = {
+      "x-harbor-hf-worker-capability": capability,
+      "idempotency-key": "capacity-create-key",
+    };
+    const campaignState = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${campaignId}`,
+      headers: { "x-harbor-hf-worker-capability": capability },
+    });
+    expect(campaignState.statusCode).toBe(200);
+    expect(campaignState.json().cancellation_requested).toBe(false);
+    const lifecycle = vi.spyOn(
+      runtime.sandboxes as NonNullable<Runtime["sandboxes"]>,
+      "lifecycle",
+    );
+    lifecycle.mockImplementation(async (intent) => ({
+      outcome: intent.action_kind === "sandbox.create" ? "created" : "completed",
+      observed_state: intent.action_kind === "sandbox.close" ? "CANCELED" : "RUNNING",
+      resource_id: "private-capacity-sandbox-id",
+      cost_microusd: 0,
+    }));
+
+    const queued = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
+      headers,
+    });
+    expect(queued.statusCode).toBe(202);
+    expect(queued.json()).toMatchObject({
+      state: "QUEUED",
+      limiting_factor: null,
+    });
+    await runtime.reconciler.tick();
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/v1/campaigns/${campaignId}/tasks/control-smoke-task/sandboxes`,
+      headers,
+    });
+    expect(created.statusCode).toBe(200);
+    expect(created.json()).toMatchObject({ state: "RUNNING" });
+    expect(lifecycle).toHaveBeenCalledTimes(1);
+
+    const capacity = await app.inject({
+      method: "GET",
+      url: `/api/v1/campaigns/${campaignId}/capacity`,
+    });
+    expect(capacity.statusCode).toBe(200);
+    expect(capacity.json()).toMatchObject({
+      configured: true,
+      namespace_limit: 1,
+      namespace_active: 1,
+      campaign_active: 1,
+      provider_reserved: 1,
+      start_tokens: 0,
+    });
+    expect(JSON.stringify(capacity.json())).not.toContain(
+      "private-capacity-sandbox-id",
+    );
+    const profiles = await app.inject({ method: "GET", url: "/api/v1/profiles" });
+    const capacityProfile = profiles
+      .json()
+      .items.find((item: { profile_kind: string }) => item.profile_kind === "capacity");
+    expect(capacityProfile.spec).not.toHaveProperty("namespace");
+    await app.close();
+  });
+
   it("keeps Sandbox lifecycle capability-scoped, durable, and topology-redacted", async () => {
     const records = sandboxDeploymentRecords();
     const { runtime, app } = await setup("enabled", async (seedRuntime) => {
@@ -1183,6 +1644,7 @@ describe("control API", () => {
           new TextEncoder().encode(canonicalJson(record)),
         );
     });
+    runtime.service.configureCapacityProfile(null);
     const submission = await app.inject({
       method: "POST",
       url: "/api/v1/campaigns",
@@ -1366,7 +1828,7 @@ describe("control API", () => {
           "idempotency-key": "sandbox-command-key",
         },
         payload: {
-          command: ["python", "worker.py"],
+          command: ["python", "x".repeat(5_000)],
           cwd: "/app",
           timeout_seconds: 60,
         },
@@ -1494,6 +1956,7 @@ describe("control API", () => {
           new TextEncoder().encode(canonicalJson(record)),
         );
     });
+    runtime.service.configureCapacityProfile(null);
     const submission = await app.inject({
       method: "POST",
       url: "/api/v1/campaigns",
@@ -1589,7 +2052,7 @@ describe("control API", () => {
     const resultPrefix = resultPath.slice(0, -"/result.json".length);
     expect(await runtime.store.list(resultPrefix)).toEqual([]);
     expect(
-      await runtime.projection.pendingDispatchedSandboxExecActions(
+      await runtime.projection.pendingDispatchedSandboxCommandActions(
         campaignId,
         "control-smoke-task",
       ),

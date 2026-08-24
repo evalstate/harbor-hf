@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { ApiError, type SessionResponse } from "../src/api";
+import { loginHref } from "../src/layout";
 import { formatMoney } from "../src/lib";
 import { keys } from "../src/queries";
 
@@ -151,18 +152,11 @@ afterEach(() => {
 });
 
 describe("control web", () => {
-  it("returns OAuth login to the current path without iframe query credentials", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => json({ authenticated: false, login_url: "/auth/login" }, 401)),
-    );
-    renderApp(`/results?platform_access=${"x".repeat(600)}#private`);
-    expect(
-      await screen.findByRole("link", { name: /sign in with hugging face/i }),
-    ).toHaveAttribute("href", "/auth/login?return_to=%2Fresults");
+  it("builds an OAuth guard for an admin path", () => {
+    expect(loginHref("/results")).toBe("/auth/login?return_to=%2Fresults");
   });
 
-  it("shows the username and never renders the OAuth subject", async () => {
+  it("shows only the username and sign-out control in account chrome", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -175,20 +169,13 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp();
+    renderApp("/overview");
     expect(await screen.findByText("visible-user")).toBeInTheDocument();
     expect(screen.queryByText("opaque-oauth-subject")).not.toBeInTheDocument();
-
-    const detailsButton = screen.getByRole("button", {
-      name: "Account and session details",
-    });
-    const detailsId = detailsButton.getAttribute("aria-describedby");
-    const details = detailsId ? document.getElementById(detailsId) : null;
-    expect(details).toHaveAttribute("role", "tooltip");
-    expect(details).toHaveClass("invisible", "absolute");
-    expect(details).toHaveTextContent("Operator role");
-    expect(details).toHaveTextContent("Your role grants permission");
-    expect(details).toHaveTextContent("Session expires");
+    expect(
+      screen.queryByRole("button", { name: "Account and session details" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeVisible();
   });
 
   it("keeps the authenticated shell and stale data after a transient session failure", async () => {
@@ -205,7 +192,7 @@ describe("control web", () => {
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(keys.session, session("cached-user"));
-    renderApp("/", client);
+    renderApp("/overview", client);
     expect(await screen.findByText("cached-user")).toBeInTheDocument();
 
     act(() => {
@@ -271,7 +258,7 @@ describe("control web", () => {
         throw new Error(`unexpected request: ${path}`);
       }),
     );
-    renderApp("/");
+    renderApp("/overview");
     expect(
       await screen.findByRole("img", {
         name: /observed run spend in usd, from oldest run to newest/i,
@@ -296,7 +283,7 @@ describe("control web", () => {
     );
     renderApp("/campaigns");
     expect(await screen.findByRole("button", { name: "Start a run" })).toBeDisabled();
-    expect(screen.getByText(/role grants permission/i)).toBeInTheDocument();
+    expect(screen.getByText("Disabled", { exact: true })).toBeInTheDocument();
   });
 
   it("requires a separate acknowledgement before run cancellation", async () => {
@@ -337,6 +324,89 @@ describe("control web", () => {
     expect(confirm).toBeDisabled();
     await user.click(screen.getByRole("checkbox"));
     expect(confirm).toBeEnabled();
+  });
+
+  it("shows a replacement Job on the existing run instead of a new row", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-1"))
+          return json({
+            campaign_id: "campaign-1",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed-invalid",
+            publication_status: "published",
+            total_tasks: 89,
+            terminal_tasks: 89,
+            successful_tasks: 13,
+            pending_actions: 7,
+            observed_microusd: 632_853,
+            reserved_microusd: 5_607_849,
+            ceiling_microusd: 10_600_000,
+            cleanup_pending: false,
+            admissible_tasks: 13,
+            exhausted_tasks: 0,
+            invalid_selected_tasks: 89,
+            replacement_assigned_tasks: 75,
+            replacement_recorded_tasks: 21,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
+          return json({ items: [], next_cursor: null });
+        if (path.includes("/api/v1/jobs"))
+          return json({
+            items: [
+              {
+                action_id: "action-job-retry",
+                campaign_id: "campaign-1",
+                action_kind: "job.observe",
+                generation: 1,
+                target: "job-retry",
+                outcome: "completed",
+                observed_state: "RUNNING",
+                resource_id: "job-retry",
+                inspect_url: "https://huggingface.co/jobs/test/job-retry",
+                created_at: "2026-08-22T22:37:55.000Z",
+                cost_microusd: 0,
+                assigned_tasks: 75,
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/capacity"))
+          return json({
+            campaign_active: 1,
+            campaign_limit: 8,
+            namespace_active: 1,
+            namespace_limit: 8,
+            provider_reserved: 0,
+            provider_limit: 0,
+            queued: 2,
+            cleanup_held: 0,
+            limiting_factor: null,
+            start_burst: 4,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-1");
+    expect(await screen.findByText("Replacement in progress")).toBeInTheDocument();
+    expect(screen.getByText("Replacement Job on this run")).toBeInTheDocument();
+    expect(
+      screen.getByText(/21 of 75 assigned tasks have a replacement receipt/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/1 sandbox active, 2 queued creates/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/The task list still shows selected seals/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("21/75 replacement receipts")).toBeInTheDocument();
+    expect(await screen.findByText("75 tasks")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Physical HF Jobs" }),
+    ).toBeInTheDocument();
   });
 
   it("lists campaign Jobs with Hub inspect links", async () => {
@@ -387,7 +457,7 @@ describe("control web", () => {
           });
         if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
           return json({ items: [], next_cursor: null });
-        if (path.includes("/api/v1/jobs?campaign_id=campaign-1"))
+        if (path.includes("/api/v1/jobs") && path.includes("campaign_id=campaign-1"))
           return json({
             items: [
               {
@@ -403,6 +473,7 @@ describe("control web", () => {
                   "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
                 created_at: "2026-08-18T00:00:00.000Z",
                 cost_microusd: 1_000_000,
+                assigned_tasks: 1,
               },
             ],
             next_cursor: null,
@@ -418,7 +489,9 @@ describe("control web", () => {
       "href",
       "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
     );
-    expect(screen.getByRole("heading", { name: "Jobs" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Physical HF Jobs" }),
+    ).toBeInTheDocument();
   });
 
   it("links Jobs to the Hub inspect page", async () => {
@@ -445,6 +518,7 @@ describe("control web", () => {
                   "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
                 created_at: "2026-08-18T00:00:00.000Z",
                 cost_microusd: 1_000_000,
+                assigned_tasks: 1,
               },
             ],
             next_cursor: null,
@@ -660,8 +734,7 @@ describe("control web", () => {
     renderApp("/runs");
     const table = await screen.findByRole("table");
     expect(table).toHaveClass("table-fixed");
-    expect(table.parentElement).toHaveClass("overflow-hidden");
-    expect(table.parentElement).not.toHaveClass("overflow-x-auto");
+    expect(table.parentElement).toHaveClass("max-h-[70vh]", "overflow-auto");
     expect(await screen.findByRole("link", { name: runName })).toHaveAttribute(
       "href",
       `/runs/${runName}`,
@@ -677,6 +750,25 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed/capacity"))
+          return json({
+            configured: true,
+            profile_id: "sha256:capacity",
+            namespace_limit: 8,
+            namespace_active: 3,
+            campaign_limit: 4,
+            campaign_active: 2,
+            hardware_limit: null,
+            hardware_active: 0,
+            provider_limit: 4,
+            provider_reserved: 2,
+            start_tokens: 1,
+            start_burst: 2,
+            queued: 1,
+            cleanup_held: 0,
+            limiting_factor: "namespace_sandbox_capacity",
+            not_before: null,
+          });
         if (path.endsWith("/api/v1/campaigns/campaign-mixed"))
           return json({
             campaign_id: "campaign-mixed",
@@ -691,6 +783,7 @@ describe("control web", () => {
             reserved_microusd: 0,
             ceiling_microusd: 0,
             cleanup_pending: false,
+            cancellation_requested: false,
           });
         if (path.includes("/api/v1/campaigns/campaign-mixed/tasks"))
           return json({
@@ -722,8 +815,109 @@ describe("control web", () => {
     expect(
       screen.getByText("Published. 1 sealed task did not succeed."),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Retry infrastructure failures" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Scored success").className).toContain("emerald");
     expect(screen.getByText("Timed out").className).toContain("amber");
+    expect(screen.getByText("Sandbox capacity")).toBeInTheDocument();
+    expect(await screen.findByText("Namespace Sandbox Capacity")).toBeInTheDocument();
+    expect(screen.getByText("3/8 active")).toBeInTheDocument();
+  });
+
+  it("queues eligible infrastructure retries from a finished run", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const posts: Array<{ path: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system("enabled"));
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed/capacity"))
+          return json({
+            configured: false,
+            profile_id: null,
+            namespace_limit: null,
+            namespace_active: 0,
+            campaign_limit: 1,
+            campaign_active: 0,
+            hardware_limit: null,
+            hardware_active: 0,
+            provider_limit: 0,
+            provider_reserved: 0,
+            start_tokens: null,
+            start_burst: null,
+            queued: 0,
+            cleanup_held: 0,
+            limiting_factor: null,
+            not_before: null,
+          });
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed/actions")) {
+          posts.push({
+            path,
+            body: init?.body ? JSON.parse(String(init.body)) : null,
+          });
+          return json(
+            {
+              campaign_id: "campaign-mixed",
+              action_id: "action-retry",
+              adopted: false,
+            },
+            202,
+          );
+        }
+        if (path.endsWith("/api/v1/campaigns/campaign-mixed"))
+          return json({
+            campaign_id: "campaign-mixed",
+            created_at: "2026-08-18T00:00:00.000Z",
+            status: "completed",
+            publication_status: "published",
+            total_tasks: 2,
+            terminal_tasks: 2,
+            successful_tasks: 1,
+            pending_actions: 0,
+            observed_microusd: 0,
+            reserved_microusd: 0,
+            ceiling_microusd: 0,
+            cleanup_pending: false,
+            cancellation_requested: false,
+          });
+        if (path.includes("/api/v1/campaigns/campaign-mixed/tasks"))
+          return json({
+            items: [
+              {
+                campaign_id: "campaign-mixed",
+                task_id: "infra-task",
+                input_digest: "sha256:aa",
+                terminal_outcome: "infrastructure",
+                selected_attempt_id: "attempt-infra",
+              },
+            ],
+            next_cursor: null,
+          });
+        if (path.includes("/api/v1/jobs"))
+          return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/campaigns/campaign-mixed");
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "Retry infrastructure failures" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Confirm retry" }));
+    expect(posts).toEqual([
+      {
+        path: "/api/v1/campaigns/campaign-mixed/actions",
+        body: {
+          action: "retry_infrastructure",
+          task_id: null,
+          reason: "retry eligible infrastructure failures",
+          confirmed: true,
+        },
+      },
+    ]);
   });
 
   it("shows cancelled outcomes in orange", async () => {
@@ -734,6 +928,25 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/campaigns/campaign-cancelled/capacity"))
+          return json({
+            configured: false,
+            profile_id: null,
+            namespace_limit: null,
+            namespace_active: 0,
+            campaign_limit: 1,
+            campaign_active: 0,
+            hardware_limit: null,
+            hardware_active: 0,
+            provider_limit: 0,
+            provider_reserved: 0,
+            start_tokens: null,
+            start_burst: null,
+            queued: 0,
+            cleanup_held: 0,
+            limiting_factor: "campaign_cancelled",
+            not_before: null,
+          });
         if (path.endsWith("/api/v1/campaigns/campaign-cancelled"))
           return json({
             campaign_id: "campaign-cancelled",
@@ -748,6 +961,7 @@ describe("control web", () => {
             reserved_microusd: 0,
             ceiling_microusd: 0,
             cleanup_pending: false,
+            cancellation_requested: true,
           });
         if (path.includes("/api/v1/campaigns/campaign-cancelled/tasks"))
           return json({
@@ -984,5 +1198,133 @@ describe("control web", () => {
     );
     expect(screen.getByText("task-a")).toBeInTheDocument();
     expect(screen.getByText("Timed out")).toBeInTheDocument();
+  });
+
+  it("shows official snapshot rows and the cost-score plot", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/leaderboard"))
+          return json({
+            snapshot: {
+              record_id: "leaderboard-snapshot-one",
+              created_at: "2026-08-21T00:00:00.000Z",
+              sqlite_digest: "sha256:sqlite",
+              source_digest: "sha256:source",
+              entry_count: 2,
+            },
+            items: [
+              {
+                rank: 1,
+                pareto: true,
+                configuration_digest: "sha256:strong",
+                campaign_id: "run-strong",
+                publication_id: "publication-strong",
+                published_at: "2026-08-21T00:00:00.000Z",
+                benchmark: "terminal-bench-2-1",
+                model: "openai/gpt-oss-20b",
+                harness: "opencode",
+                inference_provider: "together",
+                reasoning_effort: "off",
+                harbor_version: "0.21.0",
+                trial_count: 1,
+                task_count: 2,
+                scored_task_count: 2,
+                primary_metric_name: "mean_reward",
+                primary_metric_value: 0.9,
+                primary_metric_unit: "score",
+                observed_microusd: 40_000,
+              },
+              {
+                rank: 2,
+                pareto: false,
+                configuration_digest: "sha256:weak",
+                campaign_id: "run-weak",
+                publication_id: "publication-weak",
+                published_at: "2026-08-21T00:00:00.000Z",
+                benchmark: "terminal-bench-2-1",
+                model: "openai/gpt-oss-20b",
+                harness: "pi",
+                inference_provider: "together",
+                reasoning_effort: "off",
+                harbor_version: "0.21.0",
+                trial_count: 1,
+                task_count: 2,
+                scored_task_count: 2,
+                primary_metric_name: "mean_reward",
+                primary_metric_value: 0.2,
+                primary_metric_unit: "score",
+                observed_microusd: 90_000,
+              },
+            ],
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/");
+    expect(
+      await screen.findByRole("heading", { name: "Leaderboard" }),
+    ).toBeInTheDocument();
+    expect((await screen.findAllByText("openai/gpt-oss-20b")).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByText("OpenCode")).toBeInTheDocument();
+    expect(screen.getByText("Pareto")).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav).toHaveTextContent("Admin");
+    expect(screen.getByRole("link", { name: /^Leaderboard$/ })).toHaveAttribute(
+      "href",
+      "/",
+    );
+    expect(screen.getByRole("link", { name: /^Overview$/ })).toHaveAttribute(
+      "href",
+      "/overview",
+    );
+    expect(
+      screen.getByRole("img", {
+        name: /cost versus score, with the pareto frontier/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the public leaderboard without a session", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session"))
+          return json({ authenticated: false, login_url: "/auth/login" }, 401);
+        if (path.includes("/api/v1/leaderboard"))
+          return json({ snapshot: null, items: [] });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/");
+    expect(
+      await screen.findByRole("heading", { name: "Leaderboard" }),
+    ).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav).toHaveTextContent("Admin");
+    for (const [label, path] of [
+      ["Overview", "/overview"],
+      ["Runs", "/runs"],
+      ["Jobs", "/jobs"],
+      ["Endpoints", "/endpoints"],
+      ["Results", "/results"],
+      ["Profiles", "/profiles"],
+      ["Audit", "/audit"],
+    ])
+      expect(screen.getByRole("link", { name: label })).toHaveAttribute(
+        "href",
+        loginHref(path),
+      );
+    expect(screen.queryByText(/admin views require/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /sign in with hugging face/i }),
+    ).not.toBeInTheDocument();
   });
 });

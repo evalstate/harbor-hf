@@ -309,7 +309,9 @@ also present in the service access list.
 
 ## Start a run
 
-The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. OpenCode, DeepSeek Harness (`dsh`), and Pi all call the locked sandbox inference route. They do not read a Job-level API key. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
+The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. Dashboard harnesses that speak Chat Completions (OpenCode, Qwen Code, mini-swe-agent, Pi, Kimi Code, Hermes, OpenHands, OpenClaw, FX, and DeepSeek Harness) call the locked sandbox inference route. They do not read a Job-level API key. Codex and Claude Code stay off that route because they need a native API the router path cannot preserve. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
+
+Console tables keep their headers visible while scrolling and provide a text filter under every column. Filters apply to the loaded page; clear them together with **Clear filters**. A run detail fetches every Job page and reports its physical HF Job count separately from logical benchmark tasks. One Job is a remote worker process and may execute many tasks through several Sandboxes.
 
 The CLI submits the same lock through promoted profile aliases:
 
@@ -349,9 +351,16 @@ harbor-hf jobs
 harbor-hf endpoints
 harbor-hf results
 harbor-hf audit
+harbor-hf capacity
 ```
 
-The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. Logical task outcomes use full phrases (scored success, provider rejected the request, agent ended without a score) instead of the raw `complete`, `policy`, and `agent` tokens. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Execution Job logs stream Harbor trial stdout as the trial runs. Execution workers preserve a successful exact durable trial result if Harbor exits nonzero only after writing that result; a missing or exceptional trial result remains a failure. The Results list shows pass rate, primary metric, and token cost. Open a result for the Wilson 95% CI, publication identity, and the Hub link to the Bucket prefix that holds the generated objects. Eligible final, clean, fully scored catalogs are also written as a SQLite snapshot under `results/schema=v1/leaderboard/` in the Bucket. Diagnostic and incomplete catalogs stay off that snapshot. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
+The shared namespace Sandbox cap limits how many Sandboxes can run at once across campaigns. It defaults to 16. Raise it without changing a locked campaign's per-run `max_sandboxes` or worker concurrency:
+
+```bash
+harbor-hf capacity set --max-sandboxes 128 --yes
+```
+
+The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. Logical task outcomes use full phrases (scored success, provider rejected the request, agent ended without a score) instead of the raw `complete`, `policy`, and `agent` tokens. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Execution Job logs stream Harbor trial stdout as the trial runs. Execution workers install Harbor from a pinned git commit so new harnesses can be evaluated before a PyPI release. They preserve a successful exact durable trial result if Harbor exits nonzero only after writing that result; a missing or exceptional trial result remains a failure. The Results list shows pass rate, primary metric, and token cost. Open a result for the Wilson 95% CI, publication identity, and the Hub link to the Bucket prefix that holds the generated objects. Eligible final, clean, fully scored catalogs are also written as a SQLite snapshot under `results/schema=v1/leaderboard/` in the Bucket. Diagnostic and incomplete catalogs stay off that snapshot. The Space home page is that public leaderboard: it ranks configurations by score then cost and plots the Pareto frontier of observed spend versus primary metric. One left navigation lists Leaderboard and Admin. Admin contains Overview, Runs, Jobs, Endpoints, Results, Profiles, and Audit. Clicking an Admin view starts Hugging Face login when there is no session; the sidebar has no persistent sign-in or account-details prompt. Login waits for the projected operator ACL to be ready so an in-progress rebuild cannot misreport an authorized identity as denied. Campaign and task pages list the Jobs launched for that campaign. Observed campaign spend is the sum of recorded attempt receipts and Job or Sandbox hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
 
 ## Repair infrastructure failures
 
@@ -362,7 +371,16 @@ harbor-hf campaign retry-infrastructure <campaign-id> \
   --task <task-id> \
   --reason "transient infrastructure failure" \
   --yes
+
+harbor-hf campaign retry-infrastructure <campaign-id> \
+  --all-eligible \
+  --reason "retry eligible infrastructure failures" \
+  --yes
 ```
+
+The run page has the same control: **Retry infrastructure failures**. It only queues replacement Jobs for eligible infrastructure outcomes, including an infrastructure seal that should not have closed the logical task. Scored misses and other sealed outcomes stay sealed. A retry is a Job on the existing run. The run list does not add a second row. While that Job is running, the run page shows assigned tasks, replacement receipts, and the live sandbox window. The task list still shows selected seals.
+
+If an execution Job is later terminal with assigned tasks still open, the control service launches one follow-up Job for those tasks. An earlier COMPLETED observe does not block that follow-up. Job observation runs ahead of leftover Sandbox I/O so a finished Job cannot sit forever as SCHEDULING. If the last observe receipted a non-terminal state and the next observe was never written, control queues that observe again. Leftover Sandbox I/O from the dead Job is then closed so it cannot block the next launch. Sealed outcomes stay sealed, and tasks that were never assigned to that Job stay waiting.
 
 Cancellation also preserves existing evidence:
 

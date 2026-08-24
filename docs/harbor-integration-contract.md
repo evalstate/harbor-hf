@@ -9,7 +9,8 @@ the isolated legacy reader.
 
 Harbor owns the job config, task resolution, custom-agent loading, environment
 config, trial execution, locks, results, verifier rewards, exceptions, timing,
-token usage, and trial artifact inventory. Upstream Harbor remains unchanged;
+token usage, and trial artifact inventory. Workers install Harbor from a pinned
+`harbor-framework/harbor` git commit. Upstream Harbor remains unchanged;
 Harbor-HF uses only its public APIs and does not monkeypatch Harbor internals.
 When a Harbor CLI process exits after writing a trial result, Harbor-HF accepts
 success only if that durable result has no trial exception and its emitted lock
@@ -32,7 +33,7 @@ historical evidence tools.
 ## Execution Input
 
 A campaign first locks its approved profiles and expected logical tasks. A
-secret-free preparation Job runs the pinned Harbor release and builds one
+secret-free preparation Job runs the pinned Harbor git commit and builds one
 normal `JobConfig`. Harbor resolves the dataset and task sources through its
 public `JobPlan` API. The preparation worker then writes:
 
@@ -54,7 +55,7 @@ After a trial, the worker compares Harbor's emitted `TrialLock` with the
 prepared lock before it can submit evidence or an outcome.
 
 Both workers install the reviewed Harbor-HF agent package at its immutable
-revision and use the official pinned Harbor release. The preparation worker has
+revision and use the pinned Harbor git commit. The preparation worker has
 no persistent secret, inference access, Sandbox authority, or Bucket mount. The
 execution worker has no persistent secret or Bucket mount and reaches Sandboxes
 only through its short-lived capability. The root-owned bridge receives the
@@ -65,7 +66,7 @@ receives only its loopback route and placeholder key.
 
 Every provider-backed agent is loaded through Harbor's public
 `AgentConfig.import_path` field. Hermes, OpenClaw, OpenClaw Codex, Pi, DeepSeek
-Harness, and OpenCode live in separate modules under the `harbor-hf-agents`
+Harness, OpenCode, and FX live in separate modules under the `harbor-hf-agents`
 package. New provider executions do not select Harbor built-ins and have no
 fallback to them.
 

@@ -88,12 +88,19 @@ persistent secrets or inference access. Harbor resolves the job. The worker
 submits one `prepared.trial` record per logical task and then one `prepared.job`
 record through a short-lived capability.
 
-Execution workers pin Harbor 0.21.0 and invoke it without a dataset source
+Preparation and execution workers install Harbor from a pinned
+`harbor-framework/harbor` git commit, not a PyPI release. The current pin is
+`b37833221e27435a18d7acdd41d875cdc2831893`, which reports Harbor `0.22.0` and
+includes [PR 2681](https://github.com/harbor-framework/harbor/pull/2681). The
+former Harbor 0.21.0 empty-metrics sitecustomize patch is not applied.
+
+Execution workers invoke that pinned Harbor version without a dataset source
 label when replaying one exact prepared task. If Harbor exits nonzero only
 after writing a successful trial result, the worker still requires that exact
 durable result and its prepared lock before it can submit a completed attempt.
 A missing result, a mismatched lock, or a trial-level exception remains a
-failure. Harbor-HF does not patch Harbor internals.
+failure. Harbor-HF uses only public Harbor APIs and does not patch Harbor
+internals.
 
 The prepared records contain the exact Harbor trial locks and the data needed
 for admission, including source and task digests, resolved image digests,
@@ -197,10 +204,58 @@ canonical JSON encoder, including ECMAScript number formatting.
 
 Startup replays durable profile objects and promotions before writes are
 allowed. The resolver overlays checked-in profiles with the latest approved
-promotion for each kind and alias. Candidate and recommended records remain
-visible but cannot authorize a campaign. A campaign lock retains the selected
-alias, immutable profile digest, and complete spec even when that alias later
-moves. Canonical migration preserves profile objects and promotion records.
+promotion for each kind and alias. A promotion of a checked-in name does not
+hide a newer deployed digest of that same profile. Candidate and recommended
+records remain visible but cannot authorize a campaign. A campaign lock retains
+the selected alias, immutable profile digest, and complete spec even when that
+alias later moves. Canonical migration preserves profile objects and promotion
+records.
+
+### Capacity contracts
+
+Each concurrency field has one meaning:
+
+- `worker_concurrency` is the maximum number of trial futures submitted by one
+  execution worker at a time;
+- `sandbox_template.max_sandboxes` is the maximum number of active or reserved
+  Sandboxes for one campaign;
+- `worker_max_tasks_per_job` bounds the task assignment and recovery impact of
+  one execution Job and does not set concurrency;
+- `inference_max_concurrency` limits concurrent provider requests from one
+  Sandbox;
+- `inference_max_total_concurrency` limits the provider request units reserved
+  across all active Sandboxes in one campaign;
+- the namespace capacity profile limits active or reserved Sandboxes across
+  campaigns and by hardware name, and sets the Sandbox start rate; and
+- budget admission limits work through the campaign's immutable reservations
+  and ceiling.
+
+A Job reservation is active only while that Job can still spend money. A
+terminal Job observation or a launch suppressed before dispatch appends a
+release for the full Job reservation. Observed cost remains recorded
+independently. Before a paused campaign reserves resumed work, the service also
+reconciles missing releases for historical terminal and suppressed Job actions.
+The release records are deterministic and append-only. Sandbox reservations
+remain separate and close through the Sandbox capacity path.
+
+The namespace capacity profile is service policy. It uses the existing profile
+object and promotion records, but it is not a campaign profile reference and is
+not part of a campaign lock. Every admission grant records the exact capacity
+profile digest that authorized it. A later promotion applies only to later
+grants. Lower limits stop new admissions and let active work drain.
+
+Write-enabled startup resolves the promoted alias named by
+`HARBOR_HF_CAPACITY_PROFILE_ALIAS`. When that promotion is absent, the service
+writes and promotes a namespace cap of `HARBOR_HF_MAX_ACTIVE_SANDBOXES` (default
+16, maximum 1024) and matches start burst and refill tokens to the same value.
+An existing approved promotion is the source of truth. Restarting the Space does
+not reset it. Operators change the live cap through `GET` and `POST
+/api/v1/capacity`. The POST body requires `confirmed: true` and an
+`Idempotency-Key`. The response never includes the namespace. Read-only startup
+may replay and display historical records without a capacity profile, but it
+cannot admit new Sandbox work. No production quota is implied by the default.
+Operators select values from verified quota and profiling evidence. Existing
+campaign locks keep their per-run `max_sandboxes` and worker concurrency.
 
 ## HTTP API
 
@@ -210,6 +265,8 @@ The service exposes these route groups:
 GET  /health/live
 GET  /health/ready
 GET  /api/v1/system
+GET  /api/v1/capacity
+POST /api/v1/capacity
 GET  /api/v1/campaigns
 POST /api/v1/campaigns
 GET  /api/v1/campaigns/{campaign_id}
@@ -227,6 +284,7 @@ GET  /api/v1/jobs
 GET  /api/v1/endpoints
 GET  /api/v1/profiles
 GET  /api/v1/results
+GET  /api/v1/leaderboard
 GET  /api/v1/audit
 GET  /api/v1/events
 ```
@@ -265,11 +323,17 @@ and requests within those limits.
 
 Sandbox policies lock the digest-pinned image, hardware, lifetime, idle timeout,
 reservation, hourly cost, command count, command timeout, transfer size and
-filesystem roots. The control service writes a dispatch fence before every
-Sandbox side effect. Create and close are remotely adoptable. File writes repeat
-only with identical content-addressed bytes. Results are stored immutably outside
-the projection prefix before the action receipt, so restart recovery cannot
-duplicate a completed operation.
+filesystem roots. While Harbor can wait outside the Sandbox between commands,
+the execution worker submits periodic observe actions. Preparation locks the
+interval into the Harbor environment, and the service validates it against the
+prepared phase limits. Historical prepared locks without the field retain the
+behavior of their pinned worker. Each observation uses an authenticated Sandbox
+process-list request, which verifies readiness and refreshes the Sandbox idle
+watchdog without starting a command. The control service writes
+a dispatch fence before every Sandbox side effect. Create and close are remotely
+adoptable. File writes repeat only with identical content-addressed bytes. Results
+are stored immutably outside the projection prefix before the action receipt, so
+restart recovery cannot duplicate a completed operation.
 
 `sandbox.exec` is not replay-safe. If its external call fails after dispatch, the
 service writes no result. It writes an action receipt with `outcome=failed`,
@@ -421,7 +485,7 @@ retry does not increase the campaign denominator.
 Campaign pages show:
 
 - total logical tasks and sealed outcomes;
-- active tasks and infrastructure replacements;
+- active tasks and infrastructure replacements, including a run-page control that retries every eligible infrastructure failure;
 - terminal invalid, provider-rejected, agent, cancellation, verifier and benchmark failures;
 - physical attempt counts;
 - reserved, observed and reconciled cost plus the approved ceiling;
@@ -456,22 +520,31 @@ Each SQLite file is content-addressed. The snapshot receipt is written after
 the database bytes. Rank is computed at read time. The latest published
 eligible row wins for a configuration digest.
 
-Anonymous HTTP access to the snapshot is a separate grant. This object lives in
-the existing Bucket and does not add a second store.
+`GET /api/v1/leaderboard` is a public, rate-limited read. It returns the latest
+snapshot metadata (without `sqlite_key`) and the ranked rows, each marked as on
+or off the cost-versus-score Pareto frontier. The browser never reads the
+Bucket. Campaigns, result details, system, events, and mutations stay
+authenticated.
+
+This object lives in the existing Bucket and does not add a second store.
 
 ## Web routes
 
-The React application provides:
+The React application provides one left navigation. Leaderboard is public.
+Admin lists Overview, Runs, Jobs, Endpoints, Results, Profiles, and Audit.
+Those Admin routes require Hugging Face login.
 
 | Route | Content |
 | --- | --- |
-| `/` | Queue, active campaigns, failures, spend and endpoint safety. |
+| `/` | Public official leaderboard: snapshot table and cost-versus-score Pareto plot. |
+| `/overview` | Queue, active campaigns, failures, spend and endpoint safety. Authenticated. |
 | `/campaigns` | Searchable and filterable campaign list. |
 | `/campaigns/:campaignId` | Campaign progress, task states, HF Jobs, cost, publication, cleanup, endpoint safety, and timeline. |
 | `/campaigns/:campaignId/tasks/:taskId` | Logical outcome, every physical attempt, and the HF Jobs that ran for the campaign. |
 | `/jobs` | Current HF Job identity, Hub inspect links, latest observed state, recorded hardware cost, ownership, timing and infrastructure failures. |
 | `/endpoints` | Endpoint ownership, requested state, observed state, active cost, and cleanup. |
 | `/results` | Published catalog: pass rate, 95% CIs, token cost, Bucket output links, and provenance. |
+| `/leaderboard` | Redirects to `/`. |
 | `/profiles` | Immutable profiles, aliases, promotions, approval state, and resolved locks. |
 | `/audit` | Recorded receipts, effective dispositions, actors, integrity failures, and policy stops. |
 
@@ -491,8 +564,9 @@ sealed non-success tasks is labeled Completed with failures, not Completed.
 
 The Space is publicly reachable so Jobs can present short-lived worker
 capabilities without receiving a Hugging Face credential. Anonymous callers can
-reach static application assets, login and callback routes, and minimal health
-checks. Control data and mutations remain protected by the application.
+reach static application assets, login and callback routes, minimal health
+checks, and `GET /api/v1/leaderboard`. Campaigns, result details, system,
+events, and mutations remain protected by the application.
 
 Hugging Face OAuth provides verified user identities. The service stores
 operators and readers in an immutable private Bucket access-list record. A
@@ -519,8 +593,8 @@ limits. Forwarded client IP headers are not trusted because the hosting proxy
 may pass caller-supplied values. Unverified credentials stay in shared
 anonymous route limits. After authentication, limits use hashes of verified
 worker actions, actors, or sessions. Anonymous limits are separate for health,
-authentication, API, and static routes, so exhausting one does not block an
-authorized worker or operator. Authentication runs before request-body parsing,
+authentication, the public leaderboard, API, and static routes, so exhausting
+one does not block an authorized worker or operator. Authentication runs before request-body parsing,
 so an anonymous caller cannot force the service to parse a large worker
 submission. Public health responses contain only `live`, `ready`, or
 `rebuilding` state.
@@ -576,6 +650,140 @@ the database is disposable.
 Snapshots may improve startup time. They cannot authorize paid work until their
 source digest set is verified.
 
+## Sandbox capacity admission
+
+A Sandbox create action is the durable queue entry. The control service is the
+only admission writer and applies these states in order:
+
+```text
+pending admission
+admitted
+remote dispatch authorized
+remote Sandbox created
+capacity released
+```
+
+The service writes the create intent and campaign budget reservation before it
+considers capacity. A pure admission decision then returns `admitted`,
+`deferred`, or `rejected`. It checks cancellation and policy validity first,
+then campaign Sandbox capacity, namespace capacity, hardware capacity, campaign
+provider capacity, Sandbox start pacing, and budget. Each result has a stable
+reason code. A deferral includes a next eligible time only when token refill
+provides one. The service does not invent an estimate for an unknown capacity
+release.
+
+An admitted action receives one immutable `sandbox.admission` grant before the
+action-dispatch fence and before any Hugging Face adapter call. The grant binds
+the action, campaign, namespace, hardware, provider request units, capacity
+profile digest, admission time, and token-bucket state. Repeating an idempotent
+request adopts the same intent, reservation, grant, dispatch, and remote
+resource.
+
+The namespace start limit is a durable integer token bucket. Its profile sets
+the token capacity, refill amount, and refill period. Each grant names its
+causal predecessor, so replay reconstructs the same order and token state even
+when timestamps are equal. Time moving backward cannot add tokens, and a profile
+promotion cannot reset a partly used bucket to a fresh burst. A token is not
+refunded after a remote start was authorized.
+
+Capacity remains reserved from grant until one of two proofs exists:
+
+- the create failed definitively and no remote resource exists; or
+- a close receipt verifies an accepted terminal Sandbox state.
+
+An ambiguous create, failed close, or uncertain cleanup retains the slot. The
+projection reports that slot as cleanup-held. Historical dispatched creates
+without admission records count as legacy reservations until the same terminal
+proof exists. Historical records are never rewritten.
+
+Pending creates keep FIFO order inside each campaign. The reconciler rotates
+among eligible campaigns so one campaign cannot take every released namespace
+slot. Cleanup keeps priority over new work. Temporary deferral causes no remote
+call and no retry storm.
+
+The worker-facing create route submits or adopts the durable action. It returns
+the completed resource when one exists, or `202 Accepted` with the action ID,
+queue state, limiting reason, and a factual retry time when available. Workers
+observe that action with bounded backoff. Observation cannot create another
+intent, reservation, token charge, grant, dispatch, or Sandbox.
+
+PR #100 established the execution worker's bounded rolling scheduler. It keeps
+at most `worker_concurrency` futures, waits for `FIRST_COMPLETED`, and fills a
+free slot while tasks remain. This design stays in place. Campaign cancellation
+closes the refill gate through the existing control API. The worker starts no
+new task after cancellation becomes visible. Tasks already running continue to
+their evidence and cleanup boundary. Harbor internals are not patched.
+
+## Valid attempts and campaign completion
+
+An attempt receipt is durable evidence. It is not automatically a valid result.
+Each campaign lock includes an evidence policy that names the metrics required for
+selection. A provider-backed Pi workload requires finite positive integer values
+for both `input_tokens` and `output_tokens`. Other workloads must state their own
+requirements in the lock. Control code must not branch on a benchmark, model, or
+harness name.
+
+The control service evaluates the policy before every terminal selection. Worker
+outcome names and worker-supplied replacement flags cannot make an invalid receipt
+selectable. A zero, missing, negative, fractional, or non-finite required metric
+makes the attempt invalid for selection.
+
+An invalid attempt remains in the Bucket with its evidence and cost. If the lock
+permits another attempt, the reconciler waits for cleanup and schedules the bounded
+replacement. If the attempt limit, reservation, or campaign ceiling prevents
+another attempt, the service writes an exhausted-task record. It does not select
+the last invalid receipt.
+
+A campaign is complete only when every locked logical task has exactly one selected
+attempt and every selection passes the locked evidence policy. Exhausted tasks stay
+on the campaign while other tasks can still run. The campaign is failed only after
+every logical task is terminal and at least one task is exhausted. That campaign
+cannot become a valid completed campaign and cannot publish. An infrastructure
+exhaustion remains replaceable. Historical records remain byte-for-byte unchanged.
+Projection replay may label an old campaign `completed-invalid` when its historical
+selection does not pass the current read-only audit.
+
+## Cooperative pause and resume
+
+Pause and resume use the existing control API, reconciler, Job, Sandbox, and Bucket.
+A pause request is durable. Once the request exists, the service and workers stop
+admitting new task slots. Active tasks may finish, write their evidence and attempt
+receipt, and close their Sandboxes. The execution Job then ends at that durable task
+boundary.
+
+Resume creates one idempotent execution action for unresolved tasks. It does not
+rerun a task that already has a valid selected attempt. Repeated pause or resume
+requests adopt the existing action. A restart of the Space or worker must produce
+the same unresolved task set and next action.
+
+A sliding-window worker checks campaign lifecycle and Sandbox admission inside the
+same slot-fill boundary. While a campaign is running, a free worker slot is refilled
+when pending work and capacity remain. After an execution Job fails or stops with
+assigned tasks still open, the reconciler launches one follow-up Job for those
+tasks if the campaign is not paused or cancelled and the ceiling still admits the
+reservation. Tasks that were never assigned to that Job wait for resume or a later
+operator action. Leftover Sandbox creates and I/O from a terminal worker Job, or
+from a paused campaign, close without creating a remote Sandbox and do not occupy
+the reconciler batch ahead of a follow-up Job launch. Once pause or cancellation is
+visible, no new slot is admitted.
+
+## Safe publication and supersession
+
+Publication repeats the selection checks independently of campaign completion. It
+requires one selected receipt for every logical task, valid required metrics,
+matching task and campaign identities, matching provenance, complete normalized
+coverage, and no pending action or cleanup.
+
+The publisher writes immutable row objects and receipt evidence first. It reads them
+back and verifies their digests before it writes the catalog object that makes the
+publication visible. A partial write is not a published result. Every step uses
+deterministic keys so a retry adopts matching objects and rejects conflicting bytes.
+
+A replacement publication does not edit or delete an older publication. After the
+new publication commits, the service may append one supersession record that binds
+the old and new publication digests. Result views derive `current` and `superseded`
+state from that record. Direct historical reads remain available for audit.
+
 ## Reconciler
 
 The reconciler runs in the Fastify process and executes bounded work cycles. It
@@ -610,10 +818,13 @@ never enters the worker. When inference is required, the control service passes
 `HF_INFERENCE_TOKEN` directly to the Sandbox root bootstrap. The benchmark
 agent receives only a loopback route and placeholder key. Trial directories and
 complete workspaces return to the trusted worker in bounded chunks, then enter
-the private evidence store through content-addressed worker uploads. A locked
-worker task limit supports recovery canaries: the first Job can stop after a
-durable subset, and normal missing-receipt recovery must launch only the
-remaining logical tasks.
+the private evidence store through content-addressed worker uploads. When a
+task becomes terminal, the reconciler closes every admitted Sandbox for that
+task. It releases capacity and the unused budget hold only after a terminal
+close receipt. This also cleans up a Sandbox that the worker replaced or left
+behind. A locked worker task limit supports recovery canaries: the first Job
+can stop after a durable subset, and normal missing-receipt recovery must launch
+only the remaining logical tasks.
 
 The reconciler uses `AbortController` for graceful shutdown. Shutdown stops new
 admissions, lets an in-flight Bucket write reach a safe boundary, closes SSE
@@ -680,6 +891,13 @@ reconciler heartbeat, last successful Bucket write, and dependency health. It
 must not report secret values or private deployment identifiers to users who
 lack operator access.
 
+Capacity views report the configured limit, reserved and active use, available
+slots, queued creates, cleanup-held slots, provider request units, start tokens,
+effective capacity, and the current limiting reason. Namespace and campaign
+views keep worker, Sandbox, provider, start-rate, assignment, and budget limits
+separate. Server-Sent Events target only the queries affected by an admission,
+release, profile promotion, or limiting-state change.
+
 The overview and audit pages expose durable operational evidence. External
 telemetry is disabled unless a separate privacy and credential review approves
 it.
@@ -715,8 +933,25 @@ Acceptance requires these failure tests:
 - valid historical action disposition with recorded and effective state;
 - disposition rejection for wrong action, receipt, result, ownership, or close;
 - partial and concurrent disposition batch adoption;
-- disposition proof failure during shuffled projection replay; and
-- disposition correction with no retry, budget, attempt, publication, or resource side effect.
+- disposition proof failure during shuffled projection replay;
+- disposition correction with no retry, budget, attempt, publication, or resource side effect;
+- rolling refill while another trial remains a straggler;
+- cancellation and pre-receipt failure stopping later task admission;
+- concurrent campaign admissions at campaign, namespace, hardware, provider,
+  start-rate, and budget boundaries;
+- fair deferred admission before and after full projection rebuild;
+- process exit after intent, reservation, grant, dispatch, create, receipt, and
+  release;
+- ambiguous create and failed cleanup retaining capacity;
+- historical Sandbox actions rebuilding as conservative reservations; and
+- API, event, and browser status showing the correct limiting reason without
+  private topology or credentials.
+
+Behavior changes also run the repository Ruff, format, type, coverage,
+Slophammer, dry-run, and mutation gates together with generated-contract,
+OpenAPI, TypeScript, build, and browser checks. Pi Reviewer runs against the
+current base until no P0 or P1 finding remains. Relevant pull-request CI must be
+green before the change is ready to merge.
 
 ## Deployment and replacement
 
@@ -729,6 +964,16 @@ The replacement is a hard new-write switch. Before it begins, all active legacy
 controllers must finish, every managed endpoint must be paused, the new Space
 must pass recovery tests, and normalized result catalog data must exist in the
 Bucket.
+
+Capacity admission rolls out in four stages. First, additive schemas, legacy
+replay, capacity status, and tests ship while writes stay disabled. Second, an
+operator promotes a reviewed namespace capacity profile, or write-enabled
+startup seeds the default cap and alias. Write-enabled startup fails closed
+until that profile is available and no ambiguous legacy create can escape
+conservative accounting. Third, every new Sandbox create requires a durable
+admission grant. Fourth, new deployment profiles pin the worker revision that
+includes cancellation awareness. Existing campaign locks keep their recorded
+worker revision and are not changed.
 
 At the boundary, the TypeScript service becomes the only campaign writer. New
 campaigns and publications stop using the coordination and result Datasets.

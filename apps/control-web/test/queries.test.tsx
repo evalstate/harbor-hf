@@ -5,8 +5,11 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   affectedQueryKeys,
+  collectPagedItems,
   JOBS_REFRESH_INTERVAL_MS,
   keys,
+  useAllProfiles,
+  useCampaignJobs,
   useJobs,
   useLiveUpdates,
 } from "../src/queries";
@@ -61,10 +64,42 @@ describe("live query updates", () => {
     });
     expect(affected).toContainEqual(keys.campaigns);
     expect(affected).toContainEqual(keys.campaign("campaign-1"));
+    expect(affected).toContainEqual(keys.capacity("campaign-1"));
     expect(affected).toContainEqual(keys.tasks("campaign-1"));
     expect(affected).toContainEqual(keys.task("campaign-1", "task-1"));
     expect(affected).not.toContainEqual(keys.session);
     expect(affected).not.toContainEqual(keys.results);
+  });
+
+  it("refreshes the complete campaign Job list for Job actions", () => {
+    const affected = affectedQueryKeys({
+      type: "action.receipt",
+      occurred_at: "2026-08-18T00:00:00Z",
+      data: { campaign_id: "campaign-1", action_kind: "job.observe" },
+    });
+    expect(affected).toContainEqual(keys.jobs);
+    expect(affected).toContainEqual(keys.campaignJobs("campaign-1"));
+  });
+
+  it("invalidates every capacity view after capacity profile promotion", () => {
+    const affected = affectedQueryKeys({
+      type: "profile.promotion",
+      occurred_at: "2026-08-18T00:00:00Z",
+      data: { profile_kind: "capacity", alias: "current" },
+    });
+    expect(affected).toContainEqual(["capacity"]);
+    expect(affected).toContainEqual(keys.profiles);
+  });
+
+  it("targets capacity views for Sandbox admission records", () => {
+    const affected = affectedQueryKeys({
+      type: "sandbox.admission",
+      occurred_at: "2026-08-18T00:00:00Z",
+      data: { campaign_id: "campaign-1", action_id: "action-1" },
+    });
+    expect(affected).toContainEqual(keys.capacity("campaign-1"));
+    expect(affected).toContainEqual(keys.campaign("campaign-1"));
+    expect(affected).not.toContainEqual(keys.session);
   });
 
   it("refreshes open detail views for replay events without scope fields", () => {
@@ -156,6 +191,7 @@ describe("live query updates", () => {
 
     const invalidated = invalidate.mock.calls.map(([options]) => options?.queryKey);
     expect(invalidated).toContainEqual(keys.results);
+    expect(invalidated).toContainEqual(keys.leaderboard);
     expect(invalidated).toContainEqual(keys.campaigns);
     expect(invalidated).toContainEqual(keys.campaign("campaign-1"));
     expect(invalidated).toContainEqual(keys.audit);
@@ -190,14 +226,21 @@ describe("live query updates", () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it("requests Jobs scoped to a campaign", async () => {
-    const fetchMock = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ items: [], next_cursor: null }), {
+  it("loads every Job page scoped to a campaign", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return new Response(
+        JSON.stringify(
+          url.includes("cursor=page-2")
+            ? { items: [{ resource_id: "job-2" }], next_cursor: null }
+            : { items: [{ resource_id: "job-1" }], next_cursor: "page-2" },
+        ),
+        {
           status: 200,
           headers: { "content-type": "application/json" },
-        }),
-    );
+        },
+      );
+    });
     vi.stubGlobal("fetch", fetchMock);
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -205,10 +248,93 @@ describe("live query updates", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    renderHook(() => useJobs(undefined, "campaign-1"), { wrapper });
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const { result } = renderHook(() => useCampaignJobs("campaign-1"), { wrapper });
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(2));
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
-      "/api/v1/jobs?campaign_id=campaign-1",
+      "/api/v1/jobs?limit=100&campaign_id=campaign-1",
     );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=page-2");
+  });
+});
+
+describe("paged profile collection", () => {
+  it("follows profile cursors until models and later harnesses appear", async () => {
+    const pages = [
+      {
+        items: [{ name: "tb21-old-deployment" }, { name: "hermes" }],
+        next_cursor: "page-2",
+      },
+      {
+        items: [{ name: "opencode" }, { name: "gpt-oss-20b" }],
+        next_cursor: null,
+      },
+    ];
+
+    const items = await collectPagedItems(async (cursor) => {
+      if (!cursor) return pages[0];
+      if (cursor === "page-2") return pages[1];
+      throw new Error(`unexpected cursor ${cursor}`);
+    });
+
+    expect(items.map((item) => item.name)).toEqual([
+      "tb21-old-deployment",
+      "hermes",
+      "opencode",
+      "gpt-oss-20b",
+    ]);
+  });
+
+  it("loads every profile page for the launch form", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const page = url.includes("cursor=page-2")
+        ? {
+            items: [
+              {
+                profile_id: "model-1",
+                profile_kind: "model",
+                name: "gpt-oss-20b",
+                approved_aliases: ["gpt-oss-20b"],
+              },
+              {
+                profile_id: "harness-2",
+                profile_kind: "harness",
+                name: "opencode",
+                approved_aliases: ["opencode"],
+              },
+            ],
+            next_cursor: null,
+          }
+        : {
+            items: [
+              {
+                profile_id: "deploy-1",
+                profile_kind: "deployment",
+                name: "tb21-old",
+                approved_aliases: ["tb21-old"],
+              },
+            ],
+            next_cursor: "page-2",
+          };
+      return new Response(JSON.stringify(page), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const hook = renderHook(() => useAllProfiles(), { wrapper });
+    await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));
+    expect(hook.result.current.data?.items.map((item) => item.name)).toEqual([
+      "tb21-old",
+      "gpt-oss-20b",
+      "opencode",
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -1,11 +1,9 @@
 # Provider agents and security
 
 Provider-backed Harbor runs load external custom agents from
-`packages/harbor-hf-agents`. Upstream Harbor remains unchanged except for the
-time-boxed Harbor 0.21.0 empty-metrics sitecustomize patch. Delete
-`harbor_0210_empty_metrics.py` when the pinned Harbor version includes
-[PR 2681](https://github.com/harbor-framework/harbor/pull/2681). The worker
-revision pins orchestration and the complete custom-agent package.
+`packages/harbor-hf-agents`. Workers install Harbor from a pinned
+`harbor-framework/harbor` git commit. The worker revision pins orchestration
+and the complete custom-agent package.
 
 ## Supported boundary
 
@@ -17,7 +15,16 @@ current package has separate modules for:
 - OpenClaw with the genuine Codex runtime through Responses;
 - Pi through Chat Completions;
 - DeepSeek Harness through Chat Completions;
-- OpenCode through Chat Completions.
+- OpenCode through Chat Completions;
+- Qwen Code through Chat Completions;
+- mini-swe-agent through Chat Completions;
+- Kimi Code through Chat Completions;
+- OpenHands through Chat Completions;
+- FX through Chat Completions.
+
+Harbor Codex and Claude Code keep their native APIs. The locked
+`gpt-oss-20b` Together route is Chat Completions only, so those two
+harnesses are rejected on that route.
 
 Each module owns installation, configuration, invocation, session collection,
 and ATIF-v1.7 conversion. One agent's runtime files or trajectory converter

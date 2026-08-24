@@ -13,10 +13,21 @@ import {
   deterministicId,
   sha256,
 } from "@harbor-hf/contracts";
+import {
+  attemptAdmissibility,
+  requiredPositiveMetrics,
+} from "./attempt-admissibility.js";
 import { preparationRequired } from "./profiles.js";
 import type { Projection } from "./projection.js";
 import type { ResultPublisher } from "./publication.js";
-import { type ControlService, PolicyError } from "./service.js";
+import {
+  type ControlService,
+  executionReservationCategory,
+  executionTaskBatches,
+  infrastructureSealReplaceable,
+  type JobBudgetReservation,
+  PolicyError,
+} from "./service.js";
 
 export interface ExternalActionResult {
   outcome: ActionReceipt["outcome"];
@@ -116,6 +127,14 @@ function optionalHourlyCost(
   return typeof value === "number" ? value : undefined;
 }
 
+function optionalProfileStrings(spec: Record<string, unknown>, key: string): string[] {
+  const value = spec[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string"))
+    throw new PolicyError(`profile ${key} must be an array of strings`);
+  return value;
+}
+
 function profileStrings(
   spec: Record<string, unknown>,
   key: string,
@@ -137,6 +156,42 @@ function profileInferenceToken(
   if (value !== "forbidden" && value !== "required")
     throw new PolicyError("profile inference_token is invalid");
   return value;
+}
+
+export function fairSandboxCreateOrder(
+  intents: readonly ActionIntent[],
+  latestCampaignId: string | null,
+): ActionIntent[] {
+  const groups = new Map<string, ActionIntent[]>();
+  for (const intent of intents) {
+    const group = groups.get(intent.campaign_id) ?? [];
+    group.push(intent);
+    groups.set(intent.campaign_id, group);
+  }
+  let campaigns = [...groups.keys()].sort((left, right) => {
+    const leftIntent = groups.get(left)?.[0];
+    const rightIntent = groups.get(right)?.[0];
+    return (leftIntent?.created_at ?? left).localeCompare(
+      rightIntent?.created_at ?? right,
+    );
+  });
+  const latestIndex = latestCampaignId ? campaigns.indexOf(latestCampaignId) : -1;
+  if (latestIndex >= 0)
+    campaigns = [
+      ...campaigns.slice(latestIndex + 1),
+      ...campaigns.slice(0, latestIndex + 1),
+    ];
+  const output: ActionIntent[] = [];
+  while (groups.size > 0) {
+    for (const campaignId of campaigns) {
+      const group = groups.get(campaignId);
+      const next = group?.shift();
+      if (next) output.push(next);
+      if (group?.length === 0) groups.delete(campaignId);
+    }
+    campaigns = campaigns.filter((campaignId) => groups.has(campaignId));
+  }
+  return output;
 }
 
 export class Reconciler {
@@ -188,18 +243,97 @@ export class Reconciler {
       await this.service.markAdvanced(intent, receipt);
       handled += 1;
     }
-    for (const intent of await this.projection.pendingActions(
-      this.options.batch_size,
-    )) {
+    const pending = await this.projection.pendingActions(10_000);
+    const ordinary = pending.filter(
+      (intent) => intent.action_kind !== "sandbox.create",
+    );
+    ordinary.sort((left, right) => {
+      // Observe must beat leftover Sandbox I/O. Those I/O actions stay pending
+      // while the launch still looks running, and they would otherwise fill the
+      // batch so a finished Job never leaves SCHEDULING.
+      const priority = (intent: ActionIntent): number => {
+        if (
+          intent.action_kind === "sandbox.close" ||
+          intent.action_kind === "campaign.cancel" ||
+          intent.action_kind === "job.cancel" ||
+          intent.action_kind === "job.launch" ||
+          intent.action_kind === "job.observe" ||
+          intent.action_kind === "campaign.resume" ||
+          intent.action_kind === "campaign.pause"
+        )
+          return 0;
+        return 1;
+      };
+      return priority(left) - priority(right);
+    });
+    let ordinaryHandled = 0;
+    const ordinaryLimit = Math.max(1, this.options.batch_size - 1);
+    const due = ordinary.filter((intent) => {
       const notBefore = intent.payload.not_before;
-      if (typeof notBefore === "string" && Date.parse(notBefore) > Date.now()) continue;
+      return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
+    });
+    for (const intent of due.slice(0, ordinaryLimit)) {
+      await this.handle(intent);
+      handled += 1;
+      ordinaryHandled += 1;
+    }
+    const remaining = Math.max(1, this.options.batch_size - ordinaryHandled);
+    for (const intent of (
+      await this.fairSandboxCreates(
+        pending.filter((candidate) => candidate.action_kind === "sandbox.create"),
+      )
+    ).slice(0, remaining)) {
+      if (!this.service.capacityProfile()) {
+        await this.handle(intent);
+        handled += 1;
+        continue;
+      }
+      const maximum = intent.payload.sandbox?.max_sandboxes;
+      if (typeof maximum !== "number")
+        throw new PolicyError("Sandbox create is missing its campaign capacity");
+      const admission = await this.service.admitSandboxCreate(intent, maximum);
+      if (admission.status !== "admitted") continue;
       await this.handle(intent);
       handled += 1;
     }
+    handled += await this.cleanupTerminalTaskSandboxes();
     for (const campaign of await this.projection.campaigns(10_000)) {
+      if (await this.continueJobObservation(campaign.campaign_id)) handled += 1;
+      if (await this.continueUnresolvedExecution(campaign.campaign_id)) handled += 1;
       if (await this.maybePublish(campaign.campaign_id)) handled += 1;
     }
     return handled;
+  }
+
+  private async cleanupTerminalTaskSandboxes(): Promise<number> {
+    const tasks = new Map<string, { campaignId: string; taskId: string }>();
+    for (const grant of await this.projection.activeSandboxAdmissions(
+      this.service.namespace,
+    )) {
+      const action = await this.projection.action(grant.action_id);
+      if (action?.action_kind !== "sandbox.create")
+        throw new PolicyError("active Sandbox admission has no create action");
+      const intent = JSON.parse(action.intent_body) as ActionIntent;
+      const taskId = intent.payload.task_id;
+      if (typeof taskId !== "string")
+        throw new PolicyError("active Sandbox admission has no task identity");
+      const task = await this.projection.task(grant.campaign_id, taskId);
+      if (!task?.task.terminal_outcome) continue;
+      tasks.set(`${grant.campaign_id}\u0000${taskId}`, {
+        campaignId: grant.campaign_id,
+        taskId,
+      });
+    }
+    let pending = 0;
+    for (const task of tasks.values()) {
+      if (await this.ensureSandboxCleanup(task.campaignId, task.taskId)) pending += 1;
+    }
+    return pending;
+  }
+
+  private async fairSandboxCreates(intents: ActionIntent[]): Promise<ActionIntent[]> {
+    const latest = await this.projection.latestSandboxAdmission(this.service.namespace);
+    return fairSandboxCreateOrder(intents, latest?.campaign_id ?? null);
   }
 
   private async handle(intent: ActionIntent): Promise<void> {
@@ -211,19 +345,51 @@ export class Reconciler {
         observed_state: receipt.publication_state,
         resource_id: receipt.publication_id,
       };
+    } else if (intent.action_kind === "publication.supersede") {
+      const current = await this.projection.campaignPublication(intent.campaign_id);
+      const previousId = intent.payload.publication_id;
+      const previous =
+        typeof previousId === "string"
+          ? await this.projection.publication(previousId)
+          : null;
+      if (!current || !previous || typeof previousId !== "string")
+        throw new PolicyError("supersession publication is missing");
+      const record = await this.service.writePublicationSupersession(
+        intent.campaign_id,
+        current.publication_id,
+        previous.campaign_id,
+        previousId,
+        typeof intent.payload.reason === "string"
+          ? intent.payload.reason
+          : "replacement publication validated",
+      );
+      result = {
+        outcome: "completed",
+        observed_state: "superseded",
+        resource_id: record.record_id,
+      };
     } else if (intent.action_kind === "campaign.cancel") {
       result = { outcome: "completed", observed_state: "cancelled" };
+    } else if (intent.action_kind === "campaign.pause") {
+      result = { outcome: "completed", observed_state: "paused" };
+    } else if (intent.action_kind === "campaign.resume") {
+      result = { outcome: "completed", observed_state: "running" };
     } else if (intent.action_kind === "job.launch") {
       const cancelled = await this.projection.hasCampaignAction(
         intent.campaign_id,
         "campaign.cancel",
       );
       const terminal = await this.allActionTasksTerminal(intent);
-      const suppression: "cancelled" | "terminal" | null = cancelled
+      const paused =
+        intent.payload.worker_role !== "preparation" &&
+        (await this.projection.campaignPaused(intent.campaign_id));
+      const suppression: "cancelled" | "paused" | "terminal" | null = cancelled
         ? "cancelled"
-        : terminal
-          ? "terminal"
-          : null;
+        : paused
+          ? "paused"
+          : terminal
+            ? "terminal"
+            : null;
       const dispatch = suppression
         ? await this.projection.actionDispatch(intent.action_id)
         : null;
@@ -246,6 +412,18 @@ export class Reconciler {
       intent.action_kind === "sandbox.write" ||
       intent.action_kind === "sandbox.read"
     ) {
+      const taskId = intent.payload.task_id;
+      if (typeof taskId !== "string")
+        throw new PolicyError("Sandbox I/O action is missing its task identity");
+      const suppression = await this.sandboxCreateSuppression(intent);
+      if (suppression) {
+        result = { outcome: "completed", observed_state: suppression };
+        const receipt = await this.service.receipt(intent, result);
+        await this.advance(intent, receipt);
+        await this.service.markAdvanced(intent, receipt);
+        return;
+      }
+      await this.service.settleClosedSandboxAmbiguities(intent.campaign_id, taskId);
       return;
     } else if (
       intent.action_kind === "sandbox.create" ||
@@ -253,6 +431,36 @@ export class Reconciler {
       intent.action_kind === "sandbox.close"
     ) {
       if (intent.action_kind === "sandbox.create") {
+        const dispatch = await this.projection.actionDispatch(intent.action_id);
+        const suppression = await this.sandboxCreateSuppression(intent);
+        if (suppression && !dispatch) {
+          result = { outcome: "completed", observed_state: suppression };
+          const receipt = await this.service.receipt(intent, result);
+          await this.advance(intent, receipt);
+          await this.service.markAdvanced(intent, receipt);
+          return;
+        }
+        if (suppression && dispatch) {
+          try {
+            result = await this.external.execute(intent, { adoption_only: true });
+          } catch (error) {
+            if (
+              error instanceof ExternalActionNotFoundError ||
+              error instanceof AmbiguousExternalActionError
+            ) {
+              result = {
+                outcome: "completed",
+                observed_state: `${suppression}-not-found`,
+              };
+            } else throw error;
+          }
+          if (result) {
+            const receipt = await this.service.receipt(intent, result);
+            await this.advance(intent, receipt);
+            await this.service.markAdvanced(intent, receipt);
+            return;
+          }
+        }
         const policy = intent.payload.sandbox;
         if (!policy) throw new PolicyError("Sandbox create is missing policy");
         const reservation = await this.projection.budget(
@@ -265,10 +473,25 @@ export class Reconciler {
         )
           throw new PolicyError("Sandbox reservation does not match policy");
       }
+      if (intent.action_kind === "sandbox.observe") {
+        const suppression = await this.sandboxCreateSuppression(intent);
+        if (suppression) {
+          result = { outcome: "completed", observed_state: suppression };
+          const receipt = await this.service.receipt(intent, result);
+          await this.advance(intent, receipt);
+          await this.service.markAdvanced(intent, receipt);
+          return;
+        }
+      }
       const dispatch = await this.projection.actionDispatch(intent.action_id);
+      const admission =
+        intent.action_kind === "sandbox.create"
+          ? await this.projection.sandboxAdmission(intent.action_id)
+          : null;
       if (
         intent.action_kind === "sandbox.create" &&
         !dispatch &&
+        !admission &&
         intent.actor.subject.startsWith("worker:") &&
         Date.parse(intent.created_at) + 30_000 > Date.now()
       )
@@ -297,15 +520,24 @@ export class Reconciler {
             intent.campaign_id,
             "campaign.cancel",
           );
+          const suppression = await this.sandboxCreateSuppression(intent);
           result = {
-            outcome: cancelled ? "completed" : "failed",
+            outcome: cancelled || suppression ? "completed" : "failed",
             observed_state: cancelled
               ? "suppressed-cancelled-not-found"
-              : "sandbox-create-not-found",
-            error_code: cancelled ? null : "sandbox_create_not_found",
+              : suppression
+                ? `${suppression}-not-found`
+                : "sandbox-create-not-found",
+            error_code: cancelled || suppression ? null : "sandbox_create_not_found",
           };
-        } else if (error instanceof AmbiguousExternalActionError) return;
-        else throw error;
+        } else if (error instanceof AmbiguousExternalActionError) {
+          const suppression = await this.sandboxCreateSuppression(intent);
+          if (!suppression) return;
+          result = {
+            outcome: "completed",
+            observed_state: `${suppression}-not-found`,
+          };
+        } else throw error;
       }
     } else if (
       intent.action_kind === "endpoint.pause" ||
@@ -328,7 +560,7 @@ export class Reconciler {
 
   private async executeJobLaunch(
     intent: ActionIntent,
-    suppression: "cancelled" | "terminal" | null = null,
+    suppression: "cancelled" | "paused" | "terminal" | null = null,
   ): Promise<ExternalActionResult | null> {
     const dispatch = await this.projection.actionDispatch(intent.action_id);
     if (dispatch) {
@@ -373,11 +605,17 @@ export class Reconciler {
         await this.admit(intent, receipt);
         break;
       case "job.launch":
-        if (receipt.observed_state.startsWith("suppressed-")) break;
+        if (receipt.observed_state.startsWith("suppressed-")) {
+          await this.service.releaseJobAction(intent, receipt.created_at);
+          break;
+        }
         if (receipt.outcome === "failed") {
           if (intent.payload.worker_role === "preparation")
             await this.handlePreparationTerminal(intent, receipt, "ERROR");
-          else await this.completeTasksFromJob(intent, receipt, "infrastructure");
+          else {
+            await this.service.releaseJobAction(intent, receipt.created_at);
+            await this.completeTasksFromJob(intent, receipt, "infrastructure");
+          }
         } else await this.observeJob(intent, receipt);
         break;
       case "job.observe":
@@ -385,6 +623,41 @@ export class Reconciler {
         break;
       case "job.cancel":
         await this.continueCancellation(intent.campaign_id);
+        break;
+      case "campaign.resume": {
+        const lock = await this.requiredLock(intent.campaign_id);
+        const tasks = (await this.projection.tasks(intent.campaign_id)).filter(
+          (task) => !task.terminal_outcome,
+        );
+        const limit =
+          typeof intent.payload.task_limit === "number"
+            ? intent.payload.task_limit
+            : tasks.length;
+        const taskIds = tasks.slice(0, limit).map((task) => task.task_id);
+        if (taskIds.length > 0) {
+          if (await this.projection.campaignPaused(intent.campaign_id)) {
+            await this.service.releaseJobActions(
+              intent.campaign_id,
+              this.executionReservations(
+                lock,
+                taskIds,
+                intent.generation,
+                receipt.created_at,
+              ),
+            );
+          } else {
+            await this.launchExecution(
+              lock,
+              receipt.created_at,
+              intent.generation,
+              taskIds,
+            );
+          }
+        }
+        break;
+      }
+      case "campaign.pause":
+      case "publication.supersede":
         break;
       case "endpoint.resume":
       case "endpoint.pause":
@@ -455,7 +728,8 @@ export class Reconciler {
     const deployment = profile(lock, "deployment") as DeploymentProfileSpec;
     if (preparationRequired(deployment))
       await this.launchPreparation(lock, receipt.created_at, 0);
-    else await this.launchExecution(lock, receipt.created_at, 0);
+    else if (!(await this.projection.campaignPaused(lock.campaign_id)))
+      await this.launchExecution(lock, receipt.created_at, 0);
   }
 
   private async launchPreparation(
@@ -510,6 +784,152 @@ export class Reconciler {
     await this.service.writeAction(intent);
   }
 
+  private executionReservations(
+    lock: CampaignLock,
+    taskIds: readonly string[],
+    generation: number,
+    createdAt: string,
+  ): JobBudgetReservation[] {
+    const deployment = profile(lock, "deployment") as DeploymentProfileSpec;
+    if (deployment.route !== "hf_job")
+      throw new PolicyError("imported deployments cannot reserve execution Jobs");
+    const maximumTasks = deployment.worker_max_tasks_per_job ?? taskIds.length;
+    const policy = profile(lock, "launch_policy");
+    const amountMicrousd = profileScalar<number>(
+      policy,
+      "reservation_microusd",
+      "number",
+    );
+    return executionTaskBatches(taskIds, maximumTasks).map((batch) => ({
+      category: executionReservationCategory(batch),
+      generation,
+      created_at: createdAt,
+      amount_microusd: amountMicrousd,
+    }));
+  }
+
+  private async releaseObservedJobReservation(
+    intent: ActionIntent,
+    createdAt: string,
+  ): Promise<void> {
+    const launchActionId = scalar<string>(intent.payload, "launch_action_id", "string");
+    const launch = await this.projection.action(launchActionId);
+    if (launch?.action_kind !== "job.launch")
+      throw new PolicyError("Job observation has no launch action");
+    await this.service.releaseJobAction(
+      JSON.parse(launch.intent_body) as ActionIntent,
+      createdAt,
+    );
+  }
+
+  private async sandboxCreateSuppression(
+    intent: ActionIntent,
+  ): Promise<"suppressed-paused" | "suppressed-terminal-job" | null> {
+    if (await this.projection.campaignPaused(intent.campaign_id))
+      return "suppressed-paused";
+    const subject = intent.actor.subject;
+    if (!subject.startsWith("worker:")) return null;
+    const launchActionId = subject.slice("worker:".length);
+    if (
+      await this.projection.launchActionStillRunning(intent.campaign_id, launchActionId)
+    )
+      return null;
+    return "suppressed-terminal-job";
+  }
+
+  /**
+   * Resume Job observation when the last observe receipted a non-terminal
+   * state and the next observe was never written. A Space restart can leave
+   * that gap, after which leftover I/O keeps the launch looking like SCHEDULING.
+   */
+  private async continueJobObservation(campaignId: string): Promise<boolean> {
+    const actions = await this.projection.campaignActions(campaignId);
+    let wrote = false;
+    for (const launch of actions) {
+      if (launch.action_kind !== "job.launch" || launch.receipt_body === null) continue;
+      if (launch.observed_state?.startsWith("suppressed-")) continue;
+      const resourceId = launch.resource_id;
+      if (!resourceId) continue;
+      const observes = actions.filter((action) => {
+        if (action.action_kind !== "job.observe") return false;
+        const intent = JSON.parse(action.intent_body) as ActionIntent;
+        return (
+          intent.payload.launch_action_id === launch.action_id ||
+          action.target === resourceId
+        );
+      });
+      if (observes.some((action) => action.receipt_body === null)) continue;
+      if (observes.some((action) => jobStateIsTerminal(action.observed_state)))
+        continue;
+      const latest = observes
+        .filter((action) => action.receipt_body !== null)
+        .sort((left, right) => left.generation - right.generation)
+        .at(-1);
+      const source = latest ?? launch;
+      const sourceIntent = JSON.parse(source.intent_body) as ActionIntent;
+      await this.service.writeAction(
+        this.service.actionIntent(
+          campaignId,
+          "job.observe",
+          resourceId,
+          (latest?.generation ?? -1) + 1,
+          {
+            ...sourceIntent.payload,
+            resource_id: resourceId,
+            launch_action_id: launch.action_id,
+            not_before: new Date(
+              Date.parse(source.created_at) + this.options.observation_interval_ms,
+            ).toISOString(),
+          },
+        ),
+      );
+      wrote = true;
+    }
+    return wrote;
+  }
+
+  /**
+   * Launch one execution Job for tasks left open by a failed or stopped
+   * execution Job. Sealed tasks and tasks that were never assigned stay put.
+   */
+  private async continueUnresolvedExecution(campaignId: string): Promise<boolean> {
+    if (await this.projection.hasCampaignAction(campaignId, "campaign.cancel"))
+      return false;
+    if (await this.projection.campaignPaused(campaignId)) return false;
+    const campaign = await this.projection.campaign(campaignId);
+    if (!campaign || campaign.terminal_tasks === campaign.total_tasks) return false;
+    const actions = await this.projection.campaignActions(campaignId);
+    if (
+      actions.some(
+        (action) =>
+          action.action_kind === "campaign.admit" && action.receipt_body === null,
+      )
+    )
+      return false;
+    const lock = await this.projection.campaignLock(campaignId);
+    if (!lock) return false;
+    const deployment = profile(lock, "deployment") as DeploymentProfileSpec;
+    if (deployment.route !== "hf_job") return false;
+    if (
+      preparationRequired(deployment) &&
+      !(await this.service.preparedJob(campaignId))
+    )
+      return false;
+    const leftover = await this.projection.abandonedUnresolvedTaskIds(campaignId);
+    if (leftover.length === 0) return false;
+    const generation =
+      actions
+        .filter((action) => action.action_kind === "job.launch")
+        .reduce((maximum, action) => Math.max(maximum, action.generation), -1) + 1;
+    try {
+      await this.launchExecution(lock, new Date().toISOString(), generation, leftover);
+    } catch (error) {
+      if (error instanceof PolicyError) return false;
+      throw error;
+    }
+    return true;
+  }
+
   private async launchExecution(
     lock: CampaignLock,
     createdAt: string,
@@ -520,14 +940,10 @@ export class Reconciler {
     if (deployment.route !== "hf_job")
       throw new PolicyError("imported deployments cannot launch execution Jobs");
     const maximumTasks = deployment.worker_max_tasks_per_job ?? taskIds.length;
-    if (taskIds.length > maximumTasks) {
-      for (let offset = 0; offset < taskIds.length; offset += maximumTasks)
-        await this.launchExecution(
-          lock,
-          createdAt,
-          generation,
-          taskIds.slice(offset, offset + maximumTasks),
-        );
+    const batches = executionTaskBatches(taskIds, maximumTasks);
+    if (batches.length > 1) {
+      for (const batch of batches)
+        await this.launchExecution(lock, createdAt, generation, batch);
       return;
     }
     const batchKey = sha256(canonicalJson(taskIds)).slice(7, 23);
@@ -537,13 +953,17 @@ export class Reconciler {
         : `campaign-tasks-${batchKey}`;
     const policy = profile(lock, "launch_policy");
     const reservation = profileScalar<number>(policy, "reservation_microusd", "number");
-    await this.reserveInitialAction(
-      lock.campaign_id,
-      `execution-${batchKey}`,
-      generation,
-      reservation,
-      createdAt,
-    );
+    if (
+      !(await this.service.reserveJobActions(lock.campaign_id, [
+        {
+          category: executionReservationCategory(taskIds),
+          generation,
+          created_at: createdAt,
+          amount_microusd: reservation,
+        },
+      ]))
+    )
+      throw new PolicyError("execution Job would exceed the campaign ceiling");
     const inferenceToken = profileInferenceToken(
       deployment as unknown as Record<string, unknown>,
     );
@@ -603,6 +1023,10 @@ export class Reconciler {
           policy,
           "max_infrastructure_attempts",
           "number",
+        ),
+        required_positive_metrics: optionalProfileStrings(
+          policy,
+          "required_positive_metrics",
         ),
         reservation_microusd: reservation,
         trusted_worker: deployment.trusted_worker,
@@ -686,6 +1110,7 @@ export class Reconciler {
       await this.handlePreparationTerminal(intent, receipt, state);
       return;
     }
+    await this.releaseObservedJobReservation(intent, receipt.created_at);
     if (state === "STOPPED" || state === "COMPLETED") {
       const successful = scalar<boolean>(
         intent.payload,
@@ -699,10 +1124,12 @@ export class Reconciler {
         intent.campaign_id,
         "campaign.cancel",
       );
+      const paused = await this.projection.campaignPaused(intent.campaign_id);
       if (
         !successful &&
         !workerAttemptsPresent &&
         !cancelling &&
+        !paused &&
         typeof deadline !== "string" &&
         graceMs > 0
       ) {
@@ -746,7 +1173,8 @@ export class Reconciler {
       const lock = await this.requiredLock(intent.campaign_id);
       if (prepared.campaign_lock_digest !== sha256(canonicalJson(lock)))
         throw new PolicyError("prepared job does not match the campaign lock");
-      await this.launchExecution(lock, receipt.created_at, 0);
+      if (!(await this.projection.campaignPaused(intent.campaign_id)))
+        await this.launchExecution(lock, receipt.created_at, 0);
       return;
     }
     const graceMs = this.options.worker_receipt_grace_ms ?? 0;
@@ -811,6 +1239,12 @@ export class Reconciler {
   ): Promise<void> {
     const tasks = stringArray(intent.payload, "task_ids");
     const known = await this.projection.campaignAttempts(intent.campaign_id);
+    const paused = await this.projection.campaignPaused(intent.campaign_id);
+    const openTaskCount = (
+      await Promise.all(
+        tasks.map((taskId) => this.projection.task(intent.campaign_id, taskId)),
+      )
+    ).filter((task) => task && !task.task.terminal_outcome).length;
     for (const taskId of tasks) {
       const task = await this.projection.task(intent.campaign_id, taskId);
       if (!task || task.task.terminal_outcome) continue;
@@ -826,9 +1260,10 @@ export class Reconciler {
         .at(-1);
       if (workerAttempt && workerAttempt.attempt_id !== task.task.selected_attempt_id) {
         const parsed = JSON.parse(workerAttempt.body) as AttemptReceipt;
-        await this.finishAttempt(parsed, intent);
+        await this.finishAttempt(parsed, intent, openTaskCount > 1);
         continue;
       }
+      if (paused) continue;
       const attemptId = deterministicId(
         "attempt",
         intent.campaign_id,
@@ -848,7 +1283,7 @@ export class Reconciler {
         metrics: {},
         completed_at: receipt.created_at,
       });
-      await this.finishAttempt(attempt, intent);
+      await this.finishAttempt(attempt, intent, openTaskCount > 1);
     }
   }
 
@@ -873,84 +1308,111 @@ export class Reconciler {
   private async finishAttempt(
     attempt: AttemptReceipt,
     source: ActionIntent,
+    deferReplacement = false,
   ): Promise<void> {
-    if (attempt.outcome === "infrastructure" && attempt.replacement_eligible) {
-      await this.service.withInfrastructureRetryAdmission(async () => {
-        if (
-          await this.projection.retryActionForAttempt(
-            attempt.campaign_id,
-            attempt.attempt_id,
-          )
-        )
-          return;
-        if (await this.ensureSandboxCleanup(attempt.campaign_id, attempt.task_id)) {
-          await this.deferRetryUntilSandboxCleanup(source);
-          return;
-        }
-        const settlement = await this.service.settleClosedSandboxAmbiguities(
-          attempt.campaign_id,
-          attempt.task_id,
-        );
-        const unresolved = await this.projection.pendingDispatchedSandboxExecActions(
-          attempt.campaign_id,
-          attempt.task_id,
-        );
-        if (settlement.unresolved > 0 || unresolved.length > 0) return;
-        const attempts = (
-          await this.projection.campaignAttempts(attempt.campaign_id)
-        ).filter((item) => item.task_id === attempt.task_id);
-        const maxAttempts = scalar<number>(
-          source.payload,
-          "max_infrastructure_attempts",
-          "number",
-        );
-        if (attempts.length < maxAttempts) {
-          const reservation = scalar<number>(
-            source.payload,
-            "reservation_microusd",
-            "number",
-          );
-          if (
-            !(await this.service.reserveReplacement(
-              attempt.campaign_id,
-              attempt.attempt_id,
-              attempt.created_at,
-              reservation,
-            ))
-          ) {
-            await this.service.selectTerminal(
-              attempt,
-              "replacement Job would exceed the campaign ceiling",
-            );
-            return;
-          }
-          const retry = this.service.actionIntent(
-            attempt.campaign_id,
-            "job.launch",
-            attempt.task_id,
-            attempts.length,
-            {
-              ...source.payload,
-              task_ids: [attempt.task_id],
-              prior_attempt_id: attempt.attempt_id,
-            },
-          );
-          await this.service.writeAction(retry);
-          return;
-        }
-        await this.service.selectTerminal(
-          attempt,
-          "infrastructure retry budget exhausted",
-        );
-      });
+    if (
+      attempt.outcome === "cancelled" &&
+      (await this.projection.hasCampaignAction(attempt.campaign_id, "campaign.cancel"))
+    )
+      return;
+    const lock = await this.requiredLock(attempt.campaign_id);
+    const validity = attemptAdmissibility(attempt, requiredPositiveMetrics(lock));
+    if (source.payload.worker_role === "preparation") {
+      const attempts = (
+        await this.projection.campaignAttempts(attempt.campaign_id)
+      ).filter((item) => item.task_id === attempt.task_id);
+      await this.service.exhaustTask(
+        attempt,
+        `campaign preparation exhausted: ${validity.reason}`,
+        attempts.length,
+      );
       return;
     }
-    await this.service.selectTerminal(
-      attempt,
-      attempt.outcome === "infrastructure"
-        ? "non-retryable infrastructure outcome"
-        : "valid terminal worker outcome",
-    );
+    if (validity.admissible) {
+      await this.service.selectTerminal(attempt, "valid terminal worker outcome");
+      return;
+    }
+
+    await this.service.withInfrastructureRetryAdmission(async () => {
+      if (
+        await this.projection.retryActionForAttempt(
+          attempt.campaign_id,
+          attempt.attempt_id,
+        )
+      )
+        return;
+      if (await this.ensureSandboxCleanup(attempt.campaign_id, attempt.task_id)) {
+        await this.deferRetryUntilSandboxCleanup(source);
+        return;
+      }
+      const settlement = await this.service.settleClosedSandboxAmbiguities(
+        attempt.campaign_id,
+        attempt.task_id,
+      );
+      const unresolved = await this.projection.pendingDispatchedSandboxCommandActions(
+        attempt.campaign_id,
+        attempt.task_id,
+      );
+      if (settlement.unresolved > 0 || unresolved.length > 0) return;
+      const attempts = (
+        await this.projection.campaignAttempts(attempt.campaign_id)
+      ).filter((item) => item.task_id === attempt.task_id);
+      const maxAttempts = scalar<number>(
+        source.payload,
+        "max_infrastructure_attempts",
+        "number",
+      );
+      if (attempts.length >= maxAttempts) {
+        await this.service.exhaustTask(
+          attempt,
+          `attempt limit exhausted: ${validity.reason}`,
+          attempts.length,
+        );
+        return;
+      }
+      if (
+        await this.service.laterExecutionLaunchExists(
+          attempt.campaign_id,
+          attempt.task_id,
+          attempt.action_id,
+        )
+      )
+        return;
+      if (await this.projection.campaignPaused(attempt.campaign_id)) return;
+      if (deferReplacement) return;
+      const reservation = scalar<number>(
+        source.payload,
+        "reservation_microusd",
+        "number",
+      );
+      if (
+        !(await this.service.reserveReplacement(
+          attempt.campaign_id,
+          attempt.attempt_id,
+          attempt.created_at,
+          reservation,
+        ))
+      ) {
+        await this.service.exhaustTask(
+          attempt,
+          `campaign ceiling blocks replacement: ${validity.reason}`,
+          attempts.length,
+        );
+        return;
+      }
+      const retry = this.service.actionIntent(
+        attempt.campaign_id,
+        "job.launch",
+        attempt.task_id,
+        attempts.length,
+        {
+          ...source.payload,
+          task_ids: [attempt.task_id],
+          prior_attempt_id: attempt.attempt_id,
+        },
+      );
+      await this.service.writeAction(retry);
+    });
   }
 
   private async ensureSandboxCleanup(
@@ -1212,6 +1674,11 @@ export class Reconciler {
     const refreshed = await this.projection.campaign(campaignId);
     if (!refreshed || refreshed.pending_actions > 0 || refreshed.cleanup_pending)
       return false;
+    if (
+      refreshed.admissible_tasks !== refreshed.total_tasks ||
+      refreshed.exhausted_tasks > 0
+    )
+      return false;
     if (await this.projection.campaignPublication(campaignId)) return false;
     if (await this.projection.hasCampaignAction(campaignId, "publication.publish"))
       return false;
@@ -1266,7 +1733,11 @@ export class Reconciler {
     if (taskIds.length === 0) return false;
     for (const taskId of taskIds) {
       const task = await this.projection.task(intent.campaign_id, taskId);
-      if (!task?.task.terminal_outcome) return false;
+      if (
+        !task?.task.terminal_outcome ||
+        infrastructureSealReplaceable(task.task.terminal_outcome)
+      )
+        return false;
     }
     return true;
   }

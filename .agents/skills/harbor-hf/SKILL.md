@@ -7,7 +7,7 @@ description: "Plan and profile Harbor benchmark campaigns, then launch and monit
 
 Use this skill for Harbor benchmark work on Hugging Face Jobs, Inference Providers, and Inference Endpoints.
 
-The steady-state service has two persistent resources: one publicly reachable, application-protected control Space and one private `<artifact-bucket>` Bucket. The Space runs the TypeScript API, reconciler, disposable SQLite projection, and React console. The Bucket stores immutable control records, profiles, evidence, normalized results, and catalogs. Anonymous callers can reach only bounded static, login, callback, and health surfaces. Control access requires an access-listed identity or a short-lived worker capability.
+The steady-state service has two persistent resources: one publicly reachable, application-protected control Space and one private `<artifact-bucket>` Bucket. The Space runs the TypeScript API, reconciler, disposable SQLite projection, and React console. The Bucket stores immutable control records, profiles, evidence, normalized results, and catalogs. Anonymous callers can reach static, login, callback, health, and the official `GET /api/v1/leaderboard` snapshot. Control access requires an access-listed identity or a short-lived worker capability.
 
 Do not create a campaign-specific repository, Space, Bucket, Dataset, schedule, lease store, status store, backup store, or result service. A new persistent resource needs an explicit failure-domain or access reason and operator approval.
 
@@ -69,6 +69,7 @@ script. Apply the same check to harness support.
 export HARBOR_HF_CONTROL_URL=https://<control-space>.hf.space
 uv run harbor-hf status
 uv run harbor-hf profiles
+uv run harbor-hf capacity
 uv run harbor-hf campaign list
 uv run harbor-hf jobs
 uv run harbor-hf endpoints
@@ -130,9 +131,14 @@ uv run harbor-hf campaign retry-infrastructure <campaign-id> \
   --task <task-id> \
   --reason "<infrastructure reason>" \
   --yes
+
+uv run harbor-hf campaign retry-infrastructure <campaign-id> \
+  --all-eligible \
+  --reason "<infrastructure reason>" \
+  --yes
 ```
 
-A retry is valid only when the task is unsealed, the latest attempt is an eligible infrastructure failure, and the physical-attempt limit remains. Semantic outcomes, refusals, verifier failures, and benchmark failures are terminal. The same is true for cancellations and benchmark timeouts.
+A retry is valid when the latest attempt is an eligible infrastructure failure and the physical-attempt limit remains. An infrastructure seal is replaceable. Semantic outcomes, refusals, verifier failures, and benchmark failures are terminal. The same is true for cancellations and benchmark timeouts.
 
 Never rerun a valid logical task. Never turn publication recovery into inference.
 
