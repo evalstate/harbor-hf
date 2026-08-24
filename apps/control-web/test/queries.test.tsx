@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   affectedQueryKeys,
   collectPagedItems,
-  JOBS_REFRESH_INTERVAL_MS,
   SSE_INVALIDATION_DEBOUNCE_MS,
   keys,
   useAllProfiles,
@@ -210,10 +209,9 @@ describe("live query updates", () => {
         ?.projection.object_count,
     ).toBe(7);
     act(() => vi.advanceTimersByTime(SSE_INVALIDATION_DEBOUNCE_MS));
-    expect(invalidate).toHaveBeenCalledWith({
-      queryKey: keys.system,
-      refetchType: "active",
-    });
+    expect(
+      invalidate.mock.calls.map(([options]) => options?.queryKey),
+    ).not.toContainEqual(keys.system);
     act(() => FakeEventSource.instances[0]?.onerror?.());
     act(() => vi.advanceTimersByTime(1_000));
     expect(FakeEventSource.instances[1]?.url).toBe(
@@ -314,7 +312,9 @@ describe("live query updates", () => {
         });
     });
     expect(invalidate).not.toHaveBeenCalled();
-    act(() => vi.advanceTimersByTime(SSE_INVALIDATION_DEBOUNCE_MS));
+    act(() => vi.advanceTimersByTime(999));
+    expect(invalidate).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
 
     const invalidated = invalidate.mock.calls.map(([options]) =>
       JSON.stringify(options?.queryKey),
@@ -324,7 +324,7 @@ describe("live query updates", () => {
     expect(invalidated).toContain(JSON.stringify(keys.task("run-1", "task-1")));
   });
 
-  it("refetches Jobs on a short interval so observed state stays current", async () => {
+  it("does not poll Jobs while SSE owns live refreshes", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(
       async () =>
@@ -346,9 +346,9 @@ describe("live query updates", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(JOBS_REFRESH_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(60_000);
     });
-    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("loads more than 2,000 Jobs scoped to a run", async () => {

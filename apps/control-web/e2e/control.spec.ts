@@ -385,6 +385,9 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
 
   await page.goto("/runs/run-table");
   await expect(page.getByText("task-125")).toBeAttached();
+  await expect(page.getByRole("navigation", { name: "Collection pages" })).toHaveCount(
+    0,
+  );
   expect(taskRequests).toBe(1);
   expect(jobRequests).toBe(1);
   await expect(page.getByRole("heading", { name: "Physical HF Jobs" })).toBeVisible();

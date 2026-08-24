@@ -58,7 +58,7 @@ export interface ControlEvent {
 }
 
 export type LiveStatus = "connected" | "reconnecting" | "offline" | "stale";
-export const SSE_INVALIDATION_DEBOUNCE_MS = 50;
+export const SSE_INVALIDATION_DEBOUNCE_MS = 1_000;
 
 export interface LiveState {
   status: LiveStatus;
@@ -155,8 +155,6 @@ export const useTask = (run: string, task: string) =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
-export const JOBS_REFRESH_INTERVAL_MS = 10_000;
-
 export const useJobs = (cursor?: string) =>
   useQuery({
     queryKey: [...keys.jobs, cursor ?? null],
@@ -164,8 +162,6 @@ export const useJobs = (cursor?: string) =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
     staleTime: 5_000,
-    refetchInterval: JOBS_REFRESH_INTERVAL_MS,
-    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
 export const useRunJobs = (runId: string) =>
@@ -180,8 +176,6 @@ export const useRunJobs = (runId: string) =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
     staleTime: 5_000,
-    refetchInterval: JOBS_REFRESH_INTERVAL_MS,
-    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     enabled: Boolean(runId),
   });
@@ -434,8 +428,10 @@ export function useLiveUpdates(
           refreshCurrentState();
           return;
         }
+        // Live resource events already identify the affected queries. System
+        // state needs a refetch only when replay catches this browser up.
         enqueueInvalidations([
-          ...(event.type === "heartbeat" ? [] : [keys.system]),
+          ...(event.replay && event.type !== "heartbeat" ? [keys.system] : []),
           ...affectedQueryKeys(event),
         ]);
       };
