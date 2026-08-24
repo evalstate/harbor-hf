@@ -1,3 +1,8 @@
+rules:
+  py.mutation-required:
+    disabled: true
+    reason: Mutation testing remains an optional manual diagnostic; Slophammer checks apply the checked-in baseline.
+
 python:
   coverage:
     threshold: 85

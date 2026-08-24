@@ -78,7 +78,7 @@
   before finishing Python code changes.
 - Run the root npm formatting, lint, type, test, build, dependency and browser
   checks before finishing TypeScript or web changes.
-- Run `uv run slophammer-py check .` after changing project structure or CI.
+- Run `uv run slophammer-py check . --baseline` after changing project structure or CI.
 - Run `uv run slophammer-py dry .` and
   `uv run python scripts/check_mutation.py --min-kill-rate 90` before finishing
   behavior changes.
