@@ -1666,6 +1666,8 @@ class IsolatedOciRuntime:
             label="task working directory",
             max_depth=self.transfer_limits.max_path_depth,
         )
+        # OCI images often link resolv.conf into /run, which is empty here.
+        # PRoot dereferences this guest bind path and exposes the Job's resolver.
         arguments = [
             "proot",
             "-r",
@@ -1674,6 +1676,8 @@ class IsolatedOciRuntime:
             working_directory,
             "-i",
             f"{account.uid}:{account.gid}",
+            "-b",
+            "/etc/resolv.conf:/etc/resolv.conf",
             "-b",
             "/proc:/proc",
         ]

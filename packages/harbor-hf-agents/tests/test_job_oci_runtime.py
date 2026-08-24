@@ -453,7 +453,7 @@ def test_rootfs_limits_reject_bytes_and_entries_before_mapping(tmp_path: Path) -
         )
 
 
-def test_proot_exposes_only_proc_and_safe_devices(tmp_path: Path) -> None:
+def test_proot_exposes_only_dns_proc_and_safe_devices(tmp_path: Path) -> None:
     isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
     try:
         passwd = isolated.rootfs / "etc" / "passwd"
@@ -473,6 +473,7 @@ def test_proot_exposes_only_proc_and_safe_devices(tmp_path: Path) -> None:
 
     serialized = "\n".join(arguments)
     assert arguments[0:3] == ["proot", "-r", str(isolated.rootfs)]
+    assert "/etc/resolv.conf:/etc/resolv.conf" in arguments
     assert "/proc:/proc" in arguments
     assert "/dev/null:/dev/null" in arguments
     assert "/run:/run" not in arguments
