@@ -43,6 +43,7 @@ Installer bearer-variable simplification approved: 2026-08-19
 Upstream safe-integration amendment approved: 2026-08-19
 Leaderboard-snapshot amendment approved at: 2026-08-21T20:06:00Z
 Installer control-scope warning amendment approved at: 2026-08-21T23:56:40Z
+Upstream integration-and-push amendment approved at: 2026-08-24T09:14:01Z
 
 ### Scope
 
@@ -85,6 +86,7 @@ Installer control-scope warning amendment approved at: 2026-08-21T23:56:40Z
 - Merge the canonical upstream default branch locally while preserving the hardened installer, replace benchmark-specific web launch-policy routing with promoted-profile selection, and bound and redact streamed Harbor output before provider logs and evidence.
 - Add a leaderboard snapshot in the existing canonical `<artifact-bucket>`: a configuration digest, mechanical eligibility, and a derived SQLite file of the rows shown on the board. Keep one Space and one Bucket. Do not add an anonymous public leaderboard route until a later amendment.
 - Accept the Endpoint-inference permission that the provider necessarily couples to Endpoint management on the fine-grained control credential. Report additional fine-grained grants as prominent installer warnings instead of blocking installation, and make credential failures distinguish missing required permissions from the fresh Bucket write/read-back proof.
+- Merge the latest canonical upstream default branch into the local `tweaks` branch, preserve the production installer and reviewed security boundaries while resolving conflicts, run the complete validation and public-privacy gates, and push the verified result only to the tracked public `origin/tweaks` branch.
 
 ### Limits
 
@@ -133,6 +135,7 @@ Installer control-scope warning amendment approved at: 2026-08-21T23:56:40Z
 - Store each snapshot as an immutable SQLite object under the existing results prefix. Do not create another Bucket, Dataset, Space, or result service. Anonymous leaderboard HTTP access is outside this amendment.
 - Keep the control credential fine-grained, owned by the selected user or organization namespace, and capable of the exact Bucket, Job, Endpoint-management, and provider-implied Endpoint-inference operations. Missing required permissions, the wrong namespace, a non-fine-grained credential, or a failed fresh Bucket write/read-back proof remain hard failures. Gated access, global grants, unrelated scoped entities, and additional permissions produce conspicuous non-blocking warnings. Never pass the control credential to a worker or use it for inference.
 - Limit the installer control-scope warning amendment to local implementation, tests, documentation, and commits. Do not inspect or transfer a real credential, run a hosted installer command or probe, mutate a hosted resource, activate writes, spend, push, or open a pull request.
+- Limit the upstream integration-and-push amendment to the fetched canonical upstream tip and the tracked public `origin/tweaks` branch. Inspect the complete diff and public metadata, preserve placeholders, and run the public privacy checker before every commit and the push. Do not push to the canonical upstream default branch, open or merge a pull request, handle credentials, run hosted installer or campaign commands, mutate hosted resources, or incur cost.
 
 ### Remaining gates
 
@@ -193,3 +196,7 @@ No project-scope amendment remains pending. Operational gates still apply:
 - At 2026-08-21T10:31:00Z, approved enabling production writes on the hosted control Space and launching campaigns beyond the built-in control-smoke canary. This does not authorize a new persistent resource, credential, or bypass of the measured substantial paid-compute gate. Existing cost, inventory, credential, and semantic-outcome limits remain.
 - At 2026-08-21T20:06:00Z, approved a derived leaderboard SQLite snapshot in the canonical `<artifact-bucket>`. The configuration digest includes trial count, reasoning, provider, and Harbor version. Only final, clean, fully scored campaigns appear. No second persistent resource and no anonymous leaderboard API in this amendment.
 - At 2026-08-21T23:56:40Z, approved allowing the provider-implied Endpoint-inference permission on the fine-grained control credential and changing additional fine-grained grants from blockers into prominent installer warnings. Missing required permissions, wrong ownership, non-fine-grained credentials, and failed Bucket write proof remain blockers. This amendment authorizes local implementation, tests, documentation, and commits only.
+
+### 2026-08-24
+
+- At 2026-08-24T09:14:01Z, approved merging the fetched canonical upstream default branch into `tweaks`, resolving conflicts without discarding the installer or reviewed security behavior, running full validation and privacy checks, and pushing only the verified result to the tracked public `origin/tweaks` branch. No pull request, upstream-default-branch update, hosted mutation, credential handling, inference, or spend is authorized.
