@@ -160,8 +160,18 @@ Phase two:
    `installer/write-probes/schema=v1/`, and reads back its exact bytes;
 5. writes the paired Space secrets without recording their values;
 6. sets the complete installed configuration with writes disabled;
-7. starts the Space and verifies anonymous health and the exact uploaded
-   revision.
+7. starts the Space and reports periodic sanitized runtime-start progress;
+8. verifies the exact uploaded revision and anonymous liveness, then polls
+   application readiness while the exact `503 {"status":"rebuilding"}`
+   startup response is observed.
+
+Runtime-start progress is reported every 30 seconds while the provider wait is
+active. Once the runtime is available, configure polls readiness every 15
+seconds and reports rebuilding progress at most once per minute. Readiness is
+bounded to 90 minutes because a full durable projection rebuild can exceed 30
+minutes. Any other status or response body fails immediately. A timeout or
+unexpected readiness response follows the same fail-closed recovery path that
+returns a fresh bootstrap to paused `source_staged`.
 
 Write probes are retained as small capability attestations. Their paths and
 contents contain no credential-derived or operator-specific data. A fresh path

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import type { BucketWriteProbeAdapter } from "./bucket-write-probe.js";
 import { canonicalJson } from "./canonical.js";
+import type { InstallerClock } from "./clock.js";
 import {
   type ControlTokenScopeAdapter,
   ControlTokenScopeError,
@@ -37,6 +38,9 @@ export interface InstallerDependencies {
   identity: IdentityAdapter;
   http: HttpAdapter;
   source: SourceAdapter;
+  clock: InstallerClock;
+  configureStartupPolicy?: ConfigureStartupPolicy;
+  reportConfigureProgress?: (event: ConfigureProgressEvent) => void | Promise<void>;
   bucketWriteProbe?: BucketWriteProbeAdapter;
   controlTokenScope?: ControlTokenScopeAdapter;
   inferenceTokenScope?: InferenceTokenScopeAdapter;
@@ -50,11 +54,97 @@ export interface InstallerSecretInput {
 }
 
 class InstallerInputError extends Error {}
+class InstallerReadinessTimeoutError extends Error {}
+
+export interface ConfigureStartupPolicy {
+  runtimeHeartbeatMilliseconds: number;
+  readinessPollMilliseconds: number;
+  readinessHeartbeatMilliseconds: number;
+  readinessTimeoutMilliseconds: number;
+  readinessRequestTimeoutMilliseconds: number;
+}
+
+export type ConfigureProgressEvent =
+  | { kind: "runtime_wait_started" }
+  | { kind: "runtime_waiting"; elapsedMilliseconds: number }
+  | { kind: "runtime_wait_complete"; elapsedMilliseconds: number }
+  | { kind: "readiness_wait_started" }
+  | { kind: "readiness_rebuilding"; elapsedMilliseconds: number }
+  | { kind: "readiness_ready"; elapsedMilliseconds: number }
+  | { kind: "readiness_timed_out"; elapsedMilliseconds: number };
+
+export const DEFAULT_CONFIGURE_STARTUP_POLICY: ConfigureStartupPolicy = {
+  runtimeHeartbeatMilliseconds: 30_000,
+  readinessPollMilliseconds: 15_000,
+  readinessHeartbeatMilliseconds: 60_000,
+  readinessTimeoutMilliseconds: 90 * 60_000,
+  readinessRequestTimeoutMilliseconds: 10_000,
+};
 
 function providerFailureSuffix(error: unknown): string {
-  return error instanceof HfCommandFailure
-    ? `; provider category: ${error.category}`
+  if (error instanceof HfCommandFailure) {
+    return `; provider category: ${error.category}`;
+  }
+  return error instanceof InstallerReadinessTimeoutError
+    ? "; verification category: readiness-timeout"
     : "";
+}
+
+function configureClock(dependencies: InstallerDependencies): InstallerClock {
+  return dependencies.clock;
+}
+
+function configureStartupPolicy(
+  dependencies: InstallerDependencies,
+): ConfigureStartupPolicy {
+  return dependencies.configureStartupPolicy ?? DEFAULT_CONFIGURE_STARTUP_POLICY;
+}
+
+function reportConfigureProgress(
+  dependencies: InstallerDependencies,
+  event: ConfigureProgressEvent,
+): void {
+  try {
+    const pending = dependencies.reportConfigureProgress?.(event);
+    if (pending) void pending.catch(() => undefined);
+  } catch {
+    // Progress output is observational and must not alter installer behavior.
+  }
+}
+
+async function waitForConfigureRuntime(
+  spaceId: string,
+  dependencies: InstallerDependencies,
+): Promise<void> {
+  const clock = configureClock(dependencies);
+  const policy = configureStartupPolicy(dependencies);
+  const startedAt = clock.monotonicMilliseconds();
+  const heartbeatController = new AbortController();
+  reportConfigureProgress(dependencies, { kind: "runtime_wait_started" });
+  const heartbeat = (async () => {
+    while (!heartbeatController.signal.aborted) {
+      await clock.sleep(
+        policy.runtimeHeartbeatMilliseconds,
+        heartbeatController.signal,
+      );
+      if (!heartbeatController.signal.aborted) {
+        reportConfigureProgress(dependencies, {
+          kind: "runtime_waiting",
+          elapsedMilliseconds: Math.max(0, clock.monotonicMilliseconds() - startedAt),
+        });
+      }
+    }
+  })().catch(() => undefined);
+  try {
+    await dependencies.hf.wait(spaceId);
+  } finally {
+    heartbeatController.abort();
+    await heartbeat;
+  }
+  reportConfigureProgress(dependencies, {
+    kind: "runtime_wait_complete",
+    elapsedMilliseconds: Math.max(0, clock.monotonicMilliseconds() - startedAt),
+  });
 }
 
 function sortedStrings(values: readonly string[]): string[] {
@@ -943,6 +1033,7 @@ async function verifyPlan(
     expectedWriteMode?: WriteMode;
     requireAuthenticated?: boolean;
     requireEmptyCampaigns?: boolean;
+    pollConfigureReadiness?: boolean;
   } = {},
 ): Promise<VerificationResult> {
   const expectedWriteMode = options.expectedWriteMode ?? "disabled";
@@ -1006,12 +1097,75 @@ async function verifyPlan(
   if (live.status !== 200 || !exactStatus(live.body, "live")) {
     throw new Error("anonymous liveness verification failed");
   }
-  const ready = await dependencies.http.getJson(new URL("/health/ready", origin), {
-    timeoutMs: 10_000,
-    maxBytes: 64 * 1024,
-  });
-  if (ready.status !== 200 || !exactStatus(ready.body, "ready")) {
-    throw new Error("anonymous readiness verification failed");
+  if (options.pollConfigureReadiness) {
+    const clock = configureClock(dependencies);
+    const policy = configureStartupPolicy(dependencies);
+    const startedAt = clock.monotonicMilliseconds();
+    const deadline = startedAt + policy.readinessTimeoutMilliseconds;
+    let nextHeartbeat = startedAt + policy.readinessHeartbeatMilliseconds;
+    reportConfigureProgress(dependencies, { kind: "readiness_wait_started" });
+    while (true) {
+      const beforeRequest = clock.monotonicMilliseconds();
+      if (beforeRequest >= deadline) {
+        const elapsedMilliseconds = Math.max(0, beforeRequest - startedAt);
+        reportConfigureProgress(dependencies, {
+          kind: "readiness_timed_out",
+          elapsedMilliseconds,
+        });
+        throw new InstallerReadinessTimeoutError(
+          "anonymous readiness verification timed out",
+        );
+      }
+      const ready = await dependencies.http.getJson(new URL("/health/ready", origin), {
+        timeoutMs: Math.max(
+          1,
+          Math.min(
+            policy.readinessRequestTimeoutMilliseconds,
+            deadline - beforeRequest,
+          ),
+        ),
+        maxBytes: 64 * 1024,
+      });
+      const afterRequest = clock.monotonicMilliseconds();
+      if (afterRequest >= deadline) {
+        const elapsedMilliseconds = Math.max(0, afterRequest - startedAt);
+        reportConfigureProgress(dependencies, {
+          kind: "readiness_timed_out",
+          elapsedMilliseconds,
+        });
+        throw new InstallerReadinessTimeoutError(
+          "anonymous readiness verification timed out",
+        );
+      }
+      if (ready.status === 200 && exactStatus(ready.body, "ready")) {
+        reportConfigureProgress(dependencies, {
+          kind: "readiness_ready",
+          elapsedMilliseconds: Math.max(0, afterRequest - startedAt),
+        });
+        break;
+      }
+      if (ready.status !== 503 || !exactStatus(ready.body, "rebuilding")) {
+        throw new Error("anonymous readiness verification failed");
+      }
+      if (afterRequest >= nextHeartbeat) {
+        reportConfigureProgress(dependencies, {
+          kind: "readiness_rebuilding",
+          elapsedMilliseconds: Math.max(0, afterRequest - startedAt),
+        });
+        nextHeartbeat = afterRequest + policy.readinessHeartbeatMilliseconds;
+      }
+      await clock.sleep(
+        Math.min(policy.readinessPollMilliseconds, deadline - afterRequest),
+      );
+    }
+  } else {
+    const ready = await dependencies.http.getJson(new URL("/health/ready", origin), {
+      timeoutMs: 10_000,
+      maxBytes: 64 * 1024,
+    });
+    if (ready.status !== 200 || !exactStatus(ready.body, "ready")) {
+      throw new Error("anonymous readiness verification failed");
+    }
   }
 
   const bearer = (dependencies.environment ?? process.env)
@@ -1779,10 +1933,12 @@ async function completeInstall(
       throw new Error("configured Space upload revision does not match");
     }
     await dependencies.hf.restart(plan.targets.space_id);
-    await dependencies.hf.wait(plan.targets.space_id);
+    await waitForConfigureRuntime(plan.targets.space_id, dependencies);
     return {
       status: "installed",
-      verification: await verifyPlan(plan, dependencies, uploadSha),
+      verification: await verifyPlan(plan, dependencies, uploadSha, {
+        pollConfigureReadiness: true,
+      }),
       control_credential_warnings: controlCredentialWarnings,
       control_credential_warnings_reported: controlCredentialWarningsReported,
     };

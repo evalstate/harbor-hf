@@ -14,6 +14,7 @@ import type {
   BucketWriteProbeAdapter,
   BucketWriteProbeInput,
 } from "../bucket-write-probe.js";
+import type { InstallerClock } from "../clock.js";
 import type {
   ControlTokenScopeAdapter,
   ControlTokenScopeInput,
@@ -109,10 +110,12 @@ class FakeIdentity implements IdentityAdapter {
 
 class FakeHttp implements HttpAdapter {
   readonly requests: { path: string; bearer?: string }[] = [];
+  readonly readyResponses: Array<{ status: number; body: unknown }> = [];
   readyStatus = "ready";
   systemIntegrityError: string | null = null;
   readyRequestCount = 0;
   failReadyOnRequest: number | null = null;
+  readyResponseGate: Promise<void> | undefined;
   campaignItems: unknown[] = [];
 
   constructor(
@@ -133,6 +136,9 @@ class FakeHttp implements HttpAdapter {
     }
     if (url.pathname === "/health/ready") {
       this.readyRequestCount += 1;
+      await this.readyResponseGate;
+      const queued = this.readyResponses.shift();
+      if (queued) return queued;
       const ready =
         this.readyStatus === "ready" &&
         this.readyRequestCount !== this.failReadyOnRequest;
@@ -196,6 +202,8 @@ class FakeHf implements HfAdapter {
   preserveNoAppFileOnVariables = false;
   failObserve = false;
   versionValue = "1.23.0";
+  waitGate: Promise<void> | undefined;
+  waitFailure: Error | undefined;
 
   async version(): Promise<string> {
     return this.versionValue;
@@ -351,6 +359,8 @@ class FakeHf implements HfAdapter {
 
   async wait(): Promise<void> {
     this.calls.push("wait");
+    await this.waitGate;
+    if (this.waitFailure) throw this.waitFailure;
     if (!this.state.space) throw new Error("missing Space");
     this.state.space.runtimeStage = "RUNNING";
     this.state.space.hardware = "cpu-basic";
@@ -366,6 +376,74 @@ class FakeHf implements HfAdapter {
     if (!this.state.space) throw new Error("missing Space");
     this.state.space.runtimeStage = "BUILDING";
   }
+}
+
+interface PendingClockWait {
+  deadline: number;
+  finish(): void;
+}
+
+class FakeClock implements InstallerClock {
+  private currentMilliseconds = 0;
+  private readonly waits = new Set<PendingClockWait>();
+
+  monotonicMilliseconds(): number {
+    return this.currentMilliseconds;
+  }
+
+  async sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
+    await new Promise<void>((resolvePromise) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        signal?.removeEventListener("abort", finish);
+        this.waits.delete(wait);
+        resolvePromise();
+      };
+      const wait: PendingClockWait = {
+        deadline: this.currentMilliseconds + milliseconds,
+        finish,
+      };
+      this.waits.add(wait);
+      signal?.addEventListener("abort", finish, { once: true });
+    });
+  }
+
+  advanceBy(milliseconds: number): void {
+    this.currentMilliseconds += milliseconds;
+    for (const wait of [...this.waits]) {
+      if (wait.deadline <= this.currentMilliseconds) wait.finish();
+    }
+  }
+
+  get pendingWaitCount(): number {
+    return this.waits.size;
+  }
+}
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve() {
+      resolvePromise?.();
+    },
+  };
+}
+
+async function waitForTest(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolvePromise) => {
+      setTimeout(resolvePromise, 1);
+    });
+  }
+  throw new Error("test condition did not settle");
 }
 
 class FakeBucketWriteProbe implements BucketWriteProbeAdapter {
@@ -415,6 +493,7 @@ async function setup(existingRevision?: string) {
   const bucketWriteProbe = new FakeBucketWriteProbe();
   const controlTokenScope = new FakeControlTokenScope();
   const inferenceTokenScope = new FakeInferenceTokenScope();
+  const clock = new FakeClock();
   const http = new FakeHttp(() => {
     const writeMode = hf.state.space?.variables.HARBOR_HF_WRITE_MODE;
     return writeMode === "enabled" || writeMode === "enabled" ? writeMode : "disabled";
@@ -427,6 +506,7 @@ async function setup(existingRevision?: string) {
     source,
     identity,
     http,
+    clock,
     bucketWriteProbe,
     controlTokenScope,
     inferenceTokenScope,
@@ -454,6 +534,7 @@ async function setup(existingRevision?: string) {
     bucketWriteProbe,
     controlTokenScope,
     inferenceTokenScope,
+    clock,
     dependencies,
     planned,
   };
@@ -592,6 +673,244 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls).not.toContain("setSecrets");
   });
 
+  it("reports runtime heartbeats and polls exact rebuilding readiness", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    const waitGate = deferred();
+    const progress: string[] = [];
+    setupResult.hf.waitGate = waitGate.promise;
+    setupResult.http.readyResponses.push(
+      { status: 503, body: { status: "rebuilding" } },
+      { status: 503, body: { status: "rebuilding" } },
+    );
+    setupResult.dependencies.configureStartupPolicy = {
+      runtimeHeartbeatMilliseconds: 30,
+      readinessPollMilliseconds: 15,
+      readinessHeartbeatMilliseconds: 15,
+      readinessTimeoutMilliseconds: 100,
+      readinessRequestTimeoutMilliseconds: 10,
+    };
+    setupResult.dependencies.reportConfigureProgress = (event) => {
+      progress.push(
+        "elapsedMilliseconds" in event
+          ? `${event.kind}:${event.elapsedMilliseconds}`
+          : event.kind,
+      );
+    };
+
+    const completion = complete(setupResult, bootstrapResult.receipt);
+    let completionError: unknown;
+    void completion.catch((error: unknown) => {
+      completionError = error;
+    });
+    await waitForTest(
+      () => setupResult.hf.calls.includes("wait") || completionError !== undefined,
+    );
+    if (completionError) throw completionError;
+    expect(progress).toEqual(["runtime_wait_started"]);
+    expect(setupResult.clock.pendingWaitCount).toBe(1);
+
+    setupResult.clock.advanceBy(30);
+    await waitForTest(() => progress.includes("runtime_waiting:30"));
+    waitGate.resolve();
+    await waitForTest(
+      () =>
+        setupResult.http.readyRequestCount === 1 &&
+        setupResult.clock.pendingWaitCount === 1,
+    );
+
+    setupResult.clock.advanceBy(15);
+    await waitForTest(
+      () =>
+        setupResult.http.readyRequestCount === 2 &&
+        setupResult.clock.pendingWaitCount === 1,
+    );
+    setupResult.clock.advanceBy(15);
+
+    await expect(completion).resolves.toMatchObject({ status: "installed" });
+    expect(progress).toEqual([
+      "runtime_wait_started",
+      "runtime_waiting:30",
+      "runtime_wait_complete:30",
+      "readiness_wait_started",
+      "readiness_rebuilding:15",
+      "readiness_ready:30",
+    ]);
+    expect(setupResult.http.readyRequestCount).toBe(3);
+    expect(setupResult.clock.pendingWaitCount).toBe(0);
+  });
+
+  it("cancels runtime heartbeats when the provider wait fails", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    const waitGate = deferred();
+    const progress: string[] = [];
+    setupResult.hf.waitGate = waitGate.promise;
+    setupResult.hf.waitFailure = new Error("provider wait failed");
+    setupResult.dependencies.configureStartupPolicy = {
+      runtimeHeartbeatMilliseconds: 30,
+      readinessPollMilliseconds: 15,
+      readinessHeartbeatMilliseconds: 15,
+      readinessTimeoutMilliseconds: 100,
+      readinessRequestTimeoutMilliseconds: 10,
+    };
+    setupResult.dependencies.reportConfigureProgress = (event) => {
+      progress.push(event.kind);
+    };
+
+    const completion = complete(setupResult, bootstrapResult.receipt);
+    void completion.catch(() => undefined);
+    await waitForTest(() => setupResult.hf.calls.includes("wait"));
+    expect(setupResult.clock.pendingWaitCount).toBe(1);
+    setupResult.clock.advanceBy(30);
+    await waitForTest(() => progress.includes("runtime_waiting"));
+    waitGate.resolve();
+
+    await expect(completion).rejects.toThrow(
+      "installation failed after remote mutation began",
+    );
+    expect(progress).not.toContain("runtime_wait_complete");
+    expect(setupResult.clock.pendingWaitCount).toBe(0);
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+  });
+
+  it("times out rebuilding readiness and restores a safe paused bootstrap", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    const progress: string[] = [];
+    setupResult.http.readyStatus = "rebuilding";
+    setupResult.dependencies.configureStartupPolicy = {
+      runtimeHeartbeatMilliseconds: 30,
+      readinessPollMilliseconds: 10,
+      readinessHeartbeatMilliseconds: 10,
+      readinessTimeoutMilliseconds: 25,
+      readinessRequestTimeoutMilliseconds: 10,
+    };
+    setupResult.dependencies.reportConfigureProgress = (event) => {
+      progress.push(event.kind);
+    };
+
+    const completion = complete(setupResult, bootstrapResult.receipt);
+    let completionError: unknown;
+    void completion.catch((error: unknown) => {
+      completionError = error;
+    });
+    await waitForTest(
+      () =>
+        (setupResult.http.readyRequestCount === 1 &&
+          setupResult.clock.pendingWaitCount === 1) ||
+        completionError !== undefined,
+    );
+    if (completionError) throw completionError;
+    setupResult.clock.advanceBy(10);
+    await waitForTest(() => setupResult.http.readyRequestCount === 2);
+    setupResult.clock.advanceBy(10);
+    await waitForTest(() => setupResult.http.readyRequestCount === 3);
+    setupResult.clock.advanceBy(5);
+
+    await expect(completion).rejects.toThrow(
+      "verification category: readiness-timeout",
+    );
+    expect(progress.filter((kind) => kind === "readiness_timed_out")).toHaveLength(1);
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+    expect(setupResult.hf.state.space?.variables.HARBOR_HF_INSTALL_PHASE).toBe(
+      "source_staged",
+    );
+    expect(setupResult.clock.pendingWaitCount).toBe(0);
+  });
+
+  it("does not accept an exact ready response that completes at the deadline", async () => {
+    const setupResult = await setup();
+    const bootstrapResult = await bootstrap(setupResult);
+    const responseGate = deferred();
+    const progress: string[] = [];
+    setupResult.http.readyResponseGate = responseGate.promise;
+    setupResult.http.readyResponses.push({
+      status: 200,
+      body: { status: "ready" },
+    });
+    setupResult.dependencies.configureStartupPolicy = {
+      runtimeHeartbeatMilliseconds: 30,
+      readinessPollMilliseconds: 10,
+      readinessHeartbeatMilliseconds: 10,
+      readinessTimeoutMilliseconds: 25,
+      readinessRequestTimeoutMilliseconds: 25,
+    };
+    setupResult.dependencies.reportConfigureProgress = (event) => {
+      progress.push(event.kind);
+    };
+
+    const completion = complete(setupResult, bootstrapResult.receipt);
+    void completion.catch(() => undefined);
+    await waitForTest(() => setupResult.http.readyRequestCount === 1);
+    setupResult.clock.advanceBy(25);
+    responseGate.resolve();
+
+    await expect(completion).rejects.toThrow(
+      "verification category: readiness-timeout",
+    );
+    expect(progress.filter((kind) => kind === "readiness_timed_out")).toHaveLength(1);
+    expect(progress).not.toContain("readiness_ready");
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+  });
+
+  it.each([
+    ["extra rebuilding field", 503, { status: "rebuilding", detail: "unexpected" }],
+    ["ready body on 503", 503, { status: "ready" }],
+    ["rebuilding body on 200", 200, { status: "rebuilding" }],
+    ["extra ready field", 200, { status: "ready", detail: "unexpected" }],
+    ["rebuilding body on 500", 500, { status: "rebuilding" }],
+    ["non-object body", 503, "rebuilding"],
+  ])(
+    "does not retry an inexact readiness response: %s",
+    async (_name, status, body) => {
+      const setupResult = await setup();
+      const bootstrapResult = await bootstrap(setupResult);
+      setupResult.http.readyResponses.push({
+        status,
+        body,
+      });
+      setupResult.dependencies.configureStartupPolicy = {
+        runtimeHeartbeatMilliseconds: 30,
+        readinessPollMilliseconds: 10,
+        readinessHeartbeatMilliseconds: 10,
+        readinessTimeoutMilliseconds: 25,
+        readinessRequestTimeoutMilliseconds: 10,
+      };
+
+      await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
+        "installation failed after remote mutation began",
+      );
+      expect(setupResult.http.readyRequestCount).toBe(1);
+      expect(setupResult.clock.pendingWaitCount).toBe(0);
+      expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+      expect(setupResult.hf.state.space?.variables.HARBOR_HF_INSTALL_PHASE).toBe(
+        "source_staged",
+      );
+    },
+  );
+
+  it("ignores synchronous and asynchronous progress reporter failures", async () => {
+    const synchronous = await setup();
+    const synchronousBootstrap = await bootstrap(synchronous);
+    synchronous.dependencies.reportConfigureProgress = () => {
+      throw new Error("progress output failed");
+    };
+    await expect(
+      complete(synchronous, synchronousBootstrap.receipt),
+    ).resolves.toMatchObject({ status: "installed" });
+
+    const asynchronous = await setup();
+    const asynchronousBootstrap = await bootstrap(asynchronous);
+    asynchronous.dependencies.reportConfigureProgress = async () => {
+      throw new Error("async progress output failed");
+    };
+    await expect(
+      complete(asynchronous, asynchronousBootstrap.receipt),
+    ).resolves.toMatchObject({ status: "installed" });
+    await Promise.resolve();
+  });
+
   it("plans and applies a fresh protected disabled-write installation", async () => {
     const setupResult = await setup();
     setupResult.dependencies.secretInput = {
@@ -655,6 +974,10 @@ describe("installer workflows", () => {
     setupResult.hf.calls.length = 0;
     setupResult.http.requests.length = 0;
     setupResult.http.readyRequestCount = 0;
+    const progress: string[] = [];
+    setupResult.dependencies.reportConfigureProgress = (event) => {
+      progress.push(event.kind);
+    };
     setupResult.dependencies.environment = {
       ...setupResult.dependencies.environment,
       HARBOR_HF_CONTROL_BEARER_TOKEN: "operator-bearer-placeholder",
@@ -687,6 +1010,7 @@ describe("installer workflows", () => {
     expect(
       setupResult.http.requests.filter((request) => request.path === "/api/v1/system"),
     ).toHaveLength(2);
+    expect(progress).toEqual([]);
   });
 
   it("does not activate without authenticated system verification", async () => {
@@ -968,6 +1292,7 @@ describe("installer workflows", () => {
       source: new FakeSource(repository, OLD_REVISION),
       identity,
       http: new FakeHttp(),
+      clock: new FakeClock(),
       environment: {},
     };
     const oldPlan = await planInstall(
@@ -1478,11 +1803,13 @@ describe("installer workflows", () => {
   it("explicitly replaces complete credentials after preflight", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
-    setupResult.http.readyStatus = "rebuilding";
+    setupResult.http.readyResponses.push({
+      status: 503,
+      body: { status: "unavailable" },
+    });
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
       "after remote mutation began",
     );
-    setupResult.http.readyStatus = "ready";
     setupResult.dependencies.environment = {
       HARBOR_HF_INSTALL_CONTROL_SECRET: "replacement-control",
       HARBOR_HF_INSTALL_INFERENCE_SECRET: "replacement-inference",
@@ -1567,7 +1894,10 @@ describe("installer workflows", () => {
   it("returns failed verification to source-staged credential recovery", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
-    setupResult.http.readyStatus = "rebuilding";
+    setupResult.http.readyResponses.push({
+      status: 503,
+      body: { status: "unavailable" },
+    });
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
       "after remote mutation began",
     );
@@ -1579,7 +1909,6 @@ describe("installer workflows", () => {
       (call) => call === "uploadMirror",
     ).length;
 
-    setupResult.http.readyStatus = "ready";
     await expect(complete(setupResult, bootstrapResult.receipt)).resolves.toMatchObject(
       { status: "installed" },
     );
@@ -1594,7 +1923,10 @@ describe("installer workflows", () => {
   it("stops before mutation when resumed source differs from its receipt", async () => {
     const setupResult = await setup();
     const bootstrapResult = await bootstrap(setupResult);
-    setupResult.http.readyStatus = "rebuilding";
+    setupResult.http.readyResponses.push({
+      status: 503,
+      body: { status: "unavailable" },
+    });
     await expect(complete(setupResult, bootstrapResult.receipt)).rejects.toThrow(
       "after remote mutation began",
     );
@@ -1659,6 +1991,7 @@ describe("installer workflows", () => {
       source: new FakeSource(repository),
       identity,
       http: new FakeHttp(),
+      clock: new FakeClock(),
       environment: {},
       secretInput: {
         async read() {
@@ -1696,6 +2029,7 @@ describe("installer workflows", () => {
       source: new FakeSource(repository),
       identity,
       http: new FakeHttp(),
+      clock: new FakeClock(),
       environment: {},
     };
     const planned = await planInstall(
@@ -1868,6 +2202,7 @@ describe("installer workflows", () => {
       source: new FakeSource(repository),
       identity: new FakeIdentity(),
       http: new FakeHttp(),
+      clock: new FakeClock(),
     };
     const hf = dependencies.hf as FakeHf;
     hf.state = installedState(
@@ -1916,6 +2251,7 @@ describe("installer workflows", () => {
       source: new FakeSource(resolve(directory, "repository")),
       identity: new FakeIdentity(),
       http: new FakeHttp(),
+      clock: new FakeClock(),
     };
     const hf = dependencies.hf as FakeHf;
     hf.state = installedState(
@@ -1971,6 +2307,7 @@ describe("installer workflows", () => {
           source: new FakeSource(repository),
           identity: new FakeIdentity(),
           http: new FakeHttp(),
+          clock: new FakeClock(),
         },
       ),
     ).rejects.toThrow("outside the checkout");
@@ -2117,9 +2454,15 @@ describe("installer workflows", () => {
     const anonymous = await setup(REVISION);
     alignInstalledStateWithPlan(anonymous);
     anonymous.http.readyStatus = "rebuilding";
+    const progress: string[] = [];
+    anonymous.dependencies.reportConfigureProgress = (event) => {
+      progress.push(event.kind);
+    };
     await expect(
       verifyInstall(anonymous.planPath, anonymous.dependencies),
     ).rejects.toThrow("readiness");
+    expect(anonymous.http.readyRequestCount).toBe(1);
+    expect(progress).toEqual([]);
 
     const authenticated = await setup(REVISION);
     alignInstalledStateWithPlan(authenticated);

@@ -1,4 +1,5 @@
 import { HuggingFaceBucketWriteProbe } from "./bucket-write-probe.js";
+import { SystemInstallerClock } from "./clock.js";
 import { HuggingFaceControlTokenScope } from "./control-token-scope.js";
 import { HfCli } from "./hf.js";
 import { BoundedHttpAdapter } from "./http.js";
@@ -11,6 +12,7 @@ import { GitSourceAdapter } from "./source.js";
 import type {
   ActivationResult,
   ApplyInstallResult,
+  ConfigureProgressEvent,
   InstallerDependencies,
 } from "./workflow.js";
 
@@ -19,17 +21,47 @@ export function defaultDependencies(): InstallerDependencies {
   const http = new BoundedHttpAdapter();
   return {
     hf,
+    clock: new SystemInstallerClock(),
     bucketWriteProbe: new HuggingFaceBucketWriteProbe(),
     controlTokenScope: new HuggingFaceControlTokenScope(http),
     inferenceTokenScope: new HuggingFaceInferenceTokenScope(http),
     reportControlCredentialWarnings(warnings) {
       process.stderr.write(formatControlCredentialWarnings(warnings));
     },
+    reportConfigureProgress(event) {
+      process.stderr.write(`${formatConfigureProgress(event)}\n`);
+    },
     http,
     identity: new StableIdentityAdapter(hf, http),
     secretInput: new TtyInstallerSecretInput(),
     source: new GitSourceAdapter(),
   };
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return minutes === 0 ? `${seconds}s` : `${minutes}m ${remainingSeconds}s`;
+}
+
+export function formatConfigureProgress(event: ConfigureProgressEvent): string {
+  switch (event.kind) {
+    case "runtime_wait_started":
+      return "Waiting for the Space runtime to start...";
+    case "runtime_waiting":
+      return `Space runtime is still starting (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
+    case "runtime_wait_complete":
+      return `Space runtime wait completed (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
+    case "readiness_wait_started":
+      return "Waiting for the control service to become ready...";
+    case "readiness_rebuilding":
+      return `Control projection is still rebuilding (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
+    case "readiness_ready":
+      return `Control service is ready (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
+    case "readiness_timed_out":
+      return `Control service readiness timed out (${formatElapsed(event.elapsedMilliseconds)} elapsed).`;
+  }
 }
 
 export function parseOptions(

@@ -634,18 +634,22 @@ Bucket mount. The database enables foreign keys and write-ahead logging.
 
 Startup follows this sequence:
 
-1. Initialize OAuth and local disposable state without listening for traffic.
-2. Load the newest valid projection snapshot when one exists.
-3. Verify the snapshot's source object digests.
-4. Replay later immutable records in deterministic order.
-5. Compare the projection with control invariants.
-6. Listen only after readiness succeeds, then start reconciliation.
+1. Initialize OAuth and local disposable state.
+2. Listen for traffic so the platform can observe liveness during a long
+   projection rebuild.
+3. Return `200 {"status":"live"}` from liveness and exact
+   `503 {"status":"rebuilding"}` from readiness until initialization finishes.
+4. Load the newest valid projection snapshot when one exists.
+5. Verify the snapshot's source object digests.
+6. Replay later immutable records in deterministic order.
+7. Compare the projection with control invariants.
+8. Return `200 {"status":"ready"}` from readiness, then start reconciliation.
 
-An initialization failure closes local resources and exits nonzero so the
-platform can restart the process. It cannot leave a live but permanently
-unready server behind. A projection schema mismatch discards the database and
-triggers a full rebuild. In-place projection migrations are unnecessary because
-the database is disposable.
+An initialization failure closes the listener and local resources and exits
+nonzero so the platform can restart the process. It cannot leave a live but
+permanently unready server behind. A projection schema mismatch discards the
+database and triggers a full rebuild. In-place projection migrations are
+unnecessary because the database is disposable.
 
 Snapshots may improve startup time. They cannot authorize paid work until their
 source digest set is verified.

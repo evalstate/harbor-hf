@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatActivationOutput,
   formatConfigureOutput,
+  formatConfigureProgress,
   formatPlanOutput,
   formatProvisionOutput,
   parseConfigureOptions,
@@ -161,6 +162,45 @@ describe("installer CLI contract", () => {
     expect(output).toContain("Production ready: no");
     expect(output).toContain("before activation");
     expect(output).not.toContain("OVER-SCOPED");
+  });
+
+  it("formats sanitized configure startup progress", () => {
+    expect(formatConfigureProgress({ kind: "runtime_wait_started" })).toBe(
+      "Waiting for the Space runtime to start...",
+    );
+    expect(
+      formatConfigureProgress({
+        kind: "runtime_waiting",
+        elapsedMilliseconds: 61_900,
+      }),
+    ).toBe("Space runtime is still starting (1m 1s elapsed).");
+    expect(
+      formatConfigureProgress({
+        kind: "runtime_wait_complete",
+        elapsedMilliseconds: 62_000,
+      }),
+    ).toBe("Space runtime wait completed (1m 2s elapsed).");
+    expect(formatConfigureProgress({ kind: "readiness_wait_started" })).toBe(
+      "Waiting for the control service to become ready...",
+    );
+    expect(
+      formatConfigureProgress({
+        kind: "readiness_rebuilding",
+        elapsedMilliseconds: 120_000,
+      }),
+    ).toBe("Control projection is still rebuilding (2m 0s elapsed).");
+    expect(
+      formatConfigureProgress({
+        kind: "readiness_ready",
+        elapsedMilliseconds: 15_000,
+      }),
+    ).toBe("Control service is ready (15s elapsed).");
+    expect(
+      formatConfigureProgress({
+        kind: "readiness_timed_out",
+        elapsedMilliseconds: 5_400_000,
+      }),
+    ).toBe("Control service readiness timed out (90m 0s elapsed).");
   });
 
   it("prints control credential scope warnings prominently", () => {
