@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -479,9 +480,16 @@ def _upload_evidence(
 
 def _transient_control_failure(error: BaseException) -> bool:
     text = str(error)
-    return any(
+    return isinstance(error, TimeoutError) or any(
         marker in text
-        for marker in ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504")
+        for marker in (
+            "HTTP 429",
+            "HTTP 500",
+            "HTTP 502",
+            "HTTP 503",
+            "HTTP 504",
+            "request failed",
+        )
     )
 
 
@@ -610,7 +618,49 @@ def _run_logged_command(
     return "".join(chunks), timed_out
 
 
+def _rate_limited(text: str) -> bool:
+    lowered = text.lower()
+    return "429" in text or "rate limit" in lowered
+
+
+def _record_pre_receipt_failure(
+    config: WorkerConfig, task: LockedTask, error: BaseException
+) -> None:
+    """Store an infrastructure receipt when Harbor never produced a trial result."""
+    digest, evidence_path = _upload_failure_note(config, task, error)
+    _submit_attempt(
+        config,
+        task,
+        None,
+        str(error),
+        digest,
+        evidence_path,
+        outcome_override=("infrastructure", True),
+    )
+
+
 def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
+    try:
+        return _run_task_once(config, task, root)
+    except BaseException as error:
+        if (
+            "worker capability leaked" not in str(error)
+            and _result_path(root, task) is None
+        ):
+            try:
+                _record_pre_receipt_failure(config, task, error)
+            except BaseException as record_error:
+                _log(
+                    {
+                        "status": "pre_receipt_record_failed",
+                        "task_id": task.task_id,
+                        "error": str(record_error)[:500],
+                    }
+                )
+        raise
+
+
+def _run_task_once(config: WorkerConfig, task: LockedTask, root: Path) -> str:
     path = _job_config(config, task, root)
     _log(
         {
@@ -619,12 +669,28 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
             "timeout_seconds": task.timeout_seconds,
         }
     )
-    output, timed_out = _run_logged_command(
-        ["harbor", "run", "--config", str(path), "--yes"],
-        task.timeout_seconds + 600,
-        os.environ.copy(),
-    )
-    result_path = _result_path(root, task)
+    output = ""
+    timed_out = False
+    result_path: Path | None = None
+    for attempt in range(3):
+        output, timed_out = _run_logged_command(
+            ["harbor", "run", "--config", str(path), "--yes"],
+            task.timeout_seconds + 600,
+            os.environ.copy(),
+        )
+        result_path = _result_path(root, task)
+        if result_path or not _rate_limited(output) or attempt == 2:
+            break
+        delay = min(30.0, float(2 ** (attempt + 2)))
+        _log(
+            {
+                "status": "harbor_rate_limited",
+                "task_id": task.task_id,
+                "attempt": attempt + 1,
+                "delay_seconds": delay,
+            }
+        )
+        time.sleep(delay)
     if not result_path:
         raise RuntimeError("Harbor did not write a trial result")
     observed_lock_path = result_path.parent / "lock.json"
@@ -636,10 +702,9 @@ def _run_task(config: WorkerConfig, task: LockedTask, root: Path) -> str:
     result = json.loads(result_path.read_text())
     _log_harbor_exception(task, result)
     capability = _required("HARBOR_HF_WORKER_CAPABILITY").encode()
-    if result_path:
-        for trial_file in result_path.parent.rglob("*"):
-            if trial_file.is_file() and capability in trial_file.read_bytes():
-                raise RuntimeError("worker capability leaked into trial evidence")
+    for trial_file in result_path.parent.rglob("*"):
+        if trial_file.is_file() and capability in trial_file.read_bytes():
+            raise RuntimeError("worker capability leaked into trial evidence")
     _deliver_trial(config, task, root, result_path, result, output, timed_out)
     return task.task_id
 
@@ -657,7 +722,7 @@ def _deliver_trial(
     outcome_override: tuple[str, bool] | None = None
     try:
         digest, evidence_path = _upload_evidence(config, task, archive)
-    except RuntimeError as error:
+    except (RuntimeError, TimeoutError) as error:
         if not _transient_control_failure(error):
             raise
         _log(
@@ -763,11 +828,23 @@ def main() -> None:  # noqa: C901 -- bounded orchestration
     with tempfile.TemporaryDirectory(prefix="harbor-hf-control-worker-") as temporary:
         root = Path(temporary)
         completed, failures = _run_assigned_tasks(config, root)
-        if failures:
+        leaked = [
+            error for error in failures if "worker capability leaked" in str(error)
+        ]
+        if leaked:
             raise RuntimeError(
-                f"{len(failures)} control worker task(s) failed before receipt; "
-                f"first={type(failures[0]).__name__}"
-            ) from failures[0]
+                f"{len(leaked)} control worker task(s) leaked a capability"
+            ) from leaked[0]
+        if failures:
+            _log(
+                {
+                    "status": "task_failures_before_receipt",
+                    "campaign_id": config.campaign_id,
+                    "action_id": config.action_id,
+                    "count": len(failures),
+                    "first": type(failures[0]).__name__,
+                }
+            )
         _log(
             {
                 "status": "complete",

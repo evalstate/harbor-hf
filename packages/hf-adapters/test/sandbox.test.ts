@@ -101,7 +101,10 @@ const closeIntent = intent("sandbox.close", {
   sandbox: policy,
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("HuggingFaceSandboxGateway", () => {
   it("creates a labelled Sandbox Job without forwarding the control credential", async () => {
@@ -157,6 +160,44 @@ describe("HuggingFaceSandboxGateway", () => {
       resource_id: remoteId,
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries Sandbox Job create after Hub rate limits", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        if (!init?.method)
+          return new Response("[]", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        if (
+          fetchMock.mock.calls.filter((call) => call[1]?.method === "POST").length === 1
+        )
+          return new Response("We had to rate limit you", { status: 429 });
+        return new Response(JSON.stringify(rawJob()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const gateway = new HuggingFaceSandboxGateway({
+      namespace: "example",
+      accessToken: controlToken,
+      inferenceToken,
+    });
+
+    const created = gateway.lifecycle(createIntent);
+    await vi.runAllTimersAsync();
+    await expect(created).resolves.toMatchObject({
+      outcome: "created",
+      resource_id: remoteId,
+    });
+    expect(
+      fetchMock.mock.calls.filter((call) => call[1]?.method === "POST"),
+    ).toHaveLength(2);
+    vi.useRealTimers();
   });
 
   it("adopts only the deterministic Sandbox action", async () => {

@@ -319,6 +319,35 @@ def test_retries_http_500_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None
     assert attempts["count"] == 2
 
 
+def test_retries_control_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in {
+        "HARBOR_HF_CONTROL_URL": "https://control.example",
+        "HARBOR_HF_WORKER_CAPABILITY": "capability",
+        "HARBOR_HF_CAMPAIGN_ID": "campaign-1",
+        "HARBOR_HF_ACTION_ID": "action-attempt-1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    attempts = {"count": 0}
+
+    def urlopen(_request: object, timeout: float = 0) -> io.BytesIO:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise TimeoutError("timed out")
+        return io.BytesIO(json.dumps({"path": "evidence/note"}).encode())
+
+    monkeypatch.setattr(control, "urlopen", urlopen)
+    monkeypatch.setattr(control.time, "sleep", lambda _delay: None)
+    client = control._ControlClient("campaign-1", "task-1")
+
+    assert client.request(
+        "POST",
+        "/api/v1/campaigns/campaign-1/tasks/task-1/attempts",
+        body={"operation": "upload_evidence"},
+        idempotency_key="evidence-1",
+    ) == {"path": "evidence/note"}
+    assert attempts["count"] == 2
+
+
 def test_preflight_rejects_broad_hf_token(monkeypatch: pytest.MonkeyPatch) -> None:
     for key, value in {
         "HARBOR_HF_CONTROL_URL": "https://control.example",

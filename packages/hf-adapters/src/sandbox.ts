@@ -367,46 +367,60 @@ export class HuggingFaceSandboxGateway {
       secrets.HF_INFERENCE_TOKEN = this.config.inferenceToken as string;
     let job: RawJob;
     try {
-      const response = await fetch(
-        `${this.config.hubUrl ?? "https://huggingface.co"}/api/jobs/${encodeURIComponent(this.config.namespace)}`,
-        {
+      const createUrl = `${this.config.hubUrl ?? "https://huggingface.co"}/api/jobs/${encodeURIComponent(this.config.namespace)}`;
+      const createBody = JSON.stringify({
+        dockerImage: policy.image,
+        command: ["/bin/sh", "-c", bootstrapScript(policy)],
+        arguments: [],
+        environment,
+        secrets,
+        flavor: policy.hardware,
+        timeoutSeconds: policy.timeout_seconds,
+        attempts: 1,
+        labels: {
+          "hf-sandbox": "1",
+          "hf-sandbox-mode": "dedicated",
+          "hf-sandbox-nonce": nonce,
+          harbor_hf_sandbox_action_id: intent.action_id,
+          harbor_hf_campaign_id: intent.campaign_id,
+          harbor_hf_task_id: stringValue(intent, "task_id"),
+        },
+        volumes: [
+          {
+            type: "bucket",
+            source: serverBucket,
+            mountPath: serverMount,
+            readOnly: true,
+          },
+        ],
+        expose: { ports: [sandboxPort] },
+      });
+      let response: Response | undefined;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        response = await fetch(createUrl, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${this.config.accessToken}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            dockerImage: policy.image,
-            command: ["/bin/sh", "-c", bootstrapScript(policy)],
-            arguments: [],
-            environment,
-            secrets,
-            flavor: policy.hardware,
-            timeoutSeconds: policy.timeout_seconds,
-            attempts: 1,
-            labels: {
-              "hf-sandbox": "1",
-              "hf-sandbox-mode": "dedicated",
-              "hf-sandbox-nonce": nonce,
-              harbor_hf_sandbox_action_id: intent.action_id,
-              harbor_hf_campaign_id: intent.campaign_id,
-              harbor_hf_task_id: stringValue(intent, "task_id"),
-            },
-            volumes: [
-              {
-                type: "bucket",
-                source: serverBucket,
-                mountPath: serverMount,
-                readOnly: true,
-              },
-            ],
-            expose: { ports: [sandboxPort] },
-          }),
+          body: createBody,
           signal: AbortSignal.timeout(30_000),
-        },
-      );
-      if (!response.ok)
-        throw new Error(`Sandbox Job create failed with ${response.status}`);
+        });
+        if (
+          response.ok ||
+          ![429, 502, 503, 504].includes(response.status) ||
+          attempt === 3
+        )
+          break;
+        const retryAfter = Number(response.headers.get("Retry-After") ?? 0);
+        const delaySeconds =
+          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 2 ** attempt;
+        await new Promise((resolve) => {
+          setTimeout(resolve, Math.min(15_000, delaySeconds * 1_000));
+        });
+      }
+      if (!response?.ok)
+        throw new Error(`Sandbox Job create failed with ${response?.status}`);
       job = (await response.json()) as RawJob;
       verifyLabels(job, intent);
       verifySecrets(job, policy);

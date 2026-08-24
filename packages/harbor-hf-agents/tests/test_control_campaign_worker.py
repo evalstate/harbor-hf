@@ -393,6 +393,138 @@ def test_keeps_refilling_after_task_failure(
     assert third_started.is_set()
 
 
+def test_records_infrastructure_receipt_when_harbor_writes_no_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _scheduler_config(monkeypatch, task_count=1)
+    recorded: list[tuple[str, bool]] = []
+
+    monkeypatch.setattr(worker, "_job_config", lambda _config, _task, _root: tmp_path)
+    monkeypatch.setattr(
+        worker, "_run_logged_command", lambda *_args, **_kwargs: ("HTTP 429", False)
+    )
+    monkeypatch.setattr(worker, "_result_path", lambda _root, _task: None)
+    monkeypatch.setattr(
+        worker, "_upload_failure_note", lambda *_args: ("sha256:note", "/note")
+    )
+
+    def fake_submit(
+        _config: worker.WorkerConfig,
+        _task: worker.LockedTask,
+        _result: dict | None,
+        _stderr: str,
+        _digest: str,
+        _path: str,
+        *,
+        timed_out: bool = False,
+        outcome_override: tuple[str, bool] | None = None,
+    ) -> None:
+        assert outcome_override == ("infrastructure", True)
+        recorded.append(outcome_override)
+
+    monkeypatch.setattr(worker, "_submit_attempt", fake_submit)
+    monkeypatch.setattr(worker.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="Harbor did not write a trial result"):
+        worker._run_task(config, config.tasks[0], tmp_path)
+
+    assert recorded == [("infrastructure", True)]
+
+
+def test_retries_harbor_run_after_rate_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _scheduler_config(monkeypatch, task_count=1)
+    runs = {"count": 0}
+    result_dir = tmp_path / "jobs" / config.tasks[0].task_id / "t1"
+
+    def fake_run(*_args, **_kwargs):
+        runs["count"] += 1
+        if runs["count"] == 1:
+            return ("<h1>429</h1><p>We had to rate limit you.</p>", False)
+        result_dir.mkdir(parents=True)
+        (result_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "exception_info": None,
+                    "agent_result": {},
+                    "verifier_result": {},
+                }
+            )
+        )
+        (result_dir / "lock.json").write_text(
+            config.tasks[0].trial_lock.model_dump_json()
+        )
+        return ("ok", False)
+
+    monkeypatch.setattr(worker, "_job_config", lambda _config, _task, _root: tmp_path)
+    monkeypatch.setattr(worker, "_run_logged_command", fake_run)
+    monkeypatch.setattr(worker, "_deliver_trial", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker.time, "sleep", lambda _seconds: None)
+    monkeypatch.setenv("HARBOR_HF_WORKER_CAPABILITY", "capability-test")
+
+    assert (
+        worker._run_task(config, config.tasks[0], tmp_path) == config.tasks[0].task_id
+    )
+    assert runs["count"] == 2
+
+
+def test_main_completes_after_pre_receipt_failures(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _scheduler_config(monkeypatch, task_count=2)
+    monkeypatch.setenv("HARBOR_HF_WORKER_ROLE", "execution")
+    monkeypatch.setenv("HARBOR_HF_WORKER_REVISION", config.worker_revision)
+    monkeypatch.setenv(
+        "HARBOR_HF_TASK_IDS_JSON",
+        json.dumps([task.task_id for task in config.tasks]),
+    )
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_INFERENCE_TOKEN", raising=False)
+    monkeypatch.setattr(worker, "_read_lock", lambda _campaign_id: {})
+    monkeypatch.setattr(worker, "_locked_config", lambda _lock: config)
+    monkeypatch.setattr(worker, "version", lambda _name: config.harbor_version)
+    monkeypatch.setattr(
+        worker,
+        "_run_assigned_tasks",
+        lambda _config, _root: (
+            ["task-1"],
+            [RuntimeError("Harbor did not write a trial result")],
+        ),
+    )
+
+    worker.main()
+
+    logged = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    statuses = [item["status"] for item in logged]
+    assert "task_failures_before_receipt" in statuses
+    assert "complete" in statuses
+
+
+def test_main_fails_job_when_capability_leaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _scheduler_config(monkeypatch, task_count=1)
+    monkeypatch.setenv("HARBOR_HF_WORKER_ROLE", "execution")
+    monkeypatch.setenv("HARBOR_HF_WORKER_REVISION", config.worker_revision)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_INFERENCE_TOKEN", raising=False)
+    monkeypatch.setattr(worker, "_read_lock", lambda _campaign_id: {})
+    monkeypatch.setattr(worker, "_locked_config", lambda _lock: config)
+    monkeypatch.setattr(worker, "version", lambda _name: config.harbor_version)
+    monkeypatch.setattr(
+        worker,
+        "_run_assigned_tasks",
+        lambda _config, _root: (
+            [],
+            [RuntimeError("worker capability leaked into trial evidence")],
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="leaked a capability"):
+        worker.main()
+
+
 @pytest.mark.parametrize(
     ("result", "stderr", "timed_out", "expected"),
     [
@@ -488,6 +620,10 @@ def test_treats_control_http_500_as_transient() -> None:
     assert worker._transient_control_failure(
         RuntimeError("control Sandbox API returned HTTP 500: internal_error")
     )
+    assert worker._transient_control_failure(
+        RuntimeError("control Sandbox API request failed")
+    )
+    assert worker._transient_control_failure(TimeoutError("timed out"))
     assert not worker._transient_control_failure(
         RuntimeError("control Sandbox API returned HTTP 422: policy_rejected")
     )

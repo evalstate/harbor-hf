@@ -124,7 +124,7 @@ class _ControlClient:
                 raise RuntimeError(
                     f"control Sandbox API returned HTTP {error.code}: {detail}"
                 ) from error
-            except URLError as error:
+            except (TimeoutError, URLError) as error:
                 if retry_safe and attempt + 1 < attempts:
                     time.sleep(2**attempt)
                     continue
