@@ -9,9 +9,9 @@ import {
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
-const WORKER_REVISION = "66d85304eb0c0fcf0c955a35522001decb499e9e";
-const FX_WORKER_REVISION = "9cd5bfbb6b340684b5d4098f1d5122e6c00baafc";
-const DEEPSEEK_WORKER_REVISION = "3a6af70769288614b58fc10ca764c528305bf496";
+const WORKER_REVISION = "9203552185db8b3b74807768b76c4bd9012d5d5d";
+const WORKER_IMAGE =
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:ed23561222c614c45689ec628228a01be9c873785325d5312612b9302ef2c26e";
 const HARBOR_SOURCE =
   "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
 const PREPARATION_COMMAND = [
@@ -182,7 +182,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       [replacement, 1],
       [diagnostic, 16],
     ] as const) {
-      expect(spec.worker_revision).toBe(DEEPSEEK_WORKER_REVISION);
+      expect(spec.worker_revision).toBe(WORKER_REVISION);
       expect(spec.harbor_version).toBe("0.22.0");
       expect(spec.preparation_job_command).toEqual(PREPARATION_COMMAND);
       expect(spec.job_command).toEqual(EXECUTION_COMMAND);
@@ -373,7 +373,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     );
     expect(fx.models).toEqual(["gpt-oss-20b"]);
     expect(fx.harnesses).toEqual(["fx"]);
-    expect(fx.worker_revision).toBe(FX_WORKER_REVISION);
+    expect(fx.worker_revision).toBe(WORKER_REVISION);
     expect(fx.harbor_version).toBe("0.22.0");
     expect(fx.job_command).toEqual(EXECUTION_COMMAND);
   });
@@ -399,6 +399,8 @@ describe("Terminal-Bench 2.1 profiles", () => {
     for (const name of names) {
       const deployment = record((await profile("deployment", name)).spec);
       expect(deployment.harbor_version).toBe("0.22.0");
+      expect(deployment.job_image).toBe(WORKER_IMAGE);
+      expect(deployment.worker_revision).toBe(WORKER_REVISION);
       expect(deployment.preparation_job_command).toEqual(PREPARATION_COMMAND);
       expect(deployment.job_command).toEqual(EXECUTION_COMMAND);
       const template = record(deployment.trial_job_template);
