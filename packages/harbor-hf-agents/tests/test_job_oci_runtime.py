@@ -62,11 +62,12 @@ def _image_layout(
     tmp_path: Path,
     layer: bytes,
     limits: ImageLimits,
+    *,
+    config: bytes = b"{}",
 ) -> tuple[Path, runtime._ImageManifest]:
     image_layout = tmp_path / "image"
     blobs = image_layout / "blobs" / "sha256"
     blobs.mkdir(parents=True)
-    config = b"{}"
     config_digest = f"sha256:{hashlib.sha256(config).hexdigest()}"
     layer_digest = f"sha256:{hashlib.sha256(layer).hexdigest()}"
     (blobs / config_digest.removeprefix("sha256:")).write_bytes(config)
@@ -223,14 +224,52 @@ def test_manifest_rejects_config_blob_bytes_before_copy() -> None:
         runtime._image_manifest(raw_manifest, digest, _image_limits())
 
 
-def test_copied_layout_requires_named_oci_manifest(tmp_path: Path) -> None:
-    image_layout, manifest = _image_layout(
+def test_copied_layout_preserves_locked_layers_and_config_semantics(
+    tmp_path: Path,
+) -> None:
+    limits = _image_limits()
+    source_config = b'{"architecture":"amd64","os":"linux"}'
+    converted_config = b'{"os":"linux","architecture":"amd64"}'
+    image_layout, copied = _image_layout(
         tmp_path,
         _compressed_layer({"file": b"contents"}),
-        _image_limits(),
+        limits,
+        config=converted_config,
+    )
+    expected = runtime._ImageManifest(
+        config=runtime._BlobDescriptor(
+            digest=f"sha256:{hashlib.sha256(source_config).hexdigest()}",
+            size=len(source_config),
+        ),
+        layers=copied.layers,
     )
 
-    runtime._validate_copied_oci_manifest(image_layout, manifest, _image_limits())
+    assert (
+        runtime._validate_copied_oci_manifest(
+            image_layout,
+            expected,
+            json.loads(source_config),
+            limits,
+        )
+        == copied
+    )
+    assert copied.config != expected.config
+
+    with pytest.raises(OciImageIntegrityError, match="config changed"):
+        runtime._validate_copied_oci_manifest(
+            image_layout,
+            expected,
+            {"architecture": "arm64", "os": "linux"},
+            limits,
+        )
+
+    with pytest.raises(OciImageIntegrityError, match="layers changed"):
+        runtime._validate_copied_oci_manifest(
+            image_layout,
+            runtime._ImageManifest(config=expected.config, layers=()),
+            json.loads(source_config),
+            limits,
+        )
 
     index = json.loads((image_layout / "index.json").read_text(encoding="utf-8"))
     index["manifests"][0]["mediaType"] = (
@@ -243,8 +282,9 @@ def test_copied_layout_requires_named_oci_manifest(tmp_path: Path) -> None:
     with pytest.raises(OciImageIntegrityError, match="not an OCI image manifest"):
         runtime._validate_copied_oci_manifest(
             image_layout,
-            manifest,
-            _image_limits(),
+            expected,
+            json.loads(source_config),
+            limits,
         )
 
 

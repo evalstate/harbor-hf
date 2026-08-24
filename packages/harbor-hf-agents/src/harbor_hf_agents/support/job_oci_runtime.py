@@ -511,16 +511,24 @@ def _is_named_task_manifest(value: object) -> bool:
     )
 
 
+def _read_image_bytes(path: Path, message: str) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise OciImageIntegrityError(message) from error
+
+
 def _validate_copied_oci_manifest(
     image_layout: Path,
     expected: _ImageManifest,
+    expected_config: dict[str, object],
     limits: ImageLimits,
-) -> None:
-    """Verify that Skopeo's named OCI manifest retains the locked image blobs."""
-    try:
-        raw_index = (image_layout / "index.json").read_bytes()
-    except OSError as error:
-        raise OciImageIntegrityError("copied task image index is missing") from error
+) -> _ImageManifest:
+    """Verify Skopeo's OCI conversion retains locked layers and config meaning."""
+    raw_index = _read_image_bytes(
+        image_layout / "index.json",
+        "copied task image index is missing",
+    )
     index = _manifest_object(raw_index, "copied task image index")
     if _optional(index, "schemaVersion") != 2:
         raise OciImageIntegrityError("copied task image index has an invalid schema")
@@ -543,15 +551,22 @@ def _validate_copied_oci_manifest(
         )
     descriptor = _blob_descriptor(descriptor_value, "copied manifest")
     manifest_blob = _validate_blob(image_layout, descriptor)
-    try:
-        raw_manifest = manifest_blob.read_bytes()
-    except OSError as error:
-        raise OciImageIntegrityError(
-            "copied task image manifest cannot be read"
-        ) from error
+    raw_manifest = _read_image_bytes(
+        manifest_blob,
+        "copied task image manifest cannot be read",
+    )
     copied = _image_manifest(raw_manifest, descriptor.digest, limits)
-    if copied != expected:
-        raise OciImageIntegrityError("copied task image manifest changed locked blobs")
+    if copied.layers != expected.layers:
+        raise OciImageIntegrityError("copied task image manifest layers changed")
+    config_blob = _validate_blob(image_layout, copied.config)
+    raw_config = _read_image_bytes(
+        config_blob,
+        "copied task image config cannot be read",
+    )
+    copied_config = _manifest_object(raw_config, "copied task image config")
+    if copied_config != expected_config:
+        raise OciImageIntegrityError("copied task image config changed")
+    return copied
 
 
 def _scan_tar_stream(
@@ -1505,6 +1520,21 @@ class IsolatedOciRuntime:
             manifest_digest,
             self.image_limits,
         )
+        source_config = _manifest_object(
+            _run_checked(
+                [
+                    "skopeo",
+                    "inspect",
+                    "--authfile",
+                    str(auth_file),
+                    "--config",
+                    source,
+                ],
+                environment=self._environment,
+                label="selected task image config inspection",
+            ).stdout,
+            "selected task image config",
+        )
         # Skopeo can need both its final blobs and temporary transfer space.
         _require_free_space(
             self.workspace,
@@ -1517,14 +1547,15 @@ class IsolatedOciRuntime:
             environment=self._environment,
             label="task image copy",
         )
-        _validate_copied_oci_manifest(
+        copied_manifest = _validate_copied_oci_manifest(
             image_layout,
             manifest,
+            source_config,
             self.image_limits,
         )
         archive_stats = _inspect_image_layout(
             image_layout,
-            manifest,
+            copied_manifest,
             self.image_limits,
         )
         with _reserved_extraction_space(self.workspace, archive_stats):
