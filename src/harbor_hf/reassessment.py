@@ -50,8 +50,8 @@ class FrozenModel(BaseModel):
 
 
 class SourceEvaluation(FrozenModel):
-    campaign_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
+    execution_id: str = Field(min_length=1)
     publication_id: str = Field(min_length=1)
     source_checksum: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     result_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -107,7 +107,7 @@ class ReassessmentTrial(FrozenModel):
     task_name: str = Field(min_length=1)
     task_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     logical_attempt: int = Field(ge=1)
-    source_execution_id: str = Field(pattern=r"^exec-[0-9a-f]{32}$")
+    source_attempt_id: str = Field(pattern=r"^exec-[0-9a-f]{32}$")
     source_trial_path: str = Field(min_length=1)
     source_outcome: Literal["scored", "agent_failed"]
     source_reward: float = Field(ge=0, le=1)
@@ -246,7 +246,9 @@ def _source_trial_root(
     source: SourceEvaluation,
 ) -> Path:
     root = evidence_root / trial.source_trial_path
-    expected = evidence_root / "runs" / source.run_id / "trials" / trial.trial_id
+    expected = (
+        evidence_root / "executions" / source.execution_id / "trials" / trial.trial_id
+    )
     if (
         not root.is_dir()
         or root.resolve().is_relative_to(evidence_root.resolve()) is False
@@ -255,20 +257,20 @@ def _source_trial_root(
         raise ReassessmentError("source trial root is missing or unsafe")
     _verify_source_trial(root, evidence_root, trial, source)
     try:
-        execution_lock = json.loads(
+        attempt_lock = json.loads(
             (
-                root / "executions" / trial.source_execution_id / "execution.lock.json"
+                root / "attempts" / trial.source_attempt_id / "attempt.lock.json"
             ).read_text()
         )
     except (OSError, json.JSONDecodeError) as error:
         raise ReassessmentError("source trial execution lock is invalid") from error
     if (
-        not isinstance(execution_lock, dict)
-        or execution_lock.get("execution_id") != trial.source_execution_id
-        or execution_lock.get("trial_id") != trial.trial_id
-        or execution_lock.get("task_name") != trial.task_name
-        or execution_lock.get("task_digest") != trial.task_digest
-        or execution_lock.get("logical_attempt") != trial.logical_attempt
+        not isinstance(attempt_lock, dict)
+        or attempt_lock.get("attempt_id") != trial.source_attempt_id
+        or attempt_lock.get("trial_id") != trial.trial_id
+        or attempt_lock.get("task_name") != trial.task_name
+        or attempt_lock.get("task_digest") != trial.task_digest
+        or attempt_lock.get("logical_attempt") != trial.logical_attempt
     ):
         raise ReassessmentError("source trial identity disagrees with plan")
     return root
@@ -280,7 +282,7 @@ def _verify_source_trial(
     trial: ReassessmentTrial,
     source: SourceEvaluation,
 ) -> None:
-    run_root = evidence_root / "runs" / source.run_id
+    run_root = evidence_root / "executions" / source.execution_id
     run_manifest_path = run_root / "checksums.json"
     trial_manifest_path = root / "checksums.json"
     try:
@@ -305,7 +307,7 @@ def _verify_source_trial(
 
 
 def _source_native_trial(source_trial_root: Path, trial: ReassessmentTrial) -> Path:
-    execution = source_trial_root / "executions" / trial.source_execution_id
+    execution = source_trial_root / "attempts" / trial.source_attempt_id
     matches = list(execution.glob("harbor-jobs/*/*"))
     matches = [path for path in matches if path.is_dir()]
     if len(matches) != 1:
@@ -586,7 +588,7 @@ def _retain_failed_attempt(
     *,
     staging: Path,
     final: Path,
-    execution_id: str,
+    attempt_id: str,
     error: Exception,
     known_secrets: tuple[str, ...],
 ) -> None:
@@ -596,7 +598,7 @@ def _retain_failed_attempt(
         staging / "failure.json",
         {
             "schema_version": "harbor-hf/reassessment-failure/v1",
-            "execution_id": execution_id,
+            "attempt_id": attempt_id,
             "error_type": type(error).__name__,
             "message": "reassessment execution failed",
             "failed_at": datetime.now(UTC).isoformat(),
@@ -605,7 +607,7 @@ def _retain_failed_attempt(
     _assert_secrets_absent(staging, known_secrets)
     _json_atomic(staging / "checksums.json", _checksums(staging))
     (staging / "_FAILED").write_text("")
-    attempt = final / "attempts" / execution_id
+    attempt = final / "attempts" / attempt_id
     attempt.parent.mkdir(parents=True, exist_ok=True)
     if attempt.exists():
         raise ReassessmentError("reassessment failed-attempt identity collided")
@@ -646,11 +648,11 @@ def _write_fixed_zero(
             "trial_id": trial.trial_id,
             "task_name": trial.task_name,
             "logical_attempt": trial.logical_attempt,
-            "source_execution_id": trial.source_execution_id,
-            "source_execution_checksum": _sha256(
+            "source_attempt_id": trial.source_attempt_id,
+            "source_attempt_checksum": _sha256(
                 source_trial_root
-                / "executions"
-                / trial.source_execution_id
+                / "attempts"
+                / trial.source_attempt_id
                 / "checksums.json"
             ),
             "action": "fixed_zero",
@@ -688,7 +690,7 @@ def _execute_rejudge(
         raise ReassessmentError("reassessment runtime image disagrees with plan")
     restored = Path(tempfile.mkdtemp(prefix="harbor-hf-reassessment-source-"))
     staging = final.with_name(f".{trial.trial_id}.{secrets.token_hex(8)}.tmp")
-    execution_id = "rejudge-" + secrets.token_hex(16)
+    attempt_id = "rejudge-" + secrets.token_hex(16)
     capability: str | None = None
     capability_secret = ""
     sandbox: Sandbox | None = None
@@ -708,7 +710,7 @@ def _execute_rejudge(
         staging.mkdir(parents=True)
         judge_root = staging / "judge-records"
         capability = recorder.register_scope(
-            execution_id=execution_id,
+            attempt_id=attempt_id,
             trial_id=trial.trial_id,
             model=plan.judge.model,
             destination=judge_root,
@@ -781,7 +783,7 @@ def _execute_rejudge(
                 "trial_id": trial.trial_id,
                 "task_name": trial.task_name,
                 "logical_attempt": trial.logical_attempt,
-                "source_execution_id": trial.source_execution_id,
+                "source_attempt_id": trial.source_attempt_id,
                 "source_trial_checksum": _sha256(source_root / "checksums.json"),
                 "action": "rejudge",
                 "model": plan.judge.model,
@@ -815,7 +817,7 @@ def _execute_rejudge(
             _retain_failed_attempt(
                 staging=staging,
                 final=final,
-                execution_id=execution_id,
+                attempt_id=attempt_id,
                 error=failure,
                 known_secrets=(hf_token, openai_token, capability_secret),
             )

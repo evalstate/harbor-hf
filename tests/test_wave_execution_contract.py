@@ -10,17 +10,17 @@ import pytest
 import yaml
 from conftest import write_fake_compatibility_bundle
 
-from harbor_hf.campaigns import (
-    CampaignLock,
-    WaveLock,
-    build_campaign_lock,
-    build_campaign_plan,
-    build_wave_lock,
-)
-from harbor_hf.control import CampaignSubmittedPayload, new_event
+from harbor_hf.control import RunSubmittedPayload, new_event
 from harbor_hf.models import EndpointRef, ExperimentSpec, SourcePin
 from harbor_hf.process import CommandRunner
 from harbor_hf.reconciler import plan_reconciliation
+from harbor_hf.runs import (
+    RunLock,
+    WaveLock,
+    build_run_lock,
+    build_run_plan,
+    build_wave_lock,
+)
 from harbor_hf.wave_worker import run_wave_worker
 
 
@@ -165,7 +165,7 @@ def _prepare_source(
 
 
 def _launch_watchdog(lock: WaveLock, endpoint: EndpointRef, token: str) -> str:
-    assert lock.campaign_id == "campaign-contract"
+    assert lock.run_id == "run-contract"
     assert endpoint.name == "qwen-endpoint"
     assert token == "contract-token"
     return "watchdog-contract"
@@ -173,7 +173,7 @@ def _launch_watchdog(lock: WaveLock, endpoint: EndpointRef, token: str) -> str:
 
 def _wave_inputs(
     remote_spec: ExperimentSpec, root: Path
-) -> tuple[ExperimentSpec, CampaignLock, WaveLock, Path, Path, Path]:
+) -> tuple[ExperimentSpec, RunLock, WaveLock, Path, Path, Path]:
     spec = remote_spec.model_copy(
         update={
             "execution": remote_spec.execution.model_copy(
@@ -185,30 +185,30 @@ def _wave_inputs(
             )
         }
     )
-    campaign = build_campaign_lock(
-        build_campaign_plan(spec),
-        "campaign-contract",
+    run = build_run_lock(
+        build_run_plan(spec),
+        "run-contract",
         clock=lambda: datetime(2026, 7, 14, 0, 0, tzinfo=UTC),
     )
     submitted = new_event(
-        subject_type="campaign",
-        subject_id=campaign.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=run.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
+        payload=RunSubmittedPayload(plan_digest=run.plan_digest),
     )
-    action = plan_reconciliation(campaign, [submitted])[1].actions[0]
-    wave = build_wave_lock(campaign, spec, action)
+    action = plan_reconciliation(run, [submitted])[1].actions[0]
+    wave = build_wave_lock(run, spec, action)
     manifest = root / "manifest.yaml"
     manifest.write_text(
         yaml.safe_dump(spec.model_dump(mode="json", exclude_none=True)),
         encoding="utf-8",
     )
-    campaign_path = root / "campaign.lock.json"
-    campaign_path.write_text(campaign.model_dump_json(), encoding="utf-8")
+    run_path = root / "run.lock.json"
+    run_path.write_text(run.model_dump_json(), encoding="utf-8")
     wave_path = root / "wave.lock.json"
     wave_path.write_text(wave.model_dump_json(), encoding="utf-8")
-    return spec, campaign, wave, manifest, campaign_path, wave_path
+    return spec, run, wave, manifest, run_path, wave_path
 
 
 def _events(path: Path) -> list[dict[str, object]]:
@@ -240,9 +240,7 @@ def test_wave_execution_publishes_complete_linked_evidence_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, campaign, wave, manifest, campaign_path, wave_path = _wave_inputs(
-        remote_spec, tmp_path
-    )
+    spec, run, wave, manifest, run_path, wave_path = _wave_inputs(remote_spec, tmp_path)
     monkeypatch.setenv("HF_TOKEN", "contract-token")
     monkeypatch.setattr(
         "harbor_hf.worker.probe_runtime",
@@ -259,7 +257,7 @@ def test_wave_execution_publishes_complete_linked_evidence_contract(
 
     destination = run_wave_worker(
         manifest,
-        campaign_path,
+        run_path,
         wave_path,
         output,
         runner=runner,
@@ -271,67 +269,67 @@ def test_wave_execution_publishes_complete_linked_evidence_contract(
         monotonic=lambda: 1000.0,
     )
 
-    run = wave.runs[0]
-    shard = run.shards[0].shard
+    execution = wave.executions[0]
+    shard = execution.shards[0].shard
     trial = shard.trials[0]
-    execution_id = "exec-1234567890abcdef1234567890abcdef"
-    campaign_root = output / campaign.artifact_prefix
+    attempt_id = "exec-1234567890abcdef1234567890abcdef"
     run_root = output / run.artifact_prefix
+    execution_root = output / execution.artifact_prefix
     wave_root = output / wave.artifact_prefix
-    shard_root = output / run.shards[0].artifact_prefix
-    trial_root = run_root / "trials" / trial.trial_id
-    execution_root = trial_root / "executions" / execution_id
+    shard_root = output / execution.shards[0].artifact_prefix
+    trial_root = execution_root / "trials" / trial.trial_id
+    attempt_root = trial_root / "attempts" / attempt_id
 
     assert destination == wave_root
     expected_files = {
-        "campaign.lock.json",
-        "campaign.lock.json.sha256",
+        "run.lock.json",
+        "run.lock.json.sha256",
         "source.lock.json",
         "source.lock.json.sha256",
-        f"runs/{run.configuration.run_id}/run.lock.json",
-        f"runs/{run.configuration.run_id}/run.lock.json.sha256",
-        f"runs/{run.configuration.run_id}/shards/{shard.shard_id}/_SUCCESS",
-        f"runs/{run.configuration.run_id}/shards/{shard.shard_id}/checksums.json",
-        f"runs/{run.configuration.run_id}/shards/{shard.shard_id}/events.jsonl",
-        f"runs/{run.configuration.run_id}/shards/{shard.shard_id}/shard-summary.json",
-        f"runs/{run.configuration.run_id}/shards/{shard.shard_id}/shard.lock.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/_SUCCESS",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/checksums.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/events.jsonl",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/trial-summary.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/trial.lock.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/_SUCCESS",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/artifacts.tar.gz",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/checksums.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/events.jsonl",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/execution.lock.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor-compatibility.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor-native-bundle.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor-export.log",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor-job.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor-jobs/job-contract/trial-contract/lock.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor-jobs/job-contract/trial-contract/result.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor.log",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor-request.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/manifest.yaml",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/private-artifacts.json",
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/verification.json",
+        f"executions/{execution.configuration.execution_id}/execution.lock.json",
+        f"executions/{execution.configuration.execution_id}/execution.lock.json.sha256",
+        f"executions/{execution.configuration.execution_id}/shards/{shard.shard_id}/_SUCCESS",
+        f"executions/{execution.configuration.execution_id}/shards/{shard.shard_id}/checksums.json",
+        f"executions/{execution.configuration.execution_id}/shards/{shard.shard_id}/events.jsonl",
+        f"executions/{execution.configuration.execution_id}/shards/{shard.shard_id}/shard-summary.json",
+        f"executions/{execution.configuration.execution_id}/shards/{shard.shard_id}/shard.lock.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/_SUCCESS",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/checksums.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/events.jsonl",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/trial-summary.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/trial.lock.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/_SUCCESS",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/artifacts.tar.gz",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/checksums.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/events.jsonl",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/attempt.lock.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor-compatibility.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor-native-bundle.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor-export.log",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor-job.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor-jobs/job-contract/trial-contract/lock.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor-jobs/job-contract/trial-contract/result.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor.log",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor-request.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/manifest.yaml",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/private-artifacts.json",
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/verification.json",
         f"waves/{wave.wave_id}/_SUCCESS",
         f"waves/{wave.wave_id}/checksums.json",
         f"waves/{wave.wave_id}/endpoint.final.json",
@@ -342,8 +340,8 @@ def test_wave_execution_publishes_complete_linked_evidence_contract(
         f"waves/{wave.wave_id}/wave.lock.json",
     }
     native = (
-        f"runs/{run.configuration.run_id}/trials/{trial.trial_id}/executions/"
-        f"{execution_id}/harbor-jobs/job-contract/trial-contract"
+        f"executions/{execution.configuration.execution_id}/trials/{trial.trial_id}/attempts/"
+        f"{attempt_id}/harbor-jobs/job-contract/trial-contract"
     )
     expected_files.update(
         {
@@ -359,18 +357,18 @@ def test_wave_execution_publishes_complete_linked_evidence_contract(
         }
     )
     assert {
-        str(path.relative_to(campaign_root))
-        for path in campaign_root.rglob("*")
+        str(path.relative_to(run_root))
+        for path in run_root.rglob("*")
         if path.is_file()
     } == expected_files
 
-    assert json.loads((execution_root / "execution.lock.json").read_text()) == {
-        "schema_version": "harbor-hf/execution-lock/v1alpha1",
-        "execution_id": execution_id,
+    assert json.loads((attempt_root / "attempt.lock.json").read_text()) == {
+        "schema_version": "harbor-hf/attempt-lock/v1alpha1",
+        "attempt_id": attempt_id,
         "created_at": "2026-07-14T01:02:03Z",
-        "campaign_id": campaign.campaign_id,
+        "run_id": run.run_id,
         "wave_id": wave.wave_id,
-        "run_id": run.configuration.run_id,
+        "execution_id": execution.configuration.execution_id,
         "shard_id": shard.shard_id,
         "trial_id": trial.trial_id,
         "task_name": task_name,
@@ -379,19 +377,19 @@ def test_wave_execution_publishes_complete_linked_evidence_contract(
         "physical_attempt": 1,
         "remote_job_id": "test-wave-job",
     }
-    assert _events(execution_root / "events.jsonl") == [
-        {"event": "execution_started", "execution_id": execution_id},
+    assert _events(attempt_root / "events.jsonl") == [
+        {"event": "attempt_started", "attempt_id": attempt_id},
         {"event": "harbor_started"},
         {"event": "harbor_finished", "exit_code": 0},
         {"event": "trial_evidence_validated", "trial_id": trial.trial_id},
-        {"event": "execution_succeeded"},
+        {"event": "attempt_succeeded"},
         {"event": "secrets_redacted", "files": ["harbor.log"]},
     ]
     private_artifacts = json.loads(
-        (execution_root / "private-artifacts.json").read_text(encoding="utf-8")
+        (attempt_root / "private-artifacts.json").read_text(encoding="utf-8")
     )
     assert private_artifacts["schema_version"] == "harbor-hf/private-artifacts/v1"
-    assert private_artifacts["execution_id"] == execution_id
+    assert private_artifacts["attempt_id"] == attempt_id
     assert private_artifacts["trial_id"] == trial.trial_id
     assert private_artifacts["requirements"] == [
         {
@@ -443,40 +441,38 @@ def test_wave_execution_publishes_complete_linked_evidence_contract(
     execution_summary = json.loads((trial_root / "trial-summary.json").read_text())
     assert execution_summary == {
         "trial_id": trial.trial_id,
-        "execution_id": execution_id,
-        "execution_checksum": _digest(execution_root / "checksums.json"),
+        "attempt_id": attempt_id,
+        "attempt_checksum": _digest(attempt_root / "checksums.json"),
     }
     shard_summary = json.loads((shard_root / "shard-summary.json").read_text())
     assert shard_summary == {
-        "campaign_id": campaign.campaign_id,
-        "run_id": run.configuration.run_id,
+        "run_id": run.run_id,
+        "execution_id": execution.configuration.execution_id,
         "shard_id": shard.shard_id,
         "trial_checksums": {trial.trial_id: _digest(trial_root / "checksums.json")},
     }
     wave_summary = json.loads((wave_root / "wave-summary.json").read_text())
     assert wave_summary == {
         "wave_id": wave.wave_id,
-        "campaign_id": campaign.campaign_id,
+        "run_id": run.run_id,
         "shard_checksums": {shard.shard_id: _digest(shard_root / "checksums.json")},
         "endpoint_cleanup_verified": True,
     }
 
-    for evidence_root in (execution_root, trial_root, shard_root, wave_root):
+    for evidence_root in (attempt_root, trial_root, shard_root, wave_root):
         assert json.loads((evidence_root / "checksums.json").read_text()) == (
             _expected_checksums(evidence_root)
         )
-    assert (campaign_root / "campaign.lock.json.sha256").read_text() == (
-        _digest(campaign_root / "campaign.lock.json") + "\n"
-    )
     assert (run_root / "run.lock.json.sha256").read_text() == (
         _digest(run_root / "run.lock.json") + "\n"
+    )
+    assert (execution_root / "execution.lock.json.sha256").read_text() == (
+        _digest(execution_root / "execution.lock.json") + "\n"
     )
 
     assert len(stream.calls) == 1
     command, log_path, environment, timeout_seconds = stream.calls[0]
-    config = json.loads(
-        (execution_root / "harbor-job.json").read_text(encoding="utf-8")
-    )
+    config = json.loads((attempt_root / "harbor-job.json").read_text(encoding="utf-8"))
     assert config["datasets"][0]["task_names"] == [task_name]
     assert Path(config["jobs_dir"]).name == "harbor-jobs"
     assert log_path.name == "harbor.log"
@@ -493,11 +489,11 @@ def test_wave_execution_publishes_complete_linked_evidence_contract(
         "pause",
         "describe",
     ]
-    assert (execution_root / "harbor.log").read_text() == (
+    assert (attempt_root / "harbor.log").read_text() == (
         "wave completed with [REDACTED]\n"
     )
     assert all(
         b"contract-token" not in path.read_bytes()
-        for path in campaign_root.rglob("*")
+        for path in run_root.rglob("*")
         if path.is_file()
     )

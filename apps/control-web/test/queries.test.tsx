@@ -7,11 +7,13 @@ import {
   affectedQueryKeys,
   collectPagedItems,
   JOBS_REFRESH_INTERVAL_MS,
+  SSE_INVALIDATION_DEBOUNCE_MS,
   keys,
   useAllProfiles,
-  useCampaignJobs,
+  useRunJobs,
   useJobs,
   useLiveUpdates,
+  useTasks,
 } from "../src/queries";
 
 class FakeEventSource {
@@ -60,25 +62,37 @@ describe("live query updates", () => {
     const affected = affectedQueryKeys({
       type: "attempt.receipt",
       occurred_at: "2026-08-18T00:00:00Z",
-      data: { campaign_id: "campaign-1", task_id: "task-1" },
+      data: { run_id: "run-1", task_id: "task-1" },
     });
-    expect(affected).toContainEqual(keys.campaigns);
-    expect(affected).toContainEqual(keys.campaign("campaign-1"));
-    expect(affected).toContainEqual(keys.capacity("campaign-1"));
-    expect(affected).toContainEqual(keys.tasks("campaign-1"));
-    expect(affected).toContainEqual(keys.task("campaign-1", "task-1"));
+    expect(affected).toContainEqual(keys.runs);
+    expect(affected).toContainEqual(keys.run("run-1"));
+    expect(affected).toContainEqual(keys.capacity("run-1"));
+    expect(affected).toContainEqual(keys.tasks("run-1"));
+    expect(affected).toContainEqual(keys.task("run-1", "task-1"));
     expect(affected).not.toContainEqual(keys.session);
     expect(affected).not.toContainEqual(keys.results);
   });
 
-  it("refreshes the complete campaign Job list for Job actions", () => {
+  it("invalidates Run and task queries for task lifecycle events", () => {
+    const affected = affectedQueryKeys({
+      type: "task.exhaustion",
+      occurred_at: "2026-08-18T00:00:00Z",
+      data: { run_id: "run-1", task_id: "task-1" },
+    });
+    expect(affected).toContainEqual(keys.runs);
+    expect(affected).toContainEqual(keys.run("run-1"));
+    expect(affected).toContainEqual(keys.tasks("run-1"));
+    expect(affected).toContainEqual(keys.task("run-1", "task-1"));
+  });
+
+  it("refreshes the complete run Job list for Job actions", () => {
     const affected = affectedQueryKeys({
       type: "action.receipt",
       occurred_at: "2026-08-18T00:00:00Z",
-      data: { campaign_id: "campaign-1", action_kind: "job.observe" },
+      data: { run_id: "run-1", action_kind: "job.observe" },
     });
     expect(affected).toContainEqual(keys.jobs);
-    expect(affected).toContainEqual(keys.campaignJobs("campaign-1"));
+    expect(affected).toContainEqual(keys.runJobs("run-1"));
   });
 
   it("invalidates every capacity view after capacity profile promotion", () => {
@@ -91,14 +105,14 @@ describe("live query updates", () => {
     expect(affected).toContainEqual(keys.profiles);
   });
 
-  it("targets capacity views for Sandbox admission records", () => {
+  it("targets capacity views for Job admission records", () => {
     const affected = affectedQueryKeys({
-      type: "sandbox.admission",
+      type: "job.admission",
       occurred_at: "2026-08-18T00:00:00Z",
-      data: { campaign_id: "campaign-1", action_id: "action-1" },
+      data: { run_id: "run-1", action_id: "action-1" },
     });
-    expect(affected).toContainEqual(keys.capacity("campaign-1"));
-    expect(affected).toContainEqual(keys.campaign("campaign-1"));
+    expect(affected).toContainEqual(keys.capacity("run-1"));
+    expect(affected).toContainEqual(keys.run("run-1"));
     expect(affected).not.toContainEqual(keys.session);
   });
 
@@ -108,8 +122,8 @@ describe("live query updates", () => {
       occurred_at: "2026-08-18T00:00:00Z",
       data: { key: "control/example", digest: "sha256:example" },
     });
-    expect(affected).toContainEqual(keys.campaigns);
-    expect(affected).toContainEqual(["campaign"]);
+    expect(affected).toContainEqual(keys.runs);
+    expect(affected).toContainEqual(["run"]);
     expect(affected).toContainEqual(["tasks"]);
     expect(affected).toContainEqual(["task"]);
   });
@@ -122,6 +136,89 @@ describe("live query updates", () => {
     );
     renderHook(() => useLiveUpdates(true, "cursor-one"), { wrapper });
     expect(FakeEventSource.instances[0]?.url).toBe("/api/v1/events?cursor=cursor-one");
+  });
+
+  it("refreshes current state on resets and system state on replay", () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const { client, invalidate } = setup();
+    client.setQueryData(keys.system, {
+      projection: {
+        object_count: 7,
+        last_sync_at: "2026-08-24T09:00:00.000Z",
+        event_cursor: "old-cursor",
+      },
+    });
+    act(() =>
+      FakeEventSource.instances[0]?.message({
+        type: "cursor.reset",
+        occurred_at: "2026-08-24T10:00:00.000Z",
+        data: { reason: "epoch_changed", latest_cursor: "latest-cursor" },
+        replay: true,
+        cursor_reset: true,
+      }),
+    );
+    expect(invalidate).toHaveBeenCalledWith({
+      predicate: expect.any(Function),
+      refetchType: "active",
+    });
+    const resetPredicate = invalidate.mock.calls[0]?.[0]?.predicate;
+    if (!resetPredicate) throw new Error("reset invalidation predicate is missing");
+    expect(resetPredicate({ queryKey: keys.system } as never)).toBe(true);
+    expect(resetPredicate({ queryKey: keys.runs } as never)).toBe(true);
+    expect(resetPredicate({ queryKey: keys.session } as never)).toBe(false);
+    expect(
+      client.getQueryData<{ projection: { object_count: number } }>(keys.system)
+        ?.projection.object_count,
+    ).toBe(7);
+    invalidate.mockClear();
+
+    act(() =>
+      FakeEventSource.instances[0]?.message({
+        id: "new-cursor-1",
+        type: "run.request",
+        occurred_at: "2026-08-24T10:00:01.000Z",
+        data: { run_id: "run-1" },
+        replay: true,
+        cursor_reset: false,
+      }),
+    );
+    expect(
+      client.getQueryData<{ projection: { object_count: number } }>(keys.system)
+        ?.projection.object_count,
+    ).toBe(7);
+    act(() => vi.advanceTimersByTime(SSE_INVALIDATION_DEBOUNCE_MS));
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: keys.system,
+      refetchType: "active",
+    });
+    invalidate.mockClear();
+
+    act(() =>
+      FakeEventSource.instances[0]?.message({
+        id: "new-cursor-2",
+        type: "run.lock",
+        occurred_at: "2026-08-24T10:00:02.000Z",
+        data: { run_id: "run-1" },
+        replay: false,
+        cursor_reset: false,
+      }),
+    );
+    expect(
+      client.getQueryData<{ projection: { object_count: number } }>(keys.system)
+        ?.projection.object_count,
+    ).toBe(7);
+    act(() => vi.advanceTimersByTime(SSE_INVALIDATION_DEBOUNCE_MS));
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: keys.system,
+      refetchType: "active",
+    });
+    act(() => FakeEventSource.instances[0]?.onerror?.());
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(FakeEventSource.instances[1]?.url).toBe(
+      "/api/v1/events?cursor=latest-cursor",
+    );
   });
 
   it("does not poll while SSE stays connected", () => {
@@ -177,6 +274,7 @@ describe("live query updates", () => {
   });
 
   it("invalidates only the queries affected by a control event", () => {
+    vi.useFakeTimers();
     vi.stubGlobal("EventSource", FakeEventSource);
     const { invalidate } = setup();
     act(() => FakeEventSource.instances[0]?.open());
@@ -185,18 +283,45 @@ describe("live query updates", () => {
       FakeEventSource.instances[0]?.message({
         type: "publication.receipt",
         occurred_at: "2026-08-18T00:00:00Z",
-        data: { campaign_id: "campaign-1" },
+        data: { run_id: "run-1" },
       }),
     );
+    act(() => vi.advanceTimersByTime(SSE_INVALIDATION_DEBOUNCE_MS));
 
     const invalidated = invalidate.mock.calls.map(([options]) => options?.queryKey);
     expect(invalidated).toContainEqual(keys.results);
     expect(invalidated).toContainEqual(keys.leaderboard);
-    expect(invalidated).toContainEqual(keys.campaigns);
-    expect(invalidated).toContainEqual(keys.campaign("campaign-1"));
+    expect(invalidated).toContainEqual(keys.runs);
+    expect(invalidated).toContainEqual(keys.run("run-1"));
     expect(invalidated).toContainEqual(keys.audit);
     expect(invalidated).not.toContainEqual(keys.session);
     expect(invalidated).not.toContainEqual(keys.profiles);
+  });
+
+  it("coalesces an SSE burst to one invalidation per query key", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const { invalidate } = setup();
+    act(() => FakeEventSource.instances[0]?.open());
+    invalidate.mockClear();
+
+    act(() => {
+      for (let index = 0; index < 5; index += 1)
+        FakeEventSource.instances[0]?.message({
+          type: "attempt.receipt",
+          occurred_at: `2026-08-18T00:00:0${index}Z`,
+          data: { run_id: "run-1", task_id: "task-1" },
+        });
+    });
+    expect(invalidate).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(SSE_INVALIDATION_DEBOUNCE_MS));
+
+    const invalidated = invalidate.mock.calls.map(([options]) =>
+      JSON.stringify(options?.queryKey),
+    );
+    expect(new Set(invalidated).size).toBe(invalidated.length);
+    expect(invalidated).toContain(JSON.stringify(keys.run("run-1")));
+    expect(invalidated).toContain(JSON.stringify(keys.task("run-1", "task-1")));
   });
 
   it("refetches Jobs on a short interval so observed state stays current", async () => {
@@ -226,21 +351,24 @@ describe("live query updates", () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it("loads every Job page scoped to a campaign", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      return new Response(
-        JSON.stringify(
-          url.includes("cursor=page-2")
-            ? { items: [{ resource_id: "job-2" }], next_cursor: null }
-            : { items: [{ resource_id: "job-1" }], next_cursor: "page-2" },
+  it("loads more than 2,000 Jobs scoped to a run", async () => {
+    const itemCount = 2_001;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: Array.from({ length: itemCount }, (_, index) => ({
+              action_id: `action-${index}`,
+              resource_id: `job-${index}`,
+            })),
+            next_cursor: null,
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
         ),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      );
-    });
+    );
     vi.stubGlobal("fetch", fetchMock);
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -248,16 +376,45 @@ describe("live query updates", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    const { result } = renderHook(() => useCampaignJobs("campaign-1"), { wrapper });
-    await waitFor(() => expect(result.current.data?.items).toHaveLength(2));
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
-      "/api/v1/jobs?limit=100&campaign_id=campaign-1",
-    );
-    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=page-2");
+    const { result } = renderHook(() => useRunJobs("run-1"), { wrapper });
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(itemCount));
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/api/v1/jobs?run_id=run-1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("paged profile collection", () => {
+describe("Run task collection", () => {
+  it("loads more than 100 logical tasks with one request", async () => {
+    const items = Array.from({ length: 125 }, (_, index) => ({
+      run_id: "run-1",
+      task_id: `task-${index}`,
+      input_digest: `sha256:${String(index).padStart(64, "0")}`,
+      terminal_outcome: null,
+      selected_attempt_id: null,
+    }));
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ items, next_cursor: null }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+
+    const hook = renderHook(() => useTasks("run-1"), { wrapper });
+    await waitFor(() => expect(hook.result.current.data?.items).toHaveLength(125));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/api/v1/runs/run-1/tasks");
+  });
+});
+
+describe("complete paged collection", () => {
   it("follows profile cursors until models and later harnesses appear", async () => {
     const pages = [
       {
@@ -282,6 +439,46 @@ describe("paged profile collection", () => {
       "opencode",
       "gpt-oss-20b",
     ]);
+  });
+
+  it("loads more than twenty pages without truncation", async () => {
+    const pageSize = 100;
+    const itemCount = 2_001;
+    const loadPage = vi.fn(async (cursor?: string) => {
+      const offset = cursor ? Number(cursor) : 0;
+      const end = Math.min(offset + pageSize, itemCount);
+      return {
+        items: Array.from({ length: end - offset }, (_, index) => offset + index),
+        next_cursor: end < itemCount ? String(end) : null,
+      };
+    });
+
+    const items = await collectPagedItems(loadPage);
+
+    expect(items).toHaveLength(itemCount);
+    expect(items.at(-1)).toBe(itemCount - 1);
+    expect(loadPage).toHaveBeenCalledTimes(21);
+  });
+
+  it("rejects empty and repeated cursor pages", async () => {
+    await expect(
+      collectPagedItems(async () => ({ items: [], next_cursor: "stalled" })),
+    ).rejects.toThrow("paged list made no progress");
+    await expect(
+      collectPagedItems(async (cursor) => ({
+        items: [cursor ?? "first"],
+        next_cursor: "page-2",
+      })),
+    ).rejects.toThrow("paged list repeated a cursor");
+    await expect(
+      collectPagedItems(
+        async (cursor) => ({
+          items: ["duplicate"],
+          next_cursor: cursor ? "page-3" : "page-2",
+        }),
+        (item) => item,
+      ),
+    ).rejects.toThrow("paged list made no progress");
   });
 
   it("loads every profile page for the launch form", async () => {

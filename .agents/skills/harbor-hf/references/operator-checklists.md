@@ -13,7 +13,7 @@ inspecting the named artifact or command output.
       are current.
 - [ ] The Space is private, Hugging Face OAuth is enabled, and the private
       Bucket operator access list was verified.
-- [ ] Read-only users cannot mutate campaigns, and operator mutations require a
+- [ ] Read-only users cannot mutate runs, and operator mutations require a
       valid CSRF token plus an idempotency key.
 - [ ] The Space has exactly two operator-managed persistent secrets:
       `HF_TOKEN` for control and `HF_INFERENCE_TOKEN` for reviewed workers. The
@@ -23,47 +23,44 @@ inspecting the named artifact or command output.
 - [ ] No keep-awake schedule, second Space, Dataset, Bucket, database service,
       or deployment credential was added.
 - [ ] An empty local filesystem rebuilds SQLite from Bucket records and produces
-      the expected replay cursor, campaign states, and next actions.
+      the expected replay cursor, run states, and next actions.
 - [ ] The API reports liveness during rebuild and refuses mutations until
       readiness passes.
 - [ ] Server-Sent Events resume from a durable cursor, and the polling fallback
       passes.
-- [ ] Overview, campaign, task, Job, Endpoint, result, profile, and audit routes
+- [ ] Overview, run, task, Job, Endpoint, result, profile, and audit routes
       pass hosted Playwright tests.
 - [ ] A forced process exit around each remote action boundary creates no
       duplicate logical work.
 - [ ] Jobs never receive `HF_TOKEN` or a writable canonical Bucket mount. A
       locked deployment marked `required` receives only `HF_INFERENCE_TOKEN`; a
       deployment marked `forbidden` receives no operator-managed secret. Signed
-      capabilities authorize only the campaign, launch action, task set, and
+      capabilities authorize only the run, launch action, task set, and
       expiration.
-- [ ] A Sandbox-enabled capability is bound to the campaign-lock digest, task
-      set, operation set and expiration. Worker responses expose neither remote
-      Job IDs nor proxy URLs.
-- [ ] Sandbox create, observe, command, file write, file read and close actions
-      have durable dispatch and result evidence. An ambiguous command is not
-      replayed automatically.
-- [ ] Sandbox Jobs receive no `HF_TOKEN` or `SBX_DL_TOKEN`. The per-Sandbox token
-      is derived in the control process, and a required inference token is
-      consumed by the reviewed root bootstrap before the unprivileged agent runs.
-- [ ] Sandbox image, hardware, lifetime, idle timeout, roots, transfer limits,
-      command limits, reservation and hourly cost match the immutable policy.
+- [ ] Each worker capability is bound to the Run-lock digest, launch action,
+      assigned task set, operation set, and expiration. It authorizes only the
+      assigned lock read, evidence upload, and receipt submission.
+- [ ] Preparation and execution Job image, hardware, timeout, task assignment,
+      reservation, and cost match the immutable policy.
+- [ ] Jobs receive no `HF_TOKEN` or writable canonical Bucket mount. A required
+      inference token is isolated in the reviewed root-owned bridge before the
+      unprivileged agent runs.
 - [ ] A worker uploads content-addressed evidence chunks and a canonical
       manifest before its attempt receipt. Missing, changed, cross-scope, or
       incomplete evidence is rejected during both receipt acceptance and replay.
-- [ ] The hosted inference-free Sandbox smoke creates, observes, executes,
-      round-trips a file, closes, reconciles cost and leaves no active Job.
+- [ ] The hosted inference-free control smoke launches and observes its Job,
+      submits a worker receipt, reconciles cost, and leaves no active Job.
 - [ ] Every endpoint is paused with zero ready replicas after the deployment
       canary.
 
-## New campaign checklist
+## New run checklist
 
 ### Scope
 
 - [ ] Benchmark protocol, task set, attempt count, model set, agents, providers,
       judge, scoring denominator, and publication cohort are approved.
 - [ ] The exact count of runs, tasks, logical trials, shards, and waves is known.
-- [ ] Existing campaigns and Jobs were checked for duplicates.
+- [ ] Existing runs and Jobs were checked for duplicates.
 - [ ] Remote writes and maximum spend have explicit authorization.
 
 ### Identity
@@ -85,7 +82,7 @@ inspecting the named artifact or command output.
 - [ ] The namespace has one publicly reachable, application-protected control
       Space and one private `<artifact-bucket>` Bucket; their deployed names
       remain in private configuration.
-- [ ] The campaign creates no repository, Bucket, Space, Dataset, schedule,
+- [ ] The run creates no repository, Bucket, Space, Dataset, schedule,
       status store, lease store, backup store, or result service.
 - [ ] Any proposed persistent resource has an approved privacy or
       failure-domain justification, owner, cost, lifecycle, and removal
@@ -103,7 +100,7 @@ inspecting the named artifact or command output.
 - [ ] `HF_TOKEN` contains the retained fine-grained service token and has only
       the required resource and action scopes. Its display name and local alias
       are not present in public artifacts.
-- [ ] No per-campaign, per-repair, per-worker, backup, or result-reader Harbor-HF
+- [ ] No per-run, per-repair, per-worker, backup, or result-reader Harbor-HF
       credential was created. Jobs never receive `HF_TOKEN` or a writable mount
       of the canonical control Bucket. Each worker receives only its short-lived,
       action-scoped capability.
@@ -118,7 +115,7 @@ inspecting the named artifact or command output.
 ### Planning
 
 - [ ] `harbor-hf validate` passes.
-- [ ] Campaign plan JSON and `source.lock.json` are saved with SHA-256 digests.
+- [ ] Run plan JSON and `source.lock.json` are saved with SHA-256 digests.
 - [ ] A directory source bundle has a complete validated manifest and payload;
       a Git source passed anonymous preflight with credentials disabled.
 - [ ] A clean-checkout plan has the same semantic digest.
@@ -136,12 +133,12 @@ inspecting the named artifact or command output.
 - [ ] Effective concurrency names its limiting factor.
 - [ ] `check_wave_budget.py` passes every deployment group and wave.
 - [ ] Worst-wave estimate plus reserve fits the execution timeout.
-- [ ] Sandbox and controller deadlines satisfy `docs/run-spec.md`.
+- [ ] Preparation and execution Job deadlines satisfy `docs/run-spec.md`.
 - [ ] No trial can be admitted with too little time for its locked lifecycle.
 
 ### Spend
 
-- [ ] Per-wave estimate and campaign cap are explicit.
+- [ ] Per-wave estimate and run cap are explicit.
 - [ ] Concurrent reservations fit the cap.
 - [ ] Infrastructure retry reservations fit the cap.
 - [ ] Unknown billing attribution is treated conservatively.
@@ -155,13 +152,13 @@ inspecting the named artifact or command output.
 - [ ] Launch record contains the manifest and plan plus duration and canary
       evidence.
 - [ ] User has approved the exact paid launch.
-- [ ] Submission response, campaign ID, controller Job ID, attempt, and input
+- [ ] Submission response, run ID, controller Job ID, attempt, and input
       digest are saved.
-- [ ] Provider campaigns have one controller Job and no child wave Jobs.
+- [ ] Provider runs have one controller Job and no child wave Jobs.
 
-## Live campaign checklist
+## Live run checklist
 
-- [ ] Provider campaigns are not driven by an applied local reconcile loop.
+- [ ] Provider runs are not driven by an applied local reconcile loop.
 - [ ] Status projection plus latest control and controller revisions are saved.
 - [ ] Controller attempt, claim, heartbeat, wave, and HF Job identity match.
 - [ ] Provider or endpoint identity matches the lock.
@@ -171,7 +168,7 @@ inspecting the named artifact or command output.
 - [ ] Remaining work still fits the wave and controller deadlines with reserve.
 - [ ] Retry counts stay within policy.
 - [ ] No benchmark or agent failure is queued for infrastructure retry.
-- [ ] Controller watchdog is scoped to the approved campaign list.
+- [ ] Controller watchdog is scoped to the approved run list.
 - [ ] Endpoint watchdog and lease remain healthy when applicable.
 - [ ] The operator handoff names the next safe action.
 
@@ -180,15 +177,15 @@ inspecting the named artifact or command output.
 - [ ] Durable cancellation was previewed and recorded.
 - [ ] New shard admission stopped.
 - [ ] Queued and active Jobs were observed or cancelled through control state.
-- [ ] Every dispatched Sandbox create was adopted or proven absent, and every
-      active Sandbox reached a terminal close receipt before task sealing.
-- [ ] Sandbox observed cost was reconciled and its reservation was released.
+- [ ] Every dispatched Job launch was adopted or proven absent, and every active
+      Job reached a terminal observation before task sealing.
+- [ ] Observed Job cost was reconciled and its reservation was released.
 - [ ] Active work drained or became terminal.
 - [ ] Endpoint is paused with zero ready replicas when applicable.
 - [ ] Existing valid trial evidence is retained.
 - [ ] Cleanup and cancellation events are durable.
 - [ ] Leases are released.
-- [ ] Campaign projection is terminal or the remaining blocker is documented.
+- [ ] Run projection is terminal or the remaining blocker is documented.
 
 ## Recovery checklist
 
@@ -200,7 +197,7 @@ inspecting the named artifact or command output.
 - [ ] Retry candidates fit retry count, wave duration, and spend admission.
 - [ ] Interrupted finalization has one unique validated success.
 - [ ] Original checksums and terminal markers are verified.
-- [ ] Replacement campaign has a new identity and explicit provenance.
+- [ ] Replacement run has a new identity and explicit provenance.
 - [ ] Duplicate prevention ledger maps every affected logical trial.
 - [ ] Replacement pilot wave passes before remaining work is admitted.
 
@@ -223,7 +220,7 @@ inspecting the named artifact or command output.
 
 ## Publication checklist
 
-- [ ] Campaign control state and Jobs are terminal. Waves and retries are
+- [ ] Run control state and Jobs are terminal. Waves and retries are
       terminal, and cleanup is complete.
 - [ ] Expected and observed logical trial counts match.
 - [ ] Task and attempt distributions match the approved protocol.
@@ -239,7 +236,7 @@ inspecting the named artifact or command output.
 ## Final operator report template
 
 ```text
-Campaign:
+Run:
 Namespace:
 Manifest path and SHA-256:
 Plan path and SHA-256:
@@ -252,9 +249,9 @@ Logical runs and trials plus shards and waves:
 Effective concurrency and limiting factor:
 Planning trial duration:
 Worst-wave estimate, reserve, and deadline:
-Job and Sandbox deadlines:
+Preparation and execution Job deadlines:
 Spend cap, wave reservation, and retry capacity:
-Campaign state counts:
+Run state counts:
 HF Job IDs and terminal states:
 Endpoint pause or provider route state:
 Artifact verification:

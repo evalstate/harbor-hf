@@ -2,8 +2,8 @@ import { useQuery, useQueryClient, type QueryKey } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type {
   AuditResponse,
-  Campaign,
-  CampaignList,
+  Run,
+  RunList,
   Capacity,
   EndpointList,
   JobList,
@@ -21,13 +21,13 @@ import { ApiError, request } from "./api";
 export const keys = {
   session: ["session"] as const,
   system: ["system"] as const,
-  campaigns: ["campaigns"] as const,
-  campaign: (id: string) => ["campaign", id] as const,
+  runs: ["runs"] as const,
+  run: (id: string) => ["run", id] as const,
   capacity: (id: string) => ["capacity", id] as const,
   tasks: (id: string) => ["tasks", id] as const,
-  task: (campaign: string, task: string) => ["task", campaign, task] as const,
+  task: (run: string, task: string) => ["task", run, task] as const,
   jobs: ["jobs"] as const,
-  campaignJobs: (id: string) => ["campaign-jobs", id] as const,
+  runJobs: (id: string) => ["run-jobs", id] as const,
   endpoints: ["endpoints"] as const,
   profiles: ["profiles"] as const,
   results: ["results"] as const,
@@ -53,9 +53,12 @@ export interface ControlEvent {
   type: string;
   occurred_at: string;
   data: Record<string, unknown>;
+  replay?: boolean;
+  cursor_reset?: boolean;
 }
 
 export type LiveStatus = "connected" | "reconnecting" | "offline" | "stale";
+export const SSE_INVALIDATION_DEBOUNCE_MS = 50;
 
 export interface LiveState {
   status: LiveStatus;
@@ -110,17 +113,17 @@ export const useSystem = () =>
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
-export const useCampaigns = (cursor?: string) =>
+export const useRuns = (cursor?: string) =>
   useQuery({
-    queryKey: [...keys.campaigns, cursor ?? null],
-    queryFn: () => request<CampaignList>(collectionUrl("/api/v1/campaigns", cursor)),
+    queryKey: [...keys.runs, cursor ?? null],
+    queryFn: () => request<RunList>(collectionUrl("/api/v1/runs", cursor)),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
-export const useCampaign = (id: string) =>
+export const useRun = (id: string) =>
   useQuery({
-    queryKey: keys.campaign(id),
-    queryFn: () => request<Campaign>(`/api/v1/campaigns/${encodeURIComponent(id)}`),
+    queryKey: keys.run(id),
+    queryFn: () => request<Run>(`/api/v1/runs/${encodeURIComponent(id)}`),
     enabled: Boolean(id),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
@@ -128,31 +131,27 @@ export const useCampaign = (id: string) =>
 export const useCapacity = (id: string) =>
   useQuery({
     queryKey: keys.capacity(id),
-    queryFn: () =>
-      request<Capacity>(`/api/v1/campaigns/${encodeURIComponent(id)}/capacity`),
+    queryFn: () => request<Capacity>(`/api/v1/runs/${encodeURIComponent(id)}/capacity`),
     enabled: Boolean(id),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
-export const useTasks = (id: string, cursor?: string) =>
+export const useTasks = (id: string) =>
   useQuery({
-    queryKey: [...keys.tasks(id), cursor ?? null],
-    queryFn: () =>
-      request<TaskList>(
-        collectionUrl(`/api/v1/campaigns/${encodeURIComponent(id)}/tasks`, cursor),
-      ),
+    queryKey: keys.tasks(id),
+    queryFn: () => request<TaskList>(`/api/v1/runs/${encodeURIComponent(id)}/tasks`),
     enabled: Boolean(id),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
-export const useTask = (campaign: string, task: string) =>
+export const useTask = (run: string, task: string) =>
   useQuery({
-    queryKey: keys.task(campaign, task),
+    queryKey: keys.task(run, task),
     queryFn: () =>
       request<TaskDetail>(
-        `/api/v1/campaigns/${encodeURIComponent(campaign)}/tasks/${encodeURIComponent(task)}`,
+        `/api/v1/runs/${encodeURIComponent(run)}/tasks/${encodeURIComponent(task)}`,
       ),
-    enabled: Boolean(campaign && task),
+    enabled: Boolean(run && task),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
   });
@@ -169,26 +168,22 @@ export const useJobs = (cursor?: string) =>
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
-export const useCampaignJobs = (campaignId: string) =>
+export const useRunJobs = (runId: string) =>
   useQuery({
-    queryKey: keys.campaignJobs(campaignId),
-    queryFn: async (): Promise<JobList> => ({
-      items: await collectPagedItems((cursor) =>
-        request<JobList>(
-          collectionUrl("/api/v1/jobs", cursor, 100, {
-            campaign_id: campaignId,
-          }),
-        ),
+    queryKey: keys.runJobs(runId),
+    queryFn: () =>
+      request<JobList>(
+        collectionUrl("/api/v1/jobs", undefined, undefined, {
+          run_id: runId,
+        }),
       ),
-      next_cursor: null,
-    }),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
     staleTime: 5_000,
     refetchInterval: JOBS_REFRESH_INTERVAL_MS,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
-    enabled: Boolean(campaignId),
+    enabled: Boolean(runId),
   });
 export const useEndpoints = (cursor?: string) =>
   useQuery({
@@ -199,17 +194,31 @@ export const useEndpoints = (cursor?: string) =>
   });
 export async function collectPagedItems<T>(
   loadPage: (cursor?: string) => Promise<{ items: T[]; next_cursor: string | null }>,
-  maxPages = 20,
+  itemKey?: (item: T) => string,
 ): Promise<T[]> {
   const items: T[] = [];
   let cursor: string | undefined;
-  for (let page = 0; page < maxPages; page += 1) {
+  const requestedCursors = new Set<string>();
+  const observedItems = new Set<string>();
+  for (;;) {
+    if (cursor) requestedCursors.add(cursor);
     const result = await loadPage(cursor);
-    items.push(...result.items);
+    let added = 0;
+    for (const item of result.items) {
+      if (itemKey) {
+        const key = itemKey(item);
+        if (observedItems.has(key)) continue;
+        observedItems.add(key);
+      }
+      items.push(item);
+      added += 1;
+    }
     if (!result.next_cursor) return items;
+    if (added === 0) throw new Error("paged list made no progress");
+    if (result.next_cursor === cursor || requestedCursors.has(result.next_cursor))
+      throw new Error("paged list repeated a cursor");
     cursor = result.next_cursor;
   }
-  throw new Error("paged list exceeded the page limit");
 }
 
 export const useProfiles = (cursor?: string) =>
@@ -225,8 +234,10 @@ export const useAllProfiles = () =>
   useQuery({
     queryKey: [...keys.profiles, "all"],
     queryFn: async () => ({
-      items: await collectPagedItems((cursor) =>
-        request<ProfileList>(collectionUrl("/api/v1/profiles", cursor, 100)),
+      items: await collectPagedItems(
+        (cursor) =>
+          request<ProfileList>(collectionUrl("/api/v1/profiles", cursor, 100)),
+        (item) => item.profile_id,
       ),
       next_cursor: null,
     }),
@@ -276,10 +287,22 @@ function stringData(event: ControlEvent, key: string): string | null {
   return typeof value === "string" ? value : null;
 }
 
+function queryKeyStartsWith(key: QueryKey, prefix: QueryKey): boolean {
+  return (
+    prefix.length <= key.length &&
+    prefix.every((value, index) => Object.is(value, key[index]))
+  );
+}
+
+function coalesceQueryKey(pending: QueryKey[], next: QueryKey): QueryKey[] {
+  if (pending.some((key) => queryKeyStartsWith(next, key))) return pending;
+  return [...pending.filter((key) => !queryKeyStartsWith(key, next)), next];
+}
+
 export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
   if (event.type === "heartbeat") return [];
   const affected: QueryKey[] = [keys.audit];
-  const campaignId = stringData(event, "campaign_id");
+  const runId = stringData(event, "run_id");
   const taskId = stringData(event, "task_id");
   if (event.type.startsWith("profile.")) {
     affected.push(keys.profiles);
@@ -288,35 +311,36 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
   if (event.type === "publication.receipt")
     affected.push(keys.results, keys.leaderboard);
   if (
-    event.type.startsWith("campaign.") ||
+    event.type.startsWith("run.") ||
     event.type.startsWith("budget.") ||
     event.type.startsWith("attempt.") ||
     event.type.startsWith("terminal.") ||
+    event.type.startsWith("task.") ||
     event.type.startsWith("action.") ||
-    event.type.startsWith("sandbox.") ||
+    event.type.startsWith("job.") ||
     event.type === "publication.receipt"
   ) {
-    affected.push(keys.campaigns);
-    if (campaignId) {
-      affected.push(
-        keys.campaign(campaignId),
-        keys.capacity(campaignId),
-        keys.tasks(campaignId),
-      );
-      if (taskId) affected.push(keys.task(campaignId, taskId));
+    affected.push(keys.runs);
+    if (runId) {
+      affected.push(keys.run(runId), keys.capacity(runId), keys.tasks(runId));
+      if (taskId) affected.push(keys.task(runId, taskId));
     } else {
-      affected.push(["campaign"], ["tasks"], ["task"]);
+      affected.push(["run"], ["tasks"], ["task"]);
     }
+  }
+  if (event.type.startsWith("job.")) {
+    affected.push(keys.jobs);
+    affected.push(runId ? keys.runJobs(runId) : ["run-jobs"]);
   }
   if (event.type.startsWith("action.")) {
     const actionKind = stringData(event, "action_kind") ?? "";
     if (actionKind.startsWith("endpoint.")) affected.push(keys.endpoints);
-    else if (actionKind.startsWith("job.") || actionKind.startsWith("sandbox.")) {
+    else if (actionKind.startsWith("job.")) {
       affected.push(keys.jobs);
-      affected.push(campaignId ? keys.campaignJobs(campaignId) : ["campaign-jobs"]);
+      affected.push(runId ? keys.runJobs(runId) : ["run-jobs"]);
     } else {
       affected.push(keys.jobs, keys.endpoints);
-      affected.push(campaignId ? keys.campaignJobs(campaignId) : ["campaign-jobs"]);
+      affected.push(runId ? keys.runJobs(runId) : ["run-jobs"]);
     }
   }
   return affected;
@@ -335,6 +359,8 @@ export function useLiveUpdates(
   });
   const attempts = useRef(0);
   const lastEventId = useRef<string | null>(null);
+  const pendingInvalidations = useRef<QueryKey[]>([]);
+  const invalidationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   if (initialCursor && !lastEventId.current) lastEventId.current = initialCursor;
 
   useEffect(() => {
@@ -348,6 +374,32 @@ export function useLiveUpdates(
     let source: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
+
+    const flushInvalidations = () => {
+      const queryKeys = pendingInvalidations.current;
+      pendingInvalidations.current = [];
+      invalidationTimer.current = null;
+      for (const queryKey of queryKeys)
+        void client.invalidateQueries({ queryKey, refetchType: "active" });
+    };
+    const enqueueInvalidations = (queryKeys: QueryKey[]) => {
+      if (queryKeys.length === 0) return;
+      for (const queryKey of queryKeys)
+        pendingInvalidations.current = coalesceQueryKey(
+          pendingInvalidations.current,
+          queryKey,
+        );
+      invalidationTimer.current ??= setTimeout(
+        flushInvalidations,
+        SSE_INVALIDATION_DEBOUNCE_MS,
+      );
+    };
+    const refreshCurrentState = () => {
+      void client.invalidateQueries({
+        predicate: (query) => query.queryKey[0] !== keys.session[0],
+        refetchType: "active",
+      });
+    };
 
     const connect = () => {
       if (stopped) return;
@@ -376,22 +428,16 @@ export function useLiveUpdates(
         const now = Date.now();
         attempts.current = 0;
         setState({ status: "connected", lastSuccessfulUpdate: now, retryAt: null });
-        if (event.type !== "heartbeat")
-          client.setQueryData<SystemResponse>(keys.system, (current) =>
-            current
-              ? {
-                  ...current,
-                  projection: {
-                    ...current.projection,
-                    object_count: current.projection.object_count + 1,
-                    last_sync_at: event.occurred_at,
-                    event_cursor: event.id ?? current.projection.event_cursor,
-                  },
-                }
-              : current,
-          );
-        for (const queryKey of affectedQueryKeys(event))
-          void client.invalidateQueries({ queryKey });
+        if (event.type === "cursor.reset" || event.cursor_reset) {
+          const latestCursor = event.data.latest_cursor;
+          lastEventId.current = typeof latestCursor === "string" ? latestCursor : null;
+          refreshCurrentState();
+          return;
+        }
+        enqueueInvalidations([
+          ...(event.type === "heartbeat" ? [] : [keys.system]),
+          ...affectedQueryKeys(event),
+        ]);
       };
       source.onerror = () => {
         source?.close();
@@ -428,6 +474,9 @@ export function useLiveUpdates(
       stopped = true;
       source?.close();
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (invalidationTimer.current) clearTimeout(invalidationTimer.current);
+      pendingInvalidations.current = [];
+      invalidationTimer.current = null;
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("online", onOnline);
     };

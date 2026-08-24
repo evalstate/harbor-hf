@@ -246,13 +246,13 @@ export function LeaderboardPage() {
     <>
       <PageHeader
         title="Leaderboard"
-        description="Official board from the Bucket snapshot. Only final, clean, fully scored campaigns appear. Diagnostic runs stay on Results."
+        description="Official board from the Bucket snapshot. Only final, clean, fully scored runs appear. Diagnostic runs stay on Results."
       />
       <QueryContent query={query}>
         {items.length === 0 ? (
           <Empty>
-            No official rows yet. Publish a final, clean, fully scored campaign to write
-            the snapshot.
+            No official rows yet. Publish a final, clean, fully scored run to write the
+            snapshot.
           </Empty>
         ) : (
           <div className="space-y-6">

@@ -22,7 +22,7 @@ class ControllerStatusError(RuntimeError):
 
 
 class ControllerOwnershipConflict(ControllerStatusError):
-    """Raised when another physical Job owns the campaign controller."""
+    """Raised when another physical Job owns the run controller."""
 
 
 class ProviderCapacityUnavailable(ControllerStatusError):
@@ -41,7 +41,7 @@ class ControllerClaim(FrozenModel):
     schema_version: Literal["harbor-hf/controller-claim/v1alpha1"] = (
         "harbor-hf/controller-claim/v1alpha1"
     )
-    campaign_id: str
+    run_id: str
     job_id: str
     plan_digest: str
     attempt: int = Field(ge=1)
@@ -49,7 +49,7 @@ class ControllerClaim(FrozenModel):
     heartbeat_at: datetime
     expires_at: datetime
 
-    @field_validator("campaign_id", "job_id")
+    @field_validator("run_id", "job_id")
     @classmethod
     def identity_is_safe(cls, value: str) -> str:
         if _SAFE_ID.fullmatch(value) is None:
@@ -87,7 +87,7 @@ class ControllerProjectionCounts(FrozenModel):
     logical_trials: int = Field(ge=0)
     terminal_trials: int = Field(ge=0)
     active_trials: int = Field(ge=0)
-    physical_executions: int = Field(ge=0)
+    physical_attempts: int = Field(ge=0)
 
     @model_validator(mode="after")
     def counts_are_consistent(self) -> ControllerProjectionCounts:
@@ -113,7 +113,7 @@ class ControllerStatus(FrozenModel):
     schema_version: Literal["harbor-hf/controller-status/v1alpha1"] = (
         "harbor-hf/controller-status/v1alpha1"
     )
-    campaign_id: str
+    run_id: str
     plan_digest: str
     job_id: str
     attempt: int = Field(ge=1)
@@ -133,7 +133,7 @@ class ControllerStatus(FrozenModel):
         default=None, exclude_if=lambda value: value is None
     )
 
-    @field_validator("campaign_id", "job_id")
+    @field_validator("run_id", "job_id")
     @classmethod
     def identity_is_safe(cls, value: str) -> str:
         if _SAFE_ID.fullmatch(value) is None:
@@ -159,14 +159,14 @@ class ProviderCapacityClaim(FrozenModel):
         "harbor-hf/provider-capacity-claim/v1alpha1"
     )
     provider: str = Field(min_length=1)
-    campaign_id: str
+    run_id: str
     plan_digest: str
     job_id: str
     attempt: int = Field(ge=1)
     action_id: str = Field(min_length=1)
     acquired_at: datetime
 
-    @field_validator("campaign_id", "job_id")
+    @field_validator("run_id", "job_id")
     @classmethod
     def identity_is_safe(cls, value: str) -> str:
         if _SAFE_ID.fullmatch(value) is None:
@@ -187,14 +187,14 @@ class ControllerLaunchClaim(FrozenModel):
     schema_version: Literal["harbor-hf/controller-launch-claim/v1alpha1"] = (
         "harbor-hf/controller-launch-claim/v1alpha1"
     )
-    campaign_id: str
+    run_id: str
     plan_digest: str
     attempt: int = Field(ge=1)
     launcher_id: str
     acquired_at: datetime
     expires_at: datetime
 
-    @field_validator("campaign_id", "launcher_id")
+    @field_validator("run_id", "launcher_id")
     @classmethod
     def identity_is_safe(cls, value: str) -> str:
         if _SAFE_ID.fullmatch(value) is None:
@@ -221,17 +221,17 @@ class ControllerLaunchReceipt(FrozenModel):
     schema_version: Literal["harbor-hf/controller-launch-receipt/v1alpha1"] = (
         "harbor-hf/controller-launch-receipt/v1alpha1"
     )
-    campaign_id: str
+    run_id: str
     plan_digest: str
     input_digest: str
     attempt: int = Field(ge=1)
     job_id: str = Field(pattern=r"^[0-9a-f]{24}$")
 
-    @field_validator("campaign_id")
+    @field_validator("run_id")
     @classmethod
-    def campaign_identity_is_safe(cls, value: str) -> str:
+    def run_identity_is_safe(cls, value: str) -> str:
         if _SAFE_ID.fullmatch(value) is None:
-            raise ValueError("controller launch campaign must be a safe path component")
+            raise ValueError("controller launch run must be a safe path component")
         return value
 
 
@@ -239,7 +239,7 @@ class ControllerStartedReceipt(FrozenModel):
     schema_version: Literal["harbor-hf/controller-started/v1alpha1"] = (
         "harbor-hf/controller-started/v1alpha1"
     )
-    campaign_id: str
+    run_id: str
     plan_digest: str
     input_digest: str
     worker_revision: str
@@ -259,7 +259,7 @@ class ControllerEndedReceipt(FrozenModel):
     schema_version: Literal["harbor-hf/controller-ended/v1alpha1"] = (
         "harbor-hf/controller-ended/v1alpha1"
     )
-    campaign_id: str
+    run_id: str
     plan_digest: str
     job_id: str
     attempt: int = Field(ge=1)
@@ -279,7 +279,7 @@ class ControllerAttemptReservation(FrozenModel):
     schema_version: Literal["harbor-hf/controller-attempt/v1alpha1"] = (
         "harbor-hf/controller-attempt/v1alpha1"
     )
-    campaign_id: str
+    run_id: str
     plan_digest: str
     input_digest: str
     input_uri: str = Field(pattern=r"^hf://buckets/[^\s]+$")
@@ -300,7 +300,7 @@ class ControllerRecoveryDecision(FrozenModel):
     schema_version: Literal["harbor-hf/controller-recovery/v1alpha1"] = (
         "harbor-hf/controller-recovery/v1alpha1"
     )
-    campaign_id: str
+    run_id: str
     plan_digest: str
     prior_job_id: str
     prior_attempt: int = Field(ge=1)
@@ -346,9 +346,9 @@ class ControllerStateStore(Protocol):
 
     def release(self, claim: ControllerClaim) -> None: ...
 
-    def read_claim(self, campaign_id: str) -> ControllerClaim | None: ...
+    def read_claim(self, run_id: str) -> ControllerClaim | None: ...
 
-    def read_status(self, campaign_id: str) -> ControllerStatus | None: ...
+    def read_status(self, run_id: str) -> ControllerStatus | None: ...
 
     def write_status(self, status: ControllerStatus) -> None: ...
 
@@ -357,13 +357,13 @@ class ControllerStateStore(Protocol):
     def release_launch(self, claim: ControllerLaunchClaim) -> None: ...
 
     def read_launch_claim(
-        self, campaign_id: str, attempt: int
+        self, run_id: str, attempt: int
     ) -> ControllerLaunchClaim | None: ...
 
     def write_launch(self, receipt: ControllerLaunchReceipt) -> None: ...
 
     def read_launch(
-        self, campaign_id: str, attempt: int
+        self, run_id: str, attempt: int
     ) -> ControllerLaunchReceipt | None: ...
 
     def acquire_provider_capacity(self, claim: ProviderCapacityClaim) -> None: ...
@@ -387,13 +387,13 @@ class ControllerStateStore(Protocol):
     def reserve_attempt(self, reservation: ControllerAttemptReservation) -> None: ...
 
     def read_attempt(
-        self, campaign_id: str, attempt: int
+        self, run_id: str, attempt: int
     ) -> ControllerAttemptReservation | None: ...
 
     def write_recovery(self, decision: ControllerRecoveryDecision) -> None: ...
 
     def read_recovery(
-        self, campaign_id: str, replacement_attempt: int
+        self, run_id: str, replacement_attempt: int
     ) -> ControllerRecoveryDecision | None: ...
 
 
@@ -412,7 +412,7 @@ class HubControllerStateStore:
         self.api = api or cast(ControllerRepositoryApi, HfApi(token=token))
 
     def acquire(self, claim: ControllerClaim, *, prior_job_terminal: bool) -> None:
-        path = controller_claim_path(claim.campaign_id)
+        path = controller_claim_path(claim.run_id)
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             observed = self._read_optional(path, head, ControllerClaim)
@@ -422,7 +422,7 @@ class HubControllerStateStore:
                 expired = observed.expires_at <= claim.acquired_at
                 if not expired or not prior_job_terminal:
                     raise ControllerOwnershipConflict(
-                        "another physical Job owns the campaign controller"
+                        "another physical Job owns the run controller"
                     )
                 if claim.attempt != observed.attempt + 1:
                     raise ControllerStatusError(
@@ -432,7 +432,7 @@ class HubControllerStateStore:
                 self._commit(
                     head,
                     [self._add(path, claim)],
-                    f"chore: acquire controller {claim.campaign_id}",
+                    f"chore: acquire controller {claim.run_id}",
                 )
                 return
             except HfHubHTTPError as error:
@@ -442,13 +442,13 @@ class HubControllerStateStore:
 
     def heartbeat(self, previous: ControllerClaim, renewed: ControllerClaim) -> None:
         if (
-            previous.campaign_id,
+            previous.run_id,
             previous.job_id,
             previous.plan_digest,
             previous.attempt,
             previous.acquired_at,
         ) != (
-            renewed.campaign_id,
+            renewed.run_id,
             renewed.job_id,
             renewed.plan_digest,
             renewed.attempt,
@@ -456,14 +456,14 @@ class HubControllerStateStore:
         ) or renewed.heartbeat_at <= previous.heartbeat_at:
             raise ControllerStatusError("controller heartbeat identity is invalid")
         self._replace_exact(
-            controller_claim_path(previous.campaign_id),
+            controller_claim_path(previous.run_id),
             previous,
             renewed,
-            "chore: renew campaign controller",
+            "chore: renew run controller",
         )
 
     def release(self, claim: ControllerClaim) -> None:
-        path = controller_claim_path(claim.campaign_id)
+        path = controller_claim_path(claim.run_id)
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             observed = self._read_optional(path, head, ControllerClaim)
@@ -477,7 +477,7 @@ class HubControllerStateStore:
                 self._commit(
                     head,
                     [CommitOperationDelete(path_in_repo=path)],
-                    f"chore: release controller {claim.campaign_id}",
+                    f"chore: release controller {claim.run_id}",
                 )
                 return
             except HfHubHTTPError as error:
@@ -485,20 +485,18 @@ class HubControllerStateStore:
                     raise
         raise ControllerStatusError("controller claim remained contended")
 
-    def read_claim(self, campaign_id: str) -> ControllerClaim | None:
+    def read_claim(self, run_id: str) -> ControllerClaim | None:
         head = self._head()
-        return self._read_optional(
-            controller_claim_path(campaign_id), head, ControllerClaim
-        )
+        return self._read_optional(controller_claim_path(run_id), head, ControllerClaim)
 
-    def read_status(self, campaign_id: str) -> ControllerStatus | None:
+    def read_status(self, run_id: str) -> ControllerStatus | None:
         head = self._head()
         return self._read_optional(
-            controller_status_path(campaign_id), head, ControllerStatus
+            controller_status_path(run_id), head, ControllerStatus
         )
 
     def write_status(self, status: ControllerStatus) -> None:
-        path = controller_status_path(status.campaign_id)
+        path = controller_status_path(status.run_id)
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             observed = self._read_optional(path, head, ControllerStatus)
@@ -506,7 +504,7 @@ class HubControllerStateStore:
                 if observed == status:
                     return
                 if (
-                    observed.campaign_id != status.campaign_id
+                    observed.run_id != status.run_id
                     or observed.plan_digest != status.plan_digest
                     or status.attempt < observed.attempt
                     or (
@@ -527,7 +525,7 @@ class HubControllerStateStore:
         raise ControllerStatusError("controller status remained contended")
 
     def acquire_launch(self, claim: ControllerLaunchClaim) -> None:
-        path = controller_launch_claim_path(claim.campaign_id, claim.attempt)
+        path = controller_launch_claim_path(claim.run_id, claim.attempt)
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             observed = self._read_optional(path, head, ControllerLaunchClaim)
@@ -551,7 +549,7 @@ class HubControllerStateStore:
         raise ControllerStatusError("controller launch claim remained contended")
 
     def release_launch(self, claim: ControllerLaunchClaim) -> None:
-        path = controller_launch_claim_path(claim.campaign_id, claim.attempt)
+        path = controller_launch_claim_path(claim.run_id, claim.attempt)
         for _attempt in range(_MAX_COMMIT_ATTEMPTS):
             head = self._head()
             observed = self._read_optional(path, head, ControllerLaunchClaim)
@@ -574,28 +572,26 @@ class HubControllerStateStore:
         raise ControllerStatusError("controller launch release remained contended")
 
     def read_launch_claim(
-        self, campaign_id: str, attempt: int
+        self, run_id: str, attempt: int
     ) -> ControllerLaunchClaim | None:
         head = self._head()
         return self._read_optional(
-            controller_launch_claim_path(campaign_id, attempt),
+            controller_launch_claim_path(run_id, attempt),
             head,
             ControllerLaunchClaim,
         )
 
     def write_launch(self, receipt: ControllerLaunchReceipt) -> None:
         self._write_immutable(
-            controller_launch_receipt_path(receipt.campaign_id, receipt.attempt),
+            controller_launch_receipt_path(receipt.run_id, receipt.attempt),
             receipt,
             "record controller launch",
         )
 
-    def read_launch(
-        self, campaign_id: str, attempt: int
-    ) -> ControllerLaunchReceipt | None:
+    def read_launch(self, run_id: str, attempt: int) -> ControllerLaunchReceipt | None:
         head = self._head()
         return self._read_optional(
-            controller_launch_receipt_path(campaign_id, attempt),
+            controller_launch_receipt_path(run_id, attempt),
             head,
             ControllerLaunchReceipt,
         )
@@ -659,7 +655,7 @@ class HubControllerStateStore:
             observed = self._read_optional(path, head, ProviderCapacityClaim)
             if observed is None or observed.job_id == replacement.job_id:
                 return
-            if observed.campaign_id != replacement.campaign_id:
+            if observed.run_id != replacement.run_id:
                 return
             if not prior_job_terminal or observed.attempt >= replacement.attempt:
                 raise ControllerStatusError(
@@ -694,44 +690,42 @@ class HubControllerStateStore:
         )
 
     def reserve_attempt(self, reservation: ControllerAttemptReservation) -> None:
-        previous = self.read_attempt(reservation.campaign_id, reservation.attempt - 1)
+        previous = self.read_attempt(reservation.run_id, reservation.attempt - 1)
         if reservation.attempt > 1 and previous is None:
             raise ControllerStatusError(
                 "controller attempt reservation has no predecessor"
             )
         self._write_immutable(
-            controller_attempt_path(reservation.campaign_id, reservation.attempt),
+            controller_attempt_path(reservation.run_id, reservation.attempt),
             reservation,
             "reserve controller attempt",
         )
 
     def read_attempt(
-        self, campaign_id: str, attempt: int
+        self, run_id: str, attempt: int
     ) -> ControllerAttemptReservation | None:
         if attempt < 1:
             return None
         head = self._head()
         return self._read_optional(
-            controller_attempt_path(campaign_id, attempt),
+            controller_attempt_path(run_id, attempt),
             head,
             ControllerAttemptReservation,
         )
 
     def write_recovery(self, decision: ControllerRecoveryDecision) -> None:
         self._write_immutable(
-            controller_recovery_path(
-                decision.campaign_id, decision.replacement_attempt
-            ),
+            controller_recovery_path(decision.run_id, decision.replacement_attempt),
             decision,
             "record controller recovery decision",
         )
 
     def read_recovery(
-        self, campaign_id: str, replacement_attempt: int
+        self, run_id: str, replacement_attempt: int
     ) -> ControllerRecoveryDecision | None:
         head = self._head()
         return self._read_optional(
-            controller_recovery_path(campaign_id, replacement_attempt),
+            controller_recovery_path(run_id, replacement_attempt),
             head,
             ControllerRecoveryDecision,
         )
@@ -862,28 +856,28 @@ def controller_json_schemas() -> dict[str, dict[str, object]]:
     }
 
 
-def controller_claim_path(campaign_id: str) -> str:
-    _require_safe_id(campaign_id)
-    return f"claims/campaign-controllers/{campaign_id}.json"
+def controller_claim_path(run_id: str) -> str:
+    _require_safe_id(run_id)
+    return f"claims/run-controllers/{run_id}.json"
 
 
-def controller_status_path(campaign_id: str) -> str:
-    _require_safe_id(campaign_id)
-    return f"campaigns/{campaign_id}/controller-status.json"
+def controller_status_path(run_id: str) -> str:
+    _require_safe_id(run_id)
+    return f"runs/{run_id}/controller-status.json"
 
 
-def controller_launch_claim_path(campaign_id: str, attempt: int) -> str:
-    _require_safe_id(campaign_id)
+def controller_launch_claim_path(run_id: str, attempt: int) -> str:
+    _require_safe_id(run_id)
     if attempt < 1:
         raise ValueError("controller launch attempt must be positive")
-    return f"claims/controller-launches/{campaign_id}/{attempt}.json"
+    return f"claims/controller-launches/{run_id}/{attempt}.json"
 
 
-def controller_launch_receipt_path(campaign_id: str, attempt: int) -> str:
-    _require_safe_id(campaign_id)
+def controller_launch_receipt_path(run_id: str, attempt: int) -> str:
+    _require_safe_id(run_id)
     if attempt < 1:
         raise ValueError("controller launch attempt must be positive")
-    return f"campaigns/{campaign_id}/controller-launches/{attempt}.json"
+    return f"runs/{run_id}/controller-launches/{attempt}.json"
 
 
 def provider_capacity_claim_path(provider: str) -> str:
@@ -894,29 +888,29 @@ def provider_capacity_claim_path(provider: str) -> str:
 
 
 def controller_started_path(receipt: ControllerStartedReceipt) -> str:
-    _require_safe_id(receipt.campaign_id)
+    _require_safe_id(receipt.run_id)
     _require_safe_id(receipt.job_id)
-    return f"campaigns/{receipt.campaign_id}/controllers/{receipt.job_id}/started.json"
+    return f"runs/{receipt.run_id}/controllers/{receipt.job_id}/started.json"
 
 
 def controller_ended_path(receipt: ControllerEndedReceipt) -> str:
-    _require_safe_id(receipt.campaign_id)
+    _require_safe_id(receipt.run_id)
     _require_safe_id(receipt.job_id)
-    return f"campaigns/{receipt.campaign_id}/controllers/{receipt.job_id}/ended.json"
+    return f"runs/{receipt.run_id}/controllers/{receipt.job_id}/ended.json"
 
 
-def controller_attempt_path(campaign_id: str, attempt: int) -> str:
-    _require_safe_id(campaign_id)
+def controller_attempt_path(run_id: str, attempt: int) -> str:
+    _require_safe_id(run_id)
     if attempt < 1:
         raise ValueError("controller attempt must be positive")
-    return f"campaigns/{campaign_id}/controller-attempts/{attempt}.json"
+    return f"runs/{run_id}/controller-attempts/{attempt}.json"
 
 
-def controller_recovery_path(campaign_id: str, replacement_attempt: int) -> str:
-    _require_safe_id(campaign_id)
+def controller_recovery_path(run_id: str, replacement_attempt: int) -> str:
+    _require_safe_id(run_id)
     if replacement_attempt < 2:
         raise ValueError("controller recovery attempt must be at least two")
-    return f"campaigns/{campaign_id}/controller-recoveries/{replacement_attempt}.json"
+    return f"runs/{run_id}/controller-recoveries/{replacement_attempt}.json"
 
 
 def _require_safe_id(value: str) -> None:

@@ -6,27 +6,27 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from harbor_hf.campaigns import CampaignLock
 from harbor_hf.control import (
-    CampaignEvent,
-    CampaignProjection,
+    AttemptOutcomePayload,
+    AttemptStartedPayload,
     CancellationPayload,
     Clock,
-    ExecutionOutcomePayload,
-    ExecutionStartedPayload,
     IdentifierFactory,
     LifecyclePayload,
     ManualInterventionResolutionPayload,
     RetryCategory,
+    RunEvent,
+    RunProjection,
     ShardRetryPayload,
     SpendRecordedPayload,
     WaveLifecyclePayload,
     new_event,
     ordered_events,
-    project_campaign,
+    project_run,
 )
+from harbor_hf.runs import RunLock
 
-RunStatus = Literal[
+ExecutionStatus = Literal[
     "planned",
     "queued",
     "active",
@@ -64,7 +64,7 @@ TaskOutcome = Literal[
     "benchmark_failed",
     "infrastructure_exhausted",
 ]
-ExecutionStatus = Literal["active", "completed", "failed", "cancelled"]
+AttemptStatus = Literal["active", "completed", "failed", "cancelled"]
 WaveStatus = Literal[
     "acquiring",
     "provisioning",
@@ -87,20 +87,20 @@ _RETRYABLE_CATEGORIES = {
 }
 _TERMINAL_STATUSES = {"complete", "invalid", "failed_infrastructure", "cancelled"}
 _SCORED_TERMINAL_STATUSES = {"complete", "invalid", "failed_infrastructure"}
-_CAMPAIGN_TERMINAL = {"completed", "partial", "failed", "cancelled"}
+_RUN_TERMINAL = {"completed", "partial", "failed", "cancelled"}
 
 
 class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class ExecutionProjection(FrozenModel):
-    execution_id: str
+class AttemptProjection(FrozenModel):
+    attempt_id: str
     trial_id: str
     shard_id: str
     wave_id: str | None
     physical_attempt: int
-    status: ExecutionStatus
+    status: AttemptStatus
     category: RetryCategory | None = None
     observed_at: datetime
     retry_after_seconds: int | None = None
@@ -114,25 +114,25 @@ class TrialProjection(FrozenModel):
     shard_id: str
     logical_attempt: int
     status: TrialStatus = "planned"
-    executions: dict[str, ExecutionProjection] = Field(default_factory=dict)
+    attempts: dict[str, AttemptProjection] = Field(default_factory=dict)
     retry_not_before: datetime | None = None
     outcome: TaskOutcome | None = None
 
 
 class ShardProjection(FrozenModel):
     shard_id: str
-    run_id: str
+    execution_id: str
     status: ShardStatus = "planned"
     trial_ids: list[str]
     observed_status: ShardStatus | None = None
 
 
-class RunProjection(FrozenModel):
-    run_id: str
+class ExecutionProjection(FrozenModel):
+    execution_id: str
     deployment_digest: str
-    status: RunStatus = "planned"
+    status: ExecutionStatus = "planned"
     shard_ids: list[str]
-    observed_status: RunStatus | None = None
+    observed_status: ExecutionStatus | None = None
 
 
 class WaveProjection(FrozenModel):
@@ -165,11 +165,11 @@ class TerminalDecision(FrozenModel):
 
 
 class RecoveryProjection(FrozenModel):
-    campaign: CampaignProjection
-    runs: dict[str, RunProjection]
+    run: RunProjection
+    executions: dict[str, ExecutionProjection]
     shards: dict[str, ShardProjection]
     trials: dict[str, TrialProjection]
-    executions: dict[str, ExecutionProjection]
+    attempts: dict[str, AttemptProjection]
     waves: dict[str, WaveProjection]
     spend_microusd: int
     counts: ProjectionCounts
@@ -178,25 +178,25 @@ class RecoveryProjection(FrozenModel):
 
     @property
     def status(self) -> str:
-        return self.campaign.status
+        return self.run.status
 
 
 def durable_cancellation_event(
-    lock: CampaignLock,
-    events: list[CampaignEvent],
+    lock: RunLock,
+    events: list[RunEvent],
     reason: str,
     *,
     clock: Clock = lambda: datetime.now(UTC),
     identifier: IdentifierFactory | None = None,
-) -> tuple[CampaignEvent, bool]:
+) -> tuple[RunEvent, bool]:
     for event in ordered_events(events):
-        if event.kind == "campaign.cancel-requested":
+        if event.kind == "run.cancel-requested":
             return event, False
     return (
         new_event(
-            subject_type="campaign",
-            subject_id=lock.campaign_id,
-            kind="campaign.cancel-requested",
+            subject_type="run",
+            subject_id=lock.run_id,
+            kind="run.cancel-requested",
             producer="cli",
             payload=CancellationPayload(reason=reason),
             clock=clock,
@@ -207,30 +207,30 @@ def durable_cancellation_event(
 
 
 def durable_manual_intervention_resolution_event(
-    lock: CampaignLock,
-    events: list[CampaignEvent],
+    lock: RunLock,
+    events: list[RunEvent],
     reason: str,
     *,
     cleanup_verified: bool,
     clock: Clock = lambda: datetime.now(UTC),
-) -> tuple[CampaignEvent, bool]:
-    """Resume a campaign after an operator has verified failed cleanup."""
+) -> tuple[RunEvent, bool]:
+    """Resume a run after an operator has verified failed cleanup."""
     if not cleanup_verified:
         raise ValueError("manual recovery requires verified endpoint cleanup")
     ordered = ordered_events(events)
     projection = project_recovery(lock, events)
-    if projection.campaign.status != "manual_intervention":
+    if projection.run.status != "manual_intervention":
         resolved = next(
             (
                 event
                 for event in reversed(ordered)
-                if event.kind == "campaign.manual-intervention-resolved"
+                if event.kind == "run.manual-intervention-resolved"
             ),
             None,
         )
         if resolved is not None:
             return resolved, False
-        raise ValueError("campaign does not require manual intervention")
+        raise ValueError("run does not require manual intervention")
     required, required_wave_ids = _manual_recovery_requirements(events)
     wave_ids = sorted(
         {
@@ -243,14 +243,14 @@ def durable_manual_intervention_resolution_event(
         }
     )
     identity = (
-        f"{lock.campaign_id}:{','.join(event.event_id for event in required)}:"
+        f"{lock.run_id}:{','.join(event.event_id for event in required)}:"
         f"{','.join(wave_ids)}"
     )
     identifier = hashlib.sha256(f"{identity}:resolved".encode()).hexdigest()[:32]
     event_id = f"evt-{identifier}"
     for event in ordered:
         if event.event_id == event_id:
-            if event.kind != "campaign.manual-intervention-resolved":
+            if event.kind != "run.manual-intervention-resolved":
                 raise ValueError("manual recovery event identity conflicts")
             return event, False
     _validate_manual_recovery_waves(projection, wave_ids)
@@ -260,9 +260,9 @@ def durable_manual_intervention_resolution_event(
     )
     return (
         new_event(
-            subject_type="campaign",
-            subject_id=lock.campaign_id,
-            kind="campaign.manual-intervention-resolved",
+            subject_type="run",
+            subject_id=lock.run_id,
+            kind="run.manual-intervention-resolved",
             producer="cli",
             payload=ManualInterventionResolutionPayload(
                 wave_ids=wave_ids,
@@ -276,18 +276,18 @@ def durable_manual_intervention_resolution_event(
 
 
 def _manual_recovery_requirements(
-    events: list[CampaignEvent],
-) -> tuple[list[CampaignEvent], list[str]]:
+    events: list[RunEvent],
+) -> tuple[list[RunEvent], list[str]]:
     resolved_wave_ids = {
         wave_id
         for event in ordered_events(events)
-        if event.kind == "campaign.manual-intervention-resolved"
+        if event.kind == "run.manual-intervention-resolved"
         for wave_id in cast(ManualInterventionResolutionPayload, event.payload).wave_ids
     }
     required = [
         event
         for event in ordered_events(events)
-        if event.kind == "campaign.manual-intervention-required"
+        if event.kind == "run.manual-intervention-required"
         and cast(LifecyclePayload, event.payload).parent_id not in resolved_wave_ids
     ]
     if not required:
@@ -315,29 +315,27 @@ def _validate_manual_recovery_waves(
             )
 
 
-def _cancellation_identifier(lock: CampaignLock) -> IdentifierFactory:
-    return lambda: hashlib.sha256(f"{lock.campaign_id}:cancel".encode()).hexdigest()[
-        :32
-    ]
+def _cancellation_identifier(lock: RunLock) -> IdentifierFactory:
+    return lambda: hashlib.sha256(f"{lock.run_id}:cancel".encode()).hexdigest()[:32]
 
 
 def durable_shard_retry_event(
-    lock: CampaignLock,
-    events: list[CampaignEvent],
+    lock: RunLock,
+    events: list[RunEvent],
     shard_id: str,
     reason: str,
     *,
     clock: Clock = lambda: datetime.now(UTC),
-) -> tuple[CampaignEvent, bool]:
+) -> tuple[RunEvent, bool]:
     """Create one immediate retry request for the shard's current execution state."""
     projection = project_recovery(lock, events)
-    if projection.campaign.status in _CAMPAIGN_TERMINAL:
-        raise ValueError("a terminal campaign cannot be retried")
-    if projection.campaign.status in {"cancel_requested", "draining"}:
-        raise ValueError("a cancelling campaign cannot be retried")
+    if projection.run.status in _RUN_TERMINAL:
+        raise ValueError("a terminal run cannot be retried")
+    if projection.run.status in {"cancel_requested", "draining"}:
+        raise ValueError("a cancelling run cannot be retried")
     shard = projection.shards.get(shard_id)
     if shard is None:
-        raise ValueError(f"unknown campaign shard: {shard_id}")
+        raise ValueError(f"unknown run shard: {shard_id}")
     eligible = [
         projection.trials[trial_id]
         for trial_id in shard.trial_ids
@@ -346,28 +344,28 @@ def durable_shard_retry_event(
     if not eligible:
         raise ValueError("shard has no retryable logical trials")
     generation = ",".join(
-        f"{trial.trial_id}:{len(trial.executions)}" for trial in eligible
+        f"{trial.trial_id}:{len(trial.attempts)}" for trial in eligible
     )
     identifier = hashlib.sha256(
-        f"{lock.campaign_id}:{shard_id}:{generation}".encode()
+        f"{lock.run_id}:{shard_id}:{generation}".encode()
     ).hexdigest()[:32]
     event_id = f"evt-{identifier}"
     for event in ordered_events(events):
         if event.event_id == event_id:
-            if event.kind != "campaign.shard-retry-requested":
+            if event.kind != "run.shard-retry-requested":
                 raise ValueError("retry event identity conflicts")
             return event, False
     return (
         new_event(
-            subject_type="campaign",
-            subject_id=lock.campaign_id,
-            kind="campaign.shard-retry-requested",
+            subject_type="run",
+            subject_id=lock.run_id,
+            kind="run.shard-retry-requested",
             producer="cli",
             payload=ShardRetryPayload(
                 shard_id=shard_id,
                 reason=reason,
                 trial_generations={
-                    trial.trial_id: len(trial.executions) for trial in eligible
+                    trial.trial_id: len(trial.attempts) for trial in eligible
                 },
             ),
             clock=clock,
@@ -377,43 +375,43 @@ def durable_shard_retry_event(
     )
 
 
-def project_recovery(
-    lock: CampaignLock, events: list[CampaignEvent]
-) -> RecoveryProjection:
-    campaign = project_campaign(lock, events)
-    runs, shards, trials = _initial_projections(lock)
-    executions: dict[str, ExecutionProjection] = {}
+def project_recovery(lock: RunLock, events: list[RunEvent]) -> RecoveryProjection:
+    run = project_run(lock, events)
+    executions, shards, trials = _initial_projections(lock)
+    attempts: dict[str, AttemptProjection] = {}
     waves: dict[str, WaveProjection] = {}
     spend = 0
     for event in ordered_events(events):
-        _apply_campaign_recovery_event(event, waves)
-        spend += _apply_recovery_event(event, runs, shards, trials, executions, waves)
-    if campaign.status not in _CAMPAIGN_TERMINAL and any(
+        _apply_run_recovery_event(event, waves)
+        spend += _apply_recovery_event(
+            event, executions, shards, trials, attempts, waves
+        )
+    if run.status not in _RUN_TERMINAL and any(
         wave.status == "cleanup_failed" for wave in waves.values()
     ):
-        campaign = campaign.model_copy(update={"status": "manual_intervention"})
-    trials = _derive_trials(lock, trials, executions)
+        run = run.model_copy(update={"status": "manual_intervention"})
+    trials = _derive_trials(lock, trials, attempts)
     trials = _apply_retry_requests(lock, events, trials)
     shards = _derive_shards(shards, trials)
-    runs = _derive_runs(runs, shards)
+    executions = _derive_executions(executions, shards)
     counts = _counts(trials)
-    if campaign.status == "queued" and (executions or waves):
-        campaign = campaign.model_copy(update={"status": "active"})
-    terminal = _terminal_decision(lock, campaign, runs, trials, waves, counts)
+    if run.status == "queued" and (attempts or waves):
+        run = run.model_copy(update={"status": "active"})
+    terminal = _terminal_decision(lock, run, executions, trials, waves, counts)
     cancel_requested_at = next(
         (
             event.observed_at
             for event in ordered_events(events)
-            if event.kind == "campaign.cancel-requested"
+            if event.kind == "run.cancel-requested"
         ),
         None,
     )
     return RecoveryProjection(
-        campaign=campaign,
-        runs=runs,
+        run=run,
+        executions=executions,
         shards=shards,
         trials=trials,
-        executions=executions,
+        attempts=attempts,
         waves=waves,
         spend_microusd=spend,
         counts=counts,
@@ -425,12 +423,12 @@ def project_recovery(
 def seal_partial_projection(projection: RecoveryProjection) -> RecoveryProjection:
     """Convert drained retry failures into typed terminal scoring outcomes."""
     decision = projection.terminal_decision
-    if projection.campaign.status != "partial" or decision is None:
-        raise ValueError("only a recorded partial campaign can be sealed")
+    if projection.run.status != "partial" or decision is None:
+        raise ValueError("only a recorded partial run can be sealed")
     if decision.status != "partial":
-        raise ValueError("only a recorded partial campaign can be sealed")
+        raise ValueError("only a recorded partial run can be sealed")
     if any(wave.status != "closed" for wave in projection.waves.values()):
-        raise ValueError("partial campaign cleanup is not complete")
+        raise ValueError("partial run cleanup is not complete")
 
     trials: dict[str, TrialProjection] = {}
     for trial_id, trial in projection.trials.items():
@@ -440,12 +438,12 @@ def seal_partial_projection(projection: RecoveryProjection) -> RecoveryProjectio
         trials[trial_id] = _seal_retry_wait_trial(trial)
 
     shards = _derive_shards(projection.shards, trials)
-    runs = _derive_runs(projection.runs, shards)
-    if any(run.status != "complete" for run in runs.values()):
+    executions = _derive_executions(projection.executions, shards)
+    if any(run.status != "complete" for run in executions.values()):
         raise ValueError("a sealed run requires at least one scored trial")
     return projection.model_copy(
         update={
-            "runs": runs,
+            "executions": executions,
             "shards": shards,
             "trials": trials,
             "counts": _counts(trials),
@@ -454,14 +452,14 @@ def seal_partial_projection(projection: RecoveryProjection) -> RecoveryProjectio
 
 
 def _seal_retry_wait_trial(trial: TrialProjection) -> TrialProjection:
-    if trial.status != "retry_wait" or not trial.executions:
+    if trial.status != "retry_wait" or not trial.attempts:
         raise ValueError(f"partial trial cannot be sealed: {trial.trial_id}")
     latest = max(
-        trial.executions.values(),
-        key=lambda execution: execution.physical_attempt,
+        trial.attempts.values(),
+        key=lambda attempt: attempt.physical_attempt,
     )
     if latest.status != "failed" or latest.category is None:
-        raise ValueError(f"partial trial has no failed execution: {trial.trial_id}")
+        raise ValueError(f"partial trial has no failed attempt: {trial.trial_id}")
     status: TrialStatus = (
         "invalid"
         if latest.category in {"agent", "benchmark"}
@@ -486,8 +484,8 @@ def _seal_retry_wait_trial(trial: TrialProjection) -> TrialProjection:
 
 
 def _apply_retry_requests(
-    lock: CampaignLock,
-    events: list[CampaignEvent],
+    lock: RunLock,
+    events: list[RunEvent],
     trials: dict[str, TrialProjection],
 ) -> dict[str, TrialProjection]:
     requested_at: dict[tuple[str, int], datetime] = {}
@@ -495,14 +493,14 @@ def _apply_retry_requests(
     legacy_generations = (
         _legacy_retry_generations(lock, ordered)
         if any(
-            event.kind == "campaign.shard-retry-requested"
+            event.kind == "run.shard-retry-requested"
             and not cast(ShardRetryPayload, event.payload).trial_generations
             for event in ordered
         )
         else {}
     )
     for event in ordered:
-        if event.kind != "campaign.shard-retry-requested":
+        if event.kind != "run.shard-retry-requested":
             continue
         payload = cast(ShardRetryPayload, event.payload)
         generations = (
@@ -526,15 +524,13 @@ def _apply_retry_requests(
             recovered[trial_id] = trial
             continue
         generation = max(generations)
-        current_generation = len(trial.executions)
+        current_generation = len(trial.attempts)
         if generation > current_generation:
-            raise ValueError(
-                "retry request generation exceeds physical execution state"
-            )
+            raise ValueError("retry request generation exceeds physical attempt state")
         cleared = trial.model_copy(
             update={"status": "planned", "retry_not_before": None, "outcome": None}
         )
-        derived = _derive_trial(lock, cleared, list(trial.executions.values()))
+        derived = _derive_trial(lock, cleared, list(trial.attempts.values()))
         if generation == current_generation and derived.status == "retry_wait":
             derived = derived.model_copy(
                 update={"retry_not_before": requested_at[(trial_id, generation)]}
@@ -544,13 +540,13 @@ def _apply_retry_requests(
 
 
 def _validated_retry_generations(
-    lock: CampaignLock,
+    lock: RunLock,
     payload: ShardRetryPayload,
     trials: dict[str, TrialProjection],
 ) -> dict[str, int]:
     shard_ids = {
         shard.shard_id: {trial.trial_id for trial in shard.trials}
-        for run in lock.runs
+        for run in lock.executions
         for shard in run.shards
     }
     allowed = shard_ids.get(payload.shard_id)
@@ -559,7 +555,7 @@ def _validated_retry_generations(
     if any(
         trial_id not in allowed
         or generation < 1
-        or generation > len(trials[trial_id].executions)
+        or generation > len(trials[trial_id].attempts)
         for trial_id, generation in payload.trial_generations.items()
     ):
         raise ValueError(
@@ -569,16 +565,16 @@ def _validated_retry_generations(
 
 
 def _legacy_retry_generations(
-    lock: CampaignLock, events: list[CampaignEvent]
+    lock: RunLock, events: list[RunEvent]
 ) -> dict[str, dict[str, int]]:
     """Recover generation bindings for legacy retry events in one forward pass."""
-    runs, shards, trials = _initial_projections(lock)
-    executions: dict[str, ExecutionProjection] = {}
-    execution_ids_by_trial: dict[str, list[str]] = {trial_id: [] for trial_id in trials}
+    executions, shards, trials = _initial_projections(lock)
+    attempts: dict[str, AttemptProjection] = {}
+    attempt_ids_by_trial: dict[str, list[str]] = {trial_id: [] for trial_id in trials}
     waves: dict[str, WaveProjection] = {}
     generations: dict[str, dict[str, int]] = {}
     for event in events:
-        if event.kind == "campaign.shard-retry-requested":
+        if event.kind == "run.shard-retry-requested":
             payload = cast(ShardRetryPayload, event.payload)
             shard = shards.get(payload.shard_id)
             if shard is None:
@@ -589,39 +585,39 @@ def _legacy_retry_generations(
                     lock,
                     trials[trial_id],
                     [
-                        executions[execution_id]
-                        for execution_id in execution_ids_by_trial[trial_id]
+                        attempts[attempt_id]
+                        for attempt_id in attempt_ids_by_trial[trial_id]
                     ],
                 )
                 if current.status == "retry_wait":
-                    event_generations[trial_id] = len(current.executions)
+                    event_generations[trial_id] = len(current.attempts)
             generations[event.event_id] = event_generations
-        _apply_campaign_recovery_event(event, waves)
-        _apply_recovery_event(event, runs, shards, trials, executions, waves)
-        if event.kind == "execution.started":
-            payload = cast(ExecutionStartedPayload, event.payload)
-            execution_ids_by_trial[payload.trial_id].append(event.subject_id)
+        _apply_run_recovery_event(event, waves)
+        _apply_recovery_event(event, executions, shards, trials, attempts, waves)
+        if event.kind == "attempt.started":
+            payload = cast(AttemptStartedPayload, event.payload)
+            attempt_ids_by_trial[payload.trial_id].append(event.subject_id)
     return generations
 
 
 def _apply_recovery_event(
-    event: CampaignEvent,
-    runs: dict[str, RunProjection],
+    event: RunEvent,
+    executions: dict[str, ExecutionProjection],
     shards: dict[str, ShardProjection],
     trials: dict[str, TrialProjection],
-    executions: dict[str, ExecutionProjection],
+    attempts: dict[str, AttemptProjection],
     waves: dict[str, WaveProjection],
 ) -> int:
-    if event.kind.startswith("run."):
-        _record_run_status(event, runs)
+    if event.kind.startswith("execution."):
+        _record_execution_status(event, executions)
     elif event.kind.startswith("shard."):
         _record_shard_status(event, shards)
     elif event.kind.startswith("trial."):
         _record_trial_status(event, trials)
-    elif event.kind == "execution.started":
-        _start_execution(event, trials, executions)
-    elif event.kind.startswith("execution."):
-        return _finish_execution(event, executions)
+    elif event.kind == "attempt.started":
+        _start_attempt(event, trials, attempts)
+    elif event.kind.startswith("attempt."):
+        return _finish_attempt(event, attempts)
     elif event.kind.startswith("wave."):
         _record_wave_status(event, shards, waves)
     elif event.kind == "spend.recorded":
@@ -629,10 +625,10 @@ def _apply_recovery_event(
     return 0
 
 
-def _apply_campaign_recovery_event(
-    event: CampaignEvent, waves: dict[str, WaveProjection]
+def _apply_run_recovery_event(
+    event: RunEvent, waves: dict[str, WaveProjection]
 ) -> None:
-    if event.kind != "campaign.manual-intervention-resolved":
+    if event.kind != "run.manual-intervention-resolved":
         return
     payload = cast(ManualInterventionResolutionPayload, event.payload)
     for wave_id in payload.wave_ids:
@@ -644,10 +640,10 @@ def _apply_campaign_recovery_event(
 
 
 def retry_delay_seconds(
-    lock: CampaignLock,
+    lock: RunLock,
     category: RetryCategory,
     physical_attempt: int,
-    execution_id: str,
+    attempt_id: str,
     retry_after_seconds: int | None = None,
 ) -> int:
     if category not in _RETRYABLE_CATEGORIES:
@@ -657,7 +653,7 @@ def retry_delay_seconds(
     multiplier = 2 if category in {"quota", "rate-limit"} else 1
     raw = policy.retry_base_seconds * (2**exponent) * multiplier
     digest = hashlib.sha256(
-        f"{execution_id}:{category}:{physical_attempt}".encode()
+        f"{attempt_id}:{category}:{physical_attempt}".encode()
     ).digest()
     jittered = raw * (75 + digest[0] * 50 // 255) // 100
     requested = retry_after_seconds or 0
@@ -673,25 +669,25 @@ def retry_is_ready(trial: TrialProjection, now: datetime) -> bool:
 
 
 def _initial_projections(
-    lock: CampaignLock,
+    lock: RunLock,
 ) -> tuple[
-    dict[str, RunProjection],
+    dict[str, ExecutionProjection],
     dict[str, ShardProjection],
     dict[str, TrialProjection],
 ]:
-    runs: dict[str, RunProjection] = {}
+    executions: dict[str, ExecutionProjection] = {}
     shards: dict[str, ShardProjection] = {}
     trials: dict[str, TrialProjection] = {}
-    for run in lock.runs:
-        runs[run.run_id] = RunProjection(
-            run_id=run.run_id,
+    for run in lock.executions:
+        executions[run.execution_id] = ExecutionProjection(
+            execution_id=run.execution_id,
             deployment_digest=run.deployment_digest,
             shard_ids=[shard.shard_id for shard in run.shards],
         )
         for shard in run.shards:
             shards[shard.shard_id] = ShardProjection(
                 shard_id=shard.shard_id,
-                run_id=run.run_id,
+                execution_id=run.execution_id,
                 trial_ids=[trial.trial_id for trial in shard.trials],
             )
             for trial in shard.trials:
@@ -700,20 +696,24 @@ def _initial_projections(
                     shard_id=shard.shard_id,
                     logical_attempt=trial.logical_attempt,
                 )
-    return runs, shards, trials
+    return executions, shards, trials
 
 
-def _record_run_status(event: CampaignEvent, runs: dict[str, RunProjection]) -> None:
-    run = runs.get(event.subject_id)
-    if run is None:
-        raise ValueError(f"event references unknown run: {event.subject_id}")
-    status = cast(RunStatus, event.kind.removeprefix("run.").replace("-", "_"))
-    runs[event.subject_id] = run.model_copy(update={"observed_status": status})
-
-
-def _record_shard_status(
-    event: CampaignEvent, shards: dict[str, ShardProjection]
+def _record_execution_status(
+    event: RunEvent, executions: dict[str, ExecutionProjection]
 ) -> None:
+    execution = executions.get(event.subject_id)
+    if execution is None:
+        raise ValueError(f"event references unknown execution: {event.subject_id}")
+    status = cast(
+        ExecutionStatus, event.kind.removeprefix("execution.").replace("-", "_")
+    )
+    executions[event.subject_id] = execution.model_copy(
+        update={"observed_status": status}
+    )
+
+
+def _record_shard_status(event: RunEvent, shards: dict[str, ShardProjection]) -> None:
     shard = shards.get(event.subject_id)
     if shard is None:
         raise ValueError(f"event references unknown shard: {event.subject_id}")
@@ -721,9 +721,7 @@ def _record_shard_status(
     shards[event.subject_id] = shard.model_copy(update={"observed_status": status})
 
 
-def _record_trial_status(
-    event: CampaignEvent, trials: dict[str, TrialProjection]
-) -> None:
+def _record_trial_status(event: RunEvent, trials: dict[str, TrialProjection]) -> None:
     trial = trials.get(event.subject_id)
     if trial is None:
         raise ValueError(f"event references unknown trial: {event.subject_id}")
@@ -731,54 +729,52 @@ def _record_trial_status(
     trials[event.subject_id] = trial.model_copy(update={"status": status})
 
 
-def _start_execution(
-    event: CampaignEvent,
+def _start_attempt(
+    event: RunEvent,
     trials: dict[str, TrialProjection],
-    executions: dict[str, ExecutionProjection],
+    attempts: dict[str, AttemptProjection],
 ) -> None:
-    payload = cast(ExecutionStartedPayload, event.payload)
+    payload = cast(AttemptStartedPayload, event.payload)
     trial = trials.get(payload.trial_id)
     if trial is None or trial.shard_id != payload.shard_id:
-        raise ValueError("execution references an unknown trial or shard")
-    if event.subject_id in executions:
-        raise ValueError(f"execution started more than once: {event.subject_id}")
-    attempts = {
-        execution.physical_attempt
-        for execution in executions.values()
-        if execution.trial_id == payload.trial_id
+        raise ValueError("attempt references an unknown trial or shard")
+    if event.subject_id in attempts:
+        raise ValueError(f"attempt started more than once: {event.subject_id}")
+    physical_attempt_numbers = {
+        attempt.physical_attempt
+        for attempt in attempts.values()
+        if attempt.trial_id == payload.trial_id
     }
-    if payload.physical_attempt in attempts:
-        raise ValueError("trial has duplicate physical execution numbers")
-    executions[event.subject_id] = ExecutionProjection(
-        execution_id=event.subject_id,
+    if payload.physical_attempt in physical_attempt_numbers:
+        raise ValueError("trial has duplicate physical attempt numbers")
+    attempts[event.subject_id] = AttemptProjection(
+        attempt_id=event.subject_id,
         status="active",
         observed_at=event.observed_at,
         **payload.model_dump(mode="python"),
     )
 
 
-def _finish_execution(
-    event: CampaignEvent, executions: dict[str, ExecutionProjection]
-) -> int:
-    execution = executions.get(event.subject_id)
-    if execution is None:
-        raise ValueError(f"execution outcome has no start: {event.subject_id}")
-    if execution.status != "active":
+def _finish_attempt(event: RunEvent, attempts: dict[str, AttemptProjection]) -> int:
+    attempt = attempts.get(event.subject_id)
+    if attempt is None:
+        raise ValueError(f"attempt outcome has no start: {event.subject_id}")
+    if attempt.status != "active":
         if _is_reconciler_lost_sentinel(event):
             return 0
-        raise ValueError(f"execution has multiple outcomes: {event.subject_id}")
-    payload = cast(ExecutionOutcomePayload, event.payload)
+        raise ValueError(f"attempt has multiple outcomes: {event.subject_id}")
+    payload = cast(AttemptOutcomePayload, event.payload)
     if (
-        payload.trial_id != execution.trial_id
-        or payload.physical_attempt != execution.physical_attempt
+        payload.trial_id != attempt.trial_id
+        or payload.physical_attempt != attempt.physical_attempt
     ):
-        raise ValueError("execution outcome identity does not match its start")
-    if event.kind == "execution.completed" and payload.category is not None:
-        raise ValueError("completed execution cannot have a failure category")
-    if event.kind == "execution.failed" and payload.category is None:
-        raise ValueError("failed execution requires a failure category")
-    status = cast(ExecutionStatus, event.kind.removeprefix("execution."))
-    executions[event.subject_id] = execution.model_copy(
+        raise ValueError("attempt outcome identity does not match its start")
+    if event.kind == "attempt.completed" and payload.category is not None:
+        raise ValueError("completed attempt cannot have a failure category")
+    if event.kind == "attempt.failed" and payload.category is None:
+        raise ValueError("failed attempt requires a failure category")
+    status = cast(AttemptStatus, event.kind.removeprefix("attempt."))
+    attempts[event.subject_id] = attempt.model_copy(
         update={
             "status": status,
             "category": payload.category,
@@ -791,20 +787,20 @@ def _finish_execution(
     return payload.spend_microusd
 
 
-def _is_reconciler_lost_sentinel(event: CampaignEvent) -> bool:
-    if event.producer != "reconciler" or event.kind != "execution.failed":
+def _is_reconciler_lost_sentinel(event: RunEvent) -> bool:
+    if event.producer != "reconciler" or event.kind != "attempt.failed":
         return False
-    payload = cast(ExecutionOutcomePayload, event.payload)
+    payload = cast(AttemptOutcomePayload, event.payload)
     return (
         payload.category == "lost"
         and payload.message is not None
         and payload.message.startswith("HF Job ")
-        and payload.message.endswith(" without terminal execution evidence")
+        and payload.message.endswith(" without terminal attempt evidence")
     )
 
 
 def _record_wave_status(
-    event: CampaignEvent,
+    event: RunEvent,
     shards: dict[str, ShardProjection],
     waves: dict[str, WaveProjection],
 ) -> None:
@@ -860,13 +856,13 @@ def _validate_wave_transition(previous: WaveStatus, current: WaveStatus) -> None
 
 
 def _derive_trials(
-    lock: CampaignLock,
+    lock: RunLock,
     trials: dict[str, TrialProjection],
-    executions: dict[str, ExecutionProjection],
+    attempts: dict[str, AttemptProjection],
 ) -> dict[str, TrialProjection]:
-    by_trial: dict[str, list[ExecutionProjection]] = {key: [] for key in trials}
-    for execution in executions.values():
-        by_trial[execution.trial_id].append(execution)
+    by_trial: dict[str, list[AttemptProjection]] = {key: [] for key in trials}
+    for attempt in attempts.values():
+        by_trial[attempt.trial_id].append(attempt)
     return {
         trial_id: _derive_trial(lock, trial, by_trial[trial_id])
         for trial_id, trial in trials.items()
@@ -874,26 +870,24 @@ def _derive_trials(
 
 
 def _derive_trial(
-    lock: CampaignLock,
+    lock: RunLock,
     trial: TrialProjection,
-    executions: list[ExecutionProjection],
+    attempts: list[AttemptProjection],
 ) -> TrialProjection:
-    ordered = sorted(executions, key=lambda value: value.physical_attempt)
-    attempts = [execution.physical_attempt for execution in ordered]
-    if attempts != list(range(1, len(ordered) + 1)):
-        raise ValueError("physical execution attempts must be contiguous")
+    ordered = sorted(attempts, key=lambda value: value.physical_attempt)
+    physical_attempts = [attempt.physical_attempt for attempt in ordered]
+    if physical_attempts != list(range(1, len(ordered) + 1)):
+        raise ValueError("physical attempt numbers must be contiguous")
     completed = [
-        index
-        for index, execution in enumerate(ordered)
-        if execution.status == "completed"
+        index for index, attempt in enumerate(ordered) if attempt.status == "completed"
     ]
     if completed and completed[-1] != len(ordered) - 1:
         raise ValueError("a completed logical trial was physically re-executed")
-    execution_map = {value.execution_id: value for value in ordered}
+    attempt_map = {value.attempt_id: value for value in ordered}
     if trial.status in _TERMINAL_STATUSES:
         return trial.model_copy(
             update={
-                "executions": execution_map,
+                "attempts": attempt_map,
                 "outcome": _task_outcome(trial.status, ordered),
             }
         )
@@ -903,7 +897,7 @@ def _derive_trial(
         return trial.model_copy(
             update={
                 "status": "complete",
-                "executions": execution_map,
+                "attempts": attempt_map,
                 "outcome": "scored",
             }
         )
@@ -919,7 +913,7 @@ def _derive_trial(
     return trial.model_copy(
         update={
             "status": status,
-            "executions": execution_map,
+            "attempts": attempt_map,
             "retry_not_before": retry_at,
             "outcome": _task_outcome(status, ordered),
         }
@@ -927,13 +921,13 @@ def _derive_trial(
 
 
 def _task_outcome(
-    status: TrialStatus, executions: list[ExecutionProjection]
+    status: TrialStatus, attempts: list[AttemptProjection]
 ) -> TaskOutcome | None:
     if status == "complete":
         return "scored"
-    if status not in {"invalid", "failed_infrastructure"} or not executions:
+    if status not in {"invalid", "failed_infrastructure"} or not attempts:
         return None
-    latest = executions[-1]
+    latest = attempts[-1]
     if latest.status != "failed":
         return None
     if latest.category == "agent":
@@ -944,14 +938,14 @@ def _task_outcome(
 
 
 def _failed_trial_state(
-    lock: CampaignLock, execution: ExecutionProjection, execution_count: int
+    lock: RunLock, execution: AttemptProjection, attempt_count: int
 ) -> tuple[TrialStatus, datetime | None]:
     category = execution.category
     if category in {"agent", "benchmark"}:
         return "invalid", None
     if category not in _RETRYABLE_CATEGORIES:
         return "failed_infrastructure", None
-    if execution_count >= lock.recovery_policy.max_physical_executions_per_trial:
+    if attempt_count >= lock.recovery_policy.max_physical_attempts_per_trial:
         return (
             "invalid" if category in {"agent", "benchmark"} else "failed_infrastructure"
         ), None
@@ -959,7 +953,7 @@ def _failed_trial_state(
         lock,
         category,
         execution.physical_attempt,
-        execution.execution_id,
+        execution.attempt_id,
         execution.retry_after_seconds,
     )
     return "retry_wait", execution.observed_at + timedelta(seconds=delay)
@@ -991,21 +985,25 @@ def _aggregate_shard(
     return shard.observed_status or "planned"
 
 
-def _derive_runs(
-    runs: dict[str, RunProjection], shards: dict[str, ShardProjection]
-) -> dict[str, RunProjection]:
+def _derive_executions(
+    executions: dict[str, ExecutionProjection], shards: dict[str, ShardProjection]
+) -> dict[str, ExecutionProjection]:
     return {
-        run_id: run.model_copy(update={"status": _aggregate_run(run, shards)})
-        for run_id, run in runs.items()
+        execution_id: run.model_copy(
+            update={"status": _aggregate_execution(run, shards)}
+        )
+        for execution_id, run in executions.items()
     }
 
 
-def _aggregate_run(run: RunProjection, shards: dict[str, ShardProjection]) -> RunStatus:
+def _aggregate_execution(
+    run: ExecutionProjection, shards: dict[str, ShardProjection]
+) -> ExecutionStatus:
     statuses = [shards[shard_id].status for shard_id in run.shard_ids]
-    _validate_observed_terminal(run.observed_status, statuses, "run")
+    _validate_observed_terminal(run.observed_status, statuses, "execution")
     scored = _scored_terminal_status(statuses)
     if scored is not None:
-        return cast(RunStatus, scored)
+        return cast(ExecutionStatus, scored)
     if all(status in _TERMINAL_STATUSES for status in statuses):
         return "cancelled"
     if any(status in {"active", "retry_wait"} for status in statuses):
@@ -1026,7 +1024,7 @@ def _scored_terminal_status(
 
 
 def _validate_observed_terminal(
-    observed: RunStatus | ShardStatus | None,
+    observed: ExecutionStatus | ShardStatus | None,
     child_statuses: list[TrialStatus] | list[ShardStatus],
     subject: str,
 ) -> None:
@@ -1043,7 +1041,7 @@ def _validate_observed_terminal(
 
 def _counts(trials: dict[str, TrialProjection]) -> ProjectionCounts:
     values = list(trials.values())
-    executions = sum(len(trial.executions) for trial in values)
+    attempts = sum(len(trial.attempts) for trial in values)
     return ProjectionCounts(
         planned=sum(trial.status == "planned" for trial in values),
         active=sum(trial.status == "active" for trial in values),
@@ -1053,33 +1051,33 @@ def _counts(trials: dict[str, TrialProjection]) -> ProjectionCounts:
         failed=sum(trial.status == "failed_infrastructure" for trial in values),
         cancelled=sum(trial.status == "cancelled" for trial in values),
         physical_retries=max(
-            0, executions - sum(bool(trial.executions) for trial in values)
+            0, attempts - sum(bool(trial.attempts) for trial in values)
         ),
     )
 
 
 def _terminal_decision(
-    lock: CampaignLock,
-    campaign: CampaignProjection,
-    runs: dict[str, RunProjection],
+    lock: RunLock,
+    run: RunProjection,
+    executions: dict[str, ExecutionProjection],
     trials: dict[str, TrialProjection],
     waves: dict[str, WaveProjection],
     counts: ProjectionCounts,
 ) -> TerminalDecision | None:
-    if campaign.status in _CAMPAIGN_TERMINAL:
-        status = cast(TerminalStatus, campaign.status)
-        return _decision(lock, status, _terminal_counts(campaign, counts), "recorded")
-    if not _cleanup_is_complete(campaign, waves):
+    if run.status in _RUN_TERMINAL:
+        status = cast(TerminalStatus, run.status)
+        return _decision(lock, status, _terminal_counts(run, counts), "recorded")
+    if not _cleanup_is_complete(run, waves):
         return None
-    decision_counts = _terminal_counts(campaign, counts)
-    cancelling = campaign.status in {"cancel_requested", "draining"}
+    decision_counts = _terminal_counts(run, counts)
+    cancelling = run.status in {"cancel_requested", "draining"}
     if not all(
         trial.status in _TERMINAL_STATUSES
         or (cancelling and trial.status in {"planned", "retry_wait"})
         for trial in trials.values()
     ):
         return None
-    run_statuses = [run.status for run in runs.values()]
+    run_statuses = [run.status for run in executions.values()]
     if run_statuses and all(status == "complete" for status in run_statuses):
         return _decision(
             lock,
@@ -1096,7 +1094,7 @@ def _terminal_decision(
         )
     if any(status == "complete" for status in run_statuses):
         return _decision(
-            lock, "partial", decision_counts, "some runs reached a scored outcome"
+            lock, "partial", decision_counts, "some executions reached a scored outcome"
         )
     if cancelling or decision_counts.cancelled:
         return _decision(
@@ -1110,10 +1108,8 @@ def _terminal_decision(
     )
 
 
-def _terminal_counts(
-    campaign: CampaignProjection, counts: ProjectionCounts
-) -> ProjectionCounts:
-    if campaign.status not in {
+def _terminal_counts(run: RunProjection, counts: ProjectionCounts) -> ProjectionCounts:
+    if run.status not in {
         "cancel_requested",
         "draining",
         "cancelled",
@@ -1129,10 +1125,8 @@ def _terminal_counts(
     )
 
 
-def _cleanup_is_complete(
-    campaign: CampaignProjection, waves: dict[str, WaveProjection]
-) -> bool:
-    for action in campaign.actions.values():
+def _cleanup_is_complete(run: RunProjection, waves: dict[str, WaveProjection]) -> bool:
+    for action in run.actions.values():
         wave = waves.get(f"wave-{action.action_key}")
         if (
             action.action_kind in {"submit-wave", "retry-shard"}
@@ -1144,7 +1138,7 @@ def _cleanup_is_complete(
 
 
 def _decision(
-    lock: CampaignLock,
+    lock: RunLock,
     status: TerminalStatus,
     counts: ProjectionCounts,
     reason: str,
@@ -1161,7 +1155,7 @@ def _decision(
     return TerminalDecision(
         status=status,
         marker=marker,
-        summary_path=f"{lock.artifact_prefix}/campaign-summary.json",
+        summary_path=f"{lock.artifact_prefix}/run-summary.json",
         marker_path=f"{lock.artifact_prefix}/{marker}",
         reason=reason,
         counts=counts,

@@ -30,7 +30,7 @@ from harbor_hf.coordination import (
     ClaimStore,
     HubClaimStore,
     endpoint_claim_path,
-    run_claim_path,
+    execution_claim_path,
 )
 from harbor_hf.endpoints import EndpointSettings
 from harbor_hf.evidence import (
@@ -43,6 +43,12 @@ from harbor_hf.evidence import (
     scrub_secret_paths,
     write_checksums,
     write_json,
+)
+from harbor_hf.executions import (
+    ExecutionLock,
+    build_execution_lock,
+    execution_secret_values,
+    harbor_process_environment,
 )
 from harbor_hf.harbor_adapter import (
     FilesystemHarborExecutionAdapter,
@@ -78,7 +84,7 @@ from harbor_hf.models import (
 from harbor_hf.planner import experiment_digest
 from harbor_hf.private_artifacts import (
     build_private_artifact_manifest,
-    openclaw_execution_started,
+    openclaw_attempt_started,
     openclaw_execution_was_attempted,
     sanitize_private_artifact_directory_files,
     sanitize_private_artifact_symlinks,
@@ -91,12 +97,6 @@ from harbor_hf.process import (
     ProcessError,
     SubprocessRunner,
     run_streaming,
-)
-from harbor_hf.runs import (
-    RunLock,
-    build_run_lock,
-    harbor_process_environment,
-    run_secret_values,
 )
 from harbor_hf.submission import (
     endpoint_lease_label_for,
@@ -111,7 +111,7 @@ _WATCHDOG_STARTUP_TIMEOUT_SECONDS = 300
 _ENDPOINT_CALL_TIMEOUT_SECONDS = 60.0
 _MAX_CONSECUTIVE_READINESS_ERRORS = 3
 
-# Historical imports remain stable while new executions use the typed adapter.
+# Historical imports remain stable while new attempts use the typed adapter.
 HarborTrialFailure = _HarborTrialFailure
 validate_harbor_result = _validate_harbor_result
 _validate_task_counts = validate_task_counts
@@ -315,7 +315,7 @@ def endpoint_health_route(snapshot: Mapping[str, object]) -> str:
 
 
 def build_harbor_command(
-    lock: RunLock,
+    lock: ExecutionLock,
     jobs_dir: Path,
     base_url: str,
     harbor_source: Path,
@@ -332,7 +332,7 @@ def build_harbor_command(
 
 
 def build_harbor_trial_command(
-    lock: RunLock,
+    lock: ExecutionLock,
     jobs_dir: Path,
     base_url: str,
     harbor_source: Path,
@@ -340,7 +340,7 @@ def build_harbor_trial_command(
     task_name: str,
 ) -> list[str]:
     if task_name not in lock.benchmark_task_digests:
-        raise WorkerError("wave trial is not in the resolved run task set")
+        raise WorkerError("wave trial is not in the resolved execution task set")
     return _build_harbor_command(
         lock,
         jobs_dir,
@@ -352,22 +352,22 @@ def build_harbor_trial_command(
     )
 
 
-def _endpoint_binding(lock: RunLock) -> EndpointRef:
+def _endpoint_binding(lock: ExecutionLock) -> EndpointRef:
     deployment = _endpoint_deployment(lock)
     if deployment.endpoint is None:
-        raise WorkerError("run lock has no endpoint binding")
+        raise WorkerError("execution lock has no endpoint binding")
     return deployment.endpoint
 
 
-def _endpoint_deployment(lock: RunLock) -> DeploymentProfile:
+def _endpoint_deployment(lock: ExecutionLock) -> DeploymentProfile:
     deployment = lock.deployment
     if not isinstance(deployment, DeploymentProfile):
-        raise WorkerError("run lock is not an Inference Endpoint target")
+        raise WorkerError("execution lock is not an Inference Endpoint target")
     return deployment
 
 
 def _build_harbor_command(
-    lock: RunLock,
+    lock: ExecutionLock,
     jobs_dir: Path,
     base_url: str,
     harbor_source: Path,
@@ -409,7 +409,7 @@ def _persist_compatibility_config(path: Path, content: bytes) -> None:
             ) from None
 
 
-def _effective_agent_parameters(lock: RunLock) -> dict[str, JsonValue]:
+def _effective_agent_parameters(lock: ExecutionLock) -> dict[str, JsonValue]:
     return effective_agent_parameters(lock)
 
 
@@ -421,16 +421,16 @@ def run_worker(
     runner: CommandRunner | None = None,
     stream_runner: Callable[..., int] = run_streaming,
     source_preparer: Callable[[SourcePin, Path, CommandRunner], None] | None = None,
-    watchdog_launcher: Callable[[RunLock, EndpointRef, str], str] | None = None,
+    watchdog_launcher: Callable[[ExecutionLock, EndpointRef, str], str] | None = None,
     claim_store: ClaimStore | None = None,
     mounted_bundle_root: Path = Path("/benchmark-source"),
 ) -> Path:
     requested_spec = load_experiment(manifest_path)
     source_lock = load_source_lock(manifest_path.parent / "source.lock.json")
-    lock = RunLock.model_validate_json(
+    lock = ExecutionLock.model_validate_json(
         lock_path.read_text(encoding="utf-8")  # pragma: no mutate
     )
-    validate_run_lock(requested_spec, source_lock, lock)
+    validate_execution_lock(requested_spec, source_lock, lock)
 
     token_name = lock.remote.job.token_secret_name
     token = os.environ.get(token_name, "")
@@ -439,11 +439,11 @@ def run_worker(
     os.environ["HF_TOKEN"] = token
 
     claims = claim_store or HubClaimStore(lock.remote.job.namespace, token)
-    claim_path = run_claim_path(lock.artifact_bucket, lock.artifact_prefix)
+    claim_path = execution_claim_path(lock.artifact_bucket, lock.artifact_prefix)
     claim_owner = {
         "artifact_bucket": lock.artifact_bucket,
         "artifact_prefix": lock.artifact_prefix,
-        "run_id": lock.run_id,
+        "execution_id": lock.execution_id,
         "expires_at": (
             datetime.now(UTC) + timedelta(seconds=lock.remote.job.timeout_seconds + 600)
         ).isoformat(),
@@ -451,19 +451,19 @@ def run_worker(
     try:
         claims.acquire(claim_path, claim_owner)
     except ClaimConflict as error:
-        raise WorkerError("run ID is already reserved") from error
+        raise WorkerError("execution ID is already reserved") from error
 
     destination = output_root / lock.artifact_prefix
     entered_worker = False
     try:
         _prepare_evidence_destination(destination, adopt_reserved=True)
         entered_worker = True
-        with tempfile.TemporaryDirectory(prefix="harbor-hf-run-") as staging:
+        with tempfile.TemporaryDirectory(prefix="harbor-hf-execution-") as staging:
             return _run_staged_worker(
                 manifest_path,
                 source_lock,
                 lock,
-                Path(staging) / "run",
+                Path(staging) / "execution",
                 destination,
                 token,
                 runner=runner,
@@ -484,7 +484,7 @@ def run_worker(
 def _run_staged_worker(
     manifest_path: Path,
     source_lock: BenchmarkSourceLock,
-    lock: RunLock,
+    lock: ExecutionLock,
     root: Path,
     destination: Path,
     token: str,
@@ -492,14 +492,14 @@ def _run_staged_worker(
     runner: CommandRunner | None,
     stream_runner: Callable[..., int],
     source_preparer: Callable[[SourcePin, Path, CommandRunner], None] | None,
-    watchdog_launcher: Callable[[RunLock, EndpointRef, str], str] | None,
+    watchdog_launcher: Callable[[ExecutionLock, EndpointRef, str], str] | None,
     mounted_bundle_root: Path,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=False)
     (root / "harbor-jobs").mkdir()
     shutil.copyfile(manifest_path, root / "manifest.yaml")
     (root / "source.lock.json").write_bytes(source_lock_bytes(source_lock))
-    write_json(root / "run.lock.json", lock.model_dump(mode="json"))
+    write_json(root / "execution.lock.json", lock.model_dump(mode="json"))
     events = root / "events.jsonl"
     process_runner = runner or SubprocessRunner()
     endpoint = _endpoint_binding(lock)
@@ -507,9 +507,9 @@ def _run_staged_worker(
     error: Exception | None = None
     cleanup_error: Exception | None = None
     watchdog_started = False
-    secrets = run_secret_values(lock, token)
+    secrets = execution_secret_values(lock, token)
 
-    append_event(events, "worker_started", run_id=lock.run_id)
+    append_event(events, "worker_started", execution_id=lock.execution_id)
     try:
         require_executable("git")
         harbor_source = (
@@ -579,7 +579,7 @@ def _run_staged_worker(
     failure, failure_record, failure_event, reported_message = _failure_details(
         error, cleanup_error, secrets
     )
-    append_event(events, "run_failed", **failure_event)
+    append_event(events, "execution_failed", **failure_event)
     write_json(root / "_FAILED", failure_record)
     try:
         _finalize_evidence(root, secrets, strict_compatibility=False)
@@ -618,36 +618,38 @@ def _failure_details(
     return failure, record, event, reported_message
 
 
-def validate_run_lock(
+def validate_execution_lock(
     requested_spec: ExperimentSpec,
     source_lock: BenchmarkSourceLock,
-    lock: RunLock,
+    lock: ExecutionLock,
 ) -> None:
     if lock.trial_evidence is None:
-        raise WorkerError("run lock requires a complete trial evidence policy")
+        raise WorkerError("execution lock requires a complete trial evidence policy")
     manifest_digest = experiment_digest(requested_spec)
     if lock.spec_digest != manifest_digest:
-        raise WorkerError("manifest digest does not match the run lock")
+        raise WorkerError("manifest digest does not match the execution lock")
     try:
-        expected = build_run_lock(
+        expected = build_execution_lock(
             resolved_experiment(requested_spec, source_lock),
             model_id=lock.model.id,
             deployment_id=lock.deployment.id,
             agent_id=lock.agent.id,
-            run_id=lock.run_id,
+            execution_id=lock.execution_id,
             clock=lambda: lock.created_at,
             manifest_digest=manifest_digest,
         )
     except ValueError as error:
         raise WorkerError(
-            f"run lock cannot be resolved from manifest: {error}"
+            f"execution lock cannot be resolved from manifest: {error}"
         ) from error
     if lock != expected:
-        raise WorkerError("run lock fields do not match the resolved manifest cell")
+        raise WorkerError(
+            "execution lock fields do not match the resolved manifest cell"
+        )
 
 
 def _publish_success(root: Path, events: Path, secrets: SecretValues) -> None:
-    append_event(events, "run_succeeded")
+    append_event(events, "execution_succeeded")
     try:
         _finalize_evidence(root, secrets, strict_compatibility=True)
     except Exception as caught:
@@ -678,7 +680,7 @@ def _publish_evidence(
     if len(markers) != 1:
         raise WorkerError("finalized evidence must have exactly one terminal marker")
     if not (destination / "_RESERVED").is_file():
-        raise WorkerError("run evidence destination is not reserved")
+        raise WorkerError("execution evidence destination is not reserved")
     if attempts < 1:
         raise ValueError("publication attempts must be positive")
     source_root = source.resolve()
@@ -740,7 +742,7 @@ def _prepare_evidence_destination(
 def _execute_benchmark(
     root: Path,
     events: Path,
-    lock: RunLock,
+    lock: ExecutionLock,
     manager: EndpointManager,
     token: str,
     stream_runner: Callable[..., int],
@@ -749,7 +751,7 @@ def _execute_benchmark(
 ) -> None:
     if lock.judge_required_tasks:
         raise WorkerError(
-            "judge-required runs must use campaign execution for per-trial evidence"
+            "judge-required executions must use run-managed per-trial execution"
         )
     base_url = resume_and_probe_endpoint(root, events, lock, manager, token)
 
@@ -798,7 +800,7 @@ def _execute_benchmark(
 def _assemble_direct_trial_evidence(
     root: Path,
     jobs_dir: Path,
-    lock: RunLock,
+    lock: ExecutionLock,
     compatibility_path: Path | None,
     token: str,
 ) -> None:
@@ -808,7 +810,7 @@ def _assemble_direct_trial_evidence(
     bundle = HarborCompatibilityBundle.model_validate_json(
         compatibility_path.read_text(encoding="utf-8")
     )
-    secret_values = run_secret_values(lock, token)
+    secret_values = execution_secret_values(lock, token)
     known_secrets = (
         (secret_values,) if isinstance(secret_values, str) else tuple(secret_values)
     )
@@ -827,9 +829,9 @@ def _assemble_direct_trial_evidence(
         assert_secret_absent(native_root, known_secrets, allow_symlinks=True)
         assemble_trial_evidence(
             native_root,
-            campaign_id=None,
-            run_id=lock.run_id,
-            execution_id=lock.run_id,
+            run_id=None,
+            execution_id=lock.execution_id,
+            attempt_id=lock.execution_id,
             trial_id=native.trial_id,
             task_name=native.task_name,
             task_digest=native.task_digest,
@@ -845,12 +847,12 @@ def _assemble_direct_trial_evidence(
 def resume_and_probe_endpoint(
     root: Path,
     events: Path,
-    lock: RunLock,
+    lock: ExecutionLock,
     manager: EndpointManager,
     token: str,
     *,
     readiness_timeout_seconds: int = 3600,
-    compatible_locks: Sequence[RunLock] = (),
+    compatible_locks: Sequence[ExecutionLock] = (),
 ) -> str:
     deadline = manager.monotonic() + readiness_timeout_seconds
     _endpoint_binding(lock)
@@ -937,11 +939,13 @@ def prepare_locked_source(
         )
 
 
-def launch_cleanup_watchdog(lock: RunLock, endpoint: EndpointRef, token: str) -> str:
+def launch_cleanup_watchdog(
+    lock: ExecutionLock, endpoint: EndpointRef, token: str
+) -> str:
     return launch_cleanup_watchdog_for(
         lock.remote,
         endpoint,
-        lock.run_id,
+        lock.execution_id,
         token,
     )
 
@@ -1043,7 +1047,7 @@ def run_endpoint_watchdog(
     controller_namespace: str,
     endpoint_name: str,
     endpoint_namespace: str,
-    run_id: str,
+    execution_id: str,
     token_secret_name: str,
     timeout_seconds: int,
     api: WatchdogApi | None = None,
@@ -1078,7 +1082,7 @@ def run_endpoint_watchdog(
         controller_namespace,
         endpoint_namespace,
         endpoint_name,
-        run_id,
+        execution_id,
     )
     deadline = monotonic() + timeout_seconds
     terminal = {"COMPLETED", "ERROR", "CANCELED", "CANCELLED", "DELETED"}
@@ -1116,7 +1120,7 @@ def _watchdog_readiness_error(
     controller_namespace: str,
     endpoint_namespace: str,
     endpoint_name: str,
-    run_id: str,
+    execution_id: str,
 ) -> Exception | None:
     try:
         _mark_watchdog_ready(
@@ -1125,7 +1129,7 @@ def _watchdog_readiness_error(
             controller_namespace,
             endpoint_namespace,
             endpoint_name,
-            run_id,
+            execution_id,
         )
     except Exception as error:
         return error
@@ -1157,12 +1161,12 @@ def _mark_watchdog_ready(
     controller_namespace: str,
     endpoint_namespace: str,
     endpoint_name: str,
-    run_id: str,
+    execution_id: str,
 ) -> None:
     api.update_job_labels(
         job_id=watchdog_job_id,
         labels={
-            "harbor-hf-watchdog": run_id,
+            "harbor-hf-watchdog": execution_id,
             "harbor-hf-endpoint": endpoint_lease_label_for(
                 endpoint_namespace, endpoint_name
             ),
@@ -1183,7 +1187,9 @@ def _job_stage(info: object) -> str:
     return value.upper()
 
 
-def validate_endpoint_model(lock: RunLock, snapshot: Mapping[str, object]) -> None:
+def validate_endpoint_model(
+    lock: ExecutionLock, snapshot: Mapping[str, object]
+) -> None:
     deployment = _endpoint_deployment(lock)
     model = snapshot.get("model")
     if not isinstance(model, Mapping):
@@ -1237,7 +1243,9 @@ def require_paused_endpoint(snapshot: Mapping[str, object]) -> None:
         )
 
 
-def _validate_endpoint_compute(lock: RunLock, snapshot: Mapping[str, object]) -> None:
+def _validate_endpoint_compute(
+    lock: ExecutionLock, snapshot: Mapping[str, object]
+) -> None:
     deployment = _endpoint_deployment(lock)
     provider = snapshot.get("provider")
     compute = snapshot.get("compute")
@@ -1372,10 +1380,10 @@ def _write_direct_private_artifact_manifests(
     strict_session: bool,
     fallback_attempted: bool | None = None,
 ) -> None:
-    lock_path = root / "run.lock.json"
+    lock_path = root / "execution.lock.json"
     if not lock_path.is_file():
         return
-    lock = RunLock.model_validate_json(lock_path.read_text(encoding="utf-8"))
+    lock = ExecutionLock.model_validate_json(lock_path.read_text(encoding="utf-8"))
     attempted = (
         openclaw_execution_was_attempted(root)
         if fallback_attempted is None
@@ -1386,22 +1394,22 @@ def _write_direct_private_artifact_manifests(
         write_private_artifact_manifest(
             trial_root,
             strict_session=strict_session,
-            execution_id=lock.run_id,
+            attempt_id=lock.execution_id,
             trial_id=trial_id,
-            session_required=openclaw_execution_started(
+            session_required=openclaw_attempt_started(
                 trial_root, fallback_attempted=attempted
             ),
             trust_rejections=not strict_session,
         )
 
 
-def _validate_direct_private_artifacts(root: Path, lock: RunLock) -> None:
+def _validate_direct_private_artifacts(root: Path, lock: ExecutionLock) -> None:
     _validate_direct_artifact_directories(root)
     for trial_root in _direct_trial_roots(root):
         build_private_artifact_manifest(
             trial_root,
             strict_session=True,
-            execution_id=lock.run_id,
+            attempt_id=lock.execution_id,
             trial_id=_direct_trial_id(root, trial_root, strict=True),
         )
 
@@ -1510,7 +1518,7 @@ def _direct_trial_roots(root: Path) -> list[Path]:
     return trials
 
 
-def controller_environment(lock: RunLock) -> dict[str, object]:
+def controller_environment(lock: ExecutionLock) -> dict[str, object]:
     return {
         "job_id": os.environ.get("JOB_ID"),
         "namespace": lock.remote.job.namespace,
@@ -1627,15 +1635,15 @@ def wait_for_runtime(
             sleep(min(poll_seconds, remaining))
 
 
-def _expected_trial_count(lock: RunLock) -> int:
+def _expected_trial_count(lock: ExecutionLock) -> int:
     return len(lock.benchmark_task_digests) * lock.attempts
 
 
-def _expected_task_counts(lock: RunLock) -> dict[str, int]:
+def _expected_task_counts(lock: ExecutionLock) -> dict[str, int]:
     return {task: lock.attempts for task in lock.benchmark_task_digests}
 
 
-def _expected_agent_version(lock: RunLock) -> str:
+def _expected_agent_version(lock: ExecutionLock) -> str:
     if lock.agent.revision_kind == "package":
         return lock.agent.revision
     assert lock.agent.reported_version is not None

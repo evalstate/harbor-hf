@@ -45,6 +45,11 @@
       "title": "Envelope Sha256",
       "type": "string"
     },
+    "execution_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "title": "Execution Id",
+      "type": "string"
+    },
     "execution_profile_sha256": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Execution Profile Sha256",
@@ -74,11 +79,6 @@
     "publication_id": {
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
       "title": "Publication Id",
-      "type": "string"
-    },
-    "run_id": {
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-      "title": "Run Id",
       "type": "string"
     },
     "sanitizer_version": {
@@ -113,9 +113,9 @@
       },
       "propertyNames": {
         "enum": [
-          "runs",
-          "trials",
           "executions",
+          "trials",
+          "attempts",
           "metrics",
           "artifacts"
         ]
@@ -126,7 +126,7 @@
   },
   "required": [
     "publication_id",
-    "run_id",
+    "execution_id",
     "source_bucket",
     "source_prefix",
     "source_checksum",

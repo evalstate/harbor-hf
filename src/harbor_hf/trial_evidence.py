@@ -239,9 +239,9 @@ class CompletionEvidence(FrozenModel):
 
 class TrialEvidenceManifest(FrozenModel):
     schema_version: Literal["harbor-hf/trial-evidence/v1"] = TRIAL_EVIDENCE_SCHEMA
-    campaign_id: str | None = None
-    run_id: str = Field(min_length=1)
+    run_id: str | None = None
     execution_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
     trial_id: str = Field(min_length=1)
     task_name: str = Field(min_length=1)
     task_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -547,7 +547,7 @@ def _collect_judge_evidence(
     *,
     judge_expected: bool,
     judge_model: str | None,
-    execution_id: str,
+    attempt_id: str,
     trial_id: str,
 ) -> tuple[JudgeEvidence, list[Path]]:
     from harbor_hf.judge_recorder import (
@@ -566,7 +566,7 @@ def _collect_judge_evidence(
     except JudgeRecorderError as error:
         raise TrialEvidenceError("judge recorder summary is invalid") from error
     if (
-        summary.execution_id != execution_id
+        summary.attempt_id != attempt_id
         or summary.trial_id != trial_id
         or summary.model != judge_model
     ):
@@ -717,9 +717,9 @@ def _completion_requirements(
 def assemble_trial_evidence(
     trial_root: Path,
     *,
-    campaign_id: str | None,
-    run_id: str,
+    run_id: str | None,
     execution_id: str,
+    attempt_id: str,
     trial_id: str,
     task_name: str,
     task_digest: str,
@@ -747,7 +747,7 @@ def assemble_trial_evidence(
         evidence_dir,
         judge_expected=judge_expected,
         judge_model=judge_model,
-        execution_id=execution_id,
+        attempt_id=attempt_id,
         trial_id=trial_id,
     )
     _ensure_single_judge_selection(trial_root, exchanges, judge_expected=judge_expected)
@@ -755,9 +755,9 @@ def assemble_trial_evidence(
         trial_root, exchanges, judge_expected=judge_expected
     )
     manifest = TrialEvidenceManifest(
-        campaign_id=campaign_id,
         run_id=run_id,
         execution_id=execution_id,
+        attempt_id=attempt_id,
         trial_id=trial_id,
         task_name=task_name,
         task_digest=task_digest,
@@ -901,7 +901,7 @@ def _verify_manifest_judge_evidence(
         if summary_reference is not None:
             summary = verify_judge_recorder_summary(trial_root / summary_reference.path)
             if (
-                summary.execution_id != manifest.execution_id
+                summary.attempt_id != manifest.attempt_id
                 or summary.trial_id != manifest.trial_id
                 or summary.model != manifest.judge.model
                 or summary.exchange_count != len(manifest.judge.exchanges)
@@ -919,7 +919,7 @@ def _verify_manifest_judge_evidence(
     if manifest.judge.expected:
         _verify_judge_directory_set(trial_root, manifest.judge.exchanges)
     if any(
-        exchange.execution_id != manifest.execution_id
+        exchange.attempt_id != manifest.attempt_id
         or exchange.trial_id != manifest.trial_id
         or exchange.forwarded_model != manifest.judge.model
         for exchange in exchanges

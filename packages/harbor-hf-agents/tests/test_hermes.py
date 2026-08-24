@@ -12,10 +12,10 @@ from harbor_hf_agents.hermes.agent import HermesAgent, HermesRuntimeConfig
 
 
 @pytest.fixture(autouse=True)
-def no_sandbox_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_job_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         hermes_agent,
-        "use_sandbox_inference_route",
+        "use_job_inference_route",
         AsyncMock(return_value=False),
     )
 
@@ -47,7 +47,7 @@ class TestHermesRunCommands:
         assert run_call.kwargs["env"]["ANTHROPIC_API_KEY"] == "test-key"
 
     @pytest.mark.asyncio
-    async def test_sandbox_route_needs_no_outer_inference_credential(
+    async def test_job_route_needs_no_outer_inference_credential(
         self,
         temp_dir,
         monkeypatch,
@@ -61,7 +61,7 @@ class TestHermesRunCommands:
             env["OPENAI_API_KEY"] = "harbor-local-inference-bridge"
             return True
 
-        monkeypatch.setattr(hermes_agent, "use_sandbox_inference_route", use_route)
+        monkeypatch.setattr(hermes_agent, "use_job_inference_route", use_route)
         agent = HermesAgent(logs_dir=temp_dir, model_name="openai/example/model")
         mock_env = AsyncMock()
         mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")

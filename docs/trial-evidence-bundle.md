@@ -62,9 +62,9 @@ paths are relative to the Harbor trial root that contains the `evidence/`,
 ```json
 {
   "schema_version": "harbor-hf/trial-evidence/v1",
-  "campaign_id": "campaign-0123456789abcdef",
   "run_id": "run-0123456789abcdef",
-  "execution_id": "exec-0123456789abcdef",
+  "execution_id": "execution-0123456789abcdef",
+  "attempt_id": "exec-0123456789abcdef",
   "trial_id": "trial-0123456789abcdef",
   "task_name": "example-task",
   "task_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -190,7 +190,7 @@ paths are relative to the Harbor trial root that contains the `evidence/`,
 ## Object model
 
 A trial evidence bundle belongs to one physical execution. It never combines
-files from separate execution IDs, even when those executions belong to the
+files from separate execution IDs, even when those attempts belong to the
 same logical trial.
 
 The bundle records five stable concepts:
@@ -210,9 +210,9 @@ small enough to validate before loading large private evidence.
 | Field | Required | Type | Meaning |
 | --- | --- | --- | --- |
 | `schema_version` | Yes | string | Exact bundle schema version. |
-| `campaign_id` | No | string or null | Campaign identity for campaign executions. |
-| `run_id` | Yes | string | Locked run identity. |
-| `execution_id` | Yes | string | Harbor-HF physical execution identity. |
+| `run_id` | No | string or null | Run identity for run attempts. |
+| `execution_id` | Yes | string | Locked run identity. |
+| `attempt_id` | Yes | string | Harbor-HF physical execution identity. |
 | `trial_id` | Yes | string | Logical trial identity. |
 | `task_name` | Yes | string | Exact Harbor task name. |
 | `task_digest` | Yes | string | SHA-256 task content digest from the locked run. |
@@ -239,9 +239,9 @@ rules, judge exchange contract, and completeness rules as one unit.
 
 ### Identity fields
 
-`execution_id` and `trial_id` must match the execution and trial directories
-that contain the bundle. They must also match `execution.lock.json`, the Harbor
-compatibility export, and the campaign lock when those records exist.
+`attempt_id` and `trial_id` must match the execution and trial directories
+that contain the bundle. They must also match `attempt.lock.json`, the Harbor
+compatibility export, and the run lock when those records exist.
 
 `task_name`, `task_digest`, and `logical_attempt` must match the locked trial.
 `physical_attempt` must match the execution ordering recorded by Harbor-HF. A
@@ -415,7 +415,7 @@ Archive rules:
   evidence, outside the bundle manifest.
 
 Normalized ownership and times make the archive independent of transient
-Sandbox metadata. File bytes, paths, node types, permissions, and safe symlink
+runtime metadata. File bytes, paths, node types, permissions, and safe symlink
 targets remain exact.
 
 The validator must compare the archive with every file-index row. Matching only
@@ -526,7 +526,7 @@ A successful exchange record has this shape:
 {
   "schema_version": "harbor-hf/judge-exchange/v1",
   "exchange_id": "judge-0001",
-  "execution_id": "exec-0123456789abcdef",
+  "attempt_id": "exec-0123456789abcdef",
   "trial_id": "trial-0123456789abcdef",
   "attempt": 1,
   "started_at": "2026-07-21T18:03:58.120000+00:00",
@@ -690,7 +690,7 @@ Its deterministic test results and reward still have to be captured.
 ## Completion decision
 
 `completion.status` is `complete`. `requirements` is a sorted list derived
-from the locked task and execution policy. Incomplete physical executions keep
+from the locked task and execution policy. Incomplete physical attempts keep
 failure evidence but do not publish a trial evidence manifest.
 
 Allowed requirement names are:
@@ -782,10 +782,10 @@ execution. A successful trial has `trial-summary.json` and `_SUCCESS`; the
 summary selects the successful execution and records the SHA-256 digest of that
 execution's checksum manifest. The trial marker is written last.
 
-Campaign finalization can recover an interrupted logical projection without
+Run finalization can recover an interrupted logical projection without
 rerunning the agent. Recovery is allowed only when the trial has no terminal
 marker and exactly one complete successful execution. The finalizer validates
-all retained physical executions and selects that unique success. When the
+all retained physical attempts and selects that unique success. When the
 worker did not publish the trial envelope, the finalizer writes
 `trial-finalization-recovery.json`, `trial.lock.json`, `trial-summary.json`, and
 a complete `checksums.json` before writing `_SUCCESS` last. The checksum
@@ -799,7 +799,7 @@ writes only `_SUCCESS`. It does not insert a new record that would invalidate
 the existing checksum manifest. A newly reconstructed recovery record
 identifies the selected execution, its checksum-manifest digest, and the reason
 `interrupted_trial_finalization`. Missing, invalid, or multiple successful
-executions, mismatched locks or summaries, and incomplete checksum envelopes are
+attempts, mismatched locks or summaries, and incomplete checksum envelopes are
 ambiguous and stop publication without writing a marker.
 
 A frozen-workspace reassessment verifies its source before extraction. The
@@ -824,7 +824,7 @@ the catalog. Withdrawing a result removes it from comparison views but does not
 delete evidence automatically.
 
 Deletion is an explicit whole-prefix operation after the result is withdrawn
-and no publication, correction, audit, or campaign recovery record references
+and no publication, correction, audit, or run recovery record references
 the execution. Deleting selected workspace, judge, or verifier files would
 break the manifest and is forbidden. Retention tools delete the execution or
 run as one checked unit and record only content-free deletion metadata.
@@ -893,15 +893,15 @@ failures.
 
 | Failure | Physical category | Retry behavior |
 | --- | --- | --- |
-| Workspace changes during capture | `evidence` | Retry with a new execution. |
+| Workspace changes during capture | `evidence` | Retry with a new physical attempt. |
 | Archive or index write failure | `evidence` | Retry after normal worker cleanup. |
 | Missing expected judge exchange | `evidence` | Retry; do not accept the scorecard. |
 | Judge recorder unavailable | `evidence` | Retry without calling the upstream judge directly. |
 | Known secret detected | `evidence` | Stop publication and require operator review before another attempt. |
 | Workspace policy limit exceeded | `configuration` | Stop until policy or task contents are corrected. |
 | Malformed benchmark judge declaration | `configuration` | Reject before remote work. |
-| Sandbox job terminates during startup before benchmark work | `transient` | Retry with a new physical execution under the locked limit. |
-| Deterministic Sandbox image or command error | `benchmark` | Record a terminal zero without infrastructure retry. |
+| Trial Job terminates during startup before benchmark work | `transient` | Retry with a new physical attempt under the locked limit. |
+| Deterministic image or command error | `benchmark` | Record a terminal zero without infrastructure retry. |
 | Judge provider timeout with complete error evidence | Existing judge or benchmark policy | Preserve the exchange and apply the locked verifier behavior. |
 
 A direct judge fallback is forbidden. Missing recorder evidence cannot be
@@ -957,7 +957,7 @@ operator output show the capture boundary. Arbitrary roots are rejected.
 body transfer. It must be long enough for the locked judge model to finish.
 
 All numeric fields are required, positive, and copied into the resolved run and
-campaign locks. Planning includes them in experiment and run identity. Changing
+run locks. Planning includes them in experiment and run identity. Changing
 a limit creates a different experiment digest and run ID.
 
 The worker may enforce a lower platform ceiling. It must reject the plan before

@@ -39,6 +39,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Reports control initialization without failing the hosting platform health check. */
         get: {
             parameters: {
                 query?: never;
@@ -53,7 +54,12 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": {
+                            /** @enum {unknown} */
+                            status: "initializing" | "ready";
+                        };
+                    };
                 };
             };
         };
@@ -260,6 +266,11 @@ export interface paths {
                             source_revision: string;
                             /** @enum {unknown} */
                             write_mode: "disabled" | "canary" | "enabled";
+                            initialization: {
+                                ready: boolean;
+                                /** @enum {unknown} */
+                                status: "initializing" | "ready";
+                            };
                             projection: {
                                 ready: boolean;
                                 rebuilding: boolean;
@@ -310,7 +321,7 @@ export interface paths {
                         "application/json": {
                             alias: string | null;
                             configured: boolean;
-                            max_active_sandboxes: number | null;
+                            max_active_jobs: number | null;
                             start_burst: number | null;
                             start_refill_tokens: number | null;
                             start_refill_period_seconds: number | null;
@@ -331,7 +342,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        max_active_sandboxes: number;
+                        max_active_jobs: number;
                         /** @enum {unknown} */
                         confirmed: true;
                     };
@@ -347,7 +358,7 @@ export interface paths {
                         "application/json": {
                             alias: string | null;
                             configured: boolean;
-                            max_active_sandboxes: number | null;
+                            max_active_jobs: number | null;
                             start_burst: number | null;
                             start_refill_tokens: number | null;
                             start_refill_period_seconds: number | null;
@@ -381,7 +392,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns": {
+    "/api/v1/runs": {
         parameters: {
             query?: never;
             header?: never;
@@ -408,13 +419,14 @@ export interface paths {
                     content: {
                         "application/json": {
                             items: {
-                                campaign_id: string;
+                                run_id: string;
                                 /** Format: date-time */
                                 created_at: string;
                                 status: string;
                                 ceiling_microusd: number;
                                 reserved_microusd: number;
                                 observed_microusd: number;
+                                budget_exceeded: boolean;
                                 total_tasks: number;
                                 terminal_tasks: number;
                                 admissible_tasks: number;
@@ -466,7 +478,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            campaign_id: string;
+                            run_id: string;
                             action_id: string;
                             status_url: string;
                             adopted: boolean;
@@ -481,7 +493,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}": {
+    "/api/v1/runs/{run_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -493,7 +505,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                 };
                 cookie?: never;
             };
@@ -506,13 +518,14 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            campaign_id: string;
+                            run_id: string;
                             /** Format: date-time */
                             created_at: string;
                             status: string;
                             ceiling_microusd: number;
                             reserved_microusd: number;
                             observed_microusd: number;
+                            budget_exceeded: boolean;
                             total_tasks: number;
                             terminal_tasks: number;
                             admissible_tasks: number;
@@ -557,7 +570,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/capacity": {
+    "/api/v1/runs/{run_id}/capacity": {
         parameters: {
             query?: never;
             header?: never;
@@ -569,7 +582,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                 };
                 cookie?: never;
             };
@@ -586,8 +599,8 @@ export interface paths {
                             profile_id: string | null;
                             namespace_limit: number | null;
                             namespace_active: number;
-                            campaign_limit: number;
-                            campaign_active: number;
+                            run_limit: number;
+                            run_active: number;
                             hardware_limit: number | null;
                             hardware_active: number;
                             provider_limit: number;
@@ -595,7 +608,6 @@ export interface paths {
                             start_tokens: number | null;
                             start_burst: number | null;
                             queued: number;
-                            cleanup_held: number;
                             limiting_factor: string | null;
                             not_before: string | null;
                         };
@@ -629,7 +641,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/lock": {
+    "/api/v1/runs/{run_id}/lock": {
         parameters: {
             query?: never;
             header?: never;
@@ -641,7 +653,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                 };
                 cookie?: never;
             };
@@ -704,7 +716,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/prepared-job": {
+    "/api/v1/runs/{run_id}/prepared-job": {
         parameters: {
             query?: never;
             header?: never;
@@ -716,7 +728,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                 };
                 cookie?: never;
             };
@@ -737,7 +749,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                 };
                 cookie?: never;
             };
@@ -753,6 +765,7 @@ export interface paths {
                         trial_lock: {
                             [key: string]: unknown;
                         };
+                        trial_lock_digest: string;
                         declared_image: string;
                         image: string;
                         cpus: number;
@@ -800,7 +813,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/prepared-job/trials/{task_id}": {
+    "/api/v1/runs/{run_id}/prepared-job/trials/{task_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -812,7 +825,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                     task_id: string;
                 };
                 cookie?: never;
@@ -836,271 +849,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    campaign_id: string;
-                    task_id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Default Response */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            sandbox_id: string;
-                            state: string;
-                        };
-                    };
-                };
-                /** @description Default Response */
-                202: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            sandbox_id: string;
-                            /** @enum {unknown} */
-                            state: "QUEUED";
-                            limiting_factor: string | null;
-                            not_before: string | null;
-                        };
-                    };
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}/observe": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    campaign_id: string;
-                    task_id: string;
-                    sandbox_id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Default Response */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}/exec": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    campaign_id: string;
-                    task_id: string;
-                    sandbox_id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        command: string[];
-                        cwd: string;
-                        timeout_seconds: number;
-                    };
-                };
-            };
-            responses: {
-                /** @description Default Response */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}/files": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    campaign_id: string;
-                    task_id: string;
-                    sandbox_id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        path: string;
-                        content_digest: string;
-                        content_base64: string;
-                        mode?: string;
-                    };
-                };
-            };
-            responses: {
-                /** @description Default Response */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}/files/read": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    campaign_id: string;
-                    task_id: string;
-                    sandbox_id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        path: string;
-                    };
-                };
-            };
-            responses: {
-                /** @description Default Response */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    campaign_id: string;
-                    task_id: string;
-                    sandbox_id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Default Response */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/campaigns/{campaign_id}/tasks": {
+    "/api/v1/runs/{run_id}/tasks": {
         parameters: {
             query?: never;
             header?: never;
@@ -1109,13 +858,10 @@ export interface paths {
         };
         get: {
             parameters: {
-                query?: {
-                    cursor?: string;
-                    limit?: number;
-                };
+                query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                 };
                 cookie?: never;
             };
@@ -1129,7 +875,7 @@ export interface paths {
                     content: {
                         "application/json": {
                             items: {
-                                campaign_id: string;
+                                run_id: string;
                                 task_id: string;
                                 input_digest: string;
                                 terminal_outcome: string | null;
@@ -1149,7 +895,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}": {
+    "/api/v1/runs/{run_id}/tasks/{task_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1161,7 +907,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                     task_id: string;
                 };
                 cookie?: never;
@@ -1176,7 +922,7 @@ export interface paths {
                     content: {
                         "application/json": {
                             task: {
-                                campaign_id: string;
+                                run_id: string;
                                 task_id: string;
                                 input_digest: string;
                                 terminal_outcome: string | null;
@@ -1185,7 +931,7 @@ export interface paths {
                             attempts: {
                                 attempt_id: string;
                                 action_id: string;
-                                campaign_id: string;
+                                run_id: string;
                                 task_id: string;
                                 outcome: string;
                                 replacement_eligible: number;
@@ -1195,9 +941,15 @@ export interface paths {
                                 };
                                 /** Format: date-time */
                                 created_at: string;
+                                physical_job: null | {
+                                    resource_id: string | null;
+                                    observed_state: string | null;
+                                    inspect_url: string | null;
+                                };
                             }[];
                             exhaustion: null | {
-                                last_attempt_id: string;
+                                source_action_id: string;
+                                last_attempt_id: string | null;
                                 attempt_count: number;
                                 reason: string;
                                 /** Format: date-time */
@@ -1234,123 +986,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/action-dispositions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: {
-            parameters: {
-                query?: {
-                    cursor?: string;
-                    limit?: number;
-                };
-                header?: never;
-                path: {
-                    campaign_id: string;
-                    task_id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Default Response */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            items: {
-                                action_id: string;
-                                campaign_id: string;
-                                task_id: string;
-                                recorded_outcome: string;
-                                recorded_observed_state: string;
-                                effective_outcome: string;
-                                effective_observed_state: string;
-                                effective_error_code: string;
-                                reason_code: string;
-                                /** Format: date-time */
-                                corrected_at: string;
-                                actor_role: string;
-                                disposition_record_id: string;
-                                batch_id: string;
-                                batch_size: number;
-                            }[];
-                            next_cursor: string | null;
-                        };
-                    };
-                };
-            };
-        };
-        put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    campaign_id: string;
-                    task_id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        action_ids: string[];
-                        reason: string;
-                        /** @enum {unknown} */
-                        confirmed: true;
-                    };
-                };
-            };
-            responses: {
-                /** @description Default Response */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            batch_id: string;
-                            batch_digest: string;
-                            items: {
-                                action_id: string;
-                                disposition_record_id: string;
-                                created: boolean;
-                            }[];
-                        };
-                    };
-                };
-                /** @description Default Response */
-                201: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            batch_id: string;
-                            batch_digest: string;
-                            items: {
-                                action_id: string;
-                                disposition_record_id: string;
-                                created: boolean;
-                            }[];
-                        };
-                    };
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/campaigns/{campaign_id}/actions": {
+    "/api/v1/runs/{run_id}/actions": {
         parameters: {
             query?: never;
             header?: never;
@@ -1364,7 +1000,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                 };
                 cookie?: never;
             };
@@ -1389,7 +1025,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            campaign_id: string;
+                            run_id: string;
                             action_id: string;
                             status_url: string;
                             adopted: boolean;
@@ -1404,7 +1040,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/attempts": {
+    "/api/v1/runs/{run_id}/tasks/{task_id}/attempts": {
         parameters: {
             query?: never;
             header?: never;
@@ -1418,7 +1054,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    campaign_id: string;
+                    run_id: string;
                     task_id: string;
                 };
                 cookie?: never;
@@ -1485,7 +1121,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            campaign_id: string;
+                            run_id: string;
                             task_id: string;
                             attempt_id: string;
                             status_url: string;
@@ -1544,12 +1180,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Lists Jobs globally with offset pagination. When run_id is present, returns every latest Job for that Run in one stable response with next_cursor set to null. */
         get: {
             parameters: {
                 query?: {
                     cursor?: string;
                     limit?: number;
-                    campaign_id?: string;
+                    /** @description Return every latest Job for this Run in one response. cursor and limit do not apply. */
+                    run_id?: string;
                 };
                 header?: never;
                 path?: never;
@@ -1566,7 +1204,7 @@ export interface paths {
                         "application/json": {
                             items: {
                                 action_id: string;
-                                campaign_id: string;
+                                run_id: string;
                                 action_kind: string;
                                 generation: number;
                                 target: string;
@@ -1575,6 +1213,7 @@ export interface paths {
                                 resource_id: string | null;
                                 /** Format: date-time */
                                 created_at: string;
+                                launch_action_id: string;
                                 inspect_url: string | null;
                                 cost_microusd: number;
                                 assigned_tasks: number;
@@ -1621,7 +1260,7 @@ export interface paths {
                         "application/json": {
                             items: {
                                 action_id: string;
-                                campaign_id: string;
+                                run_id: string;
                                 endpoint_id: string;
                                 desired_state: string;
                                 observed_state: string;
@@ -1706,7 +1345,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Official snapshot rows. Anonymous GET is allowed. Campaigns and result details stay authenticated. */
+        /** @description Official snapshot rows. Anonymous GET is allowed. Runs and result details stay authenticated. */
         get: {
             parameters: {
                 query?: never;
@@ -1735,7 +1374,7 @@ export interface paths {
                                 rank: number;
                                 pareto: boolean;
                                 configuration_digest: string;
-                                campaign_id: string;
+                                run_id: string;
                                 publication_id: string;
                                 /** Format: date-time */
                                 published_at: string;
@@ -1803,12 +1442,11 @@ export interface paths {
                         "application/json": {
                             items: {
                                 publication_id: string;
-                                campaign_id: string;
+                                run_id: string;
                                 status: string;
                                 catalog_digest: string | null;
                                 /** Format: date-time */
                                 published_at: string;
-                                run_id?: string | null;
                                 benchmark?: string | null;
                                 model?: string | null;
                                 harness?: string | null;
@@ -1902,12 +1540,11 @@ export interface paths {
                     content: {
                         "application/json": {
                             publication_id: string;
-                            campaign_id: string;
+                            run_id: string;
                             status: string;
                             catalog_digest: string | null;
                             /** Format: date-time */
                             published_at: string;
-                            run_id?: string | null;
                             benchmark?: string | null;
                             model?: string | null;
                             harness?: string | null;
@@ -2047,9 +1684,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Streams bounded durable-event replay and live updates. cursor.reset tells clients to refetch current state and resume from data.latest_cursor. */
         get: {
             parameters: {
                 query?: {
+                    /** @description Last durable cursor received. Replay is capped; stale cursors receive cursor.reset. */
                     cursor?: string;
                 };
                 header?: never;
@@ -2058,12 +1697,14 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Default Response */
+                /** @description Server-Sent Events frames. Durable envelopes have an id. cursor.reset has no id and includes reason, latest_cursor, and replay_limit metadata. */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "text/event-stream": string;
+                    };
                 };
             };
         };

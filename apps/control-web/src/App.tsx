@@ -6,8 +6,8 @@ import { ControlStateProvider, type DisplayActor } from "./control-state";
 import { Layout, loginHref } from "./layout";
 import {
   AuditPage,
-  CampaignPage,
-  CampaignsPage,
+  RunPage,
+  RunsPage,
   EndpointsPage,
   JobsPage,
   LeaderboardPage,
@@ -88,15 +88,9 @@ function AuthenticatedApp({
           {system.data ? (
             <>
               <Route path="/overview" element={<OverviewPage />} />
-              <Route path="/runs" element={<CampaignsPage />} />
-              <Route path="/runs/:campaignId" element={<CampaignPage />} />
-              <Route path="/runs/:campaignId/tasks/:taskId" element={<TaskPage />} />
-              <Route path="/campaigns" element={<CampaignsPage />} />
-              <Route path="/campaigns/:campaignId" element={<CampaignPage />} />
-              <Route
-                path="/campaigns/:campaignId/tasks/:taskId"
-                element={<TaskPage />}
-              />
+              <Route path="/runs" element={<RunsPage />} />
+              <Route path="/runs/:runId" element={<RunPage />} />
+              <Route path="/runs/:runId/tasks/:taskId" element={<TaskPage />} />
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/endpoints" element={<EndpointsPage />} />
               <Route path="/results" element={<ResultsPage />} />

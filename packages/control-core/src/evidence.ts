@@ -8,7 +8,7 @@ import {
 import type { ImmutableObjectStore } from "./store.js";
 
 export interface WorkerEvidenceIdentity {
-  campaign_id: string;
+  run_id: string;
   action_id: string;
   task_id: string;
   evidence_path: string;
@@ -49,7 +49,7 @@ export async function verifyWorkerEvidence(
   identity: WorkerEvidenceIdentity,
 ): Promise<WorkerEvidenceManifestV1> {
   const expectedManifestPath = workerEvidenceObjectPath(
-    identity.campaign_id,
+    identity.run_id,
     identity.action_id,
     identity.task_id,
     identity.evidence_digest,
@@ -78,14 +78,14 @@ export async function verifyWorkerEvidence(
     throw new EvidenceIntegrityError("worker evidence manifest is invalid");
   }
   if (
-    manifest.campaign_id !== identity.campaign_id ||
+    manifest.run_id !== identity.run_id ||
     manifest.action_id !== identity.action_id ||
     manifest.task_id !== identity.task_id
   )
     throw new EvidenceIntegrityError("worker evidence manifest identity is invalid");
   for (const object of manifest.objects) {
     const expectedPath = workerEvidenceObjectPath(
-      identity.campaign_id,
+      identity.run_id,
       identity.action_id,
       identity.task_id,
       object.digest,

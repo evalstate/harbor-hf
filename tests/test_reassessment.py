@@ -39,8 +39,8 @@ def _plan_payload() -> dict[str, object]:
         .isoformat()
         .replace("+00:00", "Z"),
         "source": {
-            "campaign_id": "campaign",
             "run_id": "run",
+            "execution_id": "run",
             "publication_id": "publication",
             "source_checksum": "sha256:" + "a" * 64,
             "result_revision": "b" * 40,
@@ -78,8 +78,8 @@ def _plan_payload() -> dict[str, object]:
                 "task_name": "task",
                 "task_digest": "sha256:" + "2" * 64,
                 "logical_attempt": 1,
-                "source_execution_id": "exec-" + "3" * 32,
-                "source_trial_path": "runs/run/trials/trial-" + "1" * 24,
+                "source_attempt_id": "exec-" + "3" * 32,
+                "source_trial_path": "executions/run/trials/trial-" + "1" * 24,
                 "source_outcome": "scored",
                 "source_reward": 1.0,
                 "action": "rejudge",
@@ -146,15 +146,15 @@ def test_source_trial_is_checksum_bound_before_reassessment(tmp_path: Path) -> N
     assert isinstance(raw_trial, dict)
     raw_trial = cast(dict[str, object], raw_trial)
     trial_id = str(raw_trial["trial_id"])
-    execution_id = str(raw_trial["source_execution_id"])
+    attempt_id = str(raw_trial["source_attempt_id"])
     evidence_root = tmp_path / "evidence"
-    trial_root = evidence_root / "runs" / "run" / "trials" / trial_id
-    execution = trial_root / "executions" / execution_id
+    trial_root = evidence_root / "executions" / "run" / "trials" / trial_id
+    execution = trial_root / "attempts" / attempt_id
     execution.mkdir(parents=True)
-    (execution / "execution.lock.json").write_text(
+    (execution / "attempt.lock.json").write_text(
         json.dumps(
             {
-                "execution_id": execution_id,
+                "attempt_id": attempt_id,
                 "trial_id": trial_id,
                 "task_name": raw_trial["task_name"],
                 "task_digest": raw_trial["task_digest"],
@@ -324,7 +324,7 @@ def test_failed_attempt_is_preserved_before_retry_success(tmp_path: Path) -> Non
     _retain_failed_attempt(
         staging=failed,
         final=final,
-        execution_id="rejudge-" + "1" * 32,
+        attempt_id="rejudge-" + "1" * 32,
         error=ReassessmentError("unsafe detail"),
         known_secrets=("secret",),
     )
@@ -375,9 +375,9 @@ def test_write_fixed_zero_is_append_only(tmp_path: Path) -> None:
     plan = ReassessmentPlan.model_validate_json(json.dumps(payload))
     trial = plan.trials[0]
     source = tmp_path / "source"
-    source_execution = source / "executions" / trial.source_execution_id
-    source_execution.mkdir(parents=True)
-    (source_execution / "checksums.json").write_text("{}\n")
+    source_attempt = source / "attempts" / trial.source_attempt_id
+    source_attempt.mkdir(parents=True)
+    (source_attempt / "checksums.json").write_text("{}\n")
     output = tmp_path / "output"
 
     _write_fixed_zero(output, trial, source, plan)

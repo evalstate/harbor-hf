@@ -25,11 +25,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from harbor_hf_agents.support.hf_inference_bridge import (
     prepare_hf_inference_bridge,
-    stop_hf_inference_bridge,
 )
 from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
-from harbor_hf_agents.support.sandbox_inference_route import (
-    use_sandbox_inference_route,
+from harbor_hf_agents.support.job_inference_route import (
+    use_job_inference_route,
+    with_job_inference_bridge_cleanup,
 )
 
 # Hermes native provider routing.
@@ -574,6 +574,7 @@ class HermesAgent(IsolatedProviderAgent):
     # ------------------------------------------------------------------
 
     @with_prompt_template
+    @with_job_inference_bridge_cleanup
     async def run(  # noqa: C901 -- parser branches
         self,
         instruction: str,
@@ -592,7 +593,7 @@ class HermesAgent(IsolatedProviderAgent):
 
         bridged = False
         if provider == "openai":
-            bridged = await use_sandbox_inference_route(
+            bridged = await use_job_inference_route(
                 self,
                 environment,
                 env,
@@ -709,22 +710,18 @@ class HermesAgent(IsolatedProviderAgent):
         try:
             await self.exec_as_agent(environment, command=run_command, env=env)
         finally:
-            try:
-                await self.exec_as_agent(
-                    environment,
-                    command=(
-                        'export PATH="$HOME/.local/bin:$PATH"; '
-                        "session_id=$(sed -n 's/^session_id: //p' "
-                        "/logs/agent/hermes.txt | tail -1); "
-                        'if [ -n "$session_id" ]; then '
-                        "hermes sessions export /logs/agent/hermes-session.jsonl "
-                        '--session-id "$session_id" --yes --redact; '
-                        "else hermes sessions export "
-                        "/logs/agent/hermes-session.jsonl --yes --redact; fi"
-                    ),
-                    env={"HERMES_HOME": "/tmp/hermes"},
-                    timeout_sec=60,
-                )
-            finally:
-                if bridged:
-                    await stop_hf_inference_bridge(self, environment)
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    'export PATH="$HOME/.local/bin:$PATH"; '
+                    "session_id=$(sed -n 's/^session_id: //p' "
+                    "/logs/agent/hermes.txt | tail -1); "
+                    'if [ -n "$session_id" ]; then '
+                    "hermes sessions export /logs/agent/hermes-session.jsonl "
+                    '--session-id "$session_id" --yes --redact; '
+                    "else hermes sessions export "
+                    "/logs/agent/hermes-session.jsonl --yes --redact; fi"
+                ),
+                env={"HERMES_HOME": "/tmp/hermes"},
+                timeout_sec=60,
+            )

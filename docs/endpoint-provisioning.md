@@ -1,7 +1,7 @@
 # Endpoint Provisioning
 
 Endpoint provisioning is implemented as a domain service and a narrow Hugging
-Face adapter. The campaign application layer composes it with deployment-wave
+Face adapter. The run application layer composes it with deployment-wave
 execution, while lifecycle resume, shard submission, and watchdog ownership
 remain separate responsibilities.
 
@@ -34,11 +34,11 @@ but not when an equivalent profile is renamed.
 A managed endpoint name is a deterministic hash of:
 
 ```text
-namespace + campaign ID + deployment digest
+namespace + run ID + deployment digest
 ```
 
 The name is `harbor-hf-` followed by 40 lowercase hexadecimal characters. The
-endpoint also carries deterministic managed, campaign, and deployment tags.
+endpoint also carries deterministic managed, run, and deployment tags.
 Adoption requires the expected namespace, name, and all managed tags. Matching
 configuration at an unrelated or untagged endpoint is not enough.
 

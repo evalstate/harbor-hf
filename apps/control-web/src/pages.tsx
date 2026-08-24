@@ -21,17 +21,17 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { z } from "zod";
 import {
   type AuditResponse,
-  actOnCampaign,
-  type CampaignAction,
-  type CampaignList,
-  type CampaignSubmission,
+  actOnRun,
+  type RunAction,
+  type RunList,
+  type RunSubmission,
   type Capacity,
   type EndpointList,
   type JobList,
   type ProfileList,
   type ResultDetail,
   type ResultList,
-  submitCampaign,
+  submitRun,
   type TaskList,
 } from "./api";
 import { DataTable } from "./components/data-table";
@@ -66,9 +66,9 @@ import {
   keys,
   useAllProfiles,
   useAudit,
-  useCampaign,
-  useCampaignJobs,
-  useCampaigns,
+  useRun,
+  useRunJobs,
+  useRuns,
   useCapacity,
   useEndpoints,
   useJobs,
@@ -91,7 +91,7 @@ import {
   statusTextClass,
 } from "./ui";
 
-type CampaignRow = CampaignList["items"][number];
+type RunRow = RunList["items"][number];
 type TaskRow = TaskList["items"][number];
 type JobRow = JobList["items"][number];
 type EndpointRow = EndpointList["items"][number];
@@ -100,82 +100,71 @@ type ResultRow = ResultList["items"][number];
 type ResultTask = NonNullable<ResultDetail["tasks"]>[number];
 type AuditRow = AuditResponse["items"][number];
 
-function campaignIsFinished(status: string): boolean {
+function runIsFinished(status: string): boolean {
   return status === "completed" || status === "cancelled";
 }
 
-function campaignHasSealedFailures(campaign: CampaignRow): boolean {
-  return (
-    campaign.status === "completed" &&
-    campaign.successful_tasks !== campaign.total_tasks
-  );
+function runHasSealedFailures(run: RunRow): boolean {
+  return run.status === "completed" && run.successful_tasks !== run.total_tasks;
 }
 
-function campaignIsRecovering(campaign: CampaignRow): boolean {
-  return (
-    campaign.pending_actions > 0 &&
-    campaign.total_tasks > 0 &&
-    campaign.terminal_tasks === campaign.total_tasks
-  );
+function runIsRecovering(run: RunRow): boolean {
+  return run.replacement_assigned_tasks > 0;
 }
 
-function campaignResultStatus(campaign: CampaignRow): string {
-  if (campaignIsRecovering(campaign)) return "active";
-  if (campaign.status === "failed") return "error";
-  if (campaign.status === "completed-invalid") return "warning";
-  return campaignHasSealedFailures(campaign) ? "warning" : campaign.status;
+function runResultStatus(run: RunRow): string {
+  if (runIsRecovering(run)) return "active";
+  if (run.status === "failed") return "error";
+  if (run.status === "completed-invalid") return "warning";
+  return runHasSealedFailures(run) ? "warning" : run.status;
 }
 
-function campaignStatusLabel(campaign: CampaignRow): string {
-  if (campaignIsRecovering(campaign)) return "Replacement in progress";
-  if (campaign.status === "completed-invalid") return "Completed with invalid results";
-  if (campaign.status === "failed") return "Failed safely";
-  return campaignHasSealedFailures(campaign)
-    ? "Completed with failures"
-    : humanize(campaign.status);
+function runStatusLabel(run: RunRow): string {
+  if (runIsRecovering(run)) return "Replacement in progress";
+  if (run.status === "completed-invalid") return "Completed with invalid results";
+  if (run.status === "failed") return "Failed safely";
+  return runHasSealedFailures(run) ? "Completed with failures" : humanize(run.status);
 }
 
-function campaignStatusNote(campaign: CampaignRow): string {
-  const publication = campaign.publication_status
-    ? humanize(campaign.publication_status)
+function runStatusNote(run: RunRow): string {
+  const publication = run.publication_status
+    ? humanize(run.publication_status)
     : "Not published";
-  if (campaignIsRecovering(campaign)) {
-    const assigned = campaign.replacement_assigned_tasks;
-    const recorded = campaign.replacement_recorded_tasks;
-    const pending = campaign.pending_actions;
-    if (assigned > 0)
-      return `${recorded} of ${assigned} replacement tasks recorded. ${counted(pending, "pending action")} on this run.`;
-    return `${counted(pending, "pending action")} on this run. This is not a new run.`;
+  if (runIsRecovering(run)) {
+    const assigned = run.replacement_assigned_tasks;
+    const recorded = run.replacement_recorded_tasks;
+    const pending = run.pending_actions;
+    return `${recorded} of ${assigned} replacement tasks recorded. ${counted(pending, "pending action")} on this run.`;
   }
-  if (campaign.status === "cancelled") {
-    const cancelled = campaign.total_tasks - campaign.successful_tasks;
+  if (run.status === "cancelled") {
+    const cancelled = run.total_tasks - run.successful_tasks;
     return `${publication}. ${cancelled} sealed ${cancelled === 1 ? "task" : "tasks"} cancelled.`;
   }
-  if (campaign.status === "failed")
-    return `${publication}. ${campaign.exhausted_tasks} exhausted ${campaign.exhausted_tasks === 1 ? "task" : "tasks"}.`;
-  if (campaign.status === "completed-invalid")
-    return `${publication}. ${campaign.invalid_selected_tasks} invalid selected ${campaign.invalid_selected_tasks === 1 ? "attempt" : "attempts"}.`;
-  if (campaign.status !== "completed") return publication;
-  if (campaign.successful_tasks === campaign.total_tasks) return publication;
-  const failed = campaign.total_tasks - campaign.successful_tasks;
+  if (run.status === "failed")
+    return `${publication}. ${run.exhausted_tasks} exhausted ${run.exhausted_tasks === 1 ? "task" : "tasks"}.`;
+  if (run.status === "completed-invalid")
+    return `${publication}. ${run.invalid_selected_tasks} invalid selected ${run.invalid_selected_tasks === 1 ? "attempt" : "attempts"}.`;
+  if (run.status !== "completed") return publication;
+  if (run.successful_tasks === run.total_tasks) return publication;
+  const failed = run.total_tasks - run.successful_tasks;
   return `${publication}. ${failed} sealed ${failed === 1 ? "task" : "tasks"} did not succeed.`;
 }
 
-function RunName({ campaignId, to }: { campaignId: string; to: string }) {
+function RunName({ runId, to }: { runId: string; to: string }) {
   return (
     <Link className={cn(runNameClass, "text-cyan-300 hover:underline")} to={to}>
-      {campaignId}
+      {runId}
     </Link>
   );
 }
 
-function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
-  const campaignColumn: ColumnDef<JobRow> = {
-    accessorKey: "campaign_id",
-    header: () => <Hint text={hints.jobs.campaign}>Run</Hint>,
+function jobColumns(includeRun: boolean): ColumnDef<JobRow>[] {
+  const runColumn: ColumnDef<JobRow> = {
+    accessorKey: "run_id",
+    header: () => <Hint text={hints.jobs.run}>Run</Hint>,
     meta: { className: "min-w-0" },
     cell: ({ getValue }) => (
-      <RunName campaignId={String(getValue())} to={`/runs/${String(getValue())}`} />
+      <RunName runId={String(getValue())} to={`/runs/${String(getValue())}`} />
     ),
   };
   return [
@@ -201,7 +190,7 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
         );
       },
     },
-    ...(includeCampaign ? [campaignColumn] : []),
+    ...(includeRun ? [runColumn] : []),
     {
       accessorKey: "action_kind",
       header: () => <Hint text={hints.jobs.action}>Action</Hint>,
@@ -253,68 +242,66 @@ function jobIsActive(job: JobRow): boolean {
 }
 
 function ReplacementProgress({
-  campaign,
+  run,
   capacity,
 }: {
-  campaign: CampaignRow;
+  run: RunRow;
   capacity: Capacity | undefined;
 }) {
-  const assigned = campaign.replacement_assigned_tasks;
-  const recorded = campaign.replacement_recorded_tasks;
-  const active = capacity?.campaign_active;
+  const assigned = run.replacement_assigned_tasks;
+  const recorded = run.replacement_recorded_tasks;
+  const active = capacity?.run_active;
   const queued = capacity?.queued;
   const burst = capacity?.start_burst;
   return (
     <Card className="my-6 border-cyan-500/40 bg-cyan-950/20">
       <h2 className="text-base font-semibold text-cyan-100">
-        Replacement Job on this run
+        Replacement Jobs on this Run
       </h2>
       <p className="mt-2 text-sm text-cyan-100">
-        {assigned > 0
-          ? `${recorded} of ${assigned} assigned tasks have a replacement receipt. This is not a new run.`
-          : "A replacement Job is queued on this run. The run list does not add a second row."}
+        {recorded} of {assigned} assigned tasks have a replacement receipt. This is not
+        a new run.
       </p>
       {typeof active === "number" ? (
         <p className="mt-2 text-sm text-cyan-100/80">
-          {counted(active, "sandbox")} active
-          {typeof queued === "number" ? `, ${counted(queued, "queued create")}` : ""}.
+          {counted(active, "physical Job")} active
+          {typeof queued === "number" ? `, ${counted(queued, "queued admission")}` : ""}
+          .
           {typeof burst === "number"
-            ? ` The start burst is ${burst}, so only a few sandboxes look alive at once.`
-            : " Only the live sandbox window looks alive."}
+            ? ` The Job start burst is ${burst}.`
+            : " Job admission is waiting for available capacity."}
         </p>
       ) : null}
       <p className="mt-2 text-sm text-cyan-100/80">
         The task list still shows selected seals. Rows stay Infrastructure until a
         replacement attempt is chosen.
       </p>
-      {assigned > 0 ? (
-        <div className="mt-4">
-          <Progress
-            label={`${recorded}/${assigned} replacement receipts`}
-            value={(recorded / assigned) * 100}
-          />
-        </div>
-      ) : null}
+      <div className="mt-4">
+        <Progress
+          label={`${recorded}/${assigned} replacement receipts`}
+          value={(recorded / assigned) * 100}
+        />
+      </div>
     </Card>
   );
 }
 
-function CampaignJobs({ campaignId }: { campaignId: string }) {
-  const query = useCampaignJobs(campaignId);
+function RunJobs({ runId }: { runId: string }) {
+  const query = useRunJobs(runId);
   const jobs = query.data?.items ?? [];
   const active = jobs.filter(jobIsActive).length;
   return (
     <section className="mt-8">
       <h2 className="text-lg font-semibold text-white">
-        <Hint text={hints.campaign.jobs}>Physical HF Jobs</Hint>
+        <Hint text={hints.run.jobs}>Physical HF Jobs</Hint>
       </h2>
       <p className="mb-4 mt-1 text-sm text-slate-400">
         {query.data
           ? `${counted(jobs.length, "Job")} recorded, ${active} active. `
           : null}
-        A Job is a remote worker process that can run many logical tasks through several
-        Sandboxes. Assigned is the task count on that Job, not a count of active
-        processes.
+        Each physical trial Job runs one logical trial attempt. A logical trial can
+        retain multiple Jobs after infrastructure replacements, but only one valid
+        attempt becomes its selected result.
       </p>
       <QueryContent query={query}>
         <DataTable
@@ -564,11 +551,11 @@ function Stat({
 }
 
 export function OverviewPage() {
-  const campaigns = useCampaigns();
+  const runs = useRuns();
   const endpoints = useEndpoints();
   const system = useSystem();
-  const items = campaigns.data?.items ?? [];
-  const active = items.filter((item) => !campaignIsFinished(item.status)).length;
+  const items = runs.data?.items ?? [];
+  const active = items.filter((item) => !runIsFinished(item.status)).length;
   const failures = items.filter((item) =>
     ["failed", "manual_intervention"].includes(item.status),
   ).length;
@@ -580,11 +567,11 @@ export function OverviewPage() {
     .reverse()
     .slice(-20)
     .map((item) => ({
-      name: item.campaign_id,
+      name: item.run_id,
       spendMicrousd: item.observed_microusd,
     }));
   return (
-    <QueryContent query={campaigns}>
+    <QueryContent query={runs}>
       <QueryContent query={endpoints}>
         <QueryContent query={system}>
           <PageHeader
@@ -609,7 +596,7 @@ export function OverviewPage() {
             <Stat
               label="Observed spend"
               value={formatMoney(spend)}
-              note="Across projected campaigns"
+              note="Across projected runs"
               icon={CircleDollarSign}
               hint={hints.overview.observedSpend}
             />
@@ -641,11 +628,8 @@ export function OverviewPage() {
               {items.length > 0 ? (
                 <ul className="mt-4 space-y-2 border-t border-slate-800 pt-4">
                   {[...items].slice(0, 8).map((item) => (
-                    <li key={item.campaign_id}>
-                      <RunName
-                        campaignId={item.campaign_id}
-                        to={`/runs/${item.campaign_id}`}
-                      />
+                    <li key={item.run_id}>
+                      <RunName runId={item.run_id} to={`/runs/${item.run_id}`} />
                     </li>
                   ))}
                 </ul>
@@ -654,8 +638,8 @@ export function OverviewPage() {
             <Card>
               <div className="flex items-center justify-between">
                 <h2 className="font-semibold">Control readiness</h2>
-                <Badge status={system.data?.projection?.ready ? "ready" : "pending"}>
-                  {system.data?.projection?.ready ? "Ready" : "Rebuilding"}
+                <Badge status={system.data?.initialization.ready ? "ready" : "pending"}>
+                  {system.data?.initialization.ready ? "Ready" : "Initializing"}
                 </Badge>
               </div>
               <dl className="mt-5 space-y-4 text-sm">
@@ -814,10 +798,10 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
     );
   }, [estimatedMicrousd, form]);
   const mutation = useMutation({
-    mutationFn: (input: CampaignSubmission) => submitCampaign(input),
+    mutationFn: (input: RunSubmission) => submitRun(input),
     onSuccess: async (result) => {
-      await client.invalidateQueries({ queryKey: keys.campaigns });
-      navigate(`/runs/${result.campaign_id}`);
+      await client.invalidateQueries({ queryKey: keys.runs });
+      navigate(`/runs/${result.run_id}`);
     },
   });
   return (
@@ -1051,51 +1035,47 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
   );
 }
 
-export function CampaignsPage() {
+export function RunsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigation = useCursorNavigation();
   const [launching, setLaunching] = useState(false);
-  const query = useCampaigns(navigation.cursor);
+  const query = useRuns(navigation.cursor);
   const { writesAllowed, writeMode } = useControlState();
   const filter = searchParams.get("status") ?? "all";
   const items = (query.data?.items ?? []).filter(
     (item) => filter === "all" || item.status === filter,
   );
-  const columns = useMemo<ColumnDef<CampaignRow>[]>(
+  const columns = useMemo<ColumnDef<RunRow>[]>(
     () => [
       {
-        accessorKey: "campaign_id",
-        header: () => <Hint text={hints.campaign.identity}>Run</Hint>,
+        accessorKey: "run_id",
+        header: () => <Hint text={hints.run.identity}>Run</Hint>,
         meta: { className: "min-w-0" },
         cell: ({ row }) => (
-          <RunName
-            campaignId={row.original.campaign_id}
-            to={`/runs/${row.original.campaign_id}`}
-          />
+          <RunName runId={row.original.run_id} to={`/runs/${row.original.run_id}`} />
         ),
       },
       {
         accessorKey: "status",
-        header: () => <Hint text={hints.campaign.status}>State</Hint>,
+        header: () => <Hint text={hints.run.status}>State</Hint>,
         cell: ({ row }) => (
-          <Badge status={campaignResultStatus(row.original)}>
-            {campaignStatusLabel(row.original)}
+          <Badge status={runResultStatus(row.original)}>
+            {runStatusLabel(row.original)}
           </Badge>
         ),
       },
       {
         accessorFn: (row) => {
-          const recovering =
-            campaignIsRecovering(row) && row.replacement_assigned_tasks > 0;
+          const recovering = runIsRecovering(row) && row.replacement_assigned_tasks > 0;
           return recovering
             ? `${row.replacement_recorded_tasks}/${row.replacement_assigned_tasks} replacement tasks`
             : `${row.terminal_tasks}/${row.total_tasks} tasks`;
         },
         id: "progress",
-        header: () => <Hint text={hints.campaign.logicalTasks}>Logical progress</Hint>,
+        header: () => <Hint text={hints.run.logicalTasks}>Logical progress</Hint>,
         cell: ({ row }) => {
           const recovering =
-            campaignIsRecovering(row.original) &&
+            runIsRecovering(row.original) &&
             row.original.replacement_assigned_tasks > 0;
           const done = recovering
             ? row.original.replacement_recorded_tasks
@@ -1117,7 +1097,7 @@ export function CampaignsPage() {
       },
       {
         accessorKey: "observed_microusd",
-        header: () => <Hint text={hints.campaign.observedCost}>Observed</Hint>,
+        header: () => <Hint text={hints.run.observedCost}>Observed</Hint>,
         cell: ({ getValue }) => formatMoney(Number(getValue())),
       },
       {
@@ -1155,15 +1135,17 @@ export function CampaignsPage() {
       />
       {launching ? <LaunchPanel onClose={() => setLaunching(false)} /> : null}
       <nav className="mb-4 flex flex-wrap gap-2" aria-label="Filter runs">
-        {["all", "active", "publishing", "completed", "cancelled"].map((status) => (
-          <Button
-            key={status}
-            variant={filter === status ? "secondary" : "ghost"}
-            onClick={() => setSearchParams(status === "all" ? {} : { status })}
-          >
-            {humanize(status)}
-          </Button>
-        ))}
+        {["all", "active", "cancelling", "publishing", "completed", "cancelled"].map(
+          (status) => (
+            <Button
+              key={status}
+              variant={filter === status ? "secondary" : "ghost"}
+              onClick={() => setSearchParams(status === "all" ? {} : { status })}
+            >
+              {humanize(status)}
+            </Button>
+          ),
+        )}
       </nav>
       <QueryContent query={query}>
         <DataTable columns={columns} data={items} empty="No runs match this filter" />
@@ -1173,12 +1155,11 @@ export function CampaignsPage() {
   );
 }
 
-export function CampaignPage() {
-  const { campaignId = "" } = useParams();
-  const navigation = useCursorNavigation();
-  const campaign = useCampaign(campaignId);
-  const capacity = useCapacity(campaignId);
-  const tasks = useTasks(campaignId, navigation.cursor);
+export function RunPage() {
+  const { runId = "" } = useParams();
+  const run = useRun(runId);
+  const capacity = useCapacity(runId);
+  const tasks = useTasks(runId);
   const client = useQueryClient();
   const { writesAllowed, writeMode } = useControlState();
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -1191,45 +1172,45 @@ export function CampaignPage() {
   const closeRetry = () => setRetryOpen(false);
   const cancel = useMutation({
     mutationFn: () =>
-      actOnCampaign(campaignId, {
+      actOnRun(runId, {
         action: "cancel",
         task_id: null,
         reason: "operator cancellation",
         confirmed: true,
-      } as CampaignAction),
+      } as RunAction),
     onSuccess: () => {
       closeCancel();
-      return client.invalidateQueries({ queryKey: keys.campaign(campaignId) });
+      return client.invalidateQueries({ queryKey: keys.run(runId) });
     },
   });
   const retryInfrastructure = useMutation({
     mutationFn: () =>
-      actOnCampaign(campaignId, {
+      actOnRun(runId, {
         action: "retry_infrastructure",
         task_id: null,
         reason: "retry eligible infrastructure failures",
         confirmed: true,
-      } as CampaignAction),
+      } as RunAction),
     onSuccess: () => {
       closeRetry();
-      return client.invalidateQueries({ queryKey: keys.campaign(campaignId) });
+      return client.invalidateQueries({ queryKey: keys.run(runId) });
     },
   });
-  if (!campaign.data)
+  if (!run.data)
     return (
-      <QueryContent query={campaign}>
+      <QueryContent query={run}>
         <Empty>Run not found</Empty>
       </QueryContent>
     );
-  const item = campaign.data;
+  const item = run.data;
   const columns: ColumnDef<TaskRow>[] = [
     {
       accessorKey: "task_id",
-      header: () => <Hint text={hints.campaign.logicalTasks}>Task</Hint>,
+      header: () => <Hint text={hints.run.logicalTasks}>Task</Hint>,
       cell: ({ row }) => (
         <Link
           className="font-mono text-xs text-cyan-300 hover:underline"
-          to={`/runs/${campaignId}/tasks/${row.original.task_id}`}
+          to={`/runs/${runId}/tasks/${row.original.task_id}`}
         >
           {shortId(row.original.task_id)}
         </Link>
@@ -1237,14 +1218,14 @@ export function CampaignPage() {
     },
     {
       accessorKey: "terminal_outcome",
-      header: () => <Hint text={hints.campaign.outcome}>Outcome</Hint>,
+      header: () => <Hint text={hints.run.outcome}>Outcome</Hint>,
       cell: ({ getValue }) => (
         <OutcomeBadge outcome={String(getValue() ?? "pending")} />
       ),
     },
     {
       accessorKey: "selected_attempt_id",
-      header: () => <Hint text={hints.campaign.selectedAttempt}>Selected attempt</Hint>,
+      header: () => <Hint text={hints.run.selectedAttempt}>Selected attempt</Hint>,
       cell: ({ getValue }) => (
         <span className="font-mono text-xs">
           {getValue() ? shortId(String(getValue())) : "—"}
@@ -1253,7 +1234,7 @@ export function CampaignPage() {
     },
     {
       accessorKey: "input_digest",
-      header: () => <Hint text={hints.campaign.inputDigest}>Input</Hint>,
+      header: () => <Hint text={hints.run.inputDigest}>Input</Hint>,
       cell: ({ getValue }) => (
         <span className="font-mono text-xs text-slate-500">
           {shortId(String(getValue()))}
@@ -1262,9 +1243,9 @@ export function CampaignPage() {
     },
   ];
   return (
-    <QueryContent query={campaign}>
+    <QueryContent query={run}>
       <PageHeader
-        title={campaignId}
+        title={runId}
         titleClassName="break-all font-mono text-lg sm:text-xl"
         description="Run lock, logical outcomes, cost and publication state."
         action={
@@ -1281,7 +1262,9 @@ export function CampaignPage() {
               <RefreshCw size={16} />
               Retry infrastructure failures
             </Button>
-            {!campaignIsFinished(item.status) ? (
+            {!runIsFinished(item.status) &&
+            item.status !== "publishing" &&
+            !item.cancellation_requested ? (
               <Button
                 variant="destructive"
                 disabled={!writesAllowed || cancel.isPending}
@@ -1346,8 +1329,8 @@ export function CampaignPage() {
               Cancel run?
             </h2>
             <p className="mt-2 text-sm text-slate-300">
-              Target <span className="break-all font-mono text-xs">{campaignId}</span>{" "}
-              has {item.total_tasks - item.terminal_tasks} open logical tasks.
+              Target <span className="break-all font-mono text-xs">{runId}</span> has{" "}
+              {item.total_tasks - item.terminal_tasks} open logical tasks.
             </p>
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
               <div>
@@ -1395,47 +1378,46 @@ export function CampaignPage() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Stat
           label="Status"
-          value={campaignStatusLabel(item)}
-          note={campaignStatusNote(item)}
+          value={runStatusLabel(item)}
+          note={runStatusNote(item)}
           icon={RefreshCw}
-          hint={hints.campaign.status}
-          status={campaignResultStatus(item)}
+          hint={hints.run.status}
+          status={runResultStatus(item)}
         />
         <Stat
           label="Logical tasks"
           value={`${item.terminal_tasks}/${item.total_tasks}`}
           note={`${item.admissible_tasks} valid, ${item.exhausted_tasks} exhausted, ${item.pending_actions} pending actions`}
           icon={Clock3}
-          hint={hints.campaign.logicalTasks}
+          hint={hints.run.logicalTasks}
         />
         <Stat
           label="Observed cost"
           value={formatMoney(item.observed_microusd)}
-          note={`All recorded campaign sources. ${formatMoney(item.reserved_microusd)} reserved`}
+          note={`All recorded run sources. ${formatMoney(item.reserved_microusd)} reserved`}
           icon={CircleDollarSign}
-          hint={hints.campaign.observedCost}
+          hint={hints.run.observedCost}
         />
         <Stat
           label="Endpoint cleanup"
           value={item.cleanup_pending ? "Pending" : "Clear"}
           note="Required before completion"
           icon={ShieldCheck}
-          hint={hints.campaign.endpointCleanup}
+          hint={hints.run.endpointCleanup}
         />
       </div>
-      {campaignIsRecovering(item) ? (
-        <ReplacementProgress campaign={item} capacity={capacity.data} />
+      {runIsRecovering(item) ? (
+        <ReplacementProgress run={item} capacity={capacity.data} />
       ) : null}
       {item.invalid_selected_tasks > 0 || item.exhausted_tasks > 0 ? (
         <Card className="my-6 border-amber-800 bg-amber-950/30">
           <p className="text-sm text-amber-200">
-            This campaign cannot publish a valid result. It has{" "}
-            {item.invalid_selected_tasks} invalid selected attempts and{" "}
-            {item.exhausted_tasks} exhausted tasks.
+            This run cannot publish a valid result. It has {item.invalid_selected_tasks}{" "}
+            invalid selected attempts and {item.exhausted_tasks} exhausted tasks.
           </p>
         </Card>
       ) : null}
-      <CampaignJobs campaignId={campaignId} />
+      <RunJobs runId={runId} />
       <Card className="my-6">
         <Progress
           label="Terminal logical outcomes"
@@ -1444,12 +1426,12 @@ export function CampaignPage() {
       </Card>
       {capacity.data ? (
         <Card className="my-6">
-          <h2 className="text-base font-semibold text-white">Sandbox capacity</h2>
+          <h2 className="text-base font-semibold text-white">Job capacity</h2>
           <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
             <div>
-              <dt className="text-slate-500">Campaign</dt>
+              <dt className="text-slate-500">Run</dt>
               <dd className="mt-1">
-                {capacity.data.campaign_active}/{capacity.data.campaign_limit} active
+                {capacity.data.run_active}/{capacity.data.run_limit} active
               </dd>
             </div>
             <div>
@@ -1473,12 +1455,8 @@ export function CampaignPage() {
               </dd>
             </div>
             <div>
-              <dt className="text-slate-500">Queued creates</dt>
+              <dt className="text-slate-500">Queued launches</dt>
               <dd className="mt-1">{capacity.data.queued}</dd>
-            </div>
-            <div>
-              <dt className="text-slate-500">Cleanup-held slots</dt>
-              <dd className="mt-1">{capacity.data.cleanup_held}</dd>
             </div>
             <div className="sm:col-span-2">
               <dt className="text-slate-500">Current limit</dt>
@@ -1493,14 +1471,15 @@ export function CampaignPage() {
       ) : null}
       <section className="mt-8">
         <h2 className="text-lg font-semibold text-white">
-          <Hint text={hints.campaign.logicalTasks}>Logical benchmark tasks</Hint>
+          <Hint text={hints.run.logicalTasks}>Logical benchmark tasks</Hint>
         </h2>
         <p className="mb-4 mt-1 text-sm text-slate-400">
-          One row per locked benchmark case. A task keeps one selected sealed outcome,
-          even when multiple Jobs or attempts worked on it.
+          One row per locked logical trial. Infrastructure failures may create multiple
+          physical Job attempts, but only one valid attempt can become the selected
+          result.
         </p>
         <QueryContent query={tasks}>
-          {campaignIsRecovering(item) ? (
+          {runIsRecovering(item) ? (
             <p className="mb-3 text-sm text-slate-400">
               Outcome is the selected seal. A replacement Job can be assigned to a row
               that still shows Infrastructure.
@@ -1511,7 +1490,6 @@ export function CampaignPage() {
             data={tasks.data?.items ?? []}
             empty="No tasks are locked"
           />
-          <CursorPager navigation={navigation} nextCursor={tasks.data?.next_cursor} />
         </QueryContent>
       </section>
     </QueryContent>
@@ -1519,8 +1497,8 @@ export function CampaignPage() {
 }
 
 export function TaskPage() {
-  const { campaignId = "", taskId = "" } = useParams();
-  const detail = useTask(campaignId, taskId);
+  const { runId = "", taskId = "" } = useParams();
+  const detail = useTask(runId, taskId);
   if (!detail.data)
     return (
       <QueryContent query={detail}>
@@ -1531,13 +1509,13 @@ export function TaskPage() {
     <QueryContent query={detail}>
       <PageHeader
         title={shortId(taskId)}
-        description="One logical task with every immutable physical attempt."
+        description="One logical trial can have multiple physical Job attempts. Every attempt stays visible, but only one valid result can be selected."
       />
       <Card>
         <dl className="grid gap-4 text-sm sm:grid-cols-2">
           <div>
             <dt className="text-slate-500">
-              <Hint text={hints.campaign.outcome}>Outcome</Hint>
+              <Hint text={hints.run.outcome}>Outcome</Hint>
             </dt>
             <dd className="mt-1">
               <OutcomeBadge outcome={detail.data.task.terminal_outcome} />
@@ -1545,7 +1523,7 @@ export function TaskPage() {
           </div>
           <div>
             <dt className="text-slate-500">
-              <Hint text={hints.campaign.selectedAttempt}>Selected attempt</Hint>
+              <Hint text={hints.run.selectedAttempt}>Selected attempt</Hint>
             </dt>
             <dd className="mt-1 font-mono text-xs">
               {detail.data.task.selected_attempt_id ?? "—"}
@@ -1553,7 +1531,7 @@ export function TaskPage() {
           </div>
           <div className="sm:col-span-2">
             <dt className="text-slate-500">
-              <Hint text={hints.campaign.inputDigest}>Input digest</Hint>
+              <Hint text={hints.run.inputDigest}>Input digest</Hint>
             </dt>
             <dd className="mt-1 break-all font-mono text-xs">
               {detail.data.task.input_digest}
@@ -1567,36 +1545,91 @@ export function TaskPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-xs uppercase tracking-wider text-slate-500">
-                  Physical attempt {index + 1}
+                  Attempt {index + 1}
                 </p>
                 <p className="mt-1 font-mono text-sm">{attempt.attempt_id}</p>
               </div>
-              <OutcomeBadge outcome={attempt.outcome} />
+              <div className="flex items-center gap-2">
+                {detail.data.task.selected_attempt_id === attempt.attempt_id ? (
+                  <Badge status="ready">Selected result</Badge>
+                ) : null}
+                <OutcomeBadge outcome={attempt.outcome} />
+              </div>
             </div>
             <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-3">
+              <div className="sm:col-span-3">
+                <dt className="text-slate-500">
+                  {attempt.physical_job ? (
+                    <Hint text={hints.run.launchAction}>job.launch action</Hint>
+                  ) : (
+                    "Source action"
+                  )}
+                </dt>
+                <dd className="mt-1 break-all font-mono text-xs">
+                  {attempt.action_id}
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-slate-500">
+                  <Hint text={hints.run.physicalJob}>Physical HF Job</Hint>
+                </dt>
+                <dd className="mt-1">
+                  {attempt.physical_job?.resource_id ? (
+                    attempt.physical_job.inspect_url ? (
+                      <a
+                        className="inline-flex items-center gap-1 break-all font-mono text-xs text-cyan-300 hover:underline"
+                        href={attempt.physical_job.inspect_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {attempt.physical_job.resource_id}
+                        <ExternalLink size={12} />
+                      </a>
+                    ) : (
+                      <span className="break-all font-mono text-xs">
+                        {attempt.physical_job.resource_id}
+                      </span>
+                    )
+                  ) : (
+                    <span className="text-slate-500">Not projected</span>
+                  )}
+                </dd>
+              </div>
               <div>
                 <dt className="text-slate-500">
-                  <Hint text={hints.campaign.replacementEligible}>
-                    Replacement eligible
-                  </Hint>
+                  <Hint text={hints.run.physicalJobStatus}>Job status</Hint>
+                </dt>
+                <dd className="mt-1">
+                  {attempt.physical_job?.observed_state ? (
+                    <Badge status={attempt.physical_job.observed_state.toLowerCase()}>
+                      {humanize(attempt.physical_job.observed_state)}
+                    </Badge>
+                  ) : (
+                    <span className="text-slate-500">Not observed</span>
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-slate-500">
+                  <Hint text={hints.run.replacementEligible}>Replacement eligible</Hint>
                 </dt>
                 <dd>{attempt.replacement_eligible ? "Yes" : "No"}</dd>
               </div>
               <div>
                 <dt className="text-slate-500">
-                  <Hint text={hints.campaign.attemptCost}>Cost</Hint>
+                  <Hint text={hints.run.attemptCost}>Cost</Hint>
                 </dt>
                 <dd>{formatMoney(attempt.cost_microusd)}</dd>
               </div>
               <div>
                 <dt className="text-slate-500">
-                  <Hint text={hints.campaign.attemptRecorded}>Recorded</Hint>
+                  <Hint text={hints.run.attemptRecorded}>Recorded</Hint>
                 </dt>
                 <dd>{formatDate(attempt.created_at)}</dd>
               </div>
               <div className="sm:col-span-3">
                 <dt className="text-slate-500">
-                  <Hint text={hints.campaign.attemptMetrics}>Metrics</Hint>
+                  <Hint text={hints.run.attemptMetrics}>Metrics</Hint>
                 </dt>
                 <dd className="mt-1 flex flex-wrap gap-2">
                   {Object.entries(attempt.metrics).length ? (
@@ -1612,7 +1645,6 @@ export function TaskPage() {
           </Card>
         ))}
       </div>
-      <CampaignJobs campaignId={campaignId} />
     </QueryContent>
   );
 }
@@ -1646,11 +1678,11 @@ export function EndpointsPage() {
       ),
     },
     {
-      accessorKey: "campaign_id",
-      header: () => <Hint text={hints.endpoints.campaign}>Run</Hint>,
+      accessorKey: "run_id",
+      header: () => <Hint text={hints.endpoints.run}>Run</Hint>,
       meta: { className: "min-w-0" },
       cell: ({ getValue }) => (
-        <RunName campaignId={String(getValue())} to={`/runs/${String(getValue())}`} />
+        <RunName runId={String(getValue())} to={`/runs/${String(getValue())}`} />
       ),
     },
     {
@@ -1723,14 +1755,11 @@ export function ResultsPage() {
   const query = useResults(navigation.cursor, filters);
   const columns: ColumnDef<ResultRow>[] = [
     {
-      accessorKey: "campaign_id",
-      header: () => <Hint text={hints.campaign.identity}>Run</Hint>,
+      accessorKey: "run_id",
+      header: () => <Hint text={hints.run.identity}>Run</Hint>,
       meta: { className: "min-w-0" },
       cell: ({ row }) => (
-        <RunName
-          campaignId={row.original.campaign_id}
-          to={`/runs/${row.original.campaign_id}`}
-        />
+        <RunName runId={row.original.run_id} to={`/runs/${row.original.run_id}`} />
       ),
     },
     {
@@ -2013,7 +2042,7 @@ export function ResultPage() {
       cell: ({ row }) => (
         <Link
           className="font-mono text-xs text-cyan-300 hover:underline"
-          to={`/runs/${item.campaign_id}/tasks/${row.original.task_id}`}
+          to={`/runs/${item.run_id}/tasks/${row.original.task_id}`}
         >
           {row.original.task_id}
         </Link>
@@ -2101,7 +2130,7 @@ export function ResultPage() {
               ? "—"
               : formatMoney(item.observed_cost_microusd)
           }
-          note="Attempt receipts plus recorded Job and Sandbox hardware"
+          note="Attempt receipts plus recorded physical Job hardware"
           icon={CircleDollarSign}
           hint={hints.results.observedCost}
         />
@@ -2162,7 +2191,7 @@ export function ResultPage() {
           <div>
             <dt className="text-slate-500">Run</dt>
             <dd className="mt-1">
-              <RunName campaignId={item.campaign_id} to={`/runs/${item.campaign_id}`} />
+              <RunName runId={item.run_id} to={`/runs/${item.run_id}`} />
             </dd>
           </div>
         </dl>
@@ -2293,18 +2322,16 @@ export function AuditPage() {
     },
     {
       accessorFn: (row) => {
-        const campaignId = row.data.campaign_id;
-        return typeof campaignId === "string"
-          ? campaignId
-          : String(row.data.record_id ?? row.id);
+        const runId = row.data.run_id;
+        return typeof runId === "string" ? runId : String(row.data.record_id ?? row.id);
       },
       id: "record_id",
       header: () => <Hint text={hints.audit.identity}>Identity</Hint>,
       meta: { className: "min-w-0" },
       cell: ({ row }) => {
-        const campaignId = row.original.data.campaign_id;
-        if (typeof campaignId === "string")
-          return <RunName campaignId={campaignId} to={`/runs/${campaignId}`} />;
+        const runId = row.original.data.run_id;
+        if (typeof runId === "string")
+          return <RunName runId={runId} to={`/runs/${runId}`} />;
         return (
           <span className="font-mono text-xs">
             {shortId(String(row.original.data.record_id ?? row.original.id))}

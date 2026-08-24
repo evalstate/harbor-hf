@@ -12,7 +12,7 @@ const schema = z.object({
   HARBOR_HF_AUTH_PATH: z.string().min(1).default("/tmp/harbor-hf/auth.sqlite"),
   HARBOR_HF_PROFILES_ROOT: z.string().min(1).default("./profiles"),
   HARBOR_HF_CAPACITY_PROFILE_ALIAS: z.string().min(2).max(160).optional(),
-  HARBOR_HF_MAX_ACTIVE_SANDBOXES: z.coerce.number().int().min(1).max(1024).default(16),
+  HARBOR_HF_MAX_ACTIVE_JOBS: z.coerce.number().int().min(1).max(1024).default(16),
   HARBOR_HF_WEB_ROOT: z.string().min(1).default("./apps/control-web/dist"),
   HARBOR_HF_AUTH_MODE: z.enum(["oauth", "development"]).default("oauth"),
   HARBOR_HF_WRITE_MODE: z.enum(["disabled", "canary", "enabled"]).default("disabled"),
@@ -30,6 +30,12 @@ const schema = z.object({
     .min(100)
     .max(60000)
     .default(2000),
+  HARBOR_HF_SYNC_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1000)
+    .max(300000)
+    .default(30000),
   HARBOR_HF_OBSERVE_INTERVAL_MS: z.coerce
     .number()
     .int()
@@ -57,7 +63,7 @@ export interface AppConfig {
   auth_path: string;
   profiles_root: string;
   capacity_profile_alias: string | null;
-  max_active_sandboxes: number;
+  max_active_jobs: number;
   web_root: string;
   auth_mode: "oauth" | "development";
   write_mode: "disabled" | "canary" | "enabled";
@@ -73,6 +79,7 @@ export interface AppConfig {
   hf_token: string | null;
   hf_inference_token: string | null;
   reconcile_interval_ms: number;
+  sync_interval_ms: number;
   observe_interval_ms: number;
   worker_receipt_grace_ms: number;
   source_revision: string;
@@ -149,7 +156,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     auth_path: resolve(parsed.HARBOR_HF_AUTH_PATH),
     profiles_root: resolve(parsed.HARBOR_HF_PROFILES_ROOT),
     capacity_profile_alias: parsed.HARBOR_HF_CAPACITY_PROFILE_ALIAS ?? null,
-    max_active_sandboxes: parsed.HARBOR_HF_MAX_ACTIVE_SANDBOXES,
+    max_active_jobs: parsed.HARBOR_HF_MAX_ACTIVE_JOBS,
     web_root: resolve(parsed.HARBOR_HF_WEB_ROOT),
     auth_mode: parsed.HARBOR_HF_AUTH_MODE,
     write_mode: parsed.HARBOR_HF_WRITE_MODE,
@@ -158,6 +165,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     hf_token: parsed.HF_TOKEN ?? null,
     hf_inference_token: parsed.HF_INFERENCE_TOKEN ?? null,
     reconcile_interval_ms: parsed.HARBOR_HF_RECONCILE_INTERVAL_MS,
+    sync_interval_ms: parsed.HARBOR_HF_SYNC_INTERVAL_MS,
     observe_interval_ms: parsed.HARBOR_HF_OBSERVE_INTERVAL_MS,
     worker_receipt_grace_ms: parsed.HARBOR_HF_WORKER_RECEIPT_GRACE_MS,
     source_revision: parsed.HARBOR_HF_SOURCE_REVISION,

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from harbor_hf.executions import ExecutionLock, build_execution_lock
 from harbor_hf.harbor_adapter import build_execution_request
 from harbor_hf.models import (
     DeploymentProfile,
@@ -17,7 +18,6 @@ from harbor_hf.provider_models import (
     ProviderLimits,
     ProviderTarget,
 )
-from harbor_hf.runs import RunLock, build_run_lock
 from harbor_hf.worker import (
     WorkerError,
     build_harbor_command,
@@ -25,8 +25,8 @@ from harbor_hf.worker import (
 )
 
 
-def _contract_lock(remote_spec: ExperimentSpec) -> RunLock:
-    lock = build_run_lock(remote_spec, run_id="command-contract")
+def _contract_lock(remote_spec: ExperimentSpec) -> ExecutionLock:
+    lock = build_execution_lock(remote_spec, execution_id="command-contract")
     assert isinstance(lock.deployment, DeploymentProfile)
     endpoint = lock.deployment.endpoint
     assert endpoint is not None
@@ -227,7 +227,7 @@ def test_command_rejects_a_lock_without_an_endpoint_binding(
         update={"deployment": lock.deployment.model_copy(update={"endpoint": None})}
     )
 
-    with pytest.raises(WorkerError, match="^run lock has no endpoint binding$"):
+    with pytest.raises(WorkerError, match="^execution lock has no endpoint binding$"):
         build_harbor_command(lock, tmp_path, "https://unused.example", tmp_path)
 
 
@@ -357,7 +357,9 @@ def test_provider_command_applies_locked_openclaw_request_controls(
             )
         }
     )
-    lock = build_run_lock(spec, run_id="provider-command-contract", allow_provider=True)
+    lock = build_execution_lock(
+        spec, execution_id="provider-command-contract", allow_provider=True
+    )
 
     task_name = next(iter(lock.benchmark_task_digests))
     request = build_execution_request(
@@ -435,7 +437,7 @@ def test_endpoint_command_aligns_openclaw_model_with_llama_cpp_alias(
             )
         }
     )
-    lock = build_run_lock(spec, run_id="endpoint-model-contract")
+    lock = build_execution_lock(spec, execution_id="endpoint-model-contract")
     task_name = next(iter(lock.benchmark_task_digests))
 
     request = build_execution_request(
@@ -514,7 +516,9 @@ def test_provider_command_preserves_locked_openclaw_model_capabilities(
             )
         }
     )
-    lock = build_run_lock(spec, run_id="provider-model-contract", allow_provider=True)
+    lock = build_execution_lock(
+        spec, execution_id="provider-model-contract", allow_provider=True
+    )
     task_name = next(iter(lock.benchmark_task_digests))
 
     request = build_execution_request(
@@ -591,7 +595,9 @@ def test_responses_provider_configures_registered_openclaw_codex_runtime(
             )
         }
     )
-    lock = build_run_lock(spec, run_id="codex-provider", allow_provider=True)
+    lock = build_execution_lock(
+        spec, execution_id="codex-provider", allow_provider=True
+    )
     task_name = next(iter(lock.benchmark_task_digests))
 
     request = build_execution_request(
@@ -659,7 +665,7 @@ def test_chat_provider_configures_pi_with_locked_models_json(
             )
         }
     )
-    lock = build_run_lock(spec, run_id="pi-provider", allow_provider=True)
+    lock = build_execution_lock(spec, execution_id="pi-provider", allow_provider=True)
     task_name = next(iter(lock.benchmark_task_digests))
 
     request = build_execution_request(
@@ -709,7 +715,9 @@ def test_provider_command_rejects_an_agent_without_request_control_support(
             "execution": remote_spec.execution.model_copy(update={"attempts": 1}),
         }
     )
-    lock = build_run_lock(spec, run_id="provider-command-contract", allow_provider=True)
+    lock = build_execution_lock(
+        spec, execution_id="provider-command-contract", allow_provider=True
+    )
     lock = lock.model_copy(
         update={"agent": lock.agent.model_copy(update={"name": "unsupported-agent"})}
     )

@@ -1,14 +1,14 @@
-"""FX over the Harbor-HF sandbox inference route."""
+"""FX over the Harbor-HF Job inference route."""
 
 from harbor.agents.installed.fx import Fx
 
-from harbor_hf_agents.support.sandbox_chat_completions import (
-    SandboxChatCompletionsAgent,
+from harbor_hf_agents.support.job_chat_completions import (
+    JobChatCompletionsAgent,
 )
 
 
-class FxAgent(SandboxChatCompletionsAgent, Fx):
-    """Harbor FX bound to the locked sandbox loopback inference route.
+class FxAgent(JobChatCompletionsAgent, Fx):
+    """Harbor FX bound to the locked Job loopback inference route.
 
     Upstream FX reads ``AI_GATEWAY_API_KEY`` from the Job process and talks
     to an OpenAI-compatible gateway. Execution Jobs do not receive that key.

@@ -204,7 +204,7 @@ def ensure_no_policy_conflicts(
     if not isinstance(concurrency, int) or concurrency < 1:
         raise ValueError("Harbor request concurrency must be positive")
     if not isinstance(retry, dict) or retry.get("max_retries") != 0:
-        raise ValueError("Harbor retries must remain disabled for campaign execution")
+        raise ValueError("Harbor retries must remain disabled for execution")
     dataset = _only_mapping(datasets, "dataset")
     if dataset.get("task_names") != policy.expected_task_names:
         raise ValueError("Harbor request tasks disagree with verification policy")

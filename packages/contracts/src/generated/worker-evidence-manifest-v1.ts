@@ -6,7 +6,7 @@ export type WorkerEvidenceDigest = string
 export interface WorkerEvidenceManifestV1 {
 schema_version: "v1"
 kind: "worker.evidence.manifest"
-campaign_id: WorkerEvidenceId
+run_id: WorkerEvidenceId
 action_id: WorkerEvidenceId
 task_id: WorkerEvidenceId
 /**

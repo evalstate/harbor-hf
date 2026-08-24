@@ -40,6 +40,10 @@
       "title": "Attempt",
       "type": "integer"
     },
+    "attempt_id": {
+      "title": "Attempt Id",
+      "type": "string"
+    },
     "delivered_http_status": {
       "maximum": 599,
       "minimum": 100,
@@ -84,10 +88,6 @@
       "title": "Exchange Id",
       "type": "string"
     },
-    "execution_id": {
-      "title": "Execution Id",
-      "type": "string"
-    },
     "finished_at": {
       "format": "date-time",
       "title": "Finished At",
@@ -108,8 +108,12 @@
       "type": "string"
     },
     "provider": {
-      "const": "hf-inference-provider",
       "default": "hf-inference-provider",
+      "enum": [
+        "hf-inference-provider",
+        "openai-api",
+        "google-gemini-api"
+      ],
       "title": "Provider",
       "type": "string"
     },
@@ -176,7 +180,8 @@
     "transformation": {
       "enum": [
         "none",
-        "model_enforced"
+        "model_enforced",
+        "parameters_enforced"
       ],
       "title": "Transformation",
       "type": "string"
@@ -219,15 +224,19 @@
       "type": "object"
     },
     "upstream_url": {
-      "const": "https://router.huggingface.co/v1/chat/completions",
       "default": "https://router.huggingface.co/v1/chat/completions",
+      "enum": [
+        "https://router.huggingface.co/v1/chat/completions",
+        "https://api.openai.com/v1/chat/completions",
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+      ],
       "title": "Upstream Url",
       "type": "string"
     }
   },
   "required": [
     "exchange_id",
-    "execution_id",
+    "attempt_id",
     "trial_id",
     "attempt",
     "requested_model",

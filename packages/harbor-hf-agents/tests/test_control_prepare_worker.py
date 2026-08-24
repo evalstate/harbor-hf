@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from harbor.models.job.lock import TrialLock
+from harbor.models.task.config import TaskConfig as TaskDefinitionConfig
 
 from harbor_hf_agents.support import control_prepare_worker as worker
 
 DIGEST = f"sha256:{'a' * 64}"
 
 
-def _campaign_lock() -> dict:
+def _run_lock() -> dict:
     return {
-        "campaign_id": "campaign-1",
+        "run_id": "run-1",
         "tasks": [
             {
                 "task_id": "task-a-trial-1",
@@ -61,26 +64,26 @@ def _campaign_lock() -> dict:
 
 
 def test_builds_generic_harbor_job_without_name_branches() -> None:
-    config = worker._job_config(_campaign_lock())
+    config = worker._job_config(_run_lock())
 
     assert config.n_attempts == 1
     assert config.retry.max_retries == 0
     assert len(config.agents) == 1
     assert config.agents[0].import_path == "example.agent:Agent"
     assert config.agents[0].model_name == "openai/example/model:provider"
-    assert config.environment.import_path.endswith(":ControlSandboxEnvironment")
+    assert config.environment.import_path.endswith(":ControlJobEnvironment")
 
 
 def test_rejects_benchmark_control_fields() -> None:
-    value = _campaign_lock()
+    value = _run_lock()
     value["profiles"][0]["spec"]["harbor_job"]["agents"] = []
 
     with pytest.raises(RuntimeError, match="cannot set control field agents"):
         worker._job_config(value)
 
 
-def test_reads_exact_campaign_task_mapping() -> None:
-    assert worker._expected_tasks(_campaign_lock()) == (
+def test_reads_exact_run_task_mapping() -> None:
+    assert worker._expected_tasks(_run_lock()) == (
         worker.ExpectedTask(
             task_id="task-a-trial-1",
             source_task_id="task-a",
@@ -115,13 +118,89 @@ def test_locks_the_prepared_command_limit_into_the_environment() -> None:
         }
     )
 
-    prepared = worker._execution_trial_lock(source, "task-a-trial-1", 900, 300)
+    prepared = worker._execution_trial_lock(
+        source,
+        900,
+        20 * 1024 * 1024 * 1024,
+        500_000,
+        "example.invalid/task:release",
+        f"example.invalid/task@{DIGEST}",
+    )
 
     assert prepared.environment.kwargs == {
-        "control_task_id": "task-a-trial-1",
         "control_max_command_seconds": 900,
-        "control_keepalive_seconds": 300,
+        "control_max_transfer_bytes": 1024 * 1024 * 1024,
+        "control_max_transfer_file_bytes": 512 * 1024 * 1024,
+        "control_max_transfer_files": 10_000,
+        "control_max_transfer_path_depth": 32,
+        "control_max_image_bytes": 20 * 1024 * 1024 * 1024,
+        "control_max_image_entries": 500_000,
+        "control_declared_task_image": "example.invalid/task:release",
+        "control_task_image": f"example.invalid/task@{DIGEST}",
     }
+
+
+def test_trial_submission_includes_python_origin_lock_digest() -> None:
+    harbor_lock = TrialLock.model_validate(
+        {
+            "schema_version": 2,
+            "task": {
+                "name": "task-a",
+                "type": "git",
+                "digest": DIGEST,
+                "path": "tasks/task-a",
+                "git_url": "https://github.com/example/benchmark.git",
+                "git_commit_id": "b" * 40,
+            },
+            "install_only": False,
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "example.agent:Agent",
+                "model_name": "openai/example/model:provider",
+                "kwargs": {},
+            },
+            "skills": [],
+            "environment": {"delete": True},
+            "verifier": {"disable": False},
+        }
+    )
+    definition = cast(
+        TaskDefinitionConfig,
+        SimpleNamespace(
+            agent=SimpleNamespace(timeout_sec=60),
+            verifier=SimpleNamespace(timeout_sec=60),
+            environment=SimpleNamespace(
+                build_timeout_sec=60,
+                docker_image="example.invalid/task:release",
+                cpus=1,
+                memory_mb=2048,
+                storage_mb=10240,
+                gpus=0,
+            ),
+        ),
+    )
+    expected = worker.ExpectedTask(
+        task_id="task-a-trial-1",
+        source_task_id="task-a",
+        trial_index=1,
+        input_digest=DIGEST,
+    )
+    _, body = worker._trial_body(
+        expected,
+        harbor_lock,
+        definition,
+        f"example.invalid/task@{DIGEST}",
+        {
+            "max_image_bytes": 20 * 1024 * 1024 * 1024,
+            "max_image_entries": 500_000,
+            "default_cpus": 1,
+            "default_memory_mb": 2048,
+            "default_storage_mb": 10240,
+            "default_gpus": 0,
+        },
+    )
+
+    assert body["trial_lock_digest"] == worker.digest_json(body["trial_lock"])
 
 
 def test_keeps_digest_pinned_images_unchanged() -> None:
@@ -158,4 +237,32 @@ storage_mb = 1024
     )
 
     with pytest.raises(RuntimeError, match="requires a prebuilt task image"):
+        worker._task_definition(task)
+
+
+def test_rejects_a_separate_verifier_image(tmp_path: Path) -> None:
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / "task.toml").write_text(
+        """
+schema_version = "1.1"
+[task]
+name = "example/task"
+[agent]
+timeout_sec = 60
+[verifier]
+timeout_sec = 60
+environment_mode = "separate"
+[verifier.environment]
+docker_image = "example/verifier:release"
+[environment]
+docker_image = "example/task:release"
+cpus = 1
+memory_mb = 1024
+storage_mb = 1024
+""".strip()
+        + "\n"
+    )
+
+    with pytest.raises(RuntimeError, match="separate verifier image"):
         worker._task_definition(task)

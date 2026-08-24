@@ -1,10 +1,6 @@
 {
   "additionalProperties": false,
   "properties": {
-    "campaign_id": {
-      "title": "Campaign Id",
-      "type": "string"
-    },
     "category": {
       "enum": [
         "lost",
@@ -43,6 +39,10 @@
       "title": "Replacement Attempt",
       "type": "integer"
     },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
     "schema_version": {
       "const": "harbor-hf/controller-recovery/v1alpha1",
       "default": "harbor-hf/controller-recovery/v1alpha1",
@@ -51,7 +51,7 @@
     }
   },
   "required": [
-    "campaign_id",
+    "run_id",
     "plan_digest",
     "prior_job_id",
     "prior_attempt",

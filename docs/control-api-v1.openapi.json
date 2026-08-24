@@ -25,9 +25,29 @@
         "tags": [
           "system"
         ],
+        "description": "Reports control initialization without failing the hosting platform health check.",
         "responses": {
           "200": {
-            "description": "Default Response"
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "status"
+                  ],
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "initializing",
+                        "ready"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -208,6 +228,7 @@
                   "required": [
                     "source_revision",
                     "write_mode",
+                    "initialization",
                     "projection",
                     "resource_contract"
                   ],
@@ -221,6 +242,25 @@
                         "canary",
                         "enabled"
                       ]
+                    },
+                    "initialization": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "ready",
+                        "status"
+                      ],
+                      "properties": {
+                        "ready": {
+                          "type": "boolean"
+                        },
+                        "status": {
+                          "enum": [
+                            "initializing",
+                            "ready"
+                          ]
+                        }
+                      }
                     },
                     "projection": {
                       "type": "object",
@@ -316,7 +356,7 @@
                   "required": [
                     "alias",
                     "configured",
-                    "max_active_sandboxes",
+                    "max_active_jobs",
                     "start_burst",
                     "start_refill_tokens",
                     "start_refill_period_seconds",
@@ -336,7 +376,7 @@
                     "configured": {
                       "type": "boolean"
                     },
-                    "max_active_sandboxes": {
+                    "max_active_jobs": {
                       "anyOf": [
                         {
                           "type": "integer"
@@ -405,11 +445,11 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "max_active_sandboxes",
+                  "max_active_jobs",
                   "confirmed"
                 ],
                 "properties": {
-                  "max_active_sandboxes": {
+                  "max_active_jobs": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1024
@@ -435,7 +475,7 @@
                   "required": [
                     "alias",
                     "configured",
-                    "max_active_sandboxes",
+                    "max_active_jobs",
                     "start_burst",
                     "start_refill_tokens",
                     "start_refill_period_seconds",
@@ -455,7 +495,7 @@
                     "configured": {
                       "type": "boolean"
                     },
-                    "max_active_sandboxes": {
+                    "max_active_jobs": {
                       "anyOf": [
                         {
                           "type": "integer"
@@ -564,10 +604,10 @@
         }
       }
     },
-    "/api/v1/campaigns": {
+    "/api/v1/runs": {
       "get": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "parameters": [
           {
@@ -610,12 +650,13 @@
                         "type": "object",
                         "additionalProperties": false,
                         "required": [
-                          "campaign_id",
+                          "run_id",
                           "created_at",
                           "status",
                           "ceiling_microusd",
                           "reserved_microusd",
                           "observed_microusd",
+                          "budget_exceeded",
                           "total_tasks",
                           "terminal_tasks",
                           "admissible_tasks",
@@ -631,7 +672,7 @@
                           "paused"
                         ],
                         "properties": {
-                          "campaign_id": {
+                          "run_id": {
                             "type": "string"
                           },
                           "created_at": {
@@ -649,6 +690,9 @@
                           },
                           "observed_microusd": {
                             "type": "integer"
+                          },
+                          "budget_exceeded": {
+                            "type": "boolean"
                           },
                           "total_tasks": {
                             "type": "integer"
@@ -718,14 +762,14 @@
       },
       "post": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "title": "Campaign submission v1",
+                "title": "Run submission v1",
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
@@ -796,13 +840,13 @@
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
-                    "campaign_id",
+                    "run_id",
                     "action_id",
                     "status_url",
                     "adopted"
                   ],
                   "properties": {
-                    "campaign_id": {
+                    "run_id": {
                       "type": "string"
                     },
                     "action_id": {
@@ -822,10 +866,10 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}": {
+    "/api/v1/runs/{run_id}": {
       "get": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "parameters": [
           {
@@ -833,7 +877,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           }
         ],
@@ -846,12 +890,13 @@
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
-                    "campaign_id",
+                    "run_id",
                     "created_at",
                     "status",
                     "ceiling_microusd",
                     "reserved_microusd",
                     "observed_microusd",
+                    "budget_exceeded",
                     "total_tasks",
                     "terminal_tasks",
                     "admissible_tasks",
@@ -867,7 +912,7 @@
                     "paused"
                   ],
                   "properties": {
-                    "campaign_id": {
+                    "run_id": {
                       "type": "string"
                     },
                     "created_at": {
@@ -885,6 +930,9 @@
                     },
                     "observed_microusd": {
                       "type": "integer"
+                    },
+                    "budget_exceeded": {
+                      "type": "boolean"
                     },
                     "total_tasks": {
                       "type": "integer"
@@ -991,10 +1039,10 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}/capacity": {
+    "/api/v1/runs/{run_id}/capacity": {
       "get": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "parameters": [
           {
@@ -1002,7 +1050,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           }
         ],
@@ -1019,8 +1067,8 @@
                     "profile_id",
                     "namespace_limit",
                     "namespace_active",
-                    "campaign_limit",
-                    "campaign_active",
+                    "run_limit",
+                    "run_active",
                     "hardware_limit",
                     "hardware_active",
                     "provider_limit",
@@ -1028,7 +1076,6 @@
                     "start_tokens",
                     "start_burst",
                     "queued",
-                    "cleanup_held",
                     "limiting_factor",
                     "not_before"
                   ],
@@ -1059,10 +1106,10 @@
                     "namespace_active": {
                       "type": "integer"
                     },
-                    "campaign_limit": {
+                    "run_limit": {
                       "type": "integer"
                     },
-                    "campaign_active": {
+                    "run_active": {
                       "type": "integer"
                     },
                     "hardware_limit": {
@@ -1105,9 +1152,6 @@
                       ]
                     },
                     "queued": {
-                      "type": "integer"
-                    },
-                    "cleanup_held": {
                       "type": "integer"
                     },
                     "limiting_factor": {
@@ -1189,10 +1233,10 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}/lock": {
+    "/api/v1/runs/{run_id}/lock": {
       "get": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "parameters": [
           {
@@ -1200,7 +1244,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           }
         ],
@@ -1321,10 +1365,10 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}/prepared-job": {
+    "/api/v1/runs/{run_id}/prepared-job": {
       "post": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "requestBody": {
           "required": true,
@@ -1343,6 +1387,7 @@
                       "trial_index",
                       "input_digest",
                       "trial_lock",
+                      "trial_lock_digest",
                       "declared_image",
                       "image",
                       "cpus",
@@ -1385,6 +1430,10 @@
                         "type": "object",
                         "minProperties": 1,
                         "additionalProperties": true
+                      },
+                      "trial_lock_digest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
                       },
                       "declared_image": {
                         "type": "string",
@@ -1480,7 +1529,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           }
         ],
@@ -1528,7 +1577,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           }
         ],
@@ -1539,7 +1588,7 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}/prepared-job/trials/{task_id}": {
+    "/api/v1/runs/{run_id}/prepared-job/trials/{task_id}": {
       "get": {
         "parameters": [
           {
@@ -1547,7 +1596,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           },
           {
@@ -1566,413 +1615,18 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes": {
-      "post": {
-        "tags": [
-          "campaigns"
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "campaign_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "task_id",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "sandbox_id",
-                    "state"
-                  ],
-                  "properties": {
-                    "sandbox_id": {
-                      "type": "string"
-                    },
-                    "state": {
-                      "type": "string"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "sandbox_id",
-                    "state",
-                    "limiting_factor",
-                    "not_before"
-                  ],
-                  "properties": {
-                    "sandbox_id": {
-                      "type": "string"
-                    },
-                    "state": {
-                      "enum": [
-                        "QUEUED"
-                      ]
-                    },
-                    "limiting_factor": {
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "not_before": {
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "format": "date-time"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}/observe": {
-      "post": {
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "campaign_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "task_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "sandbox_id",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}/exec": {
-      "post": {
-        "tags": [
-          "campaigns"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "command",
-                  "cwd",
-                  "timeout_seconds"
-                ],
-                "properties": {
-                  "command": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 128,
-                    "items": {
-                      "type": "string",
-                      "maxLength": 1048576
-                    }
-                  },
-                  "cwd": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512
-                  },
-                  "timeout_seconds": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 86400
-                  }
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "campaign_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "task_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "sandbox_id",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}/files": {
-      "put": {
-        "tags": [
-          "campaigns"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "path",
-                  "content_digest",
-                  "content_base64"
-                ],
-                "properties": {
-                  "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512
-                  },
-                  "content_digest": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$"
-                  },
-                  "content_base64": {
-                    "type": "string",
-                    "maxLength": 89478488
-                  },
-                  "mode": {
-                    "type": "string",
-                    "pattern": "^0[0-7]{3}$"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "campaign_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "task_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "sandbox_id",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}/files/read": {
-      "post": {
-        "tags": [
-          "campaigns"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "path"
-                ],
-                "properties": {
-                  "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512
-                  }
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "campaign_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "task_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "sandbox_id",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/sandboxes/{sandbox_id}": {
-      "delete": {
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "campaign_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "task_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "sandbox_id",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
-    "/api/v1/campaigns/{campaign_id}/tasks": {
+    "/api/v1/runs/{run_id}/tasks": {
       "get": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "maxLength": 128
-            },
-            "in": "query",
-            "name": "cursor",
-            "required": false
-          },
-          {
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 50
-            },
-            "in": "query",
-            "name": "limit",
-            "required": false
-          },
           {
             "schema": {
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           }
         ],
@@ -1995,14 +1649,14 @@
                         "type": "object",
                         "additionalProperties": false,
                         "required": [
-                          "campaign_id",
+                          "run_id",
                           "task_id",
                           "input_digest",
                           "terminal_outcome",
                           "selected_attempt_id"
                         ],
                         "properties": {
-                          "campaign_id": {
+                          "run_id": {
                             "type": "string"
                           },
                           "task_id": {
@@ -2052,10 +1706,10 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}": {
+    "/api/v1/runs/{run_id}/tasks/{task_id}": {
       "get": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "parameters": [
           {
@@ -2063,7 +1717,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           },
           {
@@ -2093,14 +1747,14 @@
                       "type": "object",
                       "additionalProperties": false,
                       "required": [
-                        "campaign_id",
+                        "run_id",
                         "task_id",
                         "input_digest",
                         "terminal_outcome",
                         "selected_attempt_id"
                       ],
                       "properties": {
-                        "campaign_id": {
+                        "run_id": {
                           "type": "string"
                         },
                         "task_id": {
@@ -2139,13 +1793,14 @@
                         "required": [
                           "attempt_id",
                           "action_id",
-                          "campaign_id",
+                          "run_id",
                           "task_id",
                           "outcome",
                           "replacement_eligible",
                           "cost_microusd",
                           "metrics",
-                          "created_at"
+                          "created_at",
+                          "physical_job"
                         ],
                         "properties": {
                           "attempt_id": {
@@ -2154,7 +1809,7 @@
                           "action_id": {
                             "type": "string"
                           },
-                          "campaign_id": {
+                          "run_id": {
                             "type": "string"
                           },
                           "task_id": {
@@ -2178,6 +1833,54 @@
                           "created_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "physical_job": {
+                            "anyOf": [
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "resource_id",
+                                  "observed_state",
+                                  "inspect_url"
+                                ],
+                                "properties": {
+                                  "resource_id": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "observed_state": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "inspect_url": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            ]
                           }
                         }
                       }
@@ -2191,14 +1894,25 @@
                           "type": "object",
                           "additionalProperties": false,
                           "required": [
+                            "source_action_id",
                             "last_attempt_id",
                             "attempt_count",
                             "reason",
                             "created_at"
                           ],
                           "properties": {
-                            "last_attempt_id": {
+                            "source_action_id": {
                               "type": "string"
+                            },
+                            "last_attempt_id": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
                             },
                             "attempt_count": {
                               "type": "integer"
@@ -2273,320 +1987,17 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/action-dispositions": {
-      "get": {
-        "tags": [
-          "campaigns",
-          "audit"
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "maxLength": 128
-            },
-            "in": "query",
-            "name": "cursor",
-            "required": false
-          },
-          {
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 50
-            },
-            "in": "query",
-            "name": "limit",
-            "required": false
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "campaign_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "task_id",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "items",
-                    "next_cursor"
-                  ],
-                  "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": [
-                          "action_id",
-                          "campaign_id",
-                          "task_id",
-                          "recorded_outcome",
-                          "recorded_observed_state",
-                          "effective_outcome",
-                          "effective_observed_state",
-                          "effective_error_code",
-                          "reason_code",
-                          "corrected_at",
-                          "actor_role",
-                          "disposition_record_id",
-                          "batch_id",
-                          "batch_size"
-                        ],
-                        "properties": {
-                          "action_id": {
-                            "type": "string"
-                          },
-                          "campaign_id": {
-                            "type": "string"
-                          },
-                          "task_id": {
-                            "type": "string"
-                          },
-                          "recorded_outcome": {
-                            "type": "string"
-                          },
-                          "recorded_observed_state": {
-                            "type": "string"
-                          },
-                          "effective_outcome": {
-                            "type": "string"
-                          },
-                          "effective_observed_state": {
-                            "type": "string"
-                          },
-                          "effective_error_code": {
-                            "type": "string"
-                          },
-                          "reason_code": {
-                            "type": "string"
-                          },
-                          "corrected_at": {
-                            "type": "string",
-                            "format": "date-time"
-                          },
-                          "actor_role": {
-                            "type": "string"
-                          },
-                          "disposition_record_id": {
-                            "type": "string"
-                          },
-                          "batch_id": {
-                            "type": "string"
-                          },
-                          "batch_size": {
-                            "type": "integer"
-                          }
-                        }
-                      }
-                    },
-                    "next_cursor": {
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
+    "/api/v1/runs/{run_id}/actions": {
       "post": {
         "tags": [
-          "campaigns",
-          "audit"
+          "runs"
         ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "action_ids",
-                  "reason",
-                  "confirmed"
-                ],
-                "properties": {
-                  "action_ids": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 100,
-                    "uniqueItems": true,
-                    "items": {
-                      "type": "string",
-                      "pattern": "^[a-z0-9][a-z0-9._-]{1,159}$"
-                    }
-                  },
-                  "reason": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1000
-                  },
-                  "confirmed": {
-                    "enum": [
-                      true
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "campaign_id",
-            "required": true
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "in": "path",
-            "name": "task_id",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "batch_id",
-                    "batch_digest",
-                    "items"
-                  ],
-                  "properties": {
-                    "batch_id": {
-                      "type": "string"
-                    },
-                    "batch_digest": {
-                      "type": "string"
-                    },
-                    "items": {
-                      "type": "array",
-                      "maxItems": 100,
-                      "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": [
-                          "action_id",
-                          "disposition_record_id",
-                          "created"
-                        ],
-                        "properties": {
-                          "action_id": {
-                            "type": "string"
-                          },
-                          "disposition_record_id": {
-                            "type": "string"
-                          },
-                          "created": {
-                            "type": "boolean"
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "201": {
-            "description": "Default Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "batch_id",
-                    "batch_digest",
-                    "items"
-                  ],
-                  "properties": {
-                    "batch_id": {
-                      "type": "string"
-                    },
-                    "batch_digest": {
-                      "type": "string"
-                    },
-                    "items": {
-                      "type": "array",
-                      "maxItems": 100,
-                      "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": [
-                          "action_id",
-                          "disposition_record_id",
-                          "created"
-                        ],
-                        "properties": {
-                          "action_id": {
-                            "type": "string"
-                          },
-                          "disposition_record_id": {
-                            "type": "string"
-                          },
-                          "created": {
-                            "type": "boolean"
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/campaigns/{campaign_id}/actions": {
-      "post": {
-        "tags": [
-          "campaigns"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "title": "Campaign action v1",
+                "title": "Run action v1",
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
@@ -2652,7 +2063,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           }
         ],
@@ -2665,13 +2076,13 @@
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
-                    "campaign_id",
+                    "run_id",
                     "action_id",
                     "status_url",
                     "adopted"
                   ],
                   "properties": {
-                    "campaign_id": {
+                    "run_id": {
                       "type": "string"
                     },
                     "action_id": {
@@ -2691,10 +2102,10 @@
         }
       }
     },
-    "/api/v1/campaigns/{campaign_id}/tasks/{task_id}/attempts": {
+    "/api/v1/runs/{run_id}/tasks/{task_id}/attempts": {
       "post": {
         "tags": [
-          "campaigns"
+          "runs"
         ],
         "requestBody": {
           "required": true,
@@ -2816,7 +2227,7 @@
               "type": "string"
             },
             "in": "path",
-            "name": "campaign_id",
+            "name": "run_id",
             "required": true
           },
           {
@@ -2899,14 +2310,14 @@
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
-                    "campaign_id",
+                    "run_id",
                     "task_id",
                     "attempt_id",
                     "status_url",
                     "adopted"
                   ],
                   "properties": {
-                    "campaign_id": {
+                    "run_id": {
                       "type": "string"
                     },
                     "task_id": {
@@ -3036,6 +2447,7 @@
         "tags": [
           "resources"
         ],
+        "description": "Lists Jobs globally with offset pagination. When run_id is present, returns every latest Job for that Run in one stable response with next_cursor set to null.",
         "parameters": [
           {
             "schema": {
@@ -3064,8 +2476,9 @@
               "maxLength": 160
             },
             "in": "query",
-            "name": "campaign_id",
-            "required": false
+            "name": "run_id",
+            "required": false,
+            "description": "Return every latest Job for this Run in one response. cursor and limit do not apply."
           }
         ],
         "responses": {
@@ -3088,7 +2501,7 @@
                         "additionalProperties": false,
                         "required": [
                           "action_id",
-                          "campaign_id",
+                          "run_id",
                           "action_kind",
                           "generation",
                           "target",
@@ -3096,6 +2509,7 @@
                           "observed_state",
                           "resource_id",
                           "created_at",
+                          "launch_action_id",
                           "inspect_url",
                           "cost_microusd",
                           "assigned_tasks"
@@ -3104,7 +2518,7 @@
                           "action_id": {
                             "type": "string"
                           },
-                          "campaign_id": {
+                          "run_id": {
                             "type": "string"
                           },
                           "action_kind": {
@@ -3149,6 +2563,9 @@
                           "created_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "launch_action_id": {
+                            "type": "string"
                           },
                           "inspect_url": {
                             "anyOf": [
@@ -3234,7 +2651,7 @@
                         "additionalProperties": false,
                         "required": [
                           "action_id",
-                          "campaign_id",
+                          "run_id",
                           "endpoint_id",
                           "desired_state",
                           "observed_state",
@@ -3247,7 +2664,7 @@
                           "action_id": {
                             "type": "string"
                           },
-                          "campaign_id": {
+                          "run_id": {
                             "type": "string"
                           },
                           "endpoint_id": {
@@ -3423,7 +2840,7 @@
         "tags": [
           "results"
         ],
-        "description": "Official snapshot rows. Anonymous GET is allowed. Campaigns and result details stay authenticated.",
+        "description": "Official snapshot rows. Anonymous GET is allowed. Runs and result details stay authenticated.",
         "responses": {
           "200": {
             "description": "Default Response",
@@ -3482,7 +2899,7 @@
                           "rank",
                           "pareto",
                           "configuration_digest",
-                          "campaign_id",
+                          "run_id",
                           "publication_id",
                           "published_at",
                           "benchmark",
@@ -3509,7 +2926,7 @@
                           "configuration_digest": {
                             "type": "string"
                           },
-                          "campaign_id": {
+                          "run_id": {
                             "type": "string"
                           },
                           "publication_id": {
@@ -3704,7 +3121,7 @@
                         "additionalProperties": false,
                         "required": [
                           "publication_id",
-                          "campaign_id",
+                          "run_id",
                           "status",
                           "catalog_digest",
                           "published_at"
@@ -3713,7 +3130,7 @@
                           "publication_id": {
                             "type": "string"
                           },
-                          "campaign_id": {
+                          "run_id": {
                             "type": "string"
                           },
                           "status": {
@@ -3732,16 +3149,6 @@
                           "published_at": {
                             "type": "string",
                             "format": "date-time"
-                          },
-                          "run_id": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
                           },
                           "benchmark": {
                             "anyOf": [
@@ -4205,7 +3612,7 @@
                   "additionalProperties": false,
                   "required": [
                     "publication_id",
-                    "campaign_id",
+                    "run_id",
                     "status",
                     "catalog_digest",
                     "published_at"
@@ -4214,7 +3621,7 @@
                     "publication_id": {
                       "type": "string"
                     },
-                    "campaign_id": {
+                    "run_id": {
                       "type": "string"
                     },
                     "status": {
@@ -4233,16 +3640,6 @@
                     "published_at": {
                       "type": "string",
                       "format": "date-time"
-                    },
-                    "run_id": {
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
                     },
                     "benchmark": {
                       "anyOf": [
@@ -4810,6 +4207,7 @@
         "tags": [
           "audit"
         ],
+        "description": "Streams bounded durable-event replay and live updates. cursor.reset tells clients to refetch current state and resume from data.latest_cursor.",
         "parameters": [
           {
             "schema": {
@@ -4818,12 +4216,21 @@
             },
             "in": "query",
             "name": "cursor",
-            "required": false
+            "required": false,
+            "description": "Last durable cursor received. Replay is capped; stale cursors receive cursor.reset."
           }
         ],
         "responses": {
           "200": {
-            "description": "Default Response"
+            "description": "Server-Sent Events frames. Durable envelopes have an id. cursor.reset has no id and includes reason, latest_cursor, and replay_limit metadata.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-Sent Events frames. Durable envelopes have an id. cursor.reset has no id and includes reason, latest_cursor, and replay_limit metadata."
+                }
+              }
+            }
           }
         }
       }
@@ -4839,7 +4246,7 @@
       "name": "system"
     },
     {
-      "name": "campaigns"
+      "name": "runs"
     },
     {
       "name": "resources"

@@ -18,7 +18,7 @@ _WEBHOOK_DOMAINS = ("repo",)
 
 
 class AutomationError(RuntimeError):
-    """Raised when campaign reconciliation automation is malformed."""
+    """Raised when run reconciliation automation is malformed."""
 
 
 class FrozenModel(BaseModel):
@@ -30,7 +30,7 @@ class AutomationRequest(FrozenModel):
     schedule: str = Field(min_length=1)
     remote: RemoteExecutionSpec
     secret_names: list[str] = Field(default_factory=list)
-    campaign_ids: list[str] = Field(default_factory=list, min_length=1)
+    run_ids: list[str] = Field(default_factory=list, min_length=1)
     suspended: bool = False
 
     @field_validator("secret_names")
@@ -45,13 +45,13 @@ class AutomationRequest(FrozenModel):
             raise ValueError("automation secret names must be environment variables")
         return value
 
-    @field_validator("campaign_ids")
+    @field_validator("run_ids")
     @classmethod
-    def campaign_scope_is_canonical(cls, value: list[str]) -> list[str]:
+    def run_scope_is_canonical(cls, value: list[str]) -> list[str]:
         if len(value) != len(set(value)):
-            raise ValueError("automation campaign ids must be unique")
+            raise ValueError("automation run ids must be unique")
         if any(not item or item != item.strip() for item in value):
-            raise ValueError("automation campaign ids must be non-empty")
+            raise ValueError("automation run ids must be non-empty")
         return value
 
 
@@ -70,7 +70,7 @@ class AutomationPlan(FrozenModel):
     image: str
     command: list[str]
     secret_names: list[str]
-    campaign_ids: list[str]
+    run_ids: list[str]
     control_repository: str
 
 
@@ -88,13 +88,13 @@ def scheduled_controller_watchdog_command(request: AutomationRequest) -> list[st
     command = locked_source_command(
         request.remote.worker,
         "harbor-hf",
-        "campaign",
+        "run",
         "watchdog",
         "--namespace",
         request.namespace,
     )
-    for campaign_id in request.campaign_ids:
-        command.extend(["--campaign-id", campaign_id])
+    for run_id in request.run_ids:
+        command.extend(["--run-id", run_id])
     return command
 
 
@@ -208,14 +208,14 @@ def automation_plan(request: AutomationRequest) -> AutomationPlan:
             request.remote.job.token_secret_name,
             *request.secret_names,
         ],
-        campaign_ids=request.campaign_ids,
+        run_ids=request.run_ids,
         control_repository=coordination_repository(request.namespace),
     )
 
 
 def _managed_labels(namespace: str) -> dict[str, str]:
     return {
-        "harbor-hf-role": "campaign-controller-watchdog",
+        "harbor-hf-role": "run-controller-watchdog",
         "harbor-hf-namespace": namespace,
     }
 

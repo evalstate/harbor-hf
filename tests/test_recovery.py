@@ -8,24 +8,18 @@ from typing import cast
 
 import pytest
 
-from harbor_hf.campaigns import (
-    CampaignLock,
-    CampaignRecoveryPolicy,
-    build_campaign_lock,
-    build_campaign_plan,
-)
 from harbor_hf.control import (
     ActionOutcomePayload,
     ActionReservedPayload,
-    CampaignEvent,
-    CampaignSubmittedPayload,
+    AttemptOutcomePayload,
+    AttemptStartedPayload,
     CancellationPayload,
     EventKind,
     EventPayload,
-    ExecutionOutcomePayload,
-    ExecutionStartedPayload,
     LifecyclePayload,
     RetryCategory,
+    RunEvent,
+    RunSubmittedPayload,
     SubjectType,
     TerminalPayload,
     WaveLifecyclePayload,
@@ -45,22 +39,28 @@ from harbor_hf.recovery import (
     project_recovery,
     seal_partial_projection,
 )
+from harbor_hf.runs import (
+    RunLock,
+    RunRecoveryPolicy,
+    build_run_lock,
+    build_run_plan,
+)
 
 NOW = datetime(2026, 7, 14, tzinfo=UTC)
 
 
-def _campaign(
+def _run(
     remote_spec: ExperimentSpec,
     *,
     tasks: int = 1,
     max_trials_per_shard: int = 64,
     max_shards_per_wave: int = 8,
-    max_physical_executions_per_trial: int = 3,
+    max_physical_attempts_per_trial: int = 3,
     retry_base_seconds: int = 10,
     retry_max_seconds: int = 60,
     cancellation_grace_seconds: int = 0,
     spend_cap_microusd: int | None = None,
-) -> tuple[CampaignLock, CampaignEvent]:
+) -> tuple[RunLock, RunEvent]:
     task_digests = {
         f"task-{index}": f"sha256:{index:064x}" for index in range(1, tasks + 1)
     }
@@ -77,48 +77,48 @@ def _campaign(
             ),
         }
     )
-    recovery_policy = CampaignRecoveryPolicy(
-        max_physical_executions_per_trial=max_physical_executions_per_trial,
+    recovery_policy = RunRecoveryPolicy(
+        max_physical_attempts_per_trial=max_physical_attempts_per_trial,
         retry_base_seconds=retry_base_seconds,
         retry_max_seconds=retry_max_seconds,
         cancellation_grace_seconds=cancellation_grace_seconds,
         spend_cap_microusd=spend_cap_microusd,
     )
-    lock = build_campaign_lock(
-        build_campaign_plan(spec, recovery_policy=recovery_policy),
-        "campaign-recovery",
+    lock = build_run_lock(
+        build_run_plan(spec, recovery_policy=recovery_policy),
+        "run-recovery",
         clock=lambda: NOW,
     )
     submitted = _event(
         lock,
         1,
-        "campaign",
-        lock.campaign_id,
-        "campaign.submitted",
-        CampaignSubmittedPayload(plan_digest=lock.plan_digest),
+        "run",
+        lock.run_id,
+        "run.submitted",
+        RunSubmittedPayload(plan_digest=lock.plan_digest),
     )
     return lock, submitted
 
 
-def _with_locked_estimate(lock: CampaignLock, value: int) -> CampaignLock:
+def _with_locked_estimate(lock: RunLock, value: int) -> RunLock:
     return lock.model_copy(
         update={
-            "runs": [
+            "executions": [
                 run.model_copy(update={"estimated_wave_cost_microusd": value})
-                for run in lock.runs
+                for run in lock.executions
             ]
         }
     )
 
 
 def _event(
-    lock: CampaignLock,
+    lock: RunLock,
     sequence: int,
     subject_type: SubjectType,
     subject_id: str,
     kind: EventKind,
     payload: EventPayload,
-) -> CampaignEvent:
+) -> RunEvent:
     return new_event(
         subject_type=subject_type,
         subject_id=subject_id,
@@ -130,39 +130,39 @@ def _event(
     )
 
 
-def _execution_events(
-    lock: CampaignLock,
+def _attempt_events(
+    lock: RunLock,
     sequence: int,
     *,
-    execution_id: str,
+    attempt_id: str,
     attempt: int,
     category: RetryCategory | None,
     spend: int = 0,
     shard_index: int = 0,
-) -> list[CampaignEvent]:
-    shard = lock.runs[0].shards[shard_index]
+) -> list[RunEvent]:
+    shard = lock.executions[0].shards[shard_index]
     trial = shard.trials[0]
     started = _event(
         lock,
         sequence,
-        "execution",
-        execution_id,
-        "execution.started",
-        ExecutionStartedPayload(
+        "attempt",
+        attempt_id,
+        "attempt.started",
+        AttemptStartedPayload(
             trial_id=trial.trial_id,
             shard_id=shard.shard_id,
             physical_attempt=attempt,
             wave_id="wave-one",
         ),
     )
-    completed_kind = "execution.completed" if category is None else "execution.failed"
+    completed_kind = "attempt.completed" if category is None else "attempt.failed"
     outcome = _event(
         lock,
         sequence + 1,
-        "execution",
-        execution_id,
+        "attempt",
+        attempt_id,
         completed_kind,
-        ExecutionOutcomePayload(
+        AttemptOutcomePayload(
             trial_id=trial.trial_id,
             physical_attempt=attempt,
             category=category,
@@ -173,9 +173,9 @@ def _execution_events(
 
 
 def _wave_event(
-    lock: CampaignLock, sequence: int, phase: str, *, shard_index: int = 0
-) -> CampaignEvent:
-    run = lock.runs[0]
+    lock: RunLock, sequence: int, phase: str, *, shard_index: int = 0
+) -> RunEvent:
+    run = lock.executions[0]
     shard = run.shards[shard_index]
     return _event(
         lock,
@@ -192,13 +192,13 @@ def _wave_event(
     )
 
 
-def _cancel_event(lock: CampaignLock, sequence: int = 2) -> CampaignEvent:
+def _cancel_event(lock: RunLock, sequence: int = 2) -> RunEvent:
     return _event(
         lock,
         sequence,
-        "campaign",
-        lock.campaign_id,
-        "campaign.cancel-requested",
+        "run",
+        lock.run_id,
+        "run.cancel-requested",
         CancellationPayload(reason="operator request"),
     )
 
@@ -206,11 +206,11 @@ def _cancel_event(lock: CampaignLock, sequence: int = 2) -> CampaignEvent:
 def test_logical_trial_keeps_identity_across_physical_retry(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    first = _execution_events(
+    lock, submitted = _run(remote_spec)
+    first = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
         spend=11,
@@ -222,7 +222,7 @@ def test_logical_trial_keeps_identity_across_physical_retry(
     trial = next(iter(projection.trials.values()))
 
     assert trial.status == "retry_wait"
-    assert list(trial.executions) == ["execution-one"]
+    assert list(trial.attempts) == ["attempt-one"]
     assert waiting.actions == []
     assert waiting.blocked[0].reason == "backoff"
 
@@ -233,10 +233,10 @@ def test_logical_trial_keeps_identity_across_physical_retry(
     assert ready.actions[0].kind == "retry-shard"
     assert ready.actions[0].trial_ids == [trial.trial_id]
 
-    second = _execution_events(
+    second = _attempt_events(
         lock,
         20,
-        execution_id="execution-two",
+        attempt_id="attempt-two",
         attempt=2,
         category=None,
         spend=13,
@@ -251,24 +251,24 @@ def test_logical_trial_keeps_identity_across_physical_retry(
 def test_manual_retry_only_overrides_the_generation_it_requested(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    first = _execution_events(
-        lock, 2, execution_id="execution-one", attempt=1, category="transient"
+    lock, submitted = _run(remote_spec)
+    first = _attempt_events(
+        lock, 2, attempt_id="attempt-one", attempt=1, category="transient"
     )
     manual, _created = durable_shard_retry_event(
         lock,
         [submitted, *first],
-        lock.runs[0].shards[0].shard_id,
+        lock.executions[0].shards[0].shard_id,
         "retry now",
         clock=lambda: NOW + timedelta(seconds=5),
     )
-    second = _execution_events(
-        lock, 20, execution_id="execution-two", attempt=2, category="rate-limit"
+    second = _attempt_events(
+        lock, 20, attempt_id="attempt-two", attempt=2, category="rate-limit"
     )
 
     with_manual = project_recovery(lock, [submitted, *first, manual, *second])
     without_manual = project_recovery(lock, [submitted, *first, *second])
-    trial_id = lock.runs[0].shards[0].trials[0].trial_id
+    trial_id = lock.executions[0].shards[0].trials[0].trial_id
 
     assert with_manual.trials[trial_id].retry_not_before == (
         without_manual.trials[trial_id].retry_not_before
@@ -281,21 +281,19 @@ def test_manual_retry_only_overrides_the_generation_it_requested(
 def test_reserved_retry_targets_are_excluded_from_later_retry_wave(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=2)
-    shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=2)
+    shard = lock.executions[0].shards[0]
 
-    def failure(
-        trial_index: int, sequence: int, execution_id: str
-    ) -> list[CampaignEvent]:
+    def failure(trial_index: int, sequence: int, attempt_id: str) -> list[RunEvent]:
         trial = shard.trials[trial_index]
         return [
             _event(
                 lock,
                 sequence,
-                "execution",
-                execution_id,
-                "execution.started",
-                ExecutionStartedPayload(
+                "attempt",
+                attempt_id,
+                "attempt.started",
+                AttemptStartedPayload(
                     trial_id=trial.trial_id,
                     shard_id=shard.shard_id,
                     physical_attempt=1,
@@ -304,10 +302,10 @@ def test_reserved_retry_targets_are_excluded_from_later_retry_wave(
             _event(
                 lock,
                 sequence + 1,
-                "execution",
-                execution_id,
-                "execution.failed",
-                ExecutionOutcomePayload(
+                "attempt",
+                attempt_id,
+                "attempt.failed",
+                AttemptOutcomePayload(
                     trial_id=trial.trial_id,
                     physical_attempt=1,
                     category="transient",
@@ -315,7 +313,7 @@ def test_reserved_retry_targets_are_excluded_from_later_retry_wave(
             ),
         ]
 
-    first = failure(0, 2, "execution-one")
+    first = failure(0, 2, "attempt-one")
     _projection, first_plan = plan_reconciliation(
         lock, [submitted, *first], now=NOW + timedelta(seconds=20)
     )
@@ -325,8 +323,8 @@ def test_reserved_retry_targets_are_excluded_from_later_retry_wave(
     reserved = _event(
         lock,
         12,
-        "campaign",
-        lock.campaign_id,
+        "run",
+        lock.run_id,
         "action.reserved",
         ActionReservedPayload(
             action_id=retry.action_id,
@@ -335,7 +333,7 @@ def test_reserved_retry_targets_are_excluded_from_later_retry_wave(
             target_ids=retry.target_ids,
         ),
     )
-    second = failure(1, 20, "execution-two")
+    second = failure(1, 20, "attempt-two")
 
     _projection, plan = plan_reconciliation(
         lock,
@@ -363,9 +361,9 @@ def test_terminal_failure_categories_never_retry(
     category: RetryCategory,
     expected: str,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
-        lock, 2, execution_id="execution-one", attempt=1, category=category
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
+        lock, 2, attempt_id="attempt-one", attempt=1, category=category
     )
 
     projection, plan = plan_reconciliation(
@@ -379,9 +377,9 @@ def test_terminal_failure_categories_never_retry(
 def test_benchmark_failure_is_immediately_scored_invalid(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
-        lock, 2, execution_id="execution-one", attempt=1, category="benchmark"
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
+        lock, 2, attempt_id="attempt-one", attempt=1, category="benchmark"
     )
 
     projection, plan = plan_reconciliation(
@@ -403,9 +401,9 @@ def test_benchmark_failure_is_immediately_scored_invalid(
 def test_retry_budget_exhaustion_is_terminal(
     remote_spec: ExperimentSpec, category: RetryCategory
 ) -> None:
-    lock, submitted = _campaign(remote_spec, max_physical_executions_per_trial=1)
-    failed = _execution_events(
-        lock, 2, execution_id="execution-one", attempt=1, category=category
+    lock, submitted = _run(remote_spec, max_physical_attempts_per_trial=1)
+    failed = _attempt_events(
+        lock, 2, attempt_id="attempt-one", attempt=1, category=category
     )
 
     projection, plan = plan_reconciliation(
@@ -423,9 +421,9 @@ def test_retry_budget_exhaustion_is_terminal(
 def test_cancellation_converts_retry_wait_trials_to_terminal_cancelled_counts(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
-        lock, 2, execution_id="execution-one", attempt=1, category="transient"
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
+        lock, 2, attempt_id="attempt-one", attempt=1, category="transient"
     )
 
     projection = project_recovery(
@@ -441,17 +439,17 @@ def test_cancellation_converts_retry_wait_trials_to_terminal_cancelled_counts(
 def test_recorded_cancellation_keeps_normalized_retry_counts_after_reload(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
-        lock, 2, execution_id="execution-one", attempt=1, category="transient"
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
+        lock, 2, attempt_id="attempt-one", attempt=1, category="transient"
     )
     cancelled = _cancel_event(lock, sequence=5)
     terminal = _event(
         lock,
         6,
-        "campaign",
-        lock.campaign_id,
-        "campaign.cancelled",
+        "run",
+        lock.run_id,
+        "run.cancelled",
         TerminalPayload(message="cancellation drained and cleaned"),
     )
 
@@ -466,20 +464,20 @@ def test_recorded_cancellation_keeps_normalized_retry_counts_after_reload(
 def test_seal_partial_projection_preserves_scores_and_types_failed_retry(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2)
-    shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec, tasks=2)
+    shard = lock.executions[0].shards[0]
     scored_trial, failed_trial = shard.trials
-    scored = _execution_events(
-        lock, 2, execution_id="execution-scored", attempt=1, category=None
+    scored = _attempt_events(
+        lock, 2, attempt_id="attempt-scored", attempt=1, category=None
     )
     failed = [
         _event(
             lock,
             4,
-            "execution",
-            "execution-failed",
-            "execution.started",
-            ExecutionStartedPayload(
+            "attempt",
+            "attempt-failed",
+            "attempt.started",
+            AttemptStartedPayload(
                 trial_id=failed_trial.trial_id,
                 shard_id=shard.shard_id,
                 physical_attempt=1,
@@ -489,10 +487,10 @@ def test_seal_partial_projection_preserves_scores_and_types_failed_retry(
         _event(
             lock,
             5,
-            "execution",
-            "execution-failed",
-            "execution.failed",
-            ExecutionOutcomePayload(
+            "attempt",
+            "attempt-failed",
+            "attempt.failed",
+            AttemptOutcomePayload(
                 trial_id=failed_trial.trial_id,
                 physical_attempt=1,
                 category="benchmark",
@@ -502,9 +500,9 @@ def test_seal_partial_projection_preserves_scores_and_types_failed_retry(
     terminal = _event(
         lock,
         7,
-        "campaign",
-        lock.campaign_id,
-        "campaign.partial",
+        "run",
+        lock.run_id,
+        "run.partial",
         TerminalPayload(message="partial"),
     )
     projection = project_recovery(
@@ -517,7 +515,7 @@ def test_seal_partial_projection_preserves_scores_and_types_failed_retry(
     assert sealed.trials[scored_trial.trial_id].outcome == "scored"
     assert sealed.trials[failed_trial.trial_id].status == "invalid"
     assert sealed.trials[failed_trial.trial_id].outcome == "benchmark_failed"
-    assert sealed.runs[lock.runs[0].run_id].status == "complete"
+    assert sealed.executions[lock.executions[0].execution_id].status == "complete"
     assert sealed.counts.complete == 1
     assert sealed.counts.invalid == 1
     assert sealed.counts.retrying == 0
@@ -526,16 +524,16 @@ def test_seal_partial_projection_preserves_scores_and_types_failed_retry(
 def test_seal_partial_projection_rejects_all_failed_run(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
-        lock, 2, execution_id="execution-failed", attempt=1, category="benchmark"
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
+        lock, 2, attempt_id="attempt-failed", attempt=1, category="benchmark"
     )
     terminal = _event(
         lock,
         5,
-        "campaign",
-        lock.campaign_id,
-        "campaign.partial",
+        "run",
+        lock.run_id,
+        "run.partial",
         TerminalPayload(message="partial"),
     )
     projection = project_recovery(
@@ -550,13 +548,13 @@ def test_seal_partial_projection_rejects_all_failed_run(
 def test_seal_partial_projection_rejects_unresolved_trial(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     terminal = _event(
         lock,
         3,
-        "campaign",
-        lock.campaign_id,
-        "campaign.partial",
+        "run",
+        lock.run_id,
+        "run.partial",
         TerminalPayload(message="partial"),
     )
     projection = project_recovery(
@@ -570,8 +568,8 @@ def test_seal_partial_projection_rejects_unresolved_trial(
 def test_valid_completed_trial_is_not_retried_after_reconcile_kill(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=2)
-    shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=2)
+    shard = lock.executions[0].shards[0]
     completed = _event(
         lock,
         2,
@@ -583,10 +581,10 @@ def test_valid_completed_trial_is_not_retried_after_reconcile_kill(
     lost_start = _event(
         lock,
         3,
-        "execution",
-        "execution-lost",
-        "execution.started",
-        ExecutionStartedPayload(
+        "attempt",
+        "attempt-lost",
+        "attempt.started",
+        AttemptStartedPayload(
             trial_id=shard.trials[1].trial_id,
             shard_id=shard.shard_id,
             physical_attempt=1,
@@ -595,10 +593,10 @@ def test_valid_completed_trial_is_not_retried_after_reconcile_kill(
     lost = _event(
         lock,
         4,
-        "execution",
-        "execution-lost",
-        "execution.failed",
-        ExecutionOutcomePayload(
+        "attempt",
+        "attempt-lost",
+        "attempt.failed",
+        AttemptOutcomePayload(
             trial_id=shard.trials[1].trial_id,
             physical_attempt=1,
             category="lost",
@@ -623,7 +621,7 @@ def test_valid_completed_trial_is_not_retried_after_reconcile_kill(
 def test_cancellation_at_every_wave_phase_is_cleanup_first(
     remote_spec: ExperimentSpec, phase: str
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
 
     _projection, plan = plan_reconciliation(
         lock, [submitted, _cancel_event(lock), _wave_event(lock, 3, phase)]
@@ -641,9 +639,9 @@ def test_cancellation_at_every_wave_phase_is_cleanup_first(
 def test_active_execution_is_cancelled_before_wave_cleanup(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    started = _execution_events(
-        lock, 3, execution_id="execution-one", attempt=1, category=None
+    lock, submitted = _run(remote_spec)
+    started = _attempt_events(
+        lock, 3, attempt_id="attempt-one", attempt=1, category=None
     )[0]
 
     _projection, plan = plan_reconciliation(
@@ -661,9 +659,9 @@ def test_active_execution_is_cancelled_before_wave_cleanup(
 def test_cancellation_grace_drains_before_force_cancelling(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, cancellation_grace_seconds=60)
-    started = _execution_events(
-        lock, 4, execution_id="execution-one", attempt=1, category=None
+    lock, submitted = _run(remote_spec, cancellation_grace_seconds=60)
+    started = _attempt_events(
+        lock, 4, attempt_id="attempt-one", attempt=1, category=None
     )[0]
     events = [
         submitted,
@@ -693,7 +691,7 @@ def test_cancellation_grace_drains_before_force_cancelling(
 def test_cleanup_failure_requires_manual_intervention(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
 
     projection, plan = plan_reconciliation(
         lock, [submitted, _wave_event(lock, 2, "cleanup-failed")]
@@ -707,7 +705,7 @@ def test_cleanup_failure_requires_manual_intervention(
 def test_durable_cancellation_request_is_idempotent(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     first, created = durable_cancellation_event(
         lock,
         [submitted],
@@ -730,7 +728,7 @@ def test_durable_cancellation_request_is_idempotent(
 def test_durable_cancellation_request_has_stable_identity_and_requested_time(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     observed_at = NOW + timedelta(seconds=19)
 
     event, created = durable_cancellation_event(
@@ -740,12 +738,12 @@ def test_durable_cancellation_request_has_stable_identity_and_requested_time(
         clock=lambda: observed_at,
     )
 
-    identity = hashlib.sha256(f"{lock.campaign_id}:cancel".encode()).hexdigest()[:32]
+    identity = hashlib.sha256(f"{lock.run_id}:cancel".encode()).hexdigest()[:32]
     assert created is True
     assert event.event_id == f"evt-{identity}"
-    assert event.subject_type == "campaign"
-    assert event.subject_id == lock.campaign_id
-    assert event.kind == "campaign.cancel-requested"
+    assert event.subject_type == "run"
+    assert event.subject_id == lock.run_id
+    assert event.kind == "run.cancel-requested"
     assert event.producer == "cli"
     assert event.observed_at == observed_at
     assert event.payload == CancellationPayload(reason="operator stop")
@@ -754,15 +752,15 @@ def test_durable_cancellation_request_has_stable_identity_and_requested_time(
 def test_durable_shard_retry_request_skips_current_backoff(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
     )
-    shard_id = lock.runs[0].shards[0].shard_id
+    shard_id = lock.executions[0].shards[0].shard_id
     request, created = durable_shard_retry_event(
         lock,
         [submitted, *failed],
@@ -791,15 +789,15 @@ def test_durable_shard_retry_request_skips_current_backoff(
 def test_durable_retry_reopens_spend_exhausted_infrastructure_trial(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
     )
-    trial_id = lock.runs[0].shards[0].trials[0].trial_id
+    trial_id = lock.executions[0].shards[0].trials[0].trial_id
     exhausted = new_event(
         subject_type="trial",
         subject_id=trial_id,
@@ -809,7 +807,7 @@ def test_durable_retry_reopens_spend_exhausted_infrastructure_trial(
         clock=lambda: NOW + timedelta(seconds=4),
         identifier=lambda: "f" * 32,
     )
-    shard_id = lock.runs[0].shards[0].shard_id
+    shard_id = lock.executions[0].shards[0].shard_id
     request, created = durable_shard_retry_event(
         lock,
         [submitted, *failed, exhausted],
@@ -825,10 +823,10 @@ def test_durable_retry_reopens_spend_exhausted_infrastructure_trial(
     assert projection.trials[trial_id].outcome is None
     assert projection.counts.retrying == 1
 
-    completed = _execution_events(
+    completed = _attempt_events(
         lock,
         10,
-        execution_id="execution-two",
+        attempt_id="attempt-two",
         attempt=2,
         category=None,
     )
@@ -842,15 +840,15 @@ def test_durable_retry_reopens_spend_exhausted_infrastructure_trial(
 def test_legacy_shard_retry_request_preserves_its_event_time_generation(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
     )
-    shard_id = lock.runs[0].shards[0].shard_id
+    shard_id = lock.executions[0].shards[0].shard_id
     request, _created = durable_shard_retry_event(
         lock,
         [submitted, *failed],
@@ -873,15 +871,15 @@ def test_legacy_shard_retry_request_preserves_its_event_time_generation(
 def test_multiple_legacy_retry_requests_are_projected_without_recursion(
     remote_spec: ExperimentSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
     )
-    shard_id = lock.runs[0].shards[0].shard_id
+    shard_id = lock.executions[0].shards[0].shard_id
     request, _created = durable_shard_retry_event(
         lock,
         [submitted, *failed],
@@ -916,15 +914,15 @@ def test_multiple_legacy_retry_requests_are_projected_without_recursion(
 def test_durable_shard_retry_request_has_generation_identity_and_exact_payload(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
     )
-    shard = lock.runs[0].shards[0]
+    shard = lock.executions[0].shards[0]
     trial = shard.trials[0]
     observed_at = NOW + timedelta(seconds=11)
 
@@ -938,12 +936,12 @@ def test_durable_shard_retry_request_has_generation_identity_and_exact_payload(
 
     generation = f"{trial.trial_id}:1"
     identity = hashlib.sha256(
-        f"{lock.campaign_id}:{shard.shard_id}:{generation}".encode()
+        f"{lock.run_id}:{shard.shard_id}:{generation}".encode()
     ).hexdigest()[:32]
     assert created is True
     assert event.event_id == f"evt-{identity}"
-    assert event.kind == "campaign.shard-retry-requested"
-    assert event.subject_id == lock.campaign_id
+    assert event.kind == "run.shard-retry-requested"
+    assert event.subject_id == lock.run_id
     assert event.observed_at == observed_at
     assert event.payload.model_dump(mode="json") == {
         "shard_id": shard.shard_id,
@@ -955,15 +953,15 @@ def test_durable_shard_retry_request_has_generation_identity_and_exact_payload(
 def test_retry_request_rejects_generations_outside_its_event_time_shard_state(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=1)
-    failed = _execution_events(
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=1)
+    failed = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
     )
-    first_shard, second_shard = lock.runs[0].shards
+    first_shard, second_shard = lock.executions[0].shards
     first_trial = first_shard.trials[0]
     second_trial = second_shard.trials[0]
     request, _created = durable_shard_retry_event(
@@ -997,15 +995,15 @@ def test_retry_request_rejects_generations_outside_its_event_time_shard_state(
 def test_retry_generation_binding_tolerates_cross_host_clock_skew(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
     )
-    shard = lock.runs[0].shards[0]
+    shard = lock.executions[0].shards[0]
     request, _created = durable_shard_retry_event(
         lock,
         [submitted, *failed],
@@ -1025,20 +1023,20 @@ def test_retry_generation_binding_tolerates_cross_host_clock_skew(
 def test_durable_shard_retry_identity_includes_every_eligible_trial(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=2)
-    shard = lock.runs[0].shards[0]
-    failures: list[CampaignEvent] = []
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=2)
+    shard = lock.executions[0].shards[0]
+    failures: list[RunEvent] = []
     for index, trial in enumerate(shard.trials, 1):
-        execution_id = f"execution-{trial.trial_id}"
+        attempt_id = f"attempt-{trial.trial_id}"
         failures.extend(
             [
                 _event(
                     lock,
                     index * 3,
-                    "execution",
-                    execution_id,
-                    "execution.started",
-                    ExecutionStartedPayload(
+                    "attempt",
+                    attempt_id,
+                    "attempt.started",
+                    AttemptStartedPayload(
                         trial_id=trial.trial_id,
                         shard_id=shard.shard_id,
                         physical_attempt=1,
@@ -1048,10 +1046,10 @@ def test_durable_shard_retry_identity_includes_every_eligible_trial(
                 _event(
                     lock,
                     index * 3 + 1,
-                    "execution",
-                    execution_id,
-                    "execution.failed",
-                    ExecutionOutcomePayload(
+                    "attempt",
+                    attempt_id,
+                    "attempt.failed",
+                    AttemptOutcomePayload(
                         trial_id=trial.trial_id,
                         physical_attempt=1,
                         category="transient",
@@ -1066,7 +1064,7 @@ def test_durable_shard_retry_identity_includes_every_eligible_trial(
 
     generation = ",".join(f"{trial.trial_id}:1" for trial in shard.trials)
     identity = hashlib.sha256(
-        f"{lock.campaign_id}:{shard.shard_id}:{generation}".encode()
+        f"{lock.run_id}:{shard.shard_id}:{generation}".encode()
     ).hexdigest()[:32]
     assert created is True
     assert event.event_id == f"evt-{identity}"
@@ -1075,25 +1073,25 @@ def test_durable_shard_retry_identity_includes_every_eligible_trial(
 def test_durable_shard_retry_rejects_conflicting_event_identity(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    failed = _execution_events(
+    lock, submitted = _run(remote_spec)
+    failed = _attempt_events(
         lock,
         2,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="transient",
     )
-    shard = lock.runs[0].shards[0]
+    shard = lock.executions[0].shards[0]
     retry, _created = durable_shard_retry_event(
         lock, [submitted, *failed], shard.shard_id, "retry"
     )
     conflict = _event(
         lock,
         5,
-        "run",
-        lock.runs[0].run_id,
-        "run.queued",
-        LifecyclePayload(parent_id=lock.campaign_id),
+        "execution",
+        lock.executions[0].execution_id,
+        "execution.queued",
+        LifecyclePayload(parent_id=lock.run_id),
     ).model_copy(update={"event_id": retry.event_id})
 
     with pytest.raises(ValueError) as captured:
@@ -1107,27 +1105,27 @@ def test_durable_shard_retry_rejects_conflicting_event_identity(
 @pytest.mark.parametrize(
     ("transition", "message"),
     [
-        ("terminal", "a terminal campaign cannot be retried"),
-        ("cancel_requested", "a cancelling campaign cannot be retried"),
-        ("draining", "a cancelling campaign cannot be retried"),
-        ("unknown", "unknown campaign shard: shard-unknown"),
+        ("terminal", "a terminal run cannot be retried"),
+        ("cancel_requested", "a cancelling run cannot be retried"),
+        ("draining", "a cancelling run cannot be retried"),
+        ("unknown", "unknown run shard: shard-unknown"),
         ("planned", "shard has no retryable logical trials"),
     ],
 )
 def test_durable_shard_retry_rejects_ineligible_recovery_transitions(
     remote_spec: ExperimentSpec, transition: str, message: str
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     events = [submitted]
-    shard_id = lock.runs[0].shards[0].shard_id
+    shard_id = lock.executions[0].shards[0].shard_id
     if transition == "terminal":
         events.append(
             _event(
                 lock,
                 2,
-                "campaign",
-                lock.campaign_id,
-                "campaign.failed",
+                "run",
+                lock.run_id,
+                "run.failed",
                 TerminalPayload(message="failed"),
             )
         )
@@ -1138,10 +1136,10 @@ def test_durable_shard_retry_rejects_ineligible_recovery_transitions(
             _event(
                 lock,
                 2,
-                "campaign",
-                lock.campaign_id,
-                "campaign.draining",
-                LifecyclePayload(parent_id=lock.campaign_id),
+                "run",
+                lock.run_id,
+                "run.draining",
+                LifecyclePayload(parent_id=lock.run_id),
             )
         )
     elif transition == "unknown":
@@ -1169,7 +1167,7 @@ def test_durable_shard_retry_rejects_ineligible_recovery_transitions(
             "deployment-budget",
         ),
         (AdmissionLimits(provider_active_waves=1), "provider", None, "provider-budget"),
-        (AdmissionLimits(campaign_active_waves=1), "campaign", None, "campaign-budget"),
+        (AdmissionLimits(run_active_waves=1), "run", None, "run-budget"),
         (AdmissionLimits(), AdmissionUsage(), 99, "spend-cap"),
     ],
 )
@@ -1180,14 +1178,14 @@ def test_all_admission_budgets_are_hard_limits(
     cap: int | None,
     reason: str,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, spend_cap_microusd=cap)
-    digest = lock.runs[0].deployment_digest
+    lock, submitted = _run(remote_spec, spend_cap_microusd=cap)
+    digest = lock.executions[0].deployment_digest
     if usage == "deployment":
         usage = AdmissionUsage(deployment_active_waves={digest: 1})
     elif usage == "provider":
         usage = AdmissionUsage(provider_active_waves={"provider-one": 1})
-    elif usage == "campaign":
-        usage = AdmissionUsage(campaign_active_waves={lock.campaign_id: 1})
+    elif usage == "run":
+        usage = AdmissionUsage(run_active_waves={lock.run_id: 1})
     assert isinstance(usage, AdmissionUsage)
     context = ReconcileContext(
         limits=limits,
@@ -1208,7 +1206,7 @@ def test_all_admission_budgets_are_hard_limits(
 def test_spend_cap_fails_closed_without_deployment_estimate(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, spend_cap_microusd=1_000)
+    lock, submitted = _run(remote_spec, spend_cap_microusd=1_000)
 
     _projection, plan = plan_reconciliation(lock, [submitted])
 
@@ -1219,12 +1217,12 @@ def test_spend_cap_fails_closed_without_deployment_estimate(
 def test_spend_cap_exhausts_retryable_trials_without_another_wave(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, spend_cap_microusd=100)
+    lock, submitted = _run(remote_spec, spend_cap_microusd=100)
     lock = _with_locked_estimate(lock, 100)
-    failure = _execution_events(
+    failure = _attempt_events(
         lock,
         3,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="evidence",
     )
@@ -1235,7 +1233,7 @@ def test_spend_cap_exhausts_retryable_trials_without_another_wave(
         _wave_event(lock, 5, "cleaning"),
         _wave_event(lock, 6, "closed"),
     ]
-    digest = lock.runs[0].deployment_digest
+    digest = lock.executions[0].deployment_digest
     context = ReconcileContext(
         deployments={digest: DeploymentAdmission(estimated_wave_cost_microusd=100)}
     )
@@ -1243,14 +1241,16 @@ def test_spend_cap_exhausts_retryable_trials_without_another_wave(
     _projection, plan = plan_reconciliation(lock, events, context=context)
 
     assert [action.kind for action in plan.actions] == ["exhaust-trials"]
-    assert plan.actions[0].trial_ids == [lock.runs[0].shards[0].trials[0].trial_id]
+    assert plan.actions[0].trial_ids == [
+        lock.executions[0].shards[0].trials[0].trial_id
+    ]
     assert plan.blocked == []
 
 
 def test_grouped_retries_share_one_provisional_admission(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(
+    lock, submitted = _run(
         remote_spec,
         tasks=2,
         max_trials_per_shard=1,
@@ -1259,29 +1259,29 @@ def test_grouped_retries_share_one_provisional_admission(
     lock = _with_locked_estimate(lock, 100)
     events = [
         submitted,
-        *_execution_events(
+        *_attempt_events(
             lock,
             2,
-            execution_id="execution-one",
+            attempt_id="attempt-one",
             attempt=1,
             category="evidence",
         ),
-        *_execution_events(
+        *_attempt_events(
             lock,
             4,
-            execution_id="execution-two",
+            attempt_id="attempt-two",
             attempt=1,
             category="evidence",
             shard_index=1,
         ),
     ]
-    digest = lock.runs[0].deployment_digest
+    digest = lock.executions[0].deployment_digest
     context = ReconcileContext(
         limits=AdmissionLimits(
             global_active_waves=2,
             deployment_active_waves=2,
             provider_active_waves=2,
-            campaign_active_waves=2,
+            run_active_waves=2,
         ),
         deployments={digest: DeploymentAdmission(estimated_wave_cost_microusd=100)},
     )
@@ -1298,12 +1298,12 @@ def test_grouped_retries_share_one_provisional_admission(
 def test_mutable_estimate_cannot_irreversibly_exhaust_a_retry(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, spend_cap_microusd=150)
+    lock, submitted = _run(remote_spec, spend_cap_microusd=150)
     lock = _with_locked_estimate(lock, 50)
-    failure = _execution_events(
+    failure = _attempt_events(
         lock,
         3,
-        execution_id="execution-one",
+        attempt_id="attempt-one",
         attempt=1,
         category="evidence",
     )
@@ -1314,7 +1314,7 @@ def test_mutable_estimate_cannot_irreversibly_exhaust_a_retry(
         _wave_event(lock, 5, "cleaning"),
         _wave_event(lock, 6, "closed"),
     ]
-    digest = lock.runs[0].deployment_digest
+    digest = lock.executions[0].deployment_digest
     context = ReconcileContext(
         deployments={digest: DeploymentAdmission(estimated_wave_cost_microusd=100)}
     )
@@ -1328,8 +1328,8 @@ def test_mutable_estimate_cannot_irreversibly_exhaust_a_retry(
 def test_cleanup_bypasses_budgets_and_action_limit_before_billable_work(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=1)
-    first_shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=1)
+    first_shard = lock.executions[0].shards[0]
     completed = _event(
         lock,
         2,
@@ -1367,8 +1367,8 @@ def test_terminal_summary_decisions(
     expected: str,
     marker: str,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=2)
-    shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=2)
+    shard = lock.executions[0].shards[0]
     events = [submitted]
     if cancelled:
         events.append(_cancel_event(lock))
@@ -1396,7 +1396,7 @@ def test_terminal_summary_decisions(
 def test_queued_cancellation_counts_unstarted_trials_as_cancelled(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=2)
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=2)
 
     projection, plan = plan_reconciliation(lock, [submitted, _cancel_event(lock)])
 
@@ -1412,8 +1412,8 @@ def test_queued_cancellation_counts_unstarted_trials_as_cancelled(
 def test_partial_cancellation_preserves_completed_trial(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=2)
-    shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=2)
+    shard = lock.executions[0].shards[0]
     completed = _event(
         lock,
         3,
@@ -1440,13 +1440,11 @@ def test_partial_cancellation_preserves_completed_trial(
 def test_randomized_duplicate_and_out_of_order_replay_converges(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     history = [
         submitted,
         _wave_event(lock, 2, "active"),
-        *_execution_events(
-            lock, 3, execution_id="execution-one", attempt=1, category=None
-        ),
+        *_attempt_events(lock, 3, attempt_id="attempt-one", attempt=1, category=None),
         _wave_event(lock, 5, "cleaning"),
         _wave_event(lock, 6, "closed"),
     ]
@@ -1463,14 +1461,14 @@ def test_randomized_duplicate_and_out_of_order_replay_converges(
 def test_terminal_summary_waits_for_unobserved_reserved_wave(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     _projection, initial = plan_reconciliation(lock, [submitted])
     action = initial.actions[0]
     reserved = _event(
         lock,
         2,
-        "campaign",
-        lock.campaign_id,
+        "run",
+        lock.run_id,
         "action.reserved",
         ActionReservedPayload(
             action_id=action.action_id,
@@ -1479,7 +1477,7 @@ def test_terminal_summary_waits_for_unobserved_reserved_wave(
             target_ids=action.target_ids,
         ),
     )
-    trial = lock.runs[0].shards[0].trials[0]
+    trial = lock.executions[0].shards[0].trials[0]
     completed = _event(
         lock,
         3,
@@ -1497,7 +1495,7 @@ def test_terminal_summary_waits_for_unobserved_reserved_wave(
 def test_faulted_history_rejects_wave_state_regression(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
 
     with pytest.raises(ValueError) as captured:
         project_recovery(
@@ -1525,7 +1523,7 @@ def test_late_terminal_evidence_supersedes_stale_reconciler_transition(
     synthetic_phase: str,
     expected: str,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     terminal = _wave_event(lock, 2, terminal_phase).model_copy(
         update={"producer": "wave-controller"}
     )
@@ -1539,7 +1537,7 @@ def test_late_terminal_evidence_supersedes_stale_reconciler_transition(
 def test_cleanup_retry_can_advance_worker_cleanup_failure(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     cleanup_failed = _wave_event(lock, 2, "cleanup-failed").model_copy(
         update={"producer": "wave-controller"}
     )
@@ -1551,7 +1549,7 @@ def test_cleanup_retry_can_advance_worker_cleanup_failure(
 
 
 def test_wave_transition_matrix_is_exhaustive(remote_spec: ExperimentSpec) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     allowed = {
         "acquiring": {"provisioning", "draining", "cleaning", "cleanup-failed"},
         "provisioning": {"ready", "draining", "cleaning", "cleanup-failed"},
@@ -1584,28 +1582,28 @@ def test_wave_transition_matrix_is_exhaustive(remote_spec: ExperimentSpec) -> No
 def test_faulted_history_rejects_skipped_physical_attempt(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    second = _execution_events(
-        lock, 2, execution_id="execution-two", attempt=2, category="lost"
+    lock, submitted = _run(remote_spec)
+    second = _attempt_events(
+        lock, 2, attempt_id="attempt-two", attempt=2, category="lost"
     )
 
     with pytest.raises(ValueError) as captured:
         project_recovery(lock, [submitted, *second])
-    assert str(captured.value) == "physical execution attempts must be contiguous"
+    assert str(captured.value) == "physical attempt numbers must be contiguous"
 
 
 def test_faulted_history_rejects_early_parent_terminal_state(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec)
+    shard = lock.executions[0].shards[0]
     early = _event(
         lock,
         2,
         "shard",
         shard.shard_id,
         "shard.complete",
-        LifecyclePayload(parent_id=lock.runs[0].run_id),
+        LifecyclePayload(parent_id=lock.executions[0].execution_id),
     )
 
     with pytest.raises(ValueError) as captured:
@@ -1616,12 +1614,10 @@ def test_faulted_history_rejects_early_parent_terminal_state(
 def test_completed_trial_cannot_be_physically_reexecuted(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    first = _execution_events(
-        lock, 2, execution_id="execution-one", attempt=1, category=None
-    )
-    second = _execution_events(
-        lock, 4, execution_id="execution-two", attempt=2, category="lost"
+    lock, submitted = _run(remote_spec)
+    first = _attempt_events(lock, 2, attempt_id="attempt-one", attempt=1, category=None)
+    second = _attempt_events(
+        lock, 4, attempt_id="attempt-two", attempt=2, category="lost"
     )
 
     with pytest.raises(ValueError) as captured:
@@ -1631,11 +1627,11 @@ def test_completed_trial_cannot_be_physically_reexecuted(
     )
 
 
-def test_execution_start_identity_faults_are_rejected(
+def test_attempt_start_identity_faults_are_rejected(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec)
+    shard = lock.executions[0].shards[0]
     trial = shard.trials[0]
 
     for trial_id, shard_id in [
@@ -1645,10 +1641,10 @@ def test_execution_start_identity_faults_are_rejected(
         invalid = _event(
             lock,
             2,
-            "execution",
-            "execution-invalid",
-            "execution.started",
-            ExecutionStartedPayload(
+            "attempt",
+            "attempt-invalid",
+            "attempt.started",
+            AttemptStartedPayload(
                 trial_id=trial_id,
                 shard_id=shard_id,
                 physical_attempt=1,
@@ -1656,10 +1652,10 @@ def test_execution_start_identity_faults_are_rejected(
         )
         with pytest.raises(ValueError) as captured:
             project_recovery(lock, [submitted, invalid])
-        assert str(captured.value) == ("execution references an unknown trial or shard")
+        assert str(captured.value) == ("attempt references an unknown trial or shard")
 
-    started = _execution_events(
-        lock, 2, execution_id="execution-one", attempt=1, category="lost"
+    started = _attempt_events(
+        lock, 2, attempt_id="attempt-one", attempt=1, category="lost"
     )[0]
     duplicate_start = started.model_copy(
         update={
@@ -1669,15 +1665,15 @@ def test_execution_start_identity_faults_are_rejected(
     )
     with pytest.raises(ValueError) as captured:
         project_recovery(lock, [submitted, started, duplicate_start])
-    assert str(captured.value) == "execution started more than once: execution-one"
+    assert str(captured.value) == "attempt started more than once: attempt-one"
 
     duplicate_attempt = _event(
         lock,
         3,
-        "execution",
-        "execution-two",
-        "execution.started",
-        ExecutionStartedPayload(
+        "attempt",
+        "attempt-two",
+        "attempt.started",
+        AttemptStartedPayload(
             trial_id=trial.trial_id,
             shard_id=shard.shard_id,
             physical_attempt=1,
@@ -1685,15 +1681,15 @@ def test_execution_start_identity_faults_are_rejected(
     )
     with pytest.raises(ValueError) as captured:
         project_recovery(lock, [submitted, started, duplicate_attempt])
-    assert str(captured.value) == "trial has duplicate physical execution numbers"
+    assert str(captured.value) == "trial has duplicate physical attempt numbers"
 
 
 def test_wave_identity_faults_are_rejected(remote_spec: ExperimentSpec) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     unknown = _wave_event(lock, 2, "active").model_copy(
         update={
             "payload": WaveLifecyclePayload(
-                deployment_digest=lock.runs[0].deployment_digest,
+                deployment_digest=lock.executions[0].deployment_digest,
                 provider="hf-inference-endpoints",
                 shard_ids=["unknown-shard"],
             )
@@ -1709,7 +1705,7 @@ def test_wave_identity_faults_are_rejected(remote_spec: ExperimentSpec) -> None:
             "payload": WaveLifecyclePayload(
                 deployment_digest="sha256:" + "f" * 64,
                 provider="different-provider",
-                shard_ids=[lock.runs[0].shards[0].shard_id],
+                shard_ids=[lock.executions[0].shards[0].shard_id],
             )
         }
     )
@@ -1718,17 +1714,17 @@ def test_wave_identity_faults_are_rejected(remote_spec: ExperimentSpec) -> None:
     assert str(captured.value) == "wave lifecycle identity changed"
 
 
-def test_execution_outcome_faults_are_rejected(remote_spec: ExperimentSpec) -> None:
-    lock, submitted = _campaign(remote_spec, tasks=2, max_trials_per_shard=2)
-    shard = lock.runs[0].shards[0]
+def test_attempt_outcome_faults_are_rejected(remote_spec: ExperimentSpec) -> None:
+    lock, submitted = _run(remote_spec, tasks=2, max_trials_per_shard=2)
+    shard = lock.executions[0].shards[0]
     trial = shard.trials[0]
     start = _event(
         lock,
         2,
-        "execution",
-        "execution-one",
-        "execution.started",
-        ExecutionStartedPayload(
+        "attempt",
+        "attempt-one",
+        "attempt.started",
+        AttemptStartedPayload(
             trial_id=trial.trial_id,
             shard_id=shard.shard_id,
             physical_attempt=1,
@@ -1737,44 +1733,44 @@ def test_execution_outcome_faults_are_rejected(remote_spec: ExperimentSpec) -> N
 
     fault_payloads = [
         (
-            "execution.completed",
-            ExecutionOutcomePayload(
+            "attempt.completed",
+            AttemptOutcomePayload(
                 trial_id=trial.trial_id,
                 physical_attempt=1,
                 category="transient",
             ),
-            "completed execution cannot have a failure category",
+            "completed attempt cannot have a failure category",
         ),
         (
-            "execution.failed",
-            ExecutionOutcomePayload(trial_id=trial.trial_id, physical_attempt=1),
-            "failed execution requires a failure category",
+            "attempt.failed",
+            AttemptOutcomePayload(trial_id=trial.trial_id, physical_attempt=1),
+            "failed attempt requires a failure category",
         ),
         (
-            "execution.failed",
-            ExecutionOutcomePayload(
+            "attempt.failed",
+            AttemptOutcomePayload(
                 trial_id=shard.trials[1].trial_id,
                 physical_attempt=1,
                 category="lost",
             ),
-            "execution outcome identity does not match its start",
+            "attempt outcome identity does not match its start",
         ),
         (
-            "execution.failed",
-            ExecutionOutcomePayload(
+            "attempt.failed",
+            AttemptOutcomePayload(
                 trial_id=trial.trial_id,
                 physical_attempt=2,
                 category="lost",
             ),
-            "execution outcome identity does not match its start",
+            "attempt outcome identity does not match its start",
         ),
     ]
     for sequence, (kind, payload, message) in enumerate(fault_payloads, 3):
         outcome = _event(
             lock,
             sequence,
-            "execution",
-            "execution-one",
+            "attempt",
+            "attempt-one",
             cast(EventKind, kind),
             payload,
         )
@@ -1785,24 +1781,24 @@ def test_execution_outcome_faults_are_rejected(remote_spec: ExperimentSpec) -> N
     missing = _event(
         lock,
         8,
-        "execution",
+        "attempt",
         "missing",
-        "execution.failed",
-        ExecutionOutcomePayload(
+        "attempt.failed",
+        AttemptOutcomePayload(
             trial_id=trial.trial_id, physical_attempt=1, category="lost"
         ),
     )
     with pytest.raises(ValueError) as captured:
         project_recovery(lock, [submitted, missing])
-    assert str(captured.value) == "execution outcome has no start: missing"
+    assert str(captured.value) == "attempt outcome has no start: missing"
 
     first_outcome = _event(
         lock,
         9,
-        "execution",
-        "execution-one",
-        "execution.failed",
-        ExecutionOutcomePayload(
+        "attempt",
+        "attempt-one",
+        "attempt.failed",
+        AttemptOutcomePayload(
             trial_id=trial.trial_id, physical_attempt=1, category="lost"
         ),
     )
@@ -1814,22 +1810,22 @@ def test_execution_outcome_faults_are_rejected(remote_spec: ExperimentSpec) -> N
     )
     with pytest.raises(ValueError) as captured:
         project_recovery(lock, [submitted, start, first_outcome, second_outcome])
-    assert str(captured.value) == "execution has multiple outcomes: execution-one"
+    assert str(captured.value) == "attempt has multiple outcomes: attempt-one"
 
 
-def test_late_execution_evidence_overrides_reconciler_lost_sentinel(
+def test_late_attempt_evidence_overrides_reconciler_lost_sentinel(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
-    shard = lock.runs[0].shards[0]
+    lock, submitted = _run(remote_spec)
+    shard = lock.executions[0].shards[0]
     trial = shard.trials[0]
     start = _event(
         lock,
         2,
-        "execution",
-        "execution-one",
-        "execution.started",
-        ExecutionStartedPayload(
+        "attempt",
+        "attempt-one",
+        "attempt.started",
+        AttemptStartedPayload(
             trial_id=trial.trial_id,
             shard_id=shard.shard_id,
             physical_attempt=1,
@@ -1838,10 +1834,10 @@ def test_late_execution_evidence_overrides_reconciler_lost_sentinel(
     actual = _event(
         lock,
         3,
-        "execution",
-        "execution-one",
-        "execution.failed",
-        ExecutionOutcomePayload(
+        "attempt",
+        "attempt-one",
+        "attempt.failed",
+        AttemptOutcomePayload(
             trial_id=trial.trial_id,
             physical_attempt=1,
             category="transient",
@@ -1852,26 +1848,24 @@ def test_late_execution_evidence_overrides_reconciler_lost_sentinel(
     lost = _event(
         lock,
         4,
-        "execution",
-        "execution-one",
-        "execution.failed",
-        ExecutionOutcomePayload(
+        "attempt",
+        "attempt-one",
+        "attempt.failed",
+        AttemptOutcomePayload(
             trial_id=trial.trial_id,
             physical_attempt=1,
             category="lost",
-            message=(
-                "HF Job job-one reached ERROR without terminal execution evidence"
-            ),
+            message=("HF Job job-one reached ERROR without terminal attempt evidence"),
             spend_microusd=0,
         ),
     )
 
     projection = project_recovery(lock, [submitted, start, actual, lost])
-    execution = projection.executions["execution-one"]
+    attempt = projection.attempts["attempt-one"]
 
-    assert execution.status == "failed"
-    assert execution.category == "transient"
-    assert execution.message == "command timed out"
+    assert attempt.status == "failed"
+    assert attempt.category == "transient"
+    assert attempt.message == "command timed out"
     assert projection.spend_microusd == 17
 
 
@@ -1881,21 +1875,21 @@ def test_late_execution_evidence_overrides_reconciler_lost_sentinel(
         ("global", "global-budget"),
         ("deployment", "deployment-budget"),
         ("provider", "provider-budget"),
-        ("campaign", "campaign-budget"),
+        ("run", "run-budget"),
     ],
 )
 def test_admission_allocates_exactly_to_each_scope_limit(
     remote_spec: ExperimentSpec, scope: str, reason: str
 ) -> None:
-    lock, submitted = _campaign(
+    lock, submitted = _run(
         remote_spec, tasks=3, max_trials_per_shard=1, max_shards_per_wave=1
     )
-    digest = lock.runs[0].deployment_digest
+    digest = lock.executions[0].deployment_digest
     values = {
         "global_active_waves": 3,
         "deployment_active_waves": 3,
         "provider_active_waves": 3,
-        "campaign_active_waves": 3,
+        "run_active_waves": 3,
     }
     values[f"{scope}_active_waves"] = 2
     limits = AdmissionLimits(**values)
@@ -1922,20 +1916,20 @@ def test_admission_allocates_exactly_to_each_scope_limit(
         ("global", "global-budget"),
         ("deployment", "deployment-budget"),
         ("provider", "provider-budget"),
-        ("campaign", "campaign-budget"),
+        ("run", "run-budget"),
     ],
 )
 def test_existing_wave_counts_toward_each_admission_scope(
     remote_spec: ExperimentSpec, scope: str, reason: str
 ) -> None:
-    lock, submitted = _campaign(
+    lock, submitted = _run(
         remote_spec, tasks=2, max_trials_per_shard=1, max_shards_per_wave=1
     )
     values = {
         "global_active_waves": 2,
         "deployment_active_waves": 2,
         "provider_active_waves": 2,
-        "campaign_active_waves": 2,
+        "run_active_waves": 2,
     }
     values[f"{scope}_active_waves"] = 1
     context = ReconcileContext(limits=AdmissionLimits(**values))
@@ -1951,7 +1945,7 @@ def test_existing_wave_counts_toward_each_admission_scope(
 def test_default_admission_serializes_one_managed_deployment(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(
+    lock, submitted = _run(
         remote_spec, tasks=3, max_trials_per_shard=1, max_shards_per_wave=1
     )
 
@@ -1965,11 +1959,11 @@ def test_default_admission_serializes_one_managed_deployment(
 
 
 @pytest.mark.parametrize("phase", ["active", "closed"])
-def test_wave_estimate_remains_charged_against_campaign_cap(
+def test_wave_estimate_remains_charged_against_run_cap(
     remote_spec: ExperimentSpec,
     phase: str,
 ) -> None:
-    lock, submitted = _campaign(
+    lock, submitted = _run(
         remote_spec,
         tasks=2,
         max_trials_per_shard=1,
@@ -1986,7 +1980,7 @@ def test_wave_estimate_remains_charged_against_campaign_cap(
             ]
         )
 
-    digest = lock.runs[0].deployment_digest
+    digest = lock.executions[0].deployment_digest
     context = ReconcileContext(
         limits=AdmissionLimits(deployment_active_waves=2),
         deployments={digest: DeploymentAdmission(estimated_wave_cost_microusd=100)},
@@ -2002,7 +1996,7 @@ def test_wave_estimate_remains_charged_against_campaign_cap(
 def test_closed_wave_releases_all_admission_scopes(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(
+    lock, submitted = _run(
         remote_spec, tasks=2, max_trials_per_shard=1, max_shards_per_wave=1
     )
     events = [
@@ -2017,7 +2011,7 @@ def test_closed_wave_releases_all_admission_scopes(
             global_active_waves=1,
             deployment_active_waves=1,
             provider_active_waves=1,
-            campaign_active_waves=1,
+            run_active_waves=1,
         )
     )
 
@@ -2032,14 +2026,14 @@ def test_closed_wave_releases_all_admission_scopes(
 def test_cancellation_adopts_unobserved_reserved_wave(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     _projection, initial = plan_reconciliation(lock, [submitted])
     action = initial.actions[0]
     reserved = _event(
         lock,
         2,
-        "campaign",
-        lock.campaign_id,
+        "run",
+        lock.run_id,
         "action.reserved",
         ActionReservedPayload(
             action_id=action.action_id,
@@ -2060,8 +2054,8 @@ def test_cancellation_adopts_unobserved_reserved_wave(
             "action_id": plan.actions[0].action_id,
             "action_key": plan.actions[0].action_key,
             "kind": "cancel-wave",
-            "campaign_id": lock.campaign_id,
-            "deployment_digest": lock.runs[0].deployment_digest,
+            "run_id": lock.run_id,
+            "deployment_digest": lock.executions[0].deployment_digest,
             "provider": "",
             "wave_id": f"wave-{action.action_key}",
             "shard_ids": action.target_ids,
@@ -2073,8 +2067,8 @@ def test_cancellation_adopts_unobserved_reserved_wave(
             "action_id": plan.actions[1].action_id,
             "action_key": plan.actions[1].action_key,
             "kind": "cleanup-wave",
-            "campaign_id": lock.campaign_id,
-            "deployment_digest": lock.runs[0].deployment_digest,
+            "run_id": lock.run_id,
+            "deployment_digest": lock.executions[0].deployment_digest,
             "provider": "",
             "wave_id": f"wave-{action.action_key}",
             "shard_ids": action.target_ids,
@@ -2088,14 +2082,14 @@ def test_cancellation_adopts_unobserved_reserved_wave(
 def test_failed_action_gets_new_durable_retry_identity(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     _projection, initial = plan_reconciliation(lock, [submitted])
     action = initial.actions[0]
     reserved = _event(
         lock,
         2,
-        "campaign",
-        lock.campaign_id,
+        "run",
+        lock.run_id,
         "action.reserved",
         ActionReservedPayload(
             action_id=action.action_id,
@@ -2107,8 +2101,8 @@ def test_failed_action_gets_new_durable_retry_identity(
     failed = _event(
         lock,
         3,
-        "campaign",
-        lock.campaign_id,
+        "run",
+        lock.run_id,
         "action.failed",
         ActionOutcomePayload(action_id=action.action_id, message="controller lost"),
     )
@@ -2122,8 +2116,8 @@ def test_failed_action_gets_new_durable_retry_identity(
 def _append_wave_cleanup_corpus(
     remote_spec: ExperimentSpec, corpus: list[object]
 ) -> None:
-    normal_lock, normal_submitted = _campaign(remote_spec)
-    normal_shard = normal_lock.runs[0].shards[0]
+    normal_lock, normal_submitted = _run(remote_spec)
+    normal_shard = normal_lock.executions[0].shards[0]
     normal_trial = normal_shard.trials[0]
     normal_complete = _event(
         normal_lock,
@@ -2148,9 +2142,9 @@ def _append_wave_cleanup_corpus(
             [projection.model_dump(mode="json"), plan.model_dump(mode="json")]
         )
 
-    grace_lock, grace_submitted = _campaign(remote_spec, cancellation_grace_seconds=60)
-    grace_start = _execution_events(
-        grace_lock, 4, execution_id="execution-active", attempt=1, category=None
+    grace_lock, grace_submitted = _run(remote_spec, cancellation_grace_seconds=60)
+    grace_start = _attempt_events(
+        grace_lock, 4, attempt_id="attempt-active", attempt=1, category=None
     )[0]
     grace_events = [
         grace_submitted,
@@ -2167,27 +2161,27 @@ def _append_wave_cleanup_corpus(
 
 def test_recovery_decision_corpus_is_stable(remote_spec: ExperimentSpec) -> None:
     corpus: list[object] = []
-    lock, submitted = _campaign(
+    lock, submitted = _run(
         remote_spec,
         tasks=3,
         max_trials_per_shard=1,
         cancellation_grace_seconds=60,
         spend_cap_microusd=1_000,
     )
-    digest = lock.runs[0].deployment_digest
+    digest = lock.executions[0].deployment_digest
     priced = ReconcileContext(
         limits=AdmissionLimits(
             action_limit=8,
             global_active_waves=6,
             deployment_active_waves=4,
             provider_active_waves=5,
-            campaign_active_waves=3,
+            run_active_waves=3,
         ),
         usage=AdmissionUsage(
             global_active_waves=1,
             deployment_active_waves={digest: 1},
             provider_active_waves={"provider-one": 1},
-            campaign_spend_microusd={lock.campaign_id: 75},
+            run_spend_microusd={lock.run_id: 75},
         ),
         deployments={
             digest: DeploymentAdmission(
@@ -2215,17 +2209,17 @@ def test_recovery_decision_corpus_is_stable(remote_spec: ExperimentSpec) -> None
 
     _append_wave_cleanup_corpus(remote_spec, corpus)
 
-    retry_lock, retry_submitted = _campaign(remote_spec)
+    retry_lock, retry_submitted = _run(remote_spec)
     for offset, category in enumerate(
         ["lost", "transient", "quota", "rate-limit", "ambiguous", "evidence"],
         40,
     ):
         events = [
             retry_submitted,
-            *_execution_events(
+            *_attempt_events(
                 retry_lock,
                 offset,
-                execution_id=f"execution-{category}",
+                attempt_id=f"attempt-{category}",
                 attempt=1,
                 category=cast(RetryCategory, category),
                 spend=offset,
@@ -2240,10 +2234,10 @@ def test_recovery_decision_corpus_is_stable(remote_spec: ExperimentSpec) -> None
                 [projection.model_dump(mode="json"), plan.model_dump(mode="json")]
             )
 
-    terminal_lock, terminal_submitted = _campaign(
+    terminal_lock, terminal_submitted = _run(
         remote_spec, tasks=2, max_trials_per_shard=2
     )
-    shard = terminal_lock.runs[0].shards[0]
+    shard = terminal_lock.executions[0].shards[0]
     for case, kinds in enumerate(
         [
             ("trial.complete", "trial.complete"),
@@ -2278,16 +2272,16 @@ def test_recovery_decision_corpus_is_stable(remote_spec: ExperimentSpec) -> None
         corpus, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode()
     assert hashlib.sha256(encoded).hexdigest() == (
-        "01b743220ad6e1e21cccf59e0b5aee2ba2123428a89e5395b5465abf9a2956b0"
+        "3fc5daac5129478a97c8c6af44aa363173f1389acc780693c8aefe3b7784f1be"
     )
 
 
 def test_agent_failure_exhaustion_has_explicit_task_outcome(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec, max_physical_executions_per_trial=1)
-    failed = _execution_events(
-        lock, 2, execution_id="execution-agent", attempt=1, category="agent"
+    lock, submitted = _run(remote_spec, max_physical_attempts_per_trial=1)
+    failed = _attempt_events(
+        lock, 2, attempt_id="attempt-agent", attempt=1, category="agent"
     )
 
     projection = project_recovery(lock, [submitted, *failed])

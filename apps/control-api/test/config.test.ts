@@ -29,16 +29,26 @@ describe("control API configuration", () => {
     });
 
     expect(config.capacity_profile_alias).toBe("capacity-current");
-    expect(config.max_active_sandboxes).toBe(16);
+    expect(config.max_active_jobs).toBe(16);
   });
 
-  it("loads an explicit namespace Sandbox cap", () => {
+  it("loads an explicit namespace Job cap", () => {
     const config = loadConfig({
       ...environment,
-      HARBOR_HF_MAX_ACTIVE_SANDBOXES: "128",
+      HARBOR_HF_MAX_ACTIVE_JOBS: "128",
     });
 
-    expect(config.max_active_sandboxes).toBe(128);
+    expect(config.max_active_jobs).toBe(128);
+  });
+
+  it("uses a 30-second Bucket sync cadence unless configured", () => {
+    expect(loadConfig(environment).sync_interval_ms).toBe(30_000);
+    expect(
+      loadConfig({
+        ...environment,
+        HARBOR_HF_SYNC_INTERVAL_MS: "45000",
+      }).sync_interval_ms,
+    ).toBe(45_000);
   });
 
   it("loads a distinct worker inference credential without exposing it elsewhere", () => {

@@ -10,12 +10,12 @@ from typing import Protocol, cast
 from huggingface_hub import HfApi
 from pydantic import BaseModel, ConfigDict
 
+from harbor_hf.executions import build_execution_lock
 from harbor_hf.judge_recorder import JUDGE_RECORDER_PORT
 from harbor_hf.models import DeploymentProfile
 from harbor_hf.process import SubprocessRunner
 from harbor_hf.profiling import ProfilePlan, bind_profile_target
 from harbor_hf.provider_proxy import PROVIDER_RECORDER_PORT
-from harbor_hf.runs import build_run_lock
 from harbor_hf.submission import (
     BucketApi,
     bucket_uri,
@@ -50,12 +50,12 @@ def build_profile_submit_command(
     spec, _desired = bind_profile_target(plan)
     if spec.remote is None:
         raise ValueError("profile run requires remote configuration")
-    lock = build_run_lock(
+    lock = build_execution_lock(
         spec,
         model_id=plan.cell.model,
         deployment_id=plan.cell.deployment,
         agent_id=plan.cell.agent,
-        run_id=f"profile-{plan.profile_id}",
+        execution_id=f"profile-{plan.profile_id}",
         allow_provider=True,
     )
     target = lock.deployment

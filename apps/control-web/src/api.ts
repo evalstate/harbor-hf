@@ -4,16 +4,16 @@ export type SessionResponse =
   paths["/api/v1/auth/session"]["get"]["responses"][200]["content"]["application/json"];
 export type SystemResponse =
   paths["/api/v1/system"]["get"]["responses"][200]["content"]["application/json"];
-export type CampaignList =
-  paths["/api/v1/campaigns"]["get"]["responses"][200]["content"]["application/json"];
-export type Campaign =
-  paths["/api/v1/campaigns/{campaign_id}"]["get"]["responses"][200]["content"]["application/json"];
+export type RunList =
+  paths["/api/v1/runs"]["get"]["responses"][200]["content"]["application/json"];
+export type Run =
+  paths["/api/v1/runs/{run_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type Capacity =
-  paths["/api/v1/campaigns/{campaign_id}/capacity"]["get"]["responses"][200]["content"]["application/json"];
+  paths["/api/v1/runs/{run_id}/capacity"]["get"]["responses"][200]["content"]["application/json"];
 export type TaskList =
-  paths["/api/v1/campaigns/{campaign_id}/tasks"]["get"]["responses"][200]["content"]["application/json"];
+  paths["/api/v1/runs/{run_id}/tasks"]["get"]["responses"][200]["content"]["application/json"];
 export type TaskDetail =
-  paths["/api/v1/campaigns/{campaign_id}/tasks/{task_id}"]["get"]["responses"][200]["content"]["application/json"];
+  paths["/api/v1/runs/{run_id}/tasks/{task_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type JobList =
   paths["/api/v1/jobs"]["get"]["responses"][200]["content"]["application/json"];
 export type EndpointList =
@@ -28,12 +28,12 @@ export type ResultDetail =
   paths["/api/v1/results/{publication_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type AuditResponse =
   paths["/api/v1/audit"]["get"]["responses"][200]["content"]["application/json"];
-export type CampaignSubmission =
-  paths["/api/v1/campaigns"]["post"]["requestBody"]["content"]["application/json"];
-export type CampaignAction =
-  paths["/api/v1/campaigns/{campaign_id}/actions"]["post"]["requestBody"]["content"]["application/json"];
+export type RunSubmission =
+  paths["/api/v1/runs"]["post"]["requestBody"]["content"]["application/json"];
+export type RunAction =
+  paths["/api/v1/runs/{run_id}/actions"]["post"]["requestBody"]["content"]["application/json"];
 export type Accepted =
-  paths["/api/v1/campaigns"]["post"]["responses"][202]["content"]["application/json"];
+  paths["/api/v1/runs"]["post"]["responses"][202]["content"]["application/json"];
 
 export class ApiError extends Error {
   constructor(
@@ -101,8 +101,8 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return response.json() as Promise<T>;
 }
 
-export async function submitCampaign(input: CampaignSubmission): Promise<Accepted> {
-  return request<Accepted>("/api/v1/campaigns", {
+export async function submitRun(input: RunSubmission): Promise<Accepted> {
+  return request<Accepted>("/api/v1/runs", {
     method: "POST",
     headers: { "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(input),
@@ -113,16 +113,10 @@ export async function signOut(): Promise<void> {
   return request<void>("/auth/logout", { method: "POST" });
 }
 
-export async function actOnCampaign(
-  campaignId: string,
-  input: CampaignAction,
-): Promise<Accepted> {
-  return request<Accepted>(
-    `/api/v1/campaigns/${encodeURIComponent(campaignId)}/actions`,
-    {
-      method: "POST",
-      headers: { "Idempotency-Key": crypto.randomUUID() },
-      body: JSON.stringify(input),
-    },
-  );
+export async function actOnRun(runId: string, input: RunAction): Promise<Accepted> {
+  return request<Accepted>(`/api/v1/runs/${encodeURIComponent(runId)}/actions`, {
+    method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
 }

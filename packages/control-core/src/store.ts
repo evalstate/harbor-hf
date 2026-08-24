@@ -5,13 +5,14 @@ import { canonicalJson, sha256 } from "@harbor-hf/contracts";
 
 export interface ObjectEntry {
   key: string;
-  digest: string;
   size: number;
+  source_identity: string;
 }
 
 export interface CreateResult {
   created: boolean;
   digest: string;
+  source_identity: string;
 }
 
 export interface ImmutableObjectStore {
@@ -64,13 +65,16 @@ export class FilesystemObjectStore implements ImmutableObjectStore {
     const keys: string[] = [];
     await walk(this.root, safePath(this.root, prefix), keys);
     keys.sort();
-    const entries = await Promise.all(
+    return Promise.all(
       keys.map(async (key) => {
-        const bytes = await this.read(key);
-        return { key, digest: sha256(bytes), size: bytes.byteLength };
+        const bytes = await readFile(safePath(this.root, key));
+        return {
+          key,
+          size: bytes.byteLength,
+          source_identity: sha256(bytes),
+        };
       }),
     );
-    return entries;
   }
 
   async read(key: string): Promise<Uint8Array> {
@@ -85,7 +89,7 @@ export class FilesystemObjectStore implements ImmutableObjectStore {
       await access(path, constants.F_OK);
       const existing = await readFile(path);
       if (sha256(existing) !== digest) throw new ImmutableConflictError(key);
-      return { created: false, digest };
+      return { created: false, digest, source_identity: digest };
     } catch (error) {
       if (
         !(error instanceof ImmutableConflictError) &&
@@ -113,10 +117,10 @@ export class FilesystemObjectStore implements ImmutableObjectStore {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const existing = await readFile(path);
       if (sha256(existing) !== digest) throw new ImmutableConflictError(key);
-      return { created: false, digest };
+      return { created: false, digest, source_identity: digest };
     }
     await rm(temporary, { force: true });
-    return { created: true, digest };
+    return { created: true, digest, source_identity: digest };
   }
 }
 

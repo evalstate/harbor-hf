@@ -75,7 +75,7 @@ def _request(spec: ExperimentSpec) -> AutomationRequest:
         namespace="example-org",
         schedule="*/10 * * * *",
         remote=spec.remote,
-        campaign_ids=["campaign-one"],
+        run_ids=["run-one"],
     )
 
 
@@ -87,7 +87,7 @@ def _provider_webhook(request: AutomationRequest) -> WebhookInfo:
             docker_image=request.remote.job.image,
             command=scheduled_controller_watchdog_command(request),
             labels={
-                "harbor-hf-role": "campaign-controller-watchdog",
+                "harbor-hf-role": "run-controller-watchdog",
                 "harbor-hf-namespace": request.namespace,
             },
         ),
@@ -112,42 +112,42 @@ def test_builds_digest_pinned_scheduled_controller_watchdog(
 
     assert command[-7:] == [
         "harbor-hf",
-        "campaign",
+        "run",
         "watchdog",
         "--namespace",
         "example-org",
-        "--campaign-id",
-        "campaign-one",
+        "--run-id",
+        "run-one",
     ]
     assert request.remote.worker.revision in command[2]
 
 
-def test_scheduled_watchdog_requires_explicit_campaign_scope(
+def test_scheduled_watchdog_requires_explicit_run_scope(
     remote_spec: ExperimentSpec,
 ) -> None:
     value = _request(remote_spec).model_dump()
-    value["campaign_ids"] = []
+    value["run_ids"] = []
 
     with pytest.raises(ValueError, match="at least 1 item"):
         AutomationRequest.model_validate(value)
 
 
-def test_scheduled_watchdog_preserves_campaign_scope(
+def test_scheduled_watchdog_preserves_run_scope(
     remote_spec: ExperimentSpec,
 ) -> None:
     request = _request(remote_spec).model_copy(
-        update={"campaign_ids": ["campaign-one", "campaign-two"]}
+        update={"run_ids": ["run-one", "run-two"]}
     )
 
     command = scheduled_controller_watchdog_command(request)
 
     assert command[-4:] == [
-        "--campaign-id",
-        "campaign-one",
-        "--campaign-id",
-        "campaign-two",
+        "--run-id",
+        "run-one",
+        "--run-id",
+        "run-two",
     ]
-    assert automation_plan(request).campaign_ids == ["campaign-one", "campaign-two"]
+    assert automation_plan(request).run_ids == ["run-one", "run-two"]
 
 
 def test_installs_serial_schedule_and_dataset_webhook(
@@ -167,7 +167,7 @@ def test_installs_serial_schedule_and_dataset_webhook(
     assert api.job["concurrency"] is False
     assert set(cast(dict[str, str], api.job["secrets"])) == {"HF_TOKEN"}
     assert api.job["labels"] == {
-        "harbor-hf-role": "campaign-controller-watchdog",
+        "harbor-hf-role": "run-controller-watchdog",
         "harbor-hf-namespace": "example-org",
     }
     assert api.webhook == {
@@ -317,7 +317,7 @@ def test_automation_plan_exposes_the_complete_installation_contract(
         "image": "ghcr.io/astral-sh/uv@sha256:" + "0" * 64,
         "command": scheduled_controller_watchdog_command(request),
         "secret_names": ["HF_TOKEN"],
-        "campaign_ids": ["campaign-one"],
+        "run_ids": ["run-one"],
         "control_repository": "example-org/harbor-hf-coordination",
     }
 
@@ -486,7 +486,7 @@ def test_unmanaged_provider_resources_are_ignored(
         SimpleNamespace(
             job_spec=SimpleNamespace(
                 labels={
-                    "harbor-hf-role": "campaign-controller-watchdog",
+                    "harbor-hf-role": "run-controller-watchdog",
                     "harbor-hf-namespace": "other",
                 }
             )
@@ -618,7 +618,7 @@ def test_scheduled_spec_matching_treats_a_missing_command_as_drift(
     incomplete = SimpleNamespace(
         docker_image=request.remote.job.image,
         labels={
-            "harbor-hf-role": "campaign-controller-watchdog",
+            "harbor-hf-role": "run-controller-watchdog",
             "harbor-hf-namespace": "example-org",
         },
     )

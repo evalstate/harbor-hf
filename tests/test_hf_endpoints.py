@@ -77,7 +77,7 @@ def _desired(remote_spec: ExperimentSpec) -> DesiredEndpoint:
     )
     return build_desired_endpoint(
         namespace="example-org",
-        campaign_id="campaign-one",
+        run_id="run-one",
         model=remote_spec.matrix.models[0],
         deployment=deployment,
     )

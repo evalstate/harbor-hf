@@ -7,6 +7,12 @@ const runtime = await createRuntime(config);
 const app = await buildApp(runtime);
 let closing = false;
 
+function errorDetails(error: unknown): { name: string; message: string } {
+  return error instanceof Error
+    ? { name: error.name, message: error.message }
+    : { name: "Error", message: "unknown failure" };
+}
+
 async function shutdown(signal: string): Promise<void> {
   if (closing) return;
   closing = true;
@@ -24,17 +30,11 @@ try {
   // rebuild of the live store now exceeds that window.
   await app.listen({ host: "0.0.0.0", port: config.port });
   await runtime.initialize();
-  runtime.start();
+  runtime.start((error) => {
+    app.log.error({ err: errorDetails(error) }, "reconciler tick failed");
+  });
 } catch (error) {
-  app.log.error(
-    {
-      err:
-        error instanceof Error
-          ? { name: error.name, message: error.message }
-          : { name: "Error", message: "startup failed" },
-    },
-    "control startup failed",
-  );
+  app.log.error({ err: errorDetails(error) }, "control startup failed");
   await Promise.allSettled([app.close(), runtime.close()]);
   process.exitCode = 1;
 }

@@ -17,7 +17,6 @@ src
 tests
 docs
 .github
-packages/harbor-hf-agents
 **/*.md
 !deploy/control-space/README.md
 apps/control-api/test

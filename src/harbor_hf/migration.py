@@ -33,52 +33,52 @@ _CONTROL_PATH_PARTS = {
         "{record_id}.json",
     ),
     "operator.acl": ("operators", "{record_id}.json"),
-    "campaign.request": ("campaigns", "{campaign_id}", "request.json"),
-    "campaign.lock": ("campaigns", "{campaign_id}", "campaign.lock.json"),
+    "run.request": ("runs", "{run_id}", "request.json"),
+    "run.lock": ("runs", "{run_id}", "run.lock.json"),
     "prepared.trial": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "prepared",
         "trials",
         "{task_id}.json",
     ),
     "prepared.job": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "prepared",
         "zz-manifest.json",
     ),
     "action.intent": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "actions",
         "{action_id}",
         "intent.json",
     ),
     "action.dispatch": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "actions",
         "{action_id}",
         "q-dispatch.json",
     ),
     "action.receipt": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "actions",
         "{action_id}",
         "receipt.json",
     ),
     "action.advanced": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "actions",
         "{action_id}",
         "zz-advanced.json",
     ),
     "attempt.receipt": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "tasks",
         "{task_id}",
         "attempts",
@@ -86,24 +86,24 @@ _CONTROL_PATH_PARTS = {
         "receipt.json",
     ),
     "terminal.selection": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "tasks",
         "{task_id}",
         "terminal",
         "{record_id}.json",
     ),
-    "budget.event": ("campaigns", "{campaign_id}", "budgets", "{record_id}.json"),
+    "budget.event": ("runs", "{run_id}", "budgets", "{record_id}.json"),
     "endpoint.resource": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "resources",
         "endpoints",
         "{action_id}.json",
     ),
     "publication.receipt": (
-        "campaigns",
-        "{campaign_id}",
+        "runs",
+        "{run_id}",
         "publications",
         "{publication_id}.json",
     ),
@@ -234,21 +234,24 @@ def _result_entry(
 
     projection = json.loads(projection_path.read_text(encoding="utf-8"))
     tables = projection.get("tables", {})
-    run_spec = tables.get("runs") if isinstance(tables, dict) else None
+    run_spec = tables.get("executions") if isinstance(tables, dict) else None
     metric_spec = tables.get("metrics") if isinstance(tables, dict) else None
     if not isinstance(run_spec, dict) or not isinstance(run_spec.get("path"), str):
-        raise ValueError(f"result projection has no runs table: {projection_path.name}")
+        raise ValueError(
+            f"result projection has no executions table: {projection_path.name}"
+        )
     run_rows = parquet.read_table(source.root / run_spec["path"]).to_pylist()
     if len(run_rows) != 1:
         raise ValueError(
-            f"result projection runs table must have one row: {projection_path.name}"
+            "result projection executions table must have one row: "
+            f"{projection_path.name}"
         )
     run = run_rows[0]
     rewards, unit = _reward_summary(source, metric_spec)
     return {
         "publication_id": str(run["publication_id"]),
-        "campaign_id": str(run["campaign_id"]),
         "run_id": str(run["run_id"]),
+        "execution_id": str(run["execution_id"]),
         "published_at": _iso(run.get("completed_at") or run["created_at"]),
         "benchmark": run.get("benchmark"),
         "model": run.get("model_id") or run.get("model_repo"),
@@ -425,7 +428,7 @@ def _control_record_path(value: dict[str, object]) -> Path:
         name: str(value.get(name, ""))
         for name in (
             "record_id",
-            "campaign_id",
+            "run_id",
             "action_id",
             "task_id",
             "attempt_id",
@@ -471,7 +474,7 @@ def _canonical_writes(
     writes: list[_PlannedWrite] = []
     controls: list[tuple[Path, bytes, dict[str, object]]] = []
     control_prefixes = {
-        ("control", "schema=v1", "campaigns"),
+        ("control", "schema=v1", "runs"),
         ("control", "schema=v1", "migrations"),
         ("control", "schema=v1", "operators"),
         ("control", "schema=v1", "profiles"),

@@ -23,10 +23,10 @@ from harbor_hf.result_publisher import (
     PublicationConflict,
 )
 from harbor_hf.results import (
+    ExecutionRow,
     PublicationProvenance,
     ResultPublication,
     ResultTables,
-    RunRow,
     build_result_publication,
 )
 
@@ -47,18 +47,18 @@ def _hash(value: object) -> str:
 def _publication() -> ResultPublication:
     trace = {
         "publication_id": "pub-" + "1" * 32,
-        "run_id": "run-publication",
+        "execution_id": "execution-publication",
         "source_bucket": "hf://buckets/private-evidence",
-        "source_prefix": "campaigns/campaign-publication/runs/run-publication",
+        "source_prefix": "runs/run-publication/executions/run-publication",
         "source_checksum": "sha256:" + "2" * 64,
-        "run_lock_path": "run.lock.json",
-        "run_lock_sha256": "sha256:" + "3" * 64,
+        "execution_lock_path": "execution.lock.json",
+        "execution_lock_sha256": "sha256:" + "3" * 64,
         "control_commit": "4" * 40,
     }
-    run = RunRow.model_validate(
+    run = ExecutionRow.model_validate(
         {
             **trace,
-            "campaign_id": "campaign-publication",
+            "run_id": "run-publication",
             "experiment": "experiment-publication",
             "evaluation_id": "evaluation-publication",
             "publication_role": "final",
@@ -88,15 +88,15 @@ def _publication() -> ResultPublication:
             "benchmark_failed_count": 0,
             "infrastructure_exhausted_count": 0,
             "unsupported_count": 0,
-            "execution_count": 0,
+            "attempt_count": 0,
         }
     )
     return build_result_publication(
         ResultTables(
             publication_id=trace["publication_id"],
-            runs=[run],
+            executions=[run],
             trials=[],
-            executions=[],
+            attempts=[],
             metrics=[],
             artifacts=[],
             provenance=PublicationProvenance(
@@ -215,7 +215,7 @@ def test_publication_and_idempotent_adoption_have_complete_side_effect_logs(
     }
 
     assert _hash(corpus) == (
-        "925672faf303ba27f20e7a023b5d09046e16949e9feab4e9f32a210d55bfb22c"
+        "9387cba6bd2caffc38918405d1828b9a1e7c47c25b0b7cab5e24b09492c670ef"
     )
 
 
@@ -273,7 +273,9 @@ def test_evidence_serialization_and_checksum_verification_are_complete(
     root = tmp_path / "evidence"
     write_json(root / "nested" / "summary.json", {"z": 1, "a": [2, 3]})
     (root / "artifact.bin").write_bytes(b"artifact payload")
-    append_event(root / "events.jsonl", "completed", run_id="run-one", count=2)
+    append_event(
+        root / "events.jsonl", "completed", execution_id="execution-one", count=2
+    )
     event = json.loads((root / "events.jsonl").read_text())
     event["at"] = "<timestamp>"
     checksums = write_checksums(root)
@@ -290,7 +292,7 @@ def test_evidence_serialization_and_checksum_verification_are_complete(
     }
 
     assert _hash(corpus) == (
-        "dfa12fcd44ac9ffa2f130bccc6c09fe63b0ac0dc73ada785e4974d040e081b4f"
+        "022855db57b54471aef8347043b3ba3bd29a82a05542c9a1c7aeb030d0f3108f"
     )
 
 

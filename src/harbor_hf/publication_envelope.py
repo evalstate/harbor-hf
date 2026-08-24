@@ -64,7 +64,7 @@ class SourceTrialSelection(FrozenModel):
 class SourcePublicationReference(FrozenModel):
     role: Literal["base", "correction"]
     publication_id: str = Field(min_length=1)
-    run_id: str = Field(min_length=1)
+    execution_id: str = Field(min_length=1)
     result_dataset: str = Field(min_length=1)
     result_revision: str = Field(pattern=r"^[0-9a-f]{40,64}$")
     source_checksum: Sha256Digest
@@ -80,8 +80,8 @@ class SourcePublicationReference(FrozenModel):
         return self
 
 
-class PhysicalExecutionReference(FrozenModel):
-    execution_id: str = Field(min_length=1)
+class PhysicalAttemptReference(FrozenModel):
+    attempt_id: str = Field(min_length=1)
     trial_id: str = Field(min_length=1)
     physical_attempt: int = Field(ge=1)
     status: Literal["succeeded", "failed", "cancelled"]
@@ -94,9 +94,9 @@ class PhysicalExecutionReference(FrozenModel):
     harbor_bundle: HarborBundleReference | None = None
 
     @model_validator(mode="after")
-    def values_are_consistent(self) -> PhysicalExecutionReference:
+    def values_are_consistent(self) -> PhysicalAttemptReference:
         if self.completed_at < self.started_at:
-            raise ValueError("physical execution completion precedes start")
+            raise ValueError("physical attempt completion precedes start")
         if self.bundle_status == "verified" and self.harbor_bundle is None:
             raise ValueError("verified Harbor bundle is missing")
         if self.bundle_status != "verified" and self.harbor_bundle is not None:
@@ -105,11 +105,9 @@ class PhysicalExecutionReference(FrozenModel):
             "verified",
             "source_publication",
         }:
-            raise ValueError("successful execution requires a verified Harbor bundle")
+            raise ValueError("successful attempt requires a verified Harbor bundle")
         if (self.status == "failed") != (self.failure_category is not None):
-            raise ValueError(
-                "physical execution failure category conflicts with status"
-            )
+            raise ValueError("physical attempt failure category conflicts with status")
         return self
 
 
@@ -119,41 +117,38 @@ class PublicationEnvelope(FrozenModel):
     schema_version: Literal["harbor-hf/publication-envelope/v1"] = (
         PUBLICATION_ENVELOPE_V1
     )
+    execution_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
-    campaign_id: str = Field(min_length=1)
     created_at: AwareDatetime
     completed_at: AwareDatetime
     evidence_bucket: str = Field(min_length=1)
     evidence_prefix: str = Field(min_length=1)
-    run_lock: ObjectReference
+    execution_lock: ObjectReference
     profiles: ProfileDigests
     runtime: RuntimeIdentity
     sanitizer_version: Literal["harbor-hf/public-results/v1"] = SANITIZER_VERSION
     projection_version: Literal["harbor-hf/results-projection/v1"] = PROJECTION_VERSION
     cleanup_outcome: Literal["verified", "not_applicable"]
-    executions: list[PhysicalExecutionReference]
+    attempts: list[PhysicalAttemptReference]
     sources: list[SourcePublicationReference] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def values_are_consistent(self) -> PublicationEnvelope:
         if self.completed_at < self.created_at:
             raise ValueError("publication completion precedes creation")
-        ids = [execution.execution_id for execution in self.executions]
+        ids = [attempt.attempt_id for attempt in self.attempts]
         if len(ids) != len(set(ids)):
-            raise ValueError("publication envelope has duplicate executions")
-        if not any(execution.status == "succeeded" for execution in self.executions):
-            raise ValueError("publication envelope has no successful execution")
+            raise ValueError("publication envelope has duplicate attempts")
+        if not any(attempt.status == "succeeded" for attempt in self.attempts):
+            raise ValueError("publication envelope has no successful attempt")
         source_ids = [source.publication_id for source in self.sources]
         if len(source_ids) != len(set(source_ids)):
             raise ValueError("publication envelope has duplicate source publications")
         sourced = any(
-            execution.bundle_status == "source_publication"
-            for execution in self.executions
+            attempt.bundle_status == "source_publication" for attempt in self.attempts
         )
         if sourced != bool(self.sources):
-            raise ValueError(
-                "source-backed executions conflict with publication sources"
-            )
+            raise ValueError("source-backed attempts conflict with publication sources")
         _relative_path(self.evidence_prefix)
         return self
 

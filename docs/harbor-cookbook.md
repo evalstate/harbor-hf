@@ -1,8 +1,9 @@
 # Fully Hosted Harbor Evaluations on Hugging Face
 
-This recipe runs a reproducible Harbor campaign entirely on hosted Hugging Face
+This recipe runs a reproducible Harbor run entirely on hosted Hugging Face
 infrastructure. The operator submits profile aliases to one publicly reachable,
-application-protected control Space. HF Jobs and Harbor Sandboxes execute the benchmark, and one private
+application-protected control Space. One HF Job executes each physical Harbor
+trial, and one private
 Bucket stores immutable control records, evidence, results, and catalogs.
 
 The operator machine does not load the model, run inference, or execute a
@@ -11,7 +12,7 @@ benchmark task.
 > **Safety rule:** every endpoint-backed wave must finish with the Inference
 > Endpoint reporting `paused` and zero ready replicas. This applies after
 > success, failure, timeout, cancellation, control-process loss, and publication
-> failure. A campaign cannot complete while cleanup is unverified.
+> failure. A run cannot complete while cleanup is unverified.
 
 ## Hosted architecture
 
@@ -25,13 +26,13 @@ protected public control Space
           +----> private Bucket
           |       control records, profiles, evidence, results, catalogs
           |
-          +----> HF Jobs ----> Harbor HF Sandboxes
+          +----> HF Jobs, one physical Harbor trial per Job
           |
           +----> Inference Providers or managed Endpoints
 ```
 
 The Bucket is permanent truth. SQLite is a disposable projection. Deleting the
-local database and replaying the Bucket must restore the same campaign state and
+local database and replaying the Bucket must restore the same run state and
 next action.
 
 ## 1. Prepare immutable profiles
@@ -53,7 +54,7 @@ new launch or retry.
 Use two persistent Space secrets. `HF_TOKEN` is the control credential and must
 never enter a Job. `HF_INFERENCE_TOKEN` is distinct and inference-only. A locked
 deployment marks it `required` or `forbidden`; only a required, reviewed worker
-receives it. Never record either value in a profile, campaign lock, action, log,
+receives it. Never record either value in a profile, run lock, action, log,
 Bucket object, fixture, or result. The worker receives its short-lived
 control capability separately and confines the inference credential to the
 root-owned bridge. A benchmark agent, browser, and model server may not receive
@@ -72,11 +73,11 @@ uv run harbor-hf status
 uv run harbor-hf profiles
 ```
 
-Preserve the resolved profile IDs and campaign lock returned by the service.
+Preserve the resolved profile IDs and run lock returned by the service.
 
 ## 2. Profile a new deployment
 
-Before the first full campaign for an exact model and deployment, run the
+Before the first full run for an exact model and deployment, run the
 [deployment profiling procedure](deployment-profiling.md). Start with one
 verified smoke task, then test Harbor trial concurrency at powers of two:
 
@@ -92,15 +93,15 @@ throughput test.
 
 The profile must use the same model revision, quantization, serving image,
 hardware, context and output limits, KV precision, chat template, reasoning,
-agent, and representative benchmark workload as the full campaign. Store the
+agent, and representative benchmark workload as the full run. Store the
 selected profile and raw points in the private artifact Bucket. Set
 `execution.concurrent_trials` to the selected value and retain the profile URI
-and SHA-256 digest with the campaign notes until manifest linkage is
+and SHA-256 digest with the run notes until manifest linkage is
 implemented.
 
 Run the whole ladder under one leased endpoint lifecycle. Pause the endpoint
 and verify zero ready replicas before writing the profile's terminal marker.
-Do not create one endpoint-backed campaign per candidate.
+Do not create one endpoint-backed run per candidate.
 
 ## 3. Submit and reconcile
 
@@ -110,7 +111,7 @@ Inspect the ready control service and promoted profiles before submission:
 export HARBOR_HF_CONTROL_URL=https://<control-space>.hf.space
 uv run harbor-hf status
 uv run harbor-hf profiles
-uv run harbor-hf campaign submit \
+uv run harbor-hf run submit \
   --benchmark <benchmark-profile> \
   --model <model-profile> \
   --harness <harness-profile> \
@@ -119,7 +120,7 @@ uv run harbor-hf campaign submit \
   --ceiling-microusd <approved-ceiling> \
   --idempotency-key <stable-request-key> \
   --yes
-uv run harbor-hf campaign status <campaign-id>
+uv run harbor-hf run status <run-id>
 ```
 
 The Space's single reconciler reads immutable Bucket records, derives the
@@ -127,8 +128,8 @@ SQLite projection, reserves deterministic actions, performs remote side
 effects, and records receipts. SQLite is disposable. Restarting with an empty
 local filesystem must reconstruct the same state and next action.
 
-The idempotency key is part of campaign identity. Repeating the same request as
-the same actor adopts the existing campaign. Deterministic action labels allow
+The idempotency key is part of run identity. Repeating the same request as
+the same actor adopts the existing run. Deterministic action labels allow
 the reconciler to adopt a Job after an ambiguous submit response.
 
 Do not treat a timed-out create, resume, submit, cancel, or pause request as a
@@ -162,26 +163,26 @@ The watchdog pauses the endpoint when the controller exits or loses ownership.
 Cleanup actions take priority over new billable work. Ordinary completion
 pauses the endpoint; deletion is a separate, explicit retention action.
 
-If cleanup fails and the campaign enters `manual_intervention`, first verify
+If cleanup fails and the run enters `manual_intervention`, first verify
 that the owning controller and watchdog Jobs are terminal, pause the endpoint,
 and confirm `status.state=paused` with `readyReplica=0`. Release only the stale
 resource whose exact owner was verified, then request cleanup through the
 control API:
 
 ```bash
-harbor-hf campaign pause-endpoint <campaign-id> \
+harbor-hf run pause-endpoint <run-id> \
   --reason "verified terminal cleanup" \
   --yes
 harbor-hf endpoints
 ```
 
-The pause action is immutable and idempotent. The campaign remains incomplete
+The pause action is immutable and idempotent. The run remains incomplete
 until an endpoint resource record reports zero ready replicas. Do not write a
 manual cleanup acknowledgement or bypass the observed-state check.
 
 ## 4B. Inference Provider execution path
 
-A provider-backed wave uses the same campaign, run, shard, logical-trial,
+A provider-backed wave uses the same run, run, shard, logical-trial,
 physical-execution, Harbor, and artifact contracts. It does not create or lease
 an Inference Endpoint. Record the requested provider and model, routing data,
 request identity when exposed, retry and throttle observations, reported usage,
@@ -192,9 +193,9 @@ The private run lock preserves the selected model-profile revision, while the
 published `model_revision` is `not_observed`. Never present it as equivalent to
 an endpoint run whose served revision was verified.
 
-The remote wave controller owns an OpenAI-compatible evidence recorder. The
-production transport exposes it through authenticated HF Job ingress so agents
-running in separate Harbor Sandboxes can reach it. OpenClaw sends its normal
+The trial Job owns an OpenAI-compatible evidence recorder. The root-owned
+loopback bridge holds the inference credential while the unprivileged agent
+receives only a local route and placeholder key. OpenClaw sends its normal
 requests to an opaque trial-scoped route; the recorder forwards them
 to HF Inference Providers and writes `provider-requests.jsonl`. Each row
 contains typed request metadata, response routing and quota headers, retry
@@ -209,7 +210,7 @@ same provider limits block. The reconciler reserves that estimate while a wave
 is active and conservatively retains it after the wave closes. Observed spend
 is additive until the provider reports enough attribution to replace a wave's
 reservation safely. This fails closed instead of letting missing billing data
-reset the campaign budget.
+reset the run budget.
 `max_attempts` is also enforced at the proxy boundary per logical trial: an
 identical request beyond that trial's configured attempt count is rejected
 locally and is never forwarded or billed. Identical requests from independent
@@ -225,7 +226,7 @@ on fields observed for both.
 Use projections instead of scraping worker logs:
 
 ```bash
-uv run harbor-hf campaign status <campaign-id>
+uv run harbor-hf run status <run-id>
 uv run harbor-hf jobs
 uv run harbor-hf endpoints
 ```
@@ -239,14 +240,14 @@ checkpoints.
 Cancellation is a durable control request:
 
 ```bash
-uv run harbor-hf campaign cancel CAMPAIGN_ID --namespace NAMESPACE
+uv run harbor-hf run cancel RUN_ID --namespace NAMESPACE
 ```
 
 After that request, reconciliation must stop admitting shards, cancel queued
 and active Jobs, drain or terminate according to policy, pause every owned
 endpoint, verify zero ready replicas, publish the evidence that exists, and
 release leases only after cleanup. Repeating cancellation is safe. Valid
-completed trials are retained, and the campaign may end as `partial`.
+completed trials are retained, and the run may end as `partial`.
 
 If cancellation returns before cleanup finishes, keep reconciling and checking
 status. Do not consider cancellation finished while any owned endpoint is
@@ -254,22 +255,22 @@ running, any cleanup reservation is unresolved, or a watchdog reports lost
 ownership.
 
 If a managed HF Job becomes terminal without terminal Bucket evidence, the
-next pass marks active executions as `lost`, drains and cleans the wave, and
+next pass marks active attempts as `lost`, drains and cleans the wave, and
 admits the bounded retry generation. If a Job becomes terminal during a
 cancellation call, the pass records an ambiguous action and stops so evidence
 is re-observed before any cancellation outcome or cleanup is synthesized.
-`reconcile-all` reports a malformed campaign as one failure record and
-continues with the remaining campaigns.
+`reconcile-all` reports a malformed run as one failure record and
+continues with the remaining runs.
 
 ## 6. Verify canonical artifacts
 
 Run verification before publication:
 
 ```bash
-uv run harbor-hf artifacts verify CAMPAIGN_ID --namespace NAMESPACE --format json
+uv run harbor-hf artifacts verify RUN_ID --namespace NAMESPACE --format json
 ```
 
-For each run, verify the immutable `run.lock.json`, terminal marker, normalized
+For each run, verify the immutable `execution.lock.json`, terminal marker, normalized
 summary, every object listed by `checksums.json`, and every child checksum
 referenced by a parent summary. Reject traversal, symlinks, unsafe archive
 members, conflicting markers, missing files, extra files, mismatched task
@@ -284,15 +285,15 @@ evidence is not.
 Canonical evidence remains under a unique Bucket prefix such as:
 
 ```text
-campaigns/<campaign-id>/
-  campaign.lock.json
+runs/<run-id>/
+  run.lock.json
   waves/<wave-id>/...                 # lifecycle and cleanup evidence
   runs/<run-id>/
-    run.lock.json
+    execution.lock.json
     shards/<shard-id>/...
     trials/<trial-id>/
-      executions/<execution-id>/...  # physical retries never overwrite
-    run-summary.json
+      attempts/<execution-id>/...  # physical retries never overwrite
+    execution-summary.json
     _SUCCESS | _PARTIAL | _FAILED | _CANCELLED
 ```
 
@@ -301,11 +302,11 @@ campaigns/<campaign-id>/
 Publish only after artifact verification succeeds:
 
 ```bash
-uv run harbor-hf results publish CAMPAIGN_ID --namespace NAMESPACE --format json
+uv run harbor-hf results publish RUN_ID --namespace NAMESPACE --format json
 ```
 
 One leased publisher serializes commits to each destination. It writes flat,
-versioned Parquet tables for runs, logical trials, physical executions,
+versioned Parquet tables for runs, logical trials, physical attempts,
 metrics, and safe artifact metadata. It then writes one global index row that
 points to the benchmark Dataset and its exact commit. Retrying adopts an
 existing matching publication receipt instead of duplicating rows.
@@ -332,8 +333,8 @@ Every published score must be traceable through these fields:
 
 | Layer | Required provenance |
 | --- | --- |
-| Catalog entry | publication, run and campaign IDs; outcome, quality, publication role, result path, source digest, and primary metric unit |
-| Run row | benchmark, observed model revision or `not_observed`, and agent revision; deployment identity; provider, region and hardware; source Bucket prefix; campaign-lock checksum |
+| Catalog entry | publication, run and run IDs; outcome, quality, publication role, result path, source digest, and primary metric unit |
+| Run row | benchmark, observed model revision or `not_observed`, and agent revision; deployment identity; provider, region and hardware; source Bucket prefix; run-lock checksum |
 | Trial row | task digest, logical attempt, selected physical execution and verifier metric owner |
 | Execution row | physical attempt, runtime kind, remote Job identity when reported, timestamps, status and retry reason |
 | Metric row | stable metric ID, typed owner, name, value, unit and aggregation |
@@ -362,7 +363,7 @@ endpoint pause recovery. Enable production writes only after those checks pass.
 
 ## Final operational checklist
 
-- The campaign plan and all behavior-affecting references are immutable.
+- The run plan and all behavior-affecting references are immutable.
 - No model or benchmark task ran on the operator machine.
 - The control Space, input stores, artifact Bucket, and unpublished results
   were private.

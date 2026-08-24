@@ -55,14 +55,14 @@ def bucket_id(bucket: str) -> str:
     return bucket.removeprefix("hf://buckets/").removeprefix("buckets/")
 
 
-def run_claim_path(artifact_bucket: str, artifact_prefix: str) -> str:
+def execution_claim_path(artifact_bucket: str, artifact_prefix: str) -> str:
     target = f"{bucket_id(artifact_bucket)}/{artifact_prefix}".encode()
     identity = hashlib.sha256(target).hexdigest()
-    return f"run-reservations/{identity}.json"
+    return f"execution-reservations/{identity}.json"
 
 
-def action_claim_path(campaign_id: str, action_id: str) -> str:
-    identity = hashlib.sha256(f"{campaign_id}/{action_id}".encode()).hexdigest()
+def action_claim_path(run_id: str, action_id: str) -> str:
+    identity = hashlib.sha256(f"{run_id}/{action_id}".encode()).hexdigest()
     return f"action-leases/{identity}.json"
 
 
@@ -71,8 +71,8 @@ def bucket_evidence_claim_path(bucket: str, path: str) -> str:
     return f"bucket-evidence-leases/{identity}.json"
 
 
-def wave_worker_claim_path(campaign_id: str, wave_id: str) -> str:
-    identity = hashlib.sha256(f"{campaign_id}/{wave_id}".encode()).hexdigest()
+def wave_worker_claim_path(run_id: str, wave_id: str) -> str:
+    identity = hashlib.sha256(f"{run_id}/{wave_id}".encode()).hexdigest()
     return f"wave-worker-leases/{identity}.json"
 
 

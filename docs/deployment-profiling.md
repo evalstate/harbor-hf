@@ -69,7 +69,7 @@ transient address must not change the serving configuration identity.
 `harbor_runtime_sha256`, reasoning mode, exact sampled task names, and the
 sampled-task digest bind the selected concurrency to the exact Harbor client
 runtime and benchmark workload used to measure it. Plans may choose an explicit
-cohort when some benchmark tasks require sandbox capabilities unavailable on
+cohort when some benchmark tasks require environment capabilities unavailable on
 the profiling backend. That cohort is immutable evidence, not a runtime skip
 list.
 
@@ -81,7 +81,7 @@ The profile's `plan.json` contains the resolved model, deployment, agent, and
 benchmark profiles used to derive these digests. The final profile remains
 small and queryable while the plan preserves every behavior-affecting value.
 
-A campaign may reuse a selection only when all four digests and both token
+A run may reuse a selection only when all four digests and both token
 limits match exactly. A runtime, quantization, template, reasoning, hardware,
 context, output, or benchmark change requires a new profile. A profile is not
 portable merely because the model name and GPU name are unchanged.
@@ -114,27 +114,22 @@ not accepted.
 
 Profile these limits separately because they control different resources:
 
-- `worker_concurrency` limits trial futures submitted by one execution worker;
-- `sandbox_template.max_sandboxes` limits active or reserved Sandboxes for one
-  campaign;
-- namespace and hardware caps limit Sandboxes across campaigns;
-- Sandbox start pacing limits how quickly new Sandboxes are authorized;
-- `inference_max_concurrency` limits provider requests from one Sandbox;
+- `trial_job_template.max_jobs` limits active trial Jobs for one Run;
+- namespace and hardware caps limit Jobs across Runs;
+- Job start pacing limits how quickly new Jobs are authorized;
+- `inference_max_concurrency` limits provider requests from one trial Job;
 - `inference_max_total_concurrency` limits provider request units reserved by
-  one campaign;
-- `worker_max_tasks_per_job` limits assignment and recovery impact rather than
-  live concurrency; and
+  one Run; and
 - budget admission limits work by reservation and cumulative ceiling.
 
-First compare fixed barrier batching with the PR #100 rolling scheduler at the
-same concurrency. This isolates the gain from filling free worker slots without
-raising peak use. Later profiles may test higher worker, campaign, namespace,
-hardware, provider, or start-rate limits, but each tested point must name the
-limit that changed and keep the others fixed.
+Compare trial Job limits at the same per-Job resources and provider limits.
+Later profiles may test higher Run, namespace, hardware, provider, or start-rate
+limits, but each tested point must name the limit that changed and keep the
+others fixed.
 
 Use ascending powers of two for each capacity boundary. Record successful
 terminal trials per hour as the primary goodput measure together with raw
-successes and attempts. Also record Sandbox startup p50 and p95, queued time,
+successes and attempts. Also record Job startup p50 and p95, queued time,
 provider throttling, infrastructure failures, cleanup failures, deadline
 headroom, active and reserved spend, and the limiting reason reported by the
 control service.
@@ -148,14 +143,14 @@ candidate even when its throughput is higher.
 
 When candidates are within the practical tie range, select the lower limit. A
 profile can recommend a value but cannot promote the service capacity profile
-or change a campaign lock. Promotion and launch remain separate reviewed
+or change a run lock. Promotion and launch remain separate reviewed
 actions.
 
 ## Workload
 
-Profile against the workload the full campaign will run. For benchmark-speed
+Profile against the workload the full run will run. For benchmark-speed
 selection, use a representative task sample with the same agent, tools,
-reasoning mode, context limit, output limit, sampling, and sandbox shape.
+reasoning mode, context limit, output limit, sampling, and execution environment.
 
 When sampled tasks require a benchmark judge, profiling uses the exact judge
 configuration preserved in the run lock. The profiling recorder reads the
@@ -190,7 +185,7 @@ TTFT and TPOT are reported only when a streaming recorder measures them. A
 non-streaming full-response duration must never be labeled TTFT or TPOT.
 
 Successful HTTP responses are insufficient. The ladder runs the pinned Harbor
-task sample through the declared agent and sandbox, then verifies token
+task sample through the declared agent runtime, then verifies token
 accounting, task completion, endpoint logs, agent exits, truncation, timeouts,
 and hidden 4xx or 5xx responses.
 
@@ -220,11 +215,11 @@ Choose one objective before the run:
   per-session decode limits.
 
 The selection names the winning concurrency, criterion, supporting point
-digests, and rationale. The full campaign's `execution.concurrent_trials` must
+digests, and rationale. The full run's `execution.concurrent_trials` must
 equal `selection.concurrency`.
 
-For capacity admission, the selection also records the tested worker, campaign
-Sandbox, namespace, hardware, provider, and start-rate values. It records the
+For capacity admission, the selection also records the tested worker, run Job,
+namespace, hardware, provider, and start-rate values. It records the
 effective concurrency, active limiting reason, raw completed and attempted
 counts, and minimum worthwhile effect. It distinguishes the measured
 recommendation from a later approved profile promotion.
@@ -253,9 +248,9 @@ endpoint is paused and reports zero ready replicas. The profile points and raw
 logs are immutable. A retry appends a new repetition or creates a new profile;
 it never overwrites prior evidence.
 
-The final campaign evidence records the profile Bucket URI and SHA-256 digest
+The final run evidence records the profile Bucket URI and SHA-256 digest
 through `execution.serving_profile`. Manifest validation rejects a mismatched
-selection concurrency or serving identity before campaign planning.
+selection concurrency or serving identity before run planning.
 
 ## CLI
 
@@ -277,7 +272,7 @@ private Bucket, provider route or endpoint compute, current accelerator quota,
 hourly price, worst-case profile cost, and declared spend cap. Unknown endpoint
 quota fails closed. Provider profiles require an explicit estimate for the full
 profile through `--estimated-profile-cost-usd`; this is distinct from the
-deployment's campaign-wave estimate. Preflight rejects it when it exceeds
+deployment's run-wave estimate. Preflight rejects it when it exceeds
 either the provider or profile spend cap. Endpoint profiles omit this option.
 
 `run` submits one Hugging Face Job. For an Inference Endpoint, the worker
@@ -304,13 +299,13 @@ publishing `_SELECTED`. A conflicting plan, marker, point, or expired deadline
 still fails closed. This preserves the original cost bound across controller
 restarts instead of silently granting a fresh profiling budget.
 
-`select` recomputes every point digest before choosing the winner. A campaign
+`select` recomputes every point digest before choosing the winner. A run
 can bind the resulting profile under `execution.serving_profile`; validation
 then requires exact model, deployment, agent, benchmark, context, output, and
-concurrency agreement. The binding is propagated into run locks and campaign
+concurrency agreement. The binding is propagated into run locks and run
 digests.
 
-Do not split `profile run` into independent Jobs or campaigns per point. The
+Do not split `profile run` into independent Jobs or runs per point. The
 profiler reuses one safely leased endpoint across the ladder and retains the
 watchdog and verified-pause guarantees.
 

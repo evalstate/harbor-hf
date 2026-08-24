@@ -7,30 +7,30 @@ from typing import cast
 
 import pytest
 
-from harbor_hf.campaigns import CampaignLock, build_campaign_lock, build_campaign_plan
 from harbor_hf.control import (
     ActionOutcomePayload,
     ActionReservedPayload,
-    CampaignEvent,
-    CampaignSubmittedPayload,
+    AttemptOutcomePayload,
+    AttemptStartedPayload,
     CancellationPayload,
     ControlError,
     EventKind,
     EventPayload,
-    ExecutionOutcomePayload,
-    ExecutionStartedPayload,
     LifecyclePayload,
     RetryCategory,
+    RunEvent,
+    RunSubmittedPayload,
     SubjectType,
     TerminalPayload,
     WaveLifecyclePayload,
     new_event,
     ordered_events,
-    project_campaign,
+    project_run,
 )
 from harbor_hf.models import ExperimentSpec
 from harbor_hf.reconciler import plan_reconciliation
 from harbor_hf.recovery import project_recovery, retry_delay_seconds
+from harbor_hf.runs import RunLock, build_run_lock, build_run_plan
 
 NOW = datetime(2026, 7, 14, 1, 2, 3, tzinfo=UTC)
 
@@ -42,7 +42,7 @@ def _hash(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _lock(remote_spec: ExperimentSpec, *, tasks: int = 1) -> CampaignLock:
+def _lock(remote_spec: ExperimentSpec, *, tasks: int = 1) -> RunLock:
     task_digests = {
         f"task-{index}": f"sha256:{index:064x}" for index in range(1, tasks + 1)
     }
@@ -56,19 +56,19 @@ def _lock(remote_spec: ExperimentSpec, *, tasks: int = 1) -> CampaignLock:
             ),
         }
     )
-    return build_campaign_lock(
-        build_campaign_plan(spec), "campaign-recovery-mutation", clock=lambda: NOW
+    return build_run_lock(
+        build_run_plan(spec), "run-recovery-mutation", clock=lambda: NOW
     )
 
 
 def _event(
-    lock: CampaignLock,
+    lock: RunLock,
     sequence: int,
     subject_type: SubjectType,
     subject_id: str,
     kind: EventKind,
     payload: EventPayload,
-) -> CampaignEvent:
+) -> RunEvent:
     return new_event(
         subject_type=subject_type,
         subject_id=subject_id,
@@ -80,21 +80,21 @@ def _event(
     )
 
 
-def _submitted(lock: CampaignLock) -> CampaignEvent:
+def _submitted(lock: RunLock) -> RunEvent:
     return _event(
         lock,
         1,
-        "campaign",
-        lock.campaign_id,
-        "campaign.submitted",
-        CampaignSubmittedPayload(plan_digest=lock.plan_digest),
+        "run",
+        lock.run_id,
+        "run.submitted",
+        RunSubmittedPayload(plan_digest=lock.plan_digest),
     )
 
 
 def _trial_event(
-    lock: CampaignLock, sequence: int, trial_index: int, kind: EventKind
-) -> CampaignEvent:
-    shard = lock.runs[0].shards[0]
+    lock: RunLock, sequence: int, trial_index: int, kind: EventKind
+) -> RunEvent:
+    shard = lock.executions[0].shards[0]
     return _event(
         lock,
         sequence,
@@ -105,22 +105,22 @@ def _trial_event(
     )
 
 
-def _execution_started(
-    lock: CampaignLock,
+def _attempt_started(
+    lock: RunLock,
     sequence: int,
     *,
-    execution_id: str = "execution-one",
+    attempt_id: str = "attempt-one",
     attempt: int = 1,
-) -> CampaignEvent:
-    shard = lock.runs[0].shards[0]
+) -> RunEvent:
+    shard = lock.executions[0].shards[0]
     trial = shard.trials[0]
     return _event(
         lock,
         sequence,
-        "execution",
-        execution_id,
-        "execution.started",
-        ExecutionStartedPayload(
+        "attempt",
+        attempt_id,
+        "attempt.started",
+        AttemptStartedPayload(
             trial_id=trial.trial_id,
             shard_id=shard.shard_id,
             physical_attempt=attempt,
@@ -129,23 +129,23 @@ def _execution_started(
     )
 
 
-def _execution_outcome(
-    lock: CampaignLock,
+def _attempt_outcome(
+    lock: RunLock,
     sequence: int,
     *,
-    execution_id: str = "execution-one",
-    kind: EventKind = "execution.completed",
+    attempt_id: str = "attempt-one",
+    kind: EventKind = "attempt.completed",
     attempt: int = 1,
     category: str | None = None,
-) -> CampaignEvent:
-    trial = lock.runs[0].shards[0].trials[0]
+) -> RunEvent:
+    trial = lock.executions[0].shards[0].trials[0]
     return _event(
         lock,
         sequence,
-        "execution",
-        execution_id,
+        "attempt",
+        attempt_id,
         kind,
-        ExecutionOutcomePayload(
+        AttemptOutcomePayload(
             trial_id=trial.trial_id,
             physical_attempt=attempt,
             category=cast(RetryCategory | None, category),
@@ -154,13 +154,13 @@ def _execution_outcome(
 
 
 def _wave_event(
-    lock: CampaignLock,
+    lock: RunLock,
     sequence: int,
     kind: EventKind,
     *,
     provider: str = "provider-one",
-) -> CampaignEvent:
-    run = lock.runs[0]
+) -> RunEvent:
+    run = lock.executions[0]
     return _event(
         lock,
         sequence,
@@ -186,7 +186,7 @@ def test_recovery_terminal_decision_matrix_has_complete_canonical_structures(
         (_lock(remote_spec), ["trial.invalid"]),
         (
             _lock(remote_spec),
-            ["campaign.cancel-requested", "trial.cancelled"],
+            ["run.cancel-requested", "trial.cancelled"],
         ),
         (two, ["trial.complete", "trial.invalid"]),
     ]
@@ -195,14 +195,14 @@ def test_recovery_terminal_decision_matrix_has_complete_canonical_structures(
         events = [_submitted(lock)]
         trial_index = 0
         for sequence, kind in enumerate(kinds, 2):
-            if kind == "campaign.cancel-requested":
+            if kind == "run.cancel-requested":
                 events.append(
                     _event(
                         lock,
                         sequence,
-                        "campaign",
-                        lock.campaign_id,
-                        "campaign.cancel-requested",
+                        "run",
+                        lock.run_id,
+                        "run.cancel-requested",
                         CancellationPayload(reason="operator"),
                     )
                 )
@@ -220,7 +220,7 @@ def test_recovery_terminal_decision_matrix_has_complete_canonical_structures(
         )
 
     assert _hash(corpus) == (
-        "55ff16e180b1d9e255d6e4c83d6cb5b3469997a16581113e43639d5cd6e2033b"
+        "ff527263cd99e64aba98416aee026438db3ccd8cc10fa27503612058960ac68b"
     )
 
 
@@ -233,7 +233,7 @@ def test_retry_delay_matrix_pins_backoff_jitter_and_bounds(
             lock,
             cast(RetryCategory, category),
             attempt,
-            f"execution-{category}-{attempt}",
+            f"attempt-{category}-{attempt}",
             retry_after,
         )
         for category in ["lost", "transient", "quota", "rate-limit", "ambiguous"]
@@ -246,77 +246,77 @@ def test_retry_delay_matrix_pins_backoff_jitter_and_bounds(
         35,
         59,
         999,
-        51,
-        51,
+        72,
+        72,
+        72,
+        999,
+        110,
+        110,
+        110,
+        999,
+        1800,
+        1800,
+        1800,
+        1800,
+        35,
+        35,
         59,
         999,
-        115,
-        115,
-        115,
+        55,
+        55,
+        59,
+        999,
+        123,
+        123,
+        123,
         999,
         1800,
         1800,
         1800,
         1800,
-        28,
-        28,
+        54,
+        54,
+        59,
+        999,
+        121,
+        121,
+        121,
+        999,
+        290,
+        290,
+        290,
+        999,
+        1800,
+        1800,
+        1800,
+        1800,
+        65,
+        65,
+        65,
+        999,
+        126,
+        126,
+        126,
+        999,
+        192,
+        192,
+        192,
+        999,
+        1800,
+        1800,
+        1800,
+        1800,
+        24,
+        24,
         59,
         999,
         50,
         50,
         59,
         999,
-        110,
-        110,
-        110,
-        999,
-        1800,
-        1800,
-        1800,
-        1800,
-        51,
-        51,
-        59,
-        999,
-        140,
-        140,
-        140,
-        999,
-        280,
-        280,
-        280,
-        999,
-        1800,
-        1800,
-        1800,
-        1800,
-        75,
-        75,
-        75,
-        999,
-        146,
-        146,
-        146,
-        999,
-        213,
-        213,
-        213,
-        999,
-        1800,
-        1800,
-        1800,
-        1800,
-        25,
-        25,
-        59,
-        999,
-        57,
-        57,
-        59,
-        999,
-        105,
-        105,
-        105,
+        108,
+        108,
+        108,
         999,
         1800,
         1800,
@@ -325,13 +325,20 @@ def test_retry_delay_matrix_pins_backoff_jitter_and_bounds(
     ]
 
 
-def _identity_history(lock: CampaignLock, case: str) -> list[CampaignEvent]:
-    run = lock.runs[0]
+def _identity_history(lock: RunLock, case: str) -> list[RunEvent]:
+    run = lock.executions[0]
     trial = run.shards[0].trials[0]
     events = [_submitted(lock)]
-    if case == "unknown-run":
+    if case == "unknown-execution":
         events.append(
-            _event(lock, 2, "run", "missing", "run.active", LifecyclePayload())
+            _event(
+                lock,
+                2,
+                "execution",
+                "missing",
+                "execution.active",
+                LifecyclePayload(),
+            )
         )
     elif case == "unknown-shard":
         events.append(
@@ -343,9 +350,9 @@ def _identity_history(lock: CampaignLock, case: str) -> list[CampaignEvent]:
         )
     elif case == "bad-start":
         events.append(
-            _execution_started(lock, 2).model_copy(
+            _attempt_started(lock, 2).model_copy(
                 update={
-                    "payload": ExecutionStartedPayload(
+                    "payload": AttemptStartedPayload(
                         trial_id=trial.trial_id,
                         shard_id="missing",
                         physical_attempt=1,
@@ -355,49 +362,49 @@ def _identity_history(lock: CampaignLock, case: str) -> list[CampaignEvent]:
             )
         )
     elif case == "duplicate-start":
-        events.extend([_execution_started(lock, 2), _execution_started(lock, 3)])
+        events.extend([_attempt_started(lock, 2), _attempt_started(lock, 3)])
     elif case == "duplicate-attempt":
         events.extend(
             [
-                _execution_started(lock, 2),
-                _execution_started(lock, 3, execution_id="execution-two"),
+                _attempt_started(lock, 2),
+                _attempt_started(lock, 3, attempt_id="attempt-two"),
             ]
         )
     return events
 
 
-def _outcome_wave_history(lock: CampaignLock, case: str) -> list[CampaignEvent]:
-    run = lock.runs[0]
+def _outcome_wave_history(lock: RunLock, case: str) -> list[RunEvent]:
+    run = lock.executions[0]
     events = [_submitted(lock)]
     if case == "outcome-no-start":
-        events.append(_execution_outcome(lock, 2))
+        events.append(_attempt_outcome(lock, 2))
     elif case == "multiple-outcomes":
         events.extend(
             [
-                _execution_started(lock, 2),
-                _execution_outcome(lock, 3),
-                _execution_outcome(lock, 4),
+                _attempt_started(lock, 2),
+                _attempt_outcome(lock, 3),
+                _attempt_outcome(lock, 4),
             ]
         )
     elif case == "outcome-mismatch":
         events.extend(
             [
-                _execution_started(lock, 2),
-                _execution_outcome(lock, 3, attempt=2),
+                _attempt_started(lock, 2),
+                _attempt_outcome(lock, 3, attempt=2),
             ]
         )
     elif case == "completed-category":
         events.extend(
             [
-                _execution_started(lock, 2),
-                _execution_outcome(lock, 3, category="transient"),
+                _attempt_started(lock, 2),
+                _attempt_outcome(lock, 3, category="transient"),
             ]
         )
     elif case == "failed-no-category":
         events.extend(
             [
-                _execution_started(lock, 2),
-                _execution_outcome(lock, 3, kind="execution.failed"),
+                _attempt_started(lock, 2),
+                _attempt_outcome(lock, 3, kind="attempt.failed"),
             ]
         )
     elif case == "wave-unknown":
@@ -433,17 +440,17 @@ def _outcome_wave_history(lock: CampaignLock, case: str) -> list[CampaignEvent]:
 @pytest.mark.parametrize(
     ("case", "message"),
     [
-        ("unknown-run", "event references unknown run: missing"),
+        ("unknown-execution", "event references unknown execution: missing"),
         ("unknown-shard", "event references unknown shard: missing"),
         ("unknown-trial", "event references unknown trial: missing"),
-        ("bad-start", "execution references an unknown trial or shard"),
-        ("duplicate-start", "execution started more than once: execution-one"),
-        ("duplicate-attempt", "trial has duplicate physical execution numbers"),
-        ("outcome-no-start", "execution outcome has no start: execution-one"),
-        ("multiple-outcomes", "execution has multiple outcomes: execution-one"),
-        ("outcome-mismatch", "execution outcome identity does not match its start"),
-        ("completed-category", "completed execution cannot have a failure category"),
-        ("failed-no-category", "failed execution requires a failure category"),
+        ("bad-start", "attempt references an unknown trial or shard"),
+        ("duplicate-start", "attempt started more than once: attempt-one"),
+        ("duplicate-attempt", "trial has duplicate physical attempt numbers"),
+        ("outcome-no-start", "attempt outcome has no start: attempt-one"),
+        ("multiple-outcomes", "attempt has multiple outcomes: attempt-one"),
+        ("outcome-mismatch", "attempt outcome identity does not match its start"),
+        ("completed-category", "completed attempt cannot have a failure category"),
+        ("failed-no-category", "failed attempt requires a failure category"),
         ("wave-unknown", "wave references unknown shards: missing"),
         ("wave-identity", "wave lifecycle identity changed"),
         ("wave-transition", "invalid wave transition: acquiring -> active"),
@@ -454,7 +461,7 @@ def test_recovery_history_rejection_matrix_has_exact_errors(
 ) -> None:
     lock = _lock(remote_spec)
     identity_cases = {
-        "unknown-run",
+        "unknown-execution",
         "unknown-shard",
         "unknown-trial",
         "bad-start",
@@ -488,8 +495,8 @@ def test_control_action_projection_and_rejections_use_complete_values(
                 _event(
                     lock,
                     index,
-                    "campaign",
-                    lock.campaign_id,
+                    "run",
+                    lock.run_id,
                     "action.reserved",
                     ActionReservedPayload(
                         action_id=action_id,
@@ -501,8 +508,8 @@ def test_control_action_projection_and_rejections_use_complete_values(
                 _event(
                     lock,
                     index + 10,
-                    "campaign",
-                    lock.campaign_id,
+                    "run",
+                    lock.run_id,
                     cast(EventKind, outcome),
                     ActionOutcomePayload(
                         action_id=action_id,
@@ -513,28 +520,28 @@ def test_control_action_projection_and_rejections_use_complete_values(
             ]
         )
 
-    projection = project_campaign(lock, list(reversed(events)))
+    projection = project_run(lock, list(reversed(events)))
 
     assert _hash(projection.model_dump(mode="json")) == (
-        "260081057a2ec2b0d0a87bc3d2b5184e0e216ce58355d11d2cd1abb1b39e80eb"
+        "27b3238e8f6be4f70acf204c1c32921b80a41cafb4d79f867c9992df153a0d5e"
     )
 
     conflicting = submitted.model_copy(update={"subject_id": "wrong"})
     with pytest.raises(ControlError) as captured:
-        project_campaign(lock, [conflicting])
-    assert str(captured.value) == ("campaign submission event does not match its lock")
+        project_run(lock, [conflicting])
+    assert str(captured.value) == ("run submission event does not match its lock")
 
 
-def test_run_and_shard_event_projection_matrix_is_canonical(
+def test_execution_and_shard_event_projection_matrix_is_canonical(
     remote_spec: ExperimentSpec,
 ) -> None:
     corpus: list[object] = []
     for index, kind in enumerate(
         [
-            "run.queued",
-            "run.active",
-            "run.verifying",
-            "run.publishing",
+            "execution.queued",
+            "execution.active",
+            "execution.verifying",
+            "execution.publishing",
             "shard.queued",
             "shard.active",
             "shard.verifying",
@@ -543,11 +550,13 @@ def test_run_and_shard_event_projection_matrix_is_canonical(
         2,
     ):
         lock = _lock(remote_spec)
-        subject_type: SubjectType = "run" if kind.startswith("run.") else "shard"
+        subject_type: SubjectType = (
+            "execution" if kind.startswith("execution.") else "shard"
+        )
         subject_id = (
-            lock.runs[0].run_id
-            if subject_type == "run"
-            else lock.runs[0].shards[0].shard_id
+            lock.executions[0].execution_id
+            if subject_type == "execution"
+            else lock.executions[0].shards[0].shard_id
         )
         event = _event(
             lock,
@@ -562,19 +571,23 @@ def test_run_and_shard_event_projection_matrix_is_canonical(
         )
 
     assert _hash(corpus) == (
-        "c576a827b73936796088e6a6910ddf048c2af6253d98cb03da4bc4237e881026"
+        "31df8baf0f8ea6fe647d18d9a5482d2628aa3a8019d0bdf6cb1d5358d8c4a4ad"
     )
 
 
 @pytest.mark.parametrize(
     ("subject", "kind", "message"),
     [
-        ("run", "run.complete", "run completed with non-complete children"),
+        (
+            "execution",
+            "execution.complete",
+            "execution completed with non-complete children",
+        ),
         ("shard", "shard.complete", "shard completed with non-complete children"),
         (
-            "run",
-            "run.failed-infrastructure",
-            "run became terminal before its children",
+            "execution",
+            "execution.failed-infrastructure",
+            "execution became terminal before its children",
         ),
         (
             "shard",
@@ -588,7 +601,9 @@ def test_observed_terminal_parent_rejection_matrix_has_exact_errors(
 ) -> None:
     lock = _lock(remote_spec)
     subject_id = (
-        lock.runs[0].run_id if subject == "run" else lock.runs[0].shards[0].shard_id
+        lock.executions[0].execution_id
+        if subject == "execution"
+        else lock.executions[0].shards[0].shard_id
     )
     sequence = 3 if kind.endswith(".complete") else 2
     event = _event(
@@ -619,61 +634,61 @@ def test_control_terminal_and_subject_boundary_matrix_is_complete(
     terminal_projections = []
     for index, kind in enumerate(
         [
-            "campaign.completed",
-            "campaign.partial",
-            "campaign.failed",
-            "campaign.cancelled",
+            "run.completed",
+            "run.partial",
+            "run.failed",
+            "run.cancelled",
         ],
         2,
     ):
         terminal = _event(
             lock,
             index,
-            "campaign",
-            lock.campaign_id,
+            "run",
+            lock.run_id,
             cast(EventKind, kind),
             TerminalPayload(message="terminal"),
         )
         terminal_projections.append(
-            project_campaign(lock, [submitted, terminal]).model_dump(mode="json")
+            project_run(lock, [submitted, terminal]).model_dump(mode="json")
         )
         late = _event(
             lock,
             index + 10,
-            "campaign",
-            lock.campaign_id,
-            "campaign.draining",
+            "run",
+            lock.run_id,
+            "run.draining",
             LifecyclePayload(),
         )
         with pytest.raises(ControlError) as captured:
-            project_campaign(lock, [submitted, terminal, late])
-        assert str(captured.value) == "campaign has events after a terminal transition"
+            project_run(lock, [submitted, terminal, late])
+        assert str(captured.value) == "run has events after a terminal transition"
 
     assert _hash(terminal_projections) == (
-        "614756e50adeea31135a6ae6434627fe7d9f3d8319cf08d9572e16062bdc4623"
+        "f7719fc4084b4c6bb8a9a6ef9585e1bd6295a52f771ad8b7077beb1902bb5fb3"
     )
 
     wrong_type = _event(
         lock,
         2,
-        "campaign",
-        lock.campaign_id,
-        "campaign.draining",
+        "run",
+        lock.run_id,
+        "run.draining",
         LifecyclePayload(),
-    ).model_copy(update={"subject_type": "run"})
+    ).model_copy(update={"subject_type": "execution"})
     wrong_id = wrong_type.model_copy(
-        update={"subject_type": "campaign", "subject_id": "wrong"}
+        update={"subject_type": "run", "subject_id": "wrong"}
     )
-    assert project_campaign(lock, [submitted, wrong_type]).status == "queued"
+    assert project_run(lock, [submitted, wrong_type]).status == "queued"
     duplicate = submitted.model_copy(
         update={"event_id": "evt-" + "2" * 32, "observed_at": NOW + timedelta(1)}
     )
     for event, message in [
-        (wrong_id, "campaign event has the wrong subject"),
-        (duplicate, "campaign has multiple submission events"),
+        (wrong_id, "run event has the wrong subject"),
+        (duplicate, "run has multiple submission events"),
     ]:
         with pytest.raises(ControlError) as captured:
-            project_campaign(lock, [submitted, event])
+            project_run(lock, [submitted, event])
         assert str(captured.value) == message
 
 
@@ -685,8 +700,8 @@ def test_action_projection_rejection_matrix_has_exact_errors(
     reserved = _event(
         lock,
         2,
-        "campaign",
-        lock.campaign_id,
+        "run",
+        lock.run_id,
         "action.reserved",
         ActionReservedPayload(
             action_id="action-one",
@@ -698,8 +713,8 @@ def test_action_projection_rejection_matrix_has_exact_errors(
     outcome = _event(
         lock,
         3,
-        "campaign",
-        lock.campaign_id,
+        "run",
+        lock.run_id,
         "action.succeeded",
         ActionOutcomePayload(action_id="action-one", remote_id="remote-one"),
     )
@@ -734,7 +749,7 @@ def test_action_projection_rejection_matrix_has_exact_errors(
 
     for events, message in cases:
         with pytest.raises(ControlError) as captured:
-            project_campaign(lock, events)
+            project_run(lock, events)
         assert str(captured.value) == message
 
 
@@ -748,9 +763,9 @@ def test_event_ordering_deduplication_and_conflicts_are_complete(
     second = _event(
         lock,
         2,
-        "campaign",
-        lock.campaign_id,
-        "campaign.draining",
+        "run",
+        lock.run_id,
+        "run.draining",
         LifecyclePayload(),
     ).model_copy(update={"event_id": "evt-a", "observed_at": NOW})
 
@@ -764,27 +779,27 @@ def test_event_ordering_deduplication_and_conflicts_are_complete(
     assert str(captured.value) == "event ID has conflicting records"
 
 
-def test_non_campaign_events_do_not_hide_later_campaign_transitions(
+def test_non_run_events_do_not_hide_later_run_transitions(
     remote_spec: ExperimentSpec,
 ) -> None:
     lock = _lock(remote_spec)
     ignored = _event(
         lock,
         2,
-        "run",
-        lock.runs[0].run_id,
-        "run.active",
+        "execution",
+        lock.executions[0].execution_id,
+        "execution.active",
         LifecyclePayload(),
     )
     draining = _event(
         lock,
         3,
-        "campaign",
-        lock.campaign_id,
-        "campaign.draining",
+        "run",
+        lock.run_id,
+        "run.draining",
         LifecyclePayload(),
     )
-    projection = project_campaign(lock, [_submitted(lock), ignored, draining])
+    projection = project_run(lock, [_submitted(lock), ignored, draining])
 
     assert projection.status == "draining"
     assert projection.event_count == 3
@@ -799,21 +814,21 @@ def test_repeated_cancellation_preserves_draining_and_manual_states(
     cancel = _event(
         lock,
         4,
-        "campaign",
-        lock.campaign_id,
-        "campaign.cancel-requested",
+        "run",
+        lock.run_id,
+        "run.cancel-requested",
         CancellationPayload(reason="operator"),
     )
     states = []
-    for kind in [None, "campaign.draining", "campaign.manual-intervention-required"]:
+    for kind in [None, "run.draining", "run.manual-intervention-required"]:
         events = [submitted]
         if kind is not None:
             events.append(
                 _event(
                     lock,
                     2,
-                    "campaign",
-                    lock.campaign_id,
+                    "run",
+                    lock.run_id,
                     cast(EventKind, kind),
                     LifecyclePayload(),
                 )
@@ -821,8 +836,8 @@ def test_repeated_cancellation_preserves_draining_and_manual_states(
         events.extend(
             [cancel, cancel.model_copy(update={"event_id": "evt-cancel-two"})]
         )
-        states.append(project_campaign(lock, events).model_dump(mode="json"))
+        states.append(project_run(lock, events).model_dump(mode="json"))
 
     assert _hash(states) == (
-        "a92d3b849a6578169da59207a8e320e9512c89900b290b5f0135bca04092af33"
+        "bf39a85e885a53fb6764f55abb06bb1739bb31d6c164059e4df2fcc3e292c1d4"
     )

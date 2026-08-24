@@ -25,7 +25,7 @@ def validate_harbor_result(
 ) -> dict[str, object]:
     """Read historical pre-adapter evidence.
 
-    New executions use the typed compatibility exporter instead.
+    New attempts use the typed compatibility exporter instead.
     """
     trials: list[dict[str, object]] = []
     for path in sorted(jobs_dir.glob("*/*/result.json")):

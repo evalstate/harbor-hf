@@ -74,9 +74,14 @@
       "title": "ObjectReference",
       "type": "object"
     },
-    "PhysicalExecutionReference": {
+    "PhysicalAttemptReference": {
       "additionalProperties": false,
       "properties": {
+        "attempt_id": {
+          "minLength": 1,
+          "title": "Attempt Id",
+          "type": "string"
+        },
         "bundle_status": {
           "enum": [
             "verified",
@@ -89,11 +94,6 @@
         "completed_at": {
           "format": "date-time",
           "title": "Completed At",
-          "type": "string"
-        },
-        "execution_id": {
-          "minLength": 1,
-          "title": "Execution Id",
           "type": "string"
         },
         "failure_category": {
@@ -181,7 +181,7 @@
         }
       },
       "required": [
-        "execution_id",
+        "attempt_id",
         "trial_id",
         "physical_attempt",
         "status",
@@ -190,7 +190,7 @@
         "completed_at",
         "bundle_status"
       ],
-      "title": "PhysicalExecutionReference",
+      "title": "PhysicalAttemptReference",
       "type": "object"
     },
     "ProfileDigests": {
@@ -271,6 +271,11 @@
     "SourcePublicationReference": {
       "additionalProperties": false,
       "properties": {
+        "execution_id": {
+          "minLength": 1,
+          "title": "Execution Id",
+          "type": "string"
+        },
         "publication_id": {
           "minLength": 1,
           "title": "Publication Id",
@@ -294,11 +299,6 @@
           "title": "Role",
           "type": "string"
         },
-        "run_id": {
-          "minLength": 1,
-          "title": "Run Id",
-          "type": "string"
-        },
         "selected_trials": {
           "items": {
             "$ref": "#/$defs/SourceTrialSelection"
@@ -316,7 +316,7 @@
       "required": [
         "role",
         "publication_id",
-        "run_id",
+        "execution_id",
         "result_dataset",
         "result_revision",
         "source_checksum",
@@ -350,10 +350,12 @@
   "additionalProperties": false,
   "description": "HF execution metadata around referenced Harbor-native bundles.",
   "properties": {
-    "campaign_id": {
-      "minLength": 1,
-      "title": "Campaign Id",
-      "type": "string"
+    "attempts": {
+      "items": {
+        "$ref": "#/$defs/PhysicalAttemptReference"
+      },
+      "title": "Attempts",
+      "type": "array"
     },
     "cleanup_outcome": {
       "enum": [
@@ -383,12 +385,13 @@
       "title": "Evidence Prefix",
       "type": "string"
     },
-    "executions": {
-      "items": {
-        "$ref": "#/$defs/PhysicalExecutionReference"
-      },
-      "title": "Executions",
-      "type": "array"
+    "execution_id": {
+      "minLength": 1,
+      "title": "Execution Id",
+      "type": "string"
+    },
+    "execution_lock": {
+      "$ref": "#/$defs/ObjectReference"
     },
     "profiles": {
       "$ref": "#/$defs/ProfileDigests"
@@ -403,9 +406,6 @@
       "minLength": 1,
       "title": "Run Id",
       "type": "string"
-    },
-    "run_lock": {
-      "$ref": "#/$defs/ObjectReference"
     },
     "runtime": {
       "$ref": "#/$defs/RuntimeIdentity"
@@ -431,17 +431,17 @@
     }
   },
   "required": [
+    "execution_id",
     "run_id",
-    "campaign_id",
     "created_at",
     "completed_at",
     "evidence_bucket",
     "evidence_prefix",
-    "run_lock",
+    "execution_lock",
     "profiles",
     "runtime",
     "cleanup_outcome",
-    "executions"
+    "attempts"
   ],
   "title": "PublicationEnvelope",
   "type": "object"

@@ -25,23 +25,23 @@ paths and digests in `harbor-native-bundle.json`.
 
 | Published field | Canonical source |
 | --- | --- |
-| campaign and run IDs | campaign and run locks |
+| run and run IDs | run and run locks |
 | physical execution ID and attempt | execution lock |
 | physical execution bundle status | verified bundle presence or `not_available` for failed or cancelled execution |
-| physical execution status, failure category, and retry reason | campaign recovery events |
+| physical execution status, failure category, and retry reason | run recovery events |
 | task outcome | selected execution, Harbor result, and exhausted retry decision |
 | run quality | deterministic projection of all task outcomes |
-| planned trial denominator | immutable campaign and run locks |
+| planned trial denominator | immutable run and run locks |
 | provider, region, hardware, and accelerator count | resolved deployment lock |
 | model repository, revision, engine, quantization, context, and concurrency | resolved model and deployment profiles |
 | remote HF Job, Endpoint, Dataset, Bucket, and Space identity | HF control-plane evidence |
-| endpoint cleanup outcome | terminal campaign decision after all waves close |
+| endpoint cleanup outcome | terminal run decision after all waves close |
 | source, archive, envelope, and projection checksums | immutable evidence and publication manifests |
 | sanitizer and projector versions | `harbor-hf` publication contract |
 
 ## Derived Query Values
 
-The `runs`, `trials`, `executions`, `metrics`, and `artifacts` Parquet tables are
+The `runs`, `trials`, `attempts`, `metrics`, and `artifacts` Parquet tables are
 query projections, not canonical evidence. The cutover replaces their contract
 in place under the `v1` identifier; superseded shapes are not retained by the
 production reader.
@@ -53,7 +53,7 @@ The following catalog values are derived:
 - `duration_seconds`: run completion time minus run creation time;
 - `scored_trial_count`, `agent_failed_count`, `benchmark_failed_count`, and
   `infrastructure_exhausted_count`: counts of explicit task outcomes;
-- `failed_executions`: count of failed physical executions, regardless of category;
+- `failed_attempts`: count of failed physical attempts, regardless of category;
 - row counts: counts of validated projection rows.
 
 Every catalog row points to a checksummed projection manifest. That manifest

@@ -92,15 +92,16 @@ def _deployment_profiles(manifest: dict[str, object]) -> dict[str, dict[str, obj
 
 def _plan_groups(plan: dict[str, object]) -> dict[str, _DeploymentGroup]:
     groups: dict[str, _DeploymentGroup] = {}
-    runs = _sequence(plan.get("runs"), "plan.runs")
-    for run_index, item in enumerate(runs):
-        run = _mapping(item, f"plan.runs[{run_index}]")
+    executions = _sequence(plan.get("executions"), "plan.executions")
+    for execution_index, item in enumerate(executions):
+        execution = _mapping(item, f"plan.executions[{execution_index}]")
         deployment = _string(
-            run.get("deployment"), f"plan.runs[{run_index}].deployment"
+            execution.get("deployment"),
+            f"plan.executions[{execution_index}].deployment",
         )
         digest = _string(
-            run.get("deployment_digest"),
-            f"plan.runs[{run_index}].deployment_digest",
+            execution.get("deployment_digest"),
+            f"plan.executions[{execution_index}].deployment_digest",
         )
         if digest in groups and groups[digest]["deployment"] != deployment:
             raise InputError(
@@ -108,20 +109,24 @@ def _plan_groups(plan: dict[str, object]) -> dict[str, _DeploymentGroup]:
             )
         group = groups.setdefault(digest, {"deployment": deployment, "shards": []})
         for shard_index, shard_item in enumerate(
-            _sequence(run.get("shards"), f"plan.runs[{run_index}].shards")
+            _sequence(
+                execution.get("shards"),
+                f"plan.executions[{execution_index}].shards",
+            )
         ):
             shard = _mapping(
-                shard_item, f"plan.runs[{run_index}].shards[{shard_index}]"
+                shard_item,
+                f"plan.executions[{execution_index}].shards[{shard_index}]",
             )
             trial_count = len(
                 _sequence(
                     shard.get("trials"),
-                    f"plan.runs[{run_index}].shards[{shard_index}].trials",
+                    f"plan.executions[{execution_index}].shards[{shard_index}].trials",
                 )
             )
             if trial_count < 1:
                 raise InputError(
-                    f"plan.runs[{run_index}].shards[{shard_index}] is empty"
+                    f"plan.executions[{execution_index}].shards[{shard_index}] is empty"
                 )
             group["shards"].append({"trial_count": trial_count})
     if not groups:
@@ -153,9 +158,9 @@ def _validate_plan_identity(
             f"{experiment} != {plan_experiment}"
         )
 
-    planned_runs = _sequence(plan.get("runs"), "plan.runs")
+    planned_executions = _sequence(plan.get("executions"), "plan.executions")
     declared_counts = {
-        "run_count": len(planned_runs),
+        "execution_count": len(planned_executions),
         "shard_count": sum(len(group["shards"]) for group in groups.values()),
         "trial_count": sum(
             shard["trial_count"]

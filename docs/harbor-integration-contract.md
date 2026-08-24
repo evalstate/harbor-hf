@@ -2,7 +2,7 @@
 
 This document freezes the Harbor assumptions used by `harbor-hf` while the
 generic Harbor-owned execution protocol is developed upstream. New worker and
-campaign executions use this adapter. Historical evidence can still be read by
+run attempts use this adapter. Historical evidence can still be read by
 the isolated legacy reader.
 
 ## Ownership Boundary
@@ -12,10 +12,10 @@ config, trial execution, locks, results, verifier rewards, exceptions, timing,
 token usage, and trial artifact inventory. Workers install Harbor from a pinned
 `harbor-framework/harbor` git commit. Upstream Harbor remains unchanged.
 
-`harbor-hf` owns campaign and physical execution identity, Hugging Face
+`harbor-hf` owns run, execution, and physical attempt identity, Hugging Face
 infrastructure, immutable request storage, endpoint cleanup, infrastructure
 retries, policy checks, evidence publication, and normalized result rows. The
-planned TypeScript service owns shared campaign decisions. Pinned Python workers
+planned TypeScript service owns shared run decisions. Pinned Python workers
 continue to call Harbor and write attempt evidence, but they do not become a
 second control authority. See the [control service
 specification](CONTROL_SERVICE.md).
@@ -28,7 +28,7 @@ historical evidence tools.
 
 ## Execution Input
 
-A campaign first locks its approved profiles and expected logical tasks. A
+A run first locks its approved profiles and expected logical tasks. A
 secret-free preparation Job runs the pinned Harbor git commit and builds one
 normal `JobConfig`. Harbor resolves the dataset and task sources through its
 public `JobPlan` API. The preparation worker then writes:
@@ -39,31 +39,32 @@ public `JobPlan` API. The preparation worker then writes:
 
 Each prepared trial contains the exact Harbor `TrialLock`, source task digest,
 container image digest, resource request, and phase time limits. The control
-service checks the task against the campaign lock and selects compatible Hugging
-Face Sandbox hardware from the deployment profile. The deployment profile sets
+service checks the task against the run lock and selects compatible Hugging
+Face Job hardware from the deployment profile. The deployment profile sets
 limits and prices but contains no benchmark task catalog.
 
-An execution worker receives only the tasks assigned to its physical Job. It
-fetches their prepared records, reconstructs a one-attempt Harbor `JobConfig`,
-and lets Harbor fetch each exact Git or package task. It does not read a dataset
+An execution worker receives the one task assigned to its physical Job. It
+fetches that prepared record, reconstructs a one-attempt Harbor `JobConfig`,
+and lets Harbor fetch the exact Git or package task. It does not read a dataset
 manifest or select tasks again. Harbor's internal retry count remains zero.
 After a trial, the worker compares Harbor's emitted `TrialLock` with the
 prepared lock before it can submit evidence or an outcome.
 
 Both workers install the reviewed Harbor-HF agent package at its immutable
-revision and use the pinned Harbor git commit. The preparation worker has
-no persistent secret, inference access, Sandbox authority, or Bucket mount. The
-execution worker has no persistent secret or Bucket mount and reaches Sandboxes
-only through its short-lived capability. The root-owned bridge receives the
-inference credential directly from the control service. The benchmark agent
-receives only its loopback route and placeholder key.
+revision and use the pinned Harbor git commit. The preparation worker has no
+persistent secret, inference access, or Bucket mount. The execution worker has
+no broad control credential or Bucket mount. Its short-lived capability is
+scoped to the assigned lock, evidence upload, and attempt receipt. When
+inference is required, the Job receives only the inference credential for the
+root-owned bridge. The benchmark agent receives only its loopback route and
+placeholder key.
 
 ## Custom Provider Agents
 
 Every provider-backed agent is loaded through Harbor's public
 `AgentConfig.import_path` field. Hermes, OpenClaw, OpenClaw Codex, Pi, DeepSeek
 Harness, OpenCode, and FX live in separate modules under the `harbor-hf-agents`
-package. New provider executions do not select Harbor built-ins and have no
+package. New provider attempts do not select Harbor built-ins and have no
 fallback to them.
 
 One internal registry validates the logical agent name, import path, required
@@ -106,7 +107,7 @@ terminal-marker rules apply to the input, bundle, log, and raw Harbor artifacts
 together.
 
 The controller writes `private-artifacts.json` for every direct Harbor trial and
-for each complete campaign physical execution. Entries are sorted,
+for each complete run physical execution. Entries are sorted,
 private-only, size-bounded, and checksummed. A successful provider-agent trial
 whose registry definition requires a native session must include a non-empty
 session JSONL. Failed and timed-out trials
@@ -128,7 +129,7 @@ The typed bundle is accepted only when all of these checks pass:
 - every trial has at least one finite numeric verifier reward.
 
 A nonzero Harbor exit with a typed trial exception preserves that exception for
-campaign retry classification. Other malformed output from a failed process is
+run retry classification. Other malformed output from a failed process is
 reported as the Harbor process failure. A zero exit without a valid typed
 bundle cannot publish success or a score.
 
@@ -142,18 +143,18 @@ Harbor-owned protocol satisfies the migration conditions in the
 
 ## Behavioral Baseline
 
-The remote baseline is campaign
+The remote baseline is run
 `20260714T072108Z-7a2b167238-2bbc0a89fe`, produced with Harbor commit
 `bd9e606dcb99eb49de70bd741fd846cae5c7ebd1` and OpenClaw `2026.6.11`.
 Its evidence is stored under:
 
 ```text
-hf://buckets/example-org/benchmark-runs/campaigns/
+hf://buckets/example-org/benchmark-runs/runs/
 20260714T072108Z-7a2b167238-2bbc0a89fe
 ```
 
 Exporter parity was checked against a preserved successful physical execution
-from that campaign using the same Harbor commit. Harbor `0.17.1` validated one
+from that run using the same Harbor commit. Harbor `0.17.1` validated one
 job and one trial, including task digest, agent/model identity, rewards, usage,
 and 12 artifact inventory entries.
 

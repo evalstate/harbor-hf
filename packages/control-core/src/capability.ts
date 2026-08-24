@@ -2,16 +2,10 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { canonicalJson } from "@harbor-hf/contracts";
 
 export const workerOperations = [
-  "campaign.read",
+  "run.read",
   "preparation.submit",
   "attempt.submit",
   "evidence.write",
-  "sandbox.create",
-  "sandbox.observe",
-  "sandbox.exec",
-  "sandbox.write",
-  "sandbox.read",
-  "sandbox.close",
 ] as const;
 
 export type WorkerOperation = (typeof workerOperations)[number];
@@ -19,8 +13,8 @@ export type WorkerOperation = (typeof workerOperations)[number];
 export interface WorkerCapability {
   version: 1;
   namespace: string;
-  campaign_id: string;
-  campaign_lock_digest: string;
+  run_id: string;
+  run_lock_digest: string;
   action_id: string;
   task_ids: string[];
   operations: WorkerOperation[];
@@ -74,9 +68,9 @@ export function verifyWorkerCapability(
   if (
     candidate.version !== 1 ||
     candidate.namespace !== namespace ||
-    typeof candidate.campaign_id !== "string" ||
-    typeof candidate.campaign_lock_digest !== "string" ||
-    !/^sha256:[0-9a-f]{64}$/.test(candidate.campaign_lock_digest) ||
+    typeof candidate.run_id !== "string" ||
+    typeof candidate.run_lock_digest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(candidate.run_lock_digest) ||
     typeof candidate.action_id !== "string" ||
     !Array.isArray(candidate.task_ids) ||
     candidate.task_ids.length === 0 ||

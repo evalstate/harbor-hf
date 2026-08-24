@@ -25,13 +25,8 @@ from harbor_hf.benchmark_source import (
     source_lock_json_schema,
     verify_anonymous_git_source,
 )
-from harbor_hf.campaigns import (
-    CampaignLock,
-    build_campaign_lock,
-    build_campaign_plan,
-    build_wave_lock,
-)
-from harbor_hf.control import CampaignSubmittedPayload, new_event
+from harbor_hf.control import RunSubmittedPayload, new_event
+from harbor_hf.executions import build_execution_lock
 from harbor_hf.harbor_adapter import build_execution_request
 from harbor_hf.models import (
     BundleBenchmarkSource,
@@ -40,7 +35,12 @@ from harbor_hf.models import (
     GitBenchmarkSource,
 )
 from harbor_hf.reconciler import plan_reconciliation
-from harbor_hf.runs import build_run_lock
+from harbor_hf.runs import (
+    RunLock,
+    build_run_lock,
+    build_run_plan,
+    build_wave_lock,
+)
 
 
 def _with_source(spec: ExperimentSpec, source: object) -> ExperimentSpec:
@@ -61,10 +61,10 @@ def test_directory_resolution_is_content_addressed_and_path_independent(
     second.mkdir(parents=True)
     (first / "task.toml").write_text("name='same'\n", encoding="utf-8")
     (second / "task.toml").write_text("name='same'\n", encoding="utf-8")
-    first_manifest = tmp_path / "first" / "campaign.yaml"
-    second_manifest = tmp_path / "second" / "campaign.yaml"
-    first_manifest.write_text("campaign\n", encoding="utf-8")
-    second_manifest.write_text("campaign\n", encoding="utf-8")
+    first_manifest = tmp_path / "first" / "run.yaml"
+    second_manifest = tmp_path / "second" / "run.yaml"
+    first_manifest.write_text("run\n", encoding="utf-8")
+    second_manifest.write_text("run\n", encoding="utf-8")
     spec = _with_source(
         remote_spec,
         DirectoryBenchmarkSource(path="tasks").model_dump(mode="python"),
@@ -119,7 +119,7 @@ def test_source_lock_is_canonical_and_supports_package_git_and_bundle(
     git_spec = _with_source(remote_spec, git.model_dump(mode="python"))
     git_lock = resolve_benchmark_source(
         git_spec,
-        tmp_path / "campaign.yaml",
+        tmp_path / "run.yaml",
         tmp_path / "git-workspace",
         verify_git=False,
     ).lock
@@ -167,28 +167,28 @@ def test_source_identity_changes_run_shard_trial_and_wave_ids(
     second_source = first_source.model_copy(update={"revision": "9" * 40})
     first_spec = _with_source(remote_spec, first_source.model_dump(mode="python"))
     second_spec = _with_source(remote_spec, second_source.model_dump(mode="python"))
-    first_lock = build_campaign_lock(build_campaign_plan(first_spec), "same-campaign")
-    second_lock = build_campaign_lock(build_campaign_plan(second_spec), "same-campaign")
+    first_lock = build_run_lock(build_run_plan(first_spec), "same-run")
+    second_lock = build_run_lock(build_run_plan(second_spec), "same-run")
 
-    first_run = first_lock.runs[0]
-    second_run = second_lock.runs[0]
-    assert first_run.run_id != second_run.run_id
+    first_run = first_lock.executions[0]
+    second_run = second_lock.executions[0]
+    assert first_run.execution_id != second_run.execution_id
     assert first_run.shards[0].shard_id != second_run.shards[0].shard_id
     assert (
         first_run.shards[0].trials[0].trial_id
         != second_run.shards[0].trials[0].trial_id
     )
 
-    def wave_id(campaign: CampaignLock, spec: ExperimentSpec) -> str:
+    def wave_id(run: RunLock, spec: ExperimentSpec) -> str:
         submitted = new_event(
-            subject_type="campaign",
-            subject_id=campaign.campaign_id,
-            kind="campaign.submitted",
+            subject_type="run",
+            subject_id=run.run_id,
+            kind="run.submitted",
             producer="cli",
-            payload=CampaignSubmittedPayload(plan_digest=campaign.plan_digest),
+            payload=RunSubmittedPayload(plan_digest=run.plan_digest),
         )
-        action = plan_reconciliation(campaign, [submitted])[1].actions[0]
-        return build_wave_lock(campaign, spec, action).wave_id
+        action = plan_reconciliation(run, [submitted])[1].actions[0]
+        return build_wave_lock(run, spec, action).wave_id
 
     assert wave_id(first_lock, first_spec) != wave_id(second_lock, second_spec)
 
@@ -360,7 +360,7 @@ def test_bundle_loading_extracts_and_renders_a_local_harbor_dataset(
         DirectoryBenchmarkSource(path=str(source)).model_dump(mode="python"),
     )
     resolution = resolve_benchmark_source(
-        spec, tmp_path / "campaign.yaml", tmp_path / "workspace"
+        spec, tmp_path / "run.yaml", tmp_path / "workspace"
     )
     assert resolution.bundle is not None
     extracted = prepare_benchmark_source(
@@ -371,7 +371,7 @@ def test_bundle_loading_extracts_and_renders_a_local_harbor_dataset(
     assert extracted == tmp_path / "extracted"
     assert extracted is not None
     resolved = resolved_experiment(spec, resolution.lock)
-    lock = build_run_lock(resolved, run_id="bundle-run")
+    lock = build_execution_lock(resolved, execution_id="bundle-run")
     request = build_execution_request(
         lock,
         tmp_path / "jobs",

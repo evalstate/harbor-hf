@@ -6,12 +6,7 @@ from huggingface_hub import CommitOperationAdd
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel, ConfigDict
 
-from harbor_hf.campaign_finalizer import (
-    BucketCampaignFinalizer,
-    ImmutableEvidenceWriter,
-    ValidatingEvidenceWriter,
-)
-from harbor_hf.control import CampaignEvent, CampaignSnapshot
+from harbor_hf.control import RunEvent, RunSnapshot
 from harbor_hf.io import load_experiment_bytes
 from harbor_hf.models import PublicationVisibility
 from harbor_hf.publication_correction import (
@@ -34,6 +29,11 @@ from harbor_hf.results import (
     build_result_publication,
     build_result_tables,
 )
+from harbor_hf.run_finalizer import (
+    BucketRunFinalizer,
+    ImmutableEvidenceWriter,
+    ValidatingEvidenceWriter,
+)
 
 _DATASET_INITIALIZATION_PATH = ".harbor-hf-initialized"
 _DATASET_INITIALIZATION_PAYLOAD = b"harbor-hf publication Dataset\n"
@@ -43,16 +43,16 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class CampaignEventResult(FrozenModel):
-    campaign_id: str
+class RunEventResult(FrozenModel):
+    run_id: str
     event_id: str
     kind: str
     recorded: bool
     dry_run: bool
 
 
-class VerifiedRun(FrozenModel):
-    run_id: str
+class VerifiedExecution(FrozenModel):
+    execution_id: str
     publication_id: str
     source_prefix: str
     source_checksum: str
@@ -60,15 +60,15 @@ class VerifiedRun(FrozenModel):
 
 
 class ArtifactVerificationReport(FrozenModel):
-    campaign_id: str
+    run_id: str
     artifact_bucket: str
     control_commit: str
     verified: bool = True
-    runs: list[VerifiedRun]
+    executions: list[VerifiedExecution]
 
 
-class PublishedRun(FrozenModel):
-    run_id: str
+class PublishedExecution(FrozenModel):
+    execution_id: str
     publication_id: str
     result_dataset: str
     index_dataset: str
@@ -77,30 +77,30 @@ class PublishedRun(FrozenModel):
     index_revision: str | None = None
 
 
-class CampaignPublicationReport(FrozenModel):
-    campaign_id: str
+class RunPublicationReport(FrozenModel):
+    run_id: str
     control_commit: str
     dry_run: bool
-    runs: list[PublishedRun]
+    executions: list[PublishedExecution]
 
 
-class SealedRun(FrozenModel):
-    run_id: str
+class SealedExecution(FrozenModel):
+    execution_id: str
     source_prefix: str
     source_checksum: str | None = None
 
 
-class CampaignSealReport(FrozenModel):
-    campaign_id: str
+class RunSealReport(FrozenModel):
+    run_id: str
     artifact_bucket: str
     dry_run: bool
-    runs: list[SealedRun]
+    executions: list[SealedExecution]
 
 
-class CampaignEventStore(Protocol):
-    def load_snapshot(self, campaign_id: str) -> CampaignSnapshot: ...
+class RunEventStore(Protocol):
+    def load_snapshot(self, run_id: str) -> RunSnapshot: ...
 
-    def ensure_event(self, campaign_id: str, event: CampaignEvent) -> bool: ...
+    def ensure_event(self, run_id: str, event: RunEvent) -> bool: ...
 
 
 class ResultPublisher(Protocol):
@@ -127,14 +127,14 @@ class DatasetRepositoryApi(Protocol):
     ) -> object: ...
 
 
-class AutomaticCampaignPublisher:
+class AutomaticRunPublisher:
     """Publish every complete run after terminal evidence is finalized."""
 
     def __init__(
         self,
         *,
         namespace: str,
-        store: CampaignEventStore,
+        store: RunEventStore,
         reader: RefreshingEvidenceReader,
         publisher: ResultPublisher,
         repositories: DatasetRepositoryApi,
@@ -145,14 +145,14 @@ class AutomaticCampaignPublisher:
         self.publisher = publisher
         self.repositories = repositories
 
-    def publish(self, campaign_id: str) -> CampaignPublicationReport:
-        snapshot = self.store.load_snapshot(campaign_id)
+    def publish(self, run_id: str) -> RunPublicationReport:
+        snapshot = self.store.load_snapshot(run_id)
         spec = load_experiment_bytes(
             snapshot.request,
-            source=f"campaign {campaign_id} request",
+            source=f"run {run_id} request",
         )
         if spec.publishing.index_dataset is None:
-            raise ValueError("campaign result publication requires index_dataset")
+            raise ValueError("run result publication requires index_dataset")
         assert spec.publishing.index_dataset_visibility is not None
         repositories = (
             (spec.publishing.dataset, spec.publishing.dataset_visibility),
@@ -163,7 +163,7 @@ class AutomaticCampaignPublisher:
         )
         _prepare_dataset_repositories(repositories, self.repositories)
         self.reader.refresh()
-        return publish_campaign_results(
+        return publish_run_results(
             snapshot,
             namespace=self.namespace,
             reader=self.reader,
@@ -174,9 +174,9 @@ class AutomaticCampaignPublisher:
     def publish_correction(
         self,
         correction: PublicationCorrection,
-    ) -> CampaignPublicationReport:
+    ) -> RunPublicationReport:
         """Publish frozen evidence through an explicit corrected target."""
-        snapshot = self.store.load_snapshot(correction.campaign_id)
+        snapshot = self.store.load_snapshot(correction.run_id)
         artifact_bucket = validate_publication_correction(
             snapshot, correction, self.namespace
         )
@@ -188,7 +188,7 @@ class AutomaticCampaignPublisher:
             self.repositories,
         )
         self.reader.refresh()
-        return publish_campaign_results(
+        return publish_run_results(
             snapshot,
             namespace=self.namespace,
             reader=self.reader,
@@ -264,20 +264,18 @@ def _commit_identity(info: object) -> str | None:
     return revision if isinstance(revision, str) and revision else None
 
 
-def cancel_campaign(
-    store: CampaignEventStore,
-    campaign_id: str,
+def cancel_run(
+    store: RunEventStore,
+    run_id: str,
     *,
     reason: str,
     dry_run: bool,
-) -> CampaignEventResult:
-    snapshot = store.load_snapshot(campaign_id)
+) -> RunEventResult:
+    snapshot = store.load_snapshot(run_id)
     event, created = durable_cancellation_event(snapshot.lock, snapshot.events, reason)
-    recorded = (
-        False if dry_run or not created else store.ensure_event(campaign_id, event)
-    )
-    return CampaignEventResult(
-        campaign_id=campaign_id,
+    recorded = False if dry_run or not created else store.ensure_event(run_id, event)
+    return RunEventResult(
+        run_id=run_id,
         event_id=event.event_id,
         kind=event.kind,
         recorded=recorded,
@@ -285,23 +283,21 @@ def cancel_campaign(
     )
 
 
-def retry_campaign_shard(
-    store: CampaignEventStore,
-    campaign_id: str,
+def retry_run_shard(
+    store: RunEventStore,
+    run_id: str,
     *,
     shard_id: str,
     reason: str,
     dry_run: bool,
-) -> CampaignEventResult:
-    snapshot = store.load_snapshot(campaign_id)
+) -> RunEventResult:
+    snapshot = store.load_snapshot(run_id)
     event, created = durable_shard_retry_event(
         snapshot.lock, snapshot.events, shard_id, reason
     )
-    recorded = (
-        False if dry_run or not created else store.ensure_event(campaign_id, event)
-    )
-    return CampaignEventResult(
-        campaign_id=campaign_id,
+    recorded = False if dry_run or not created else store.ensure_event(run_id, event)
+    return RunEventResult(
+        run_id=run_id,
         event_id=event.event_id,
         kind=event.kind,
         recorded=recorded,
@@ -309,26 +305,24 @@ def retry_campaign_shard(
     )
 
 
-def resume_campaign(
-    store: CampaignEventStore,
-    campaign_id: str,
+def resume_run(
+    store: RunEventStore,
+    run_id: str,
     *,
     reason: str,
     cleanup_verified: bool,
     dry_run: bool,
-) -> CampaignEventResult:
-    snapshot = store.load_snapshot(campaign_id)
+) -> RunEventResult:
+    snapshot = store.load_snapshot(run_id)
     event, created = durable_manual_intervention_resolution_event(
         snapshot.lock,
         snapshot.events,
         reason,
         cleanup_verified=cleanup_verified,
     )
-    recorded = (
-        False if dry_run or not created else store.ensure_event(campaign_id, event)
-    )
-    return CampaignEventResult(
-        campaign_id=campaign_id,
+    recorded = False if dry_run or not created else store.ensure_event(run_id, event)
+    return RunEventResult(
+        run_id=run_id,
         event_id=event.event_id,
         kind=event.kind,
         recorded=recorded,
@@ -336,20 +330,20 @@ def resume_campaign(
     )
 
 
-def seal_partial_campaign_runs(
-    snapshot: CampaignSnapshot,
+def seal_partial_run_executions(
+    snapshot: RunSnapshot,
     *,
     namespace: str,
     reader: EvidenceReader,
     writer: ImmutableEvidenceWriter | None,
     dry_run: bool,
-) -> CampaignSealReport:
+) -> RunSealReport:
     spec = load_experiment_bytes(
         snapshot.request,
-        source=f"campaign {snapshot.lock.campaign_id} request",
+        source=f"run {snapshot.lock.run_id} request",
     )
     if spec.remote is None or spec.remote.job.namespace != namespace:
-        raise ValueError("campaign request does not match the control namespace")
+        raise ValueError("run request does not match the control namespace")
     projection = seal_partial_projection(
         project_recovery(snapshot.lock, snapshot.events)
     )
@@ -363,28 +357,28 @@ def seal_partial_campaign_runs(
         raise ValueError("evidence writer is required outside dry-run")
     else:
         evidence_writer = writer
-    checksums = BucketCampaignFinalizer(reader, evidence_writer).seal_runs(
+    checksums = BucketRunFinalizer(reader, evidence_writer).seal_executions(
         snapshot.lock,
         spec,
         projection,
     )
-    return CampaignSealReport(
-        campaign_id=snapshot.lock.campaign_id,
+    return RunSealReport(
+        run_id=snapshot.lock.run_id,
         artifact_bucket=spec.artifacts.bucket,
         dry_run=dry_run,
-        runs=[
-            SealedRun(
-                run_id=run.run_id,
-                source_prefix=f"{snapshot.lock.artifact_prefix}/runs/{run.run_id}",
-                source_checksum=checksums[run.run_id],
+        executions=[
+            SealedExecution(
+                execution_id=run.execution_id,
+                source_prefix=f"{snapshot.lock.artifact_prefix}/executions/{run.execution_id}",
+                source_checksum=checksums[run.execution_id],
             )
-            for run in snapshot.lock.runs
+            for run in snapshot.lock.executions
         ],
     )
 
 
-def verify_campaign_artifacts(
-    snapshot: CampaignSnapshot,
+def verify_run_artifacts(
+    snapshot: RunSnapshot,
     *,
     namespace: str,
     reader: EvidenceReader,
@@ -395,8 +389,8 @@ def verify_campaign_artifacts(
     return report
 
 
-def publish_campaign_results(
-    snapshot: CampaignSnapshot,
+def publish_run_results(
+    snapshot: RunSnapshot,
     *,
     namespace: str,
     reader: EvidenceReader,
@@ -404,7 +398,7 @@ def publish_campaign_results(
     dry_run: bool,
     destinations: tuple[str, str] | None = None,
     artifact_bucket: str | None = None,
-) -> CampaignPublicationReport:
+) -> RunPublicationReport:
     verification, publications, destinations = _prepare_publications(
         snapshot,
         namespace=namespace,
@@ -413,8 +407,10 @@ def publish_campaign_results(
         artifact_bucket=artifact_bucket,
     )
     result_dataset, index_dataset = destinations
-    published: list[PublishedRun] = []
-    for verified, publication in zip(verification.runs, publications, strict=True):
+    published: list[PublishedExecution] = []
+    for verified, publication in zip(
+        verification.executions, publications, strict=True
+    ):
         receipt = None
         if not dry_run:
             if publisher is None:
@@ -425,8 +421,8 @@ def publish_campaign_results(
                 index_dataset=index_dataset,
             )
         published.append(
-            PublishedRun(
-                run_id=verified.run_id,
+            PublishedExecution(
+                execution_id=verified.execution_id,
                 publication_id=verified.publication_id,
                 result_dataset=result_dataset,
                 index_dataset=index_dataset,
@@ -435,16 +431,16 @@ def publish_campaign_results(
                 index_revision=(receipt.index_revision if receipt else None),
             )
         )
-    return CampaignPublicationReport(
-        campaign_id=snapshot.lock.campaign_id,
+    return RunPublicationReport(
+        run_id=snapshot.lock.run_id,
         control_commit=snapshot.control_commit,
         dry_run=dry_run,
-        runs=published,
+        executions=published,
     )
 
 
 def _prepare_publications(
-    snapshot: CampaignSnapshot,
+    snapshot: RunSnapshot,
     *,
     namespace: str,
     reader: EvidenceReader,
@@ -462,44 +458,44 @@ def _prepare_publications(
     if destinations is None:
         spec = load_experiment_bytes(
             snapshot.request,
-            source=f"campaign {snapshot.lock.campaign_id} request",
+            source=f"run {snapshot.lock.run_id} request",
         )
         if spec.remote is None or spec.remote.job.namespace != namespace:
-            raise ValueError("campaign request does not match the control namespace")
+            raise ValueError("run request does not match the control namespace")
         index_dataset = spec.publishing.index_dataset
         if index_dataset is None:
-            raise ValueError("campaign result publication requires index_dataset")
+            raise ValueError("run result publication requires index_dataset")
         destinations = (spec.publishing.dataset, index_dataset)
         artifact_bucket = spec.artifacts.bucket
     assert artifact_bucket is not None
-    verified: list[VerifiedRun] = []
+    verified: list[VerifiedExecution] = []
     publications: list[ResultPublication] = []
-    for run in snapshot.lock.runs:
+    for run in snapshot.lock.executions:
         source = EvidenceSource(
             bucket=artifact_bucket,
-            prefix=f"{snapshot.lock.artifact_prefix}/runs/{run.run_id}",
+            prefix=f"{snapshot.lock.artifact_prefix}/executions/{run.execution_id}",
         )
         tables = build_result_tables(
             reader,
             source,
             control_commit=snapshot.control_commit,
         )
-        observed = tables.runs[0]
+        observed = tables.executions[0]
         if (
-            observed.run_id != run.run_id
-            or observed.campaign_id != snapshot.lock.campaign_id
+            observed.execution_id != run.execution_id
+            or observed.run_id != snapshot.lock.run_id
         ):
-            raise ValueError("run evidence does not match the campaign lock")
+            raise ValueError("run evidence does not match the run lock")
         verified.append(
-            VerifiedRun(
-                run_id=run.run_id,
+            VerifiedExecution(
+                execution_id=run.execution_id,
                 publication_id=tables.publication_id,
                 source_prefix=source.prefix,
                 source_checksum=observed.source_checksum,
                 row_counts={
-                    "runs": len(tables.runs),
-                    "trials": len(tables.trials),
                     "executions": len(tables.executions),
+                    "trials": len(tables.trials),
+                    "attempts": len(tables.attempts),
                     "metrics": len(tables.metrics),
                     "artifacts": len(tables.artifacts),
                 },
@@ -507,9 +503,9 @@ def _prepare_publications(
         )
         publications.append(build_result_publication(tables))
     report = ArtifactVerificationReport(
-        campaign_id=snapshot.lock.campaign_id,
+        run_id=snapshot.lock.run_id,
         artifact_bucket=artifact_bucket,
         control_commit=snapshot.control_commit,
-        runs=verified,
+        executions=verified,
     )
     return report, publications, destinations

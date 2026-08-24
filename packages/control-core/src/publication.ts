@@ -49,49 +49,45 @@ export class ResultPublisher {
     private readonly service: ControlService,
   ) {}
 
-  async publish(campaignId: string): Promise<PublicationReceipt> {
-    const existing = await this.projection.campaignPublication(campaignId);
+  async publish(runId: string): Promise<PublicationReceipt> {
+    const existing = await this.projection.runPublication(runId);
     if (existing?.status === "published")
       return JSON.parse(existing.body) as PublicationReceipt;
-    const campaign = await this.projection.campaign(campaignId);
+    const run = await this.projection.run(runId);
     if (
-      !campaign ||
-      campaign.terminal_tasks !== campaign.total_tasks ||
-      campaign.admissible_tasks !== campaign.total_tasks ||
-      campaign.exhausted_tasks > 0 ||
-      campaign.total_tasks === 0 ||
-      campaign.pending_actions > 1 ||
-      campaign.cleanup_pending
+      !run ||
+      run.terminal_tasks !== run.total_tasks ||
+      run.admissible_tasks !== run.total_tasks ||
+      run.exhausted_tasks > 0 ||
+      run.total_tasks === 0 ||
+      run.pending_actions > 1 ||
+      run.cleanup_pending
     ) {
-      throw new Error("campaign is not ready for publication");
+      throw new Error("run is not ready for publication");
     }
-    const tasks = await this.projection.tasks(campaignId);
-    const attempts = await this.projection.campaignAttempts(campaignId);
+    const tasks = await this.projection.tasks(runId);
+    const attempts = await this.projection.runAttempts(runId);
     const attemptsById = new Map(
       attempts.map((attempt) => [
         attempt.attempt_id,
         JSON.parse(attempt.body) as AttemptReceipt,
       ]),
     );
-    const lock = await this.projection.campaignLock(campaignId);
-    if (!lock) throw new Error("campaign lock is missing for publication");
+    const lock = await this.projection.runLock(runId);
+    if (!lock) throw new Error("run lock is missing for publication");
     const required = requiredPositiveMetrics(lock);
     const selectedAttempts = tasks.map((task) => {
       if (!task.selected_attempt_id)
         throw new Error(`task has no selected attempt: ${task.task_id}`);
       const attempt = attemptsById.get(task.selected_attempt_id);
-      if (
-        !attempt ||
-        attempt.campaign_id !== campaignId ||
-        attempt.task_id !== task.task_id
-      )
+      if (!attempt || attempt.run_id !== runId || attempt.task_id !== task.task_id)
         throw new Error(`selected attempt does not match task: ${task.task_id}`);
       const validity = attemptAdmissibility(attempt, required);
       if (!validity.admissible)
         throw new Error(`selected attempt is not admissible: ${task.task_id}`);
       return attempt;
     });
-    if (selectedAttempts.length !== campaign.total_tasks)
+    if (selectedAttempts.length !== run.total_tasks)
       throw new Error("publication selection coverage is incomplete");
     const metricRows = selectedAttempts.flatMap((attempt) =>
       Object.entries(attempt.metrics).map(([name, value]) => ({
@@ -102,10 +98,10 @@ export class ResultPublisher {
       })),
     );
     metricRows.push({
-      owner_type: "campaign",
-      owner_id: campaignId,
+      owner_type: "run",
+      owner_id: runId,
       name: "observed_microusd",
-      value: campaign.observed_microusd,
+      value: run.observed_microusd,
     });
     const rewardValues = selectedAttempts.flatMap((attempt) =>
       typeof attempt.metrics.reward === "number" ? [attempt.metrics.reward] : [],
@@ -117,24 +113,24 @@ export class ResultPublisher {
     );
     const objects = await Promise.all([
       writeParquet(this.store, "runs", [
-        { name: "campaign_id", data: [campaignId], type: "STRING" },
-        { name: "status", data: [campaign.status], type: "STRING" },
-        { name: "created_at", data: [campaign.created_at], type: "STRING" },
-        { name: "total_tasks", data: [campaign.total_tasks], type: "INT32" },
-        { name: "terminal_tasks", data: [campaign.terminal_tasks], type: "INT32" },
+        { name: "run_id", data: [runId], type: "STRING" },
+        { name: "status", data: [run.status], type: "STRING" },
+        { name: "created_at", data: [run.created_at], type: "STRING" },
+        { name: "total_tasks", data: [run.total_tasks], type: "INT32" },
+        { name: "terminal_tasks", data: [run.terminal_tasks], type: "INT32" },
         {
           name: "ceiling_microusd",
-          data: [BigInt(campaign.ceiling_microusd)],
+          data: [BigInt(run.ceiling_microusd)],
           type: "INT64",
         },
         {
           name: "observed_microusd",
-          data: [BigInt(campaign.observed_microusd)],
+          data: [BigInt(run.observed_microusd)],
           type: "INT64",
         },
       ]),
       writeParquet(this.store, "trials", [
-        { name: "campaign_id", data: tasks.map(() => campaignId), type: "STRING" },
+        { name: "run_id", data: tasks.map(() => runId), type: "STRING" },
         { name: "task_id", data: tasks.map((task) => task.task_id), type: "STRING" },
         {
           name: "input_digest",
@@ -153,7 +149,7 @@ export class ResultPublisher {
         },
       ]),
       writeParquet(this.store, "executions", [
-        { name: "campaign_id", data: attempts.map(() => campaignId), type: "STRING" },
+        { name: "run_id", data: attempts.map(() => runId), type: "STRING" },
         {
           name: "task_id",
           data: attempts.map((attempt) => attempt.task_id),
@@ -187,8 +183,8 @@ export class ResultPublisher {
       ]),
       writeParquet(this.store, "metrics", [
         {
-          name: "campaign_id",
-          data: metricRows.map(() => campaignId),
+          name: "run_id",
+          data: metricRows.map(() => runId),
           type: "STRING",
         },
         {
@@ -213,7 +209,7 @@ export class ResultPublisher {
         },
       ]),
       writeParquet(this.store, "artifacts", [
-        { name: "campaign_id", data: attempts.map(() => campaignId), type: "STRING" },
+        { name: "run_id", data: attempts.map(() => runId), type: "STRING" },
         {
           name: "attempt_id",
           data: attempts.map((attempt) => attempt.attempt_id),
@@ -231,7 +227,7 @@ export class ResultPublisher {
         },
       ]),
     ]);
-    const publicationId = deterministicId("publication", campaignId);
+    const publicationId = deterministicId("publication", runId);
     const resolvedProfile = (kind: string) =>
       lock.profiles.find((profile) => profile.kind === kind);
     const profileValue = (kind: string, key: string): string | null => {
@@ -249,16 +245,16 @@ export class ResultPublisher {
       publicationRole !== "component" &&
       publicationRole !== "diagnostic"
     )
-      throw new Error("campaign launch policy has no publication role");
+      throw new Error("run launch policy has no publication role");
     const createdAt =
       selectedAttempts
         .map((attempt) => attempt.created_at)
         .sort((left, right) => left.localeCompare(right))
-        .at(-1) ?? campaign.created_at;
+        .at(-1) ?? run.created_at;
     const sourceDigest = sha256(
       canonicalJson({
-        campaign_id: campaignId,
-        campaign_lock_id: lock.record_id,
+        run_id: runId,
+        run_lock_id: lock.record_id,
         object_digests: objects.map((item) => item.digest),
       }),
     );
@@ -277,8 +273,7 @@ export class ResultPublisher {
       entries: [
         {
           publication_id: publicationId,
-          campaign_id: campaignId,
-          run_id: null,
+          run_id: runId,
           published_at: createdAt,
           benchmark: profileValue("benchmark", "benchmark"),
           model: profileValue("model", "model_id"),
@@ -289,7 +284,7 @@ export class ResultPublisher {
             ? "clean"
             : "degraded",
           publication_role: publicationRole,
-          task_count: campaign.total_tasks,
+          task_count: run.total_tasks,
           scored_task_count: rewardValues.length,
           strict_pass_count: strictValues.length
             ? strictValues.filter((value) => value === 1).length
@@ -315,7 +310,7 @@ export class ResultPublisher {
       record_id: deterministicId("publication-receipt", publicationId),
       created_at: createdAt,
       actor: serviceActor(),
-      campaign_id: campaignId,
+      run_id: runId,
       publication_id: publicationId,
       publication_state: "published",
       object_digests: objects.map((item) => item.digest),

@@ -1,4 +1,4 @@
-"""Hugging Face orchestration for Harbor benchmark runs."""
+"""Hugging Face orchestration for Harbor benchmark executions."""
 
 from harbor_hf.models import ExperimentSpec
 from harbor_hf.planner import ExperimentPlan, build_plan

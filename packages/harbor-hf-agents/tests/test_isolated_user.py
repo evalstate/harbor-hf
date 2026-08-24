@@ -1,4 +1,4 @@
-"""Tests for the dedicated provider-agent sandbox user."""
+"""Tests for the dedicated provider-agent job user."""
 
 import stat
 import subprocess

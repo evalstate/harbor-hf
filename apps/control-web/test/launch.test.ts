@@ -102,7 +102,7 @@ describe("launch helpers", () => {
               models: ["gpt-oss-20b"],
               harnesses: ["opencode"],
               inference_provider: "together",
-              sandbox_template: { inference_upstream: "<redacted>" },
+              trial_job_template: { inference_upstream: "<redacted>" },
             },
           },
         ],
@@ -126,7 +126,7 @@ describe("launch helpers", () => {
             spec: {
               models: ["gpt-oss-20b"],
               harnesses: ["opencode"],
-              sandbox_template: {
+              trial_job_template: {
                 inference_upstream: "https://router.huggingface.co/v1",
               },
             },

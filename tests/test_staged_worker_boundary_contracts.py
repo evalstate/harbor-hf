@@ -11,10 +11,10 @@ from test_wave_worker import _provider_wave_inputs, _wave_inputs
 import harbor_hf.wave_worker as wave_worker
 import harbor_hf.worker as worker
 from harbor_hf.benchmark_source import source_lock_from_spec
+from harbor_hf.executions import ExecutionLock, build_execution_lock
 from harbor_hf.models import DeploymentProfile, EndpointRef, ExperimentSpec, SourcePin
 from harbor_hf.process import CommandRunner
 from harbor_hf.provider_models import unavailable
-from harbor_hf.runs import RunLock, build_run_lock
 from harbor_hf.wave_worker import _EndpointWaveLifecycle
 from harbor_hf.worker import WorkerError, _prepare_evidence_destination
 
@@ -49,7 +49,7 @@ def test_staged_worker_success_has_exact_ordered_side_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="staged-worker-contract")
+    lock = build_execution_lock(remote_spec, execution_id="staged-worker-contract")
     source_lock = source_lock_from_spec(remote_spec)
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text("manifest-contract\n", encoding="utf-8")
@@ -114,7 +114,7 @@ def test_staged_worker_success_has_exact_ordered_side_effects(
     ) -> None:
         calls.append(("source", source, destination_path, process_runner))
 
-    def launch(candidate: RunLock, endpoint: EndpointRef, token: str) -> str:
+    def launch(candidate: ExecutionLock, endpoint: EndpointRef, token: str) -> str:
         calls.append(("watchdog", candidate, endpoint, token))
         return "watchdog-contract"
 
@@ -164,7 +164,7 @@ def test_staged_worker_success_has_exact_ordered_side_effects(
     assert (root / "manifest.yaml").read_text(encoding="utf-8") == (
         "manifest-contract\n"
     )
-    assert json.loads((root / "run.lock.json").read_text(encoding="utf-8")) == (
+    assert json.loads((root / "execution.lock.json").read_text(encoding="utf-8")) == (
         lock.model_dump(mode="json")
     )
     assert json.loads((root / "endpoint.final.json").read_text(encoding="utf-8")) == {
@@ -172,7 +172,7 @@ def test_staged_worker_success_has_exact_ordered_side_effects(
         "status": final["status"],
     }
     assert _events(destination / "events.jsonl") == [
-        {"event": "worker_started", "run_id": lock.run_id},
+        {"event": "worker_started", "execution_id": lock.execution_id},
         {"event": "endpoint_baseline_validated"},
         {
             "event": "endpoint_lease_acquired",
@@ -186,7 +186,7 @@ def test_staged_worker_success_has_exact_ordered_side_effects(
             "ready_replicas": 0,
             "target_replicas": 1,
         },
-        {"event": "run_succeeded"},
+        {"event": "execution_succeeded"},
     ]
     assert (destination / "_SUCCESS").read_text(encoding="utf-8") == "\n"
     assert not (destination / "_RESERVED").exists()
@@ -197,7 +197,7 @@ def test_staged_worker_failure_before_lease_skips_cleanup_and_redacts_publicatio
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock = build_run_lock(remote_spec, run_id="staged-worker-failure")
+    lock = build_execution_lock(remote_spec, execution_id="staged-worker-failure")
     source_lock = source_lock_from_spec(remote_spec)
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text("manifest\n", encoding="utf-8")
@@ -244,9 +244,9 @@ def test_staged_worker_failure_before_lease_skips_cleanup_and_redacts_publicatio
     assert isinstance(captured.value.__cause__, ValueError)
     assert finalized == [(root, "contract-token")]
     assert _events(destination / "events.jsonl") == [
-        {"event": "worker_started", "run_id": lock.run_id},
+        {"event": "worker_started", "execution_id": lock.execution_id},
         {"event": "endpoint_cleanup_skipped", "reason": "lease_not_owned"},
-        {"event": "run_failed", "error_type": "ValueError"},
+        {"event": "execution_failed", "error_type": "ValueError"},
     ]
     assert json.loads((destination / "_FAILED").read_text(encoding="utf-8")) == {
         "error_type": "ValueError",
@@ -260,14 +260,14 @@ def test_staged_provider_wave_finalizes_then_publishes_exact_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _spec, campaign, wave, manifest, _campaign_path, _wave_path = _provider_wave_inputs(
+    _spec, run, wave, manifest, _run_path, _wave_path = _provider_wave_inputs(
         remote_spec,
         tmp_path,
         attempts=1,
         concurrency=1,
         provider_concurrency=1,
     )
-    campaign_root = tmp_path / "stage" / campaign.artifact_prefix
+    run_root = tmp_path / "stage" / run.artifact_prefix
     output_root = tmp_path / "output"
     calls: list[tuple[object, ...]] = []
     shard_kwargs: dict[str, object] = {}
@@ -318,9 +318,9 @@ def test_staged_provider_wave_finalizes_then_publishes_exact_success(
 
     result = wave_worker._run_staged_wave(
         manifest,
-        campaign,
+        run,
         wave,
-        campaign_root,
+        run_root,
         output_root,
         "contract-token",
         _UnusedRunner(),
@@ -332,7 +332,7 @@ def test_staged_provider_wave_finalizes_then_publishes_exact_success(
         lambda: 100.0,
     )
 
-    wave_root = campaign_root / "waves" / wave.wave_id
+    wave_root = run_root / "waves" / wave.wave_id
     assert result == output_root / wave.artifact_prefix
     assert [call[0] for call in calls] == [
         "require",
@@ -346,9 +346,7 @@ def test_staged_provider_wave_finalizes_then_publishes_exact_success(
     assert calls[0] == ("require", "git")
     assert calls[1][1] == wave.remote.harbor.source
     assert calls[1][2] == (
-        campaign_root.parent
-        / "sources"
-        / f"harbor-{wave.remote.harbor.source.revision}"
+        run_root.parent / "sources" / f"harbor-{wave.remote.harbor.source.revision}"
     )
     assert calls[4] == ("cleanup", None, proxy, None)
     assert shard_kwargs == {
@@ -369,7 +367,7 @@ def test_staged_provider_wave_finalizes_then_publishes_exact_success(
     ]
     assert json.loads((wave_root / "wave-summary.json").read_text()) == {
         "wave_id": wave.wave_id,
-        "campaign_id": campaign.campaign_id,
+        "run_id": run.run_id,
         "shard_checksums": checksums,
         "endpoint_cleanup_verified": unavailable("not_applicable").model_dump(
             mode="json"
@@ -384,10 +382,10 @@ def test_staged_endpoint_wave_preserves_primary_and_cleanup_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _spec, campaign, wave, manifest, _campaign_path, _wave_path = _wave_inputs(
+    _spec, run, wave, manifest, _run_path, _wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=1, concurrency=1
     )
-    campaign_root = tmp_path / "stage" / campaign.artifact_prefix
+    run_root = tmp_path / "stage" / run.artifact_prefix
     output_root = tmp_path / "output"
     calls: list[tuple[object, ...]] = []
 
@@ -424,9 +422,9 @@ def test_staged_endpoint_wave_preserves_primary_and_cleanup_failures(
     with pytest.raises(WorkerError) as captured:
         wave_worker._run_staged_wave(
             manifest,
-            campaign,
+            run,
             wave,
-            campaign_root,
+            run_root,
             output_root,
             "contract-token",
             _UnusedRunner(),
@@ -438,7 +436,7 @@ def test_staged_endpoint_wave_preserves_primary_and_cleanup_failures(
             lambda: 100.0,
         )
 
-    wave_root = campaign_root / "waves" / wave.wave_id
+    wave_root = run_root / "waves" / wave.wave_id
     assert str(captured.value) == (
         "primary [REDACTED]; endpoint cleanup failed: cleanup [REDACTED]"
     )
@@ -450,7 +448,7 @@ def test_staged_endpoint_wave_preserves_primary_and_cleanup_failures(
     ]
     summary = {
         "wave_id": wave.wave_id,
-        "campaign_id": campaign.campaign_id,
+        "run_id": run.run_id,
         "shard_checksums": {},
         "endpoint_cleanup_verified": False,
         "error_type": "ValueError",
@@ -474,7 +472,7 @@ def test_endpoint_wave_prepare_validates_every_run_before_lease_and_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _spec, _campaign, wave, _manifest, _campaign_path, _wave_path = _wave_inputs(
+    _spec, _run, wave, _manifest, _run_path, _wave_path = _wave_inputs(
         remote_spec, tmp_path, attempts=2, concurrency=1
     )
     wave_root = tmp_path / "wave"
@@ -515,12 +513,12 @@ def test_endpoint_wave_prepare_validates_every_run_before_lease_and_resume(
     def resume(
         root: Path,
         event_path: Path,
-        run: RunLock,
+        run: ExecutionLock,
         manager: object,
         token: str,
         *,
         readiness_timeout_seconds: int,
-        compatible_locks: Sequence[RunLock],
+        compatible_locks: Sequence[ExecutionLock],
     ) -> str:
         calls.append(
             (
@@ -543,18 +541,18 @@ def test_endpoint_wave_prepare_validates_every_run_before_lease_and_resume(
     assert lifecycle.owned is True
     assert calls == [
         ("describe",),
-        *[("validate", run.configuration, baseline) for run in wave.runs],
+        *[("validate", run.configuration, baseline) for run in wave.executions],
         ("paused", baseline),
         ("launch", wave, lifecycle.endpoint, "contract-token"),
         (
             "resume",
             wave_root,
             events,
-            wave.runs[0].configuration,
+            wave.executions[0].configuration,
             lifecycle.manager,
             "contract-token",
             11,
-            tuple(run.configuration for run in wave.runs[1:]),
+            tuple(run.configuration for run in wave.executions[1:]),
         ),
     ]
     assert _events(events) == [

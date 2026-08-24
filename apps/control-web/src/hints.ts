@@ -1,17 +1,16 @@
 export const hints = {
   nav: {
-    admin: "Operator views. Campaigns, Jobs, results, profiles, and audit stay here.",
+    admin: "Operator views. Runs, Jobs, results, profiles, and audit stay here.",
     overview:
       "Queue, active runs, recorded spend, and Endpoint cleanup risk from the control projection.",
-    campaigns:
-      "Start and inspect runs. Logical tasks stay sealed; only infrastructure failures can be replaced.",
+    runs: "Start and inspect runs. Logical tasks stay sealed; only infrastructure failures can be replaced.",
     jobs: "Hugging Face Jobs launched by control, with Hub inspect links, latest observed stage, and recorded hardware cost.",
     endpoints:
       "Inference Endpoints owned by runs. Completion requires a verified pause with zero ready replicas.",
     results:
       "Published catalog scores after runs finish. Open a result for pass rate CIs, token cost, publication identity, and the Bucket prefix. This is not the live run queue.",
     leaderboard:
-      "Official cost and score board rebuilt from the Bucket SQLite snapshot. Only final, clean, fully scored campaigns appear.",
+      "Official cost and score board rebuilt from the Bucket SQLite snapshot. Only final, clean, fully scored runs appear.",
     profiles:
       "Immutable benchmark, model, harness, deployment, and launch-policy records. Runs lock aliases at submit time.",
     audit:
@@ -29,9 +28,9 @@ export const hints = {
     policyStops:
       "Runs in failed or manual-intervention state. The reconciler stopped and an operator must inspect the audit trail.",
     observedSpend:
-      "Sum of recorded attempt receipts plus the latest Job and Sandbox hardware cost on each projected campaign.",
+      "Sum of recorded attempt receipts plus the latest physical Job hardware cost on each projected run.",
     unsafeEndpoints:
-      "Endpoints that are not verified paused with zero ready replicas. A campaign cannot complete while any remain.",
+      "Endpoints that are not verified paused with zero ready replicas. A run cannot complete while any remain.",
     spendChart:
       "Observed cost per recent run, in USD, from oldest to newest. Reserved budget and the hard ceiling are tracked separately.",
     writeMode:
@@ -60,9 +59,9 @@ export const hints = {
     confirmed:
       "Required acknowledgement that the resolved profiles, task count, estimated reservation, and ceiling are the run you intend to lock. After submit, that lock does not change.",
     logicalTasks:
-      "Distinct tasks in the selected benchmark profile. One Hugging Face Job may cover several tasks.",
+      "Distinct logical trials in the selected benchmark profile. Each physical Hugging Face Job runs one trial attempt.",
     modelRevision:
-      "Content digest of the selected model profile. This value is what the campaign lock stores.",
+      "Content digest of the selected model profile. This value is what the run lock stores.",
     hardware:
       "Hugging Face Jobs flavor from the deployment profile, such as cpu-basic or cpu-upgrade.",
     attemptLimit:
@@ -75,22 +74,28 @@ export const hints = {
     perJobReservation:
       "Amount reserved from the ceiling before each execution Job launches. Unused reservation is released when the Job ends.",
   },
-  campaign: {
+  run: {
     identity:
-      "Immutable campaign id. Open it to see the lock, logical tasks, Jobs, and recorded spend.",
+      "Immutable run id. Open it to see the lock, logical tasks, Jobs, and recorded spend.",
     status:
-      "Run lifecycle: queued, active, publishing, completed, or cancelled. Completed is green only when every sealed task scored complete. Completed with failures means the run finished, but at least one sealed task did not succeed. Cancelled means an operator stopped the run.",
+      "Run lifecycle: queued, active, cancelling, publishing, completed, or cancelled. Cancelling means physical Jobs are still draining. Completed is green only when every sealed task scored complete. Completed with failures means the run finished, but at least one sealed task did not succeed. Cancelled means an operator stopped the run.",
     logicalTasks:
-      "Terminal logical outcomes over the locked task count. Pending actions are in-flight Jobs, Sandboxes, or other control work.",
+      "Terminal logical outcomes over the locked task count. Pending actions are physical Jobs or other control work.",
     observedCost:
-      "All recorded sources for this campaign: attempt receipts plus the latest hardware cost on each Job and Sandbox. Reserved is money still held against the ceiling.",
+      "All recorded sources for this run: attempt receipts plus the latest hardware cost on each physical Job. Reserved is money still held against the ceiling.",
     endpointCleanup:
-      "Verified pause with zero ready replicas is required before the campaign can complete.",
-    jobs: "Hugging Face Jobs launched for this campaign. Preparation and execution are separate Jobs when preparation is required. Assigned is the task count on that Job.",
+      "Verified pause with zero ready replicas is required before the run can complete.",
+    jobs: "Hugging Face Jobs launched for this run. Preparation is a separate Job when required. Every physical trial Job runs one logical attempt.",
     outcome:
       "Selected sealed result for this task. A replacement Job can be assigned while this still shows Infrastructure. Hover the badge for the exact meaning. Scored success is a verifier pass. Provider rejected the request means the inference API refused the locked call. Agent ended without a score means the agent loop finished without a pass. Infrastructure failures can be replaced; the other sealed failures cannot.",
     selectedAttempt:
-      "The physical attempt chosen as the logical outcome. Infrastructure replacements create a new attempt.",
+      "The one valid physical attempt chosen as the logical result. Infrastructure replacements create another physical Job attempt without changing the logical trial.",
+    launchAction:
+      "Immutable job.launch action that authorized this physical trial Job attempt.",
+    physicalJob:
+      "Hugging Face Job created for this attempt. The link opens its Hub inspect page.",
+    physicalJobStatus:
+      "Latest projected status for the physical Hugging Face Job that ran this attempt.",
     inputDigest: "Digest of the locked task input. Retries must use this same input.",
     replacementEligible:
       "Whether this attempt may be replaced. Only infrastructure failures are eligible. Semantic outcomes stay sealed.",
@@ -102,18 +107,18 @@ export const hints = {
   jobs: {
     hfJob:
       "Remote Hugging Face Job id. Opens the Hub inspect page. Pending means control has not observed a remote id yet.",
-    campaign: "Campaign that owns this Job.",
+    run: "Run that owns this Job.",
     action: "Latest control action for this Job: launch, observe, or cancel.",
     observed:
       "Latest Hub stage copied onto the action receipt, such as RUNNING or COMPLETED.",
     assigned:
-      "How many locked tasks this Job was given. A replacement uses the existing run. It does not add a second run row.",
+      "How many locked tasks this Job was given. A physical trial Job has one. A replacement stays on the existing Run.",
     recorded: "When this latest Job observation was written.",
     cost: "Locked Job hardware cost from the latest observe or cancel receipt. Inference spend is on attempt receipts, not this row.",
   },
   endpoints: {
-    endpoint: "Inference Endpoint id owned by a campaign.",
-    campaign: "Campaign that requested this Endpoint.",
+    endpoint: "Inference Endpoint id owned by a run.",
+    run: "Run that requested this Endpoint.",
     desired: "State control asked for, usually paused after work finishes.",
     observed: "State last seen on the provider.",
     readyReplicas: "Serving replicas currently ready. Cleanup requires zero.",
@@ -138,11 +143,11 @@ export const hints = {
     tokenCost:
       "Sum of selected-attempt inference receipts. The 95% interval is a Wald interval on the per-task mean.",
     observedCost:
-      "Attempt receipts plus recorded Job and Sandbox hardware for the source campaign.",
+      "Attempt receipts plus recorded physical Job hardware for the source run.",
     outputs:
       "Hugging Face Bucket prefix for this publication's receipt and generated result objects. Opens the Hub browser. The Space never sends the Bucket credential to the browser.",
     hfUri: "hf:// URI for the same Bucket prefix, for CLI and SDK tools.",
-    taskId: "Locked task identity. Opens the campaign task page.",
+    taskId: "Locked task identity. Opens the run task page.",
     taskOutcome: "Sealed outcome of the selected attempt.",
     taskReward: "Harbor reward on the selected attempt, usually 0 or 1.",
     taskCost: "Inference receipt for the selected attempt, in USD.",
@@ -158,7 +163,7 @@ export const hints = {
     harness: "Locked agent wrapper. The profile alias stays in the snapshot.",
     benchmark: "Locked benchmark identity.",
     score: "Primary metric from the eligible catalog. Higher is better on this board.",
-    cost: "Observed campaign spend in USD from attempt and hardware receipts.",
+    cost: "Observed run spend in USD from attempt and hardware receipts.",
     trials: "Distinct trial indices in the configuration digest.",
     reasoning: "Reasoning effort locked on the harness for this configuration.",
     pareto:
@@ -170,7 +175,7 @@ export const hints = {
     name: "Profile alias and content-derived profile id.",
     kind: "benchmark, model, harness, deployment, or launch_policy.",
     source: "Whether this record is built-in source or an imported promotion.",
-    approval: "Whether operators may select this alias when creating a campaign.",
+    approval: "Whether operators may select this alias when creating a run.",
     aliases: "Approved names that resolve to this immutable profile.",
   },
   audit: {

@@ -8,9 +8,8 @@ import type {
   PreparedTrial,
   ProfileObject,
   ResolvedProfile,
-  SandboxPolicy,
-  SandboxTemplate,
   TaskLock,
+  TrialJobTemplate,
 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
@@ -65,11 +64,37 @@ function objectValue(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function shellQuote(argument: string): string {
+  return `'${argument.replaceAll("'", `'"'"'`)}'`;
+}
+
+function shellCommand(arguments_: string[]): string {
+  if (arguments_.length === 0)
+    throw new ProfileResolutionError("job command must not be empty");
+  return arguments_.map(shellQuote).join(" ");
+}
+
+function trialJobCommand(
+  rootBootstrapCommand: string[],
+  workerCommand: string[],
+): [string, string, string] {
+  return [
+    "/bin/sh",
+    "-c",
+    [
+      "set -eu",
+      shellCommand(rootBootstrapCommand),
+      "unset HF_INFERENCE_TOKEN HARBOR_HF_INFERENCE_TOKEN",
+      `exec ${shellCommand(workerCommand)}`,
+    ].join("\n"),
+  ];
+}
+
 export function preparationRequired(deployment: DeploymentProfileSpec): boolean {
   return deployment.route === "hf_job" && deployment.preparation === "required";
 }
 
-export function validatePreparedCampaignProfiles(
+export function validatePreparedRunProfiles(
   deployment: DeploymentProfileSpec,
   benchmark: BenchmarkProfileSpec,
   model: ModelProfileSpec,
@@ -79,16 +104,12 @@ export function validatePreparedCampaignProfiles(
   if (!preparationRequired(deployment)) return;
   if (!objectValue(benchmark.harbor_job))
     throw new ProfileResolutionError(
-      "prepared campaigns require a Harbor job in the benchmark profile",
+      "prepared runs require a Harbor job in the benchmark profile",
     );
   if (!Array.isArray(benchmark.source_task_ids))
-    throw new ProfileResolutionError(
-      "prepared campaigns require benchmark source task IDs",
-    );
+    throw new ProfileResolutionError("prepared runs require benchmark source task IDs");
   if (!Array.isArray(benchmark.trial_indices))
-    throw new ProfileResolutionError(
-      "prepared campaigns require benchmark trial numbers",
-    );
+    throw new ProfileResolutionError("prepared runs require benchmark trial numbers");
   if (
     benchmark.source_task_ids.length !== tasks.length ||
     benchmark.trial_indices.length !== tasks.length
@@ -111,23 +132,17 @@ export function validatePreparedCampaignProfiles(
   }
   if (!model.harbor_model_name)
     throw new ProfileResolutionError(
-      "prepared campaigns require a Harbor model name in the model profile",
+      "prepared runs require a Harbor model name in the model profile",
     );
   if (!objectValue(harness.harbor_agent))
     throw new ProfileResolutionError(
-      "prepared campaigns require a Harbor agent in the harness profile",
+      "prepared runs require a Harbor agent in the harness profile",
     );
-  if (deployment.route !== "hf_job" || !deployment.sandbox_template)
-    throw new ProfileResolutionError(
-      "prepared campaigns require an HF Job Sandbox template",
-    );
-  if ((deployment.inference_token ?? "forbidden") !== "forbidden")
-    throw new ProfileResolutionError(
-      "prepared execution Jobs must not receive an inference credential",
-    );
+  if (deployment.route !== "hf_job" || !deployment.trial_job_template)
+    throw new ProfileResolutionError("prepared runs require an HF trial Job template");
 }
 
-function selectFlavor(template: SandboxTemplate, trial: PreparedTrial) {
+function selectFlavor(template: TrialJobTemplate, trial: PreparedTrial) {
   const matches = template.flavors.filter(
     (flavor) =>
       flavor.cpus >= trial.cpus &&
@@ -147,72 +162,95 @@ function selectFlavor(template: SandboxTemplate, trial: PreparedTrial) {
   const selected = matches[0];
   if (!selected)
     throw new ProfileResolutionError(
-      `no Sandbox flavor can run prepared task: ${trial.task_id}`,
+      `no trial Job flavor can run prepared task: ${trial.task_id}`,
     );
   return selected;
 }
 
-export function preparedSandboxPolicy(
+export interface PreparedTrialJobLaunch {
+  job_image: string;
+  task_image: string;
+  job_command: [string, ...string[]];
+  hardware: string;
+  timeout_seconds: number;
+  active_hourly_cost_microusd: number;
+  max_jobs: number;
+  max_image_bytes: number;
+  max_image_entries: number;
+  inference_token: "forbidden" | "required";
+  inference_upstream?: string;
+  inference_model?: string;
+  inference_api?: "chat-completions" | "responses";
+  inference_max_requests?: number;
+  inference_max_concurrency?: number;
+  inference_max_total_concurrency?: number;
+  inference_timeout_seconds?: number;
+  inference_max_output_tokens?: number;
+}
+
+export function preparedTrialJobLaunch(
   deployment: DeploymentProfileSpec,
   trial: PreparedTrial,
-): SandboxPolicy {
-  if (deployment.route !== "hf_job" || !deployment.sandbox_template)
-    throw new ProfileResolutionError("deployment has no prepared Sandbox template");
-  const template = deployment.sandbox_template;
-  const {
-    flavors: _flavors,
-    default_cpus: _defaultCpus,
-    default_memory_mb: _defaultMemory,
-    default_storage_mb: _defaultStorage,
-    default_gpus: _defaultGpus,
-    max_timeout_seconds: _maxTimeout,
-    lifetime_overhead_seconds: _lifetimeOverhead,
-    idle_timeout_overhead_seconds: _idleOverhead,
-    ...base
-  } = template;
+): PreparedTrialJobLaunch {
+  if (deployment.route !== "hf_job" || !deployment.trial_job_template)
+    throw new ProfileResolutionError("deployment has no prepared trial Job template");
+  const template = deployment.trial_job_template;
   const flavor = selectFlavor(template, trial);
-  const maxCommandSeconds = Math.max(
-    trial.agent_timeout_seconds,
-    trial.verifier_timeout_seconds,
-    trial.environment_build_timeout_seconds,
-    trial.agent_setup_timeout_seconds,
-  );
+  if (!/^.+@sha256:[0-9a-f]{64}$/.test(deployment.job_image))
+    throw new ProfileResolutionError(
+      "prepared trial worker image must be digest-pinned",
+    );
+  if (deployment.job_image === trial.image)
+    throw new ProfileResolutionError(
+      "prepared trial worker image must differ from the benchmark task image",
+    );
   const timeoutSeconds =
     trial.agent_timeout_seconds +
     trial.verifier_timeout_seconds +
     trial.environment_build_timeout_seconds +
     trial.agent_setup_timeout_seconds +
     template.lifetime_overhead_seconds;
-  const idleTimeoutSeconds = Math.min(
-    timeoutSeconds,
-    maxCommandSeconds + template.idle_timeout_overhead_seconds,
-  );
-  if (
-    maxCommandSeconds > template.max_command_seconds ||
-    timeoutSeconds > template.max_timeout_seconds
-  )
+  if (timeoutSeconds > template.max_timeout_seconds)
     throw new ProfileResolutionError(
       `prepared task time limits exceed deployment limits: ${trial.task_id}`,
     );
   return {
-    ...base,
-    image: trial.image,
+    job_image: deployment.job_image,
+    task_image: trial.image,
+    job_command: trialJobCommand(
+      template.root_bootstrap_command,
+      deployment.job_command,
+    ),
     hardware: flavor.hardware,
     timeout_seconds: timeoutSeconds,
-    idle_timeout_seconds: idleTimeoutSeconds,
-    reservation_microusd: Math.ceil(
-      (flavor.active_hourly_cost_microusd * timeoutSeconds) / 3600,
-    ),
     active_hourly_cost_microusd: flavor.active_hourly_cost_microusd,
-    max_command_seconds: maxCommandSeconds,
+    max_jobs: template.max_jobs,
+    max_image_bytes: template.max_image_bytes,
+    max_image_entries: template.max_image_entries,
+    inference_token: template.inference_token ?? "forbidden",
+    ...(template.inference_upstream
+      ? { inference_upstream: template.inference_upstream }
+      : {}),
+    ...(template.inference_model ? { inference_model: template.inference_model } : {}),
+    ...(template.inference_api ? { inference_api: template.inference_api } : {}),
+    ...(template.inference_max_requests
+      ? { inference_max_requests: template.inference_max_requests }
+      : {}),
+    ...(template.inference_max_concurrency
+      ? { inference_max_concurrency: template.inference_max_concurrency }
+      : {}),
+    ...(template.inference_max_total_concurrency
+      ? {
+          inference_max_total_concurrency: template.inference_max_total_concurrency,
+        }
+      : {}),
+    ...(template.inference_timeout_seconds
+      ? { inference_timeout_seconds: template.inference_timeout_seconds }
+      : {}),
+    ...(template.inference_max_output_tokens
+      ? { inference_max_output_tokens: template.inference_max_output_tokens }
+      : {}),
   };
-}
-
-export function staticSandboxPolicy(
-  deployment: DeploymentProfileSpec,
-): SandboxPolicy | null {
-  if (deployment.route !== "hf_job") return null;
-  return deployment.sandbox ?? null;
 }
 
 function scalarArray(spec: ProfileObject["spec"], key: string): string[] {

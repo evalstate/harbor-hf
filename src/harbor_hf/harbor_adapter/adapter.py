@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from pydantic import JsonValue
 
+from harbor_hf.executions import ExecutionLock
 from harbor_hf.harbor_adapter.errors import (
     HarborVerificationFailure,
     WorkerError,
@@ -35,7 +36,6 @@ from harbor_hf.models import (
 from harbor_hf.provider_agents import effective_provider_agent_parameters
 from harbor_hf.provider_models import ProviderTarget
 from harbor_hf.providers import routed_provider_model
-from harbor_hf.runs import RunLock
 from harbor_hf.task_selection import task_matches_selector
 
 _SUCCESSFUL_EXPORT_ATTEMPTS = 6
@@ -59,8 +59,8 @@ class HarborExecutionOutcome:
 class HarborExecutionAdapter(Protocol):
     def prepare(
         self,
-        lock: RunLock,
-        execution_root: Path,
+        lock: ExecutionLock,
+        attempt_root: Path,
         jobs_dir: Path,
         base_url: str,
         harbor_source: Path,
@@ -92,8 +92,8 @@ class HarborExecutionAdapter(Protocol):
 class FilesystemHarborExecutionAdapter:
     def prepare(
         self,
-        lock: RunLock,
-        execution_root: Path,
+        lock: ExecutionLock,
+        attempt_root: Path,
         jobs_dir: Path,
         base_url: str,
         harbor_source: Path,
@@ -116,8 +116,8 @@ class FilesystemHarborExecutionAdapter:
             extra_environment_hosts=extra_environment_hosts,
             benchmark_root=benchmark_root,
         )
-        request_path = execution_root / "harbor-request.json"
-        config_path = execution_root / "harbor-job.json"
+        request_path = attempt_root / "harbor-request.json"
+        config_path = attempt_root / "harbor-job.json"
         _write_new(request_path, request.request_bytes())
         _write_new(config_path, request.config_bytes())
         return PreparedHarborExecution(
@@ -345,7 +345,7 @@ def resolve_native_trial_root(jobs_dir: Path, value: str) -> Path:
 
 
 def build_execution_request(
-    lock: RunLock,
+    lock: ExecutionLock,
     jobs_dir: Path,
     base_url: str,
     *,
@@ -447,7 +447,7 @@ def build_execution_request(
 
 
 def _benchmark_dataset(
-    lock: RunLock,
+    lock: ExecutionLock,
     task_names: list[str],
     benchmark_root: Path | None,
 ) -> dict[str, JsonValue]:
@@ -538,23 +538,23 @@ def render_export_command(
     ]
 
 
-def _served_model_name(lock: RunLock) -> str:
+def _served_model_name(lock: ExecutionLock) -> str:
     deployment = lock.deployment
     if isinstance(deployment, ProviderTarget):
         return routed_provider_model(deployment)
     if not isinstance(deployment, DeploymentProfile) or deployment.endpoint is None:
-        raise WorkerError("run lock has no endpoint binding")
+        raise WorkerError("execution lock has no endpoint binding")
     return deployment.endpoint.served_model_name
 
 
-def _expected_agent_version(lock: RunLock) -> str:
+def _expected_agent_version(lock: ExecutionLock) -> str:
     if lock.agent.revision_kind in {"package", "git"}:
         return lock.agent.revision
     assert lock.agent.reported_version is not None
     return lock.agent.reported_version
 
 
-def effective_agent_parameters(lock: RunLock) -> dict[str, JsonValue]:
+def effective_agent_parameters(lock: ExecutionLock) -> dict[str, JsonValue]:
     parameters = deepcopy(lock.agent.parameters)
     target = lock.deployment
     if isinstance(target, ProviderTarget):
@@ -565,7 +565,7 @@ def effective_agent_parameters(lock: RunLock) -> dict[str, JsonValue]:
 
 
 def _effective_provider_agent_parameters(
-    lock: RunLock,
+    lock: ExecutionLock,
     parameters: dict[str, JsonValue],
     target: ProviderTarget,
 ) -> dict[str, JsonValue]:
@@ -577,7 +577,7 @@ def _effective_provider_agent_parameters(
 
 
 def _effective_endpoint_openclaw_agent_parameters(
-    lock: RunLock,
+    lock: ExecutionLock,
     parameters: dict[str, JsonValue],
     target: DeploymentProfile,
 ) -> dict[str, JsonValue]:

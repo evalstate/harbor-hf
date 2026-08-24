@@ -4,20 +4,20 @@ Status: implemented; remote acceptance pending
 
 This plan implements the [benchmark source specification](benchmark-sources.md). It keeps anonymous public Git checkout, adds immutable local-directory bundles, and removes authenticated Git from new remote execution.
 
-The implementation now includes the strict source union, generated source-lock and bundle schemas, deterministic tar+zstd bundles, private content-addressed Bucket staging, source-aware campaign identities, anonymous Git preflight in planning and remote execution, safe remote extraction, Harbor local-path rendering, purpose-scoped Job secret inputs, and removal of the authenticated Git helper. Local quality gates and the two remote acceptance checks remain the final release evidence.
+The implementation now includes the strict source union, generated source-lock and bundle schemas, deterministic tar+zstd bundles, private content-addressed Bucket staging, source-aware run identities, anonymous Git preflight in planning and remote execution, safe remote extraction, Harbor local-path rendering, purpose-scoped Job secret inputs, and removal of the authenticated Git helper. Local quality gates and the two remote acceptance checks remain the final release evidence.
 
-The implementation changes the current `harbor-hf/v1alpha1` contract in place. Historical campaigns remain readable through their pinned worker revisions. Current code does not keep a compatibility path that forwards source credentials.
+The implementation changes the current `harbor-hf/v1alpha1` contract in place. Historical runs remain readable through their pinned worker revisions. Current code does not keep a compatibility path that forwards source credentials.
 
 ## Target behavior
 
-One campaign YAML accepts:
+One run YAML accepts:
 
 - a public Git source cloned anonymously by the remote Job
 - a local directory resolved into a private immutable bundle
 - an existing verified bundle
 - an existing content-addressed Harbor package
 
-Remote Jobs never receive Git credentials. A local directory follows the same campaign lifecycle as another immutable benchmark source, including run and trial identity, retries, evidence, and recovery.
+Remote Jobs never receive Git credentials. A local directory follows the same run lifecycle as another immutable benchmark source, including run and trial identity, retries, evidence, and recovery.
 
 ## Architectural boundary
 
@@ -35,7 +35,7 @@ BenchmarkSourceResolver
         +-- Harbor package ------> PackageSourceLock
         |
         v
-source.lock.json -> campaign plan and lock -> remote source loader -> Harbor
+source.lock.json -> run plan and lock -> remote source loader -> Harbor
 ```
 
 Domain planning consumes a resolved source lock. Filesystem traversal, Git probing, Bucket upload, archive construction, and remote extraction remain adapters outside the planner.
@@ -67,7 +67,7 @@ PackageSourceLock
 BenchmarkSourceLock
 ```
 
-The author-facing directory path exists only on `DirectoryBenchmarkSource`. It is absent from `BundleSourceLock`, `CampaignLock`, `RunLock`, and remote commands.
+The author-facing directory path exists only on `DirectoryBenchmarkSource`. It is absent from `BundleSourceLock`, `RunLock`, `ExecutionLock`, and remote commands.
 
 Keep the schema version at `harbor-hf/v1alpha1`. This pre-release contract replacement does not create a parallel version. Generate the two new resource schemas from Pydantic. Run Schemator on the draft and retain the source and final graphs, decisions, diff and context, plus the manual review.
 
@@ -125,34 +125,34 @@ Do not add a fallback reader, mutable alias, latest pointer, or overwrite path. 
 
 No remote workload credential is needed to construct the bundle. The local uploader uses configured HF authentication in place for its normal API calls. Remote runtime credentials remain governed by their separate purpose and approval policy.
 
-## Phase 4: resolution and campaign identity
+## Phase 4: resolution and run identity
 
 Target modules:
 
 - `src/harbor_hf/planner.py`
-- `src/harbor_hf/campaigns.py`
-- `src/harbor_hf/campaign_input.py`
+- `src/harbor_hf/runs.py`
+- `src/harbor_hf/run_input.py`
 - `src/harbor_hf/submission.py`
 - planner and lock tests, plus input and submission tests
 
 Add an explicit resolution step before semantic planning.
 
-For a directory source, planning computes the content and manifest identities without remote upload. Submission rebuilds the bundle and requires exact equality with the approved source lock. It then uploads or adopts the bundle before it creates campaign state or launches a Job.
+For a directory source, planning computes the content and manifest identities without remote upload. Submission rebuilds the bundle and requires exact equality with the approved source lock. It then uploads or adopts the bundle before it creates run state or launches a Job.
 
 For a Git source, planning performs the anonymous preflight and writes the canonical repository and commit together with the safe path. It does not use ambient Git credentials.
 
-Update the campaign input package to contain exactly:
+Update the run input package to contain exactly:
 
 ```text
 manifest.yaml
 source.lock.json
-campaign.lock.json
+run.lock.json
 input-manifest.json
 ```
 
-The input manifest covers the exact bytes of the other three files. Campaign lock reproduction uses the requested manifest plus the verified source lock. The semantic plan digest covers the source lock; the manifest digest still covers the exact request.
+The input manifest covers the exact bytes of the other three files. Run lock reproduction uses the requested manifest plus the verified source lock. The semantic plan digest covers the source lock; the manifest digest still covers the exact request.
 
-A repeated submission must adopt the same complete bundle and source lock. It must also adopt the same campaign and controller Job. Any difference fails before a remote write or billable launch.
+A repeated submission must adopt the same complete bundle and source lock. It must also adopt the same run and controller Job. Any difference fails before a remote write or billable launch.
 
 ## Phase 5: anonymous Git adapter
 
@@ -180,7 +180,7 @@ The Job command and stored launch contract must contain no Git secret names.
 
 Target modules:
 
-- `src/harbor_hf/campaign_controller.py`
+- `src/harbor_hf/run_controller.py`
 - `src/harbor_hf/wave_worker.py`
 - `src/harbor_hf/harbor_adapter/adapter.py`
 - source loader and Harbor request tests
@@ -202,7 +202,7 @@ Target modules:
 - CLI dry-run rendering
 - secret-isolation tests
 
-Delete source-secret collection, source-secret requirements, temporary Git token files, and Git credential-helper installation. `campaign_job_secret_names()` and `job_secret_names()` must ignore benchmark sources because source models cannot request secrets.
+Delete source-secret collection, source-secret requirements, temporary Git token files, and Git credential-helper installation. `run_job_secret_names()` and `job_secret_names()` must ignore benchmark sources because source models cannot request secrets.
 
 Add a submission assertion that rejects Git credential secret names and authenticated Git configuration. Render an exact allowlist of independently approved runtime secret mappings. The submitter must not forward ambient environment variables.
 
@@ -222,14 +222,14 @@ Update:
 - `docs/run-spec.md`
 - `docs/architecture.md`
 - `docs/harbor-cookbook.md`
-- `docs/single-job-campaign-controller.md`
+- `docs/single-job-run-controller.md`
 - `docs/harbor-integration-contract.md`
 - `.agents/skills/harbor-hf/`
 - examples and ShellBench launch generators
 
-`validate` reports the requested source type and path errors. `campaign plan` reports the resolved source type, content digest, entry count, total bytes, and whether an existing remote bundle was inspected. It creates no remote resource.
+`validate` reports the requested source type and path errors. `run plan` reports the resolved source type, content digest, entry count, total bytes, and whether an existing remote bundle was inspected. It creates no remote resource.
 
-`campaign submit --dry-run` reports:
+`run submit --dry-run` reports:
 
 - the approved source lock
 - local bundle bytes and file count
@@ -239,7 +239,7 @@ Update:
 - exact runtime secret names
 - proof that no Git credential is included
 
-Normal submit prints the source lock digest and bundle receipt with campaign and Job identities.
+Normal submit prints the source lock digest and bundle receipt with run and Job identities.
 
 ## Phase 9: validation
 
@@ -274,7 +274,7 @@ The canary passes only when:
 - no Git credential secret appears in Job configuration
 - the remote Job validates and extracts the locked bundle
 - Harbor loads the extracted local path through its public API
-- the task digest matches the campaign lock
+- the task digest matches the run lock
 - provider and judge behavior matches the approved manifest
 - evidence and source inputs pass secret scanning
 - controller status, trial evidence, and final publication are complete

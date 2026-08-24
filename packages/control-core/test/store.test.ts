@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sha256 } from "@harbor-hf/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { FilesystemObjectStore, ImmutableConflictError } from "../src/store.js";
 
@@ -16,19 +17,18 @@ describe("FilesystemObjectStore", () => {
     const root = await mkdtemp(join(tmpdir(), "hhf-store-"));
     roots.push(root);
     const store = new FilesystemObjectStore(root);
-    expect(
-      (await store.create("control/schema=v1/a.json", new TextEncoder().encode("one")))
-        .created,
-    ).toBe(true);
-    expect(
-      (await store.create("control/schema=v1/a.json", new TextEncoder().encode("one")))
-        .created,
-    ).toBe(false);
+    const bytes = new TextEncoder().encode("one");
+    expect((await store.create("control/schema=v1/a.json", bytes)).created).toBe(true);
+    expect((await store.create("control/schema=v1/a.json", bytes)).created).toBe(false);
     await expect(
       store.create("control/schema=v1/a.json", new TextEncoder().encode("two")),
     ).rejects.toBeInstanceOf(ImmutableConflictError);
-    expect((await store.list("control/schema=v1")).map((entry) => entry.key)).toEqual([
-      "control/schema=v1/a.json",
+    expect(await store.list("control/schema=v1")).toEqual([
+      {
+        key: "control/schema=v1/a.json",
+        size: bytes.byteLength,
+        source_identity: sha256(bytes),
+      },
     ]);
   });
 

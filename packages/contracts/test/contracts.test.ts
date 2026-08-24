@@ -4,9 +4,9 @@ import {
   canonicalJson,
   controlRecordPath,
   deterministicId,
-  sandboxActionResultPath,
+  schemas,
   sha256,
-  validateCampaignSubmission,
+  validateRunSubmission,
   validateControlRecord,
   validateLeaderboardSnapshot,
   validatePreparedJobSubmission,
@@ -31,11 +31,11 @@ describe("canonical contracts", () => {
     );
   });
 
-  it("validates optional launch-policy campaign ceiling maximums", () => {
+  it("validates optional launch-policy run ceiling maximums", () => {
     const spec = {
       max_infrastructure_attempts: 2,
       reservation_microusd: 100_000,
-      max_campaign_ceiling_microusd: 300_000_000,
+      max_run_ceiling_microusd: 300_000_000,
       success_without_worker_receipt: false,
       publication_role: "diagnostic",
     };
@@ -51,49 +51,37 @@ describe("canonical contracts", () => {
     };
 
     expect(validateControlRecord(profile)).toEqual(profile);
-    const { max_campaign_ceiling_microusd: _maximum, ...historicalSpec } = spec;
+    const { max_run_ceiling_microusd: _maximum, ...historicalSpec } = spec;
     expect(validateControlRecord({ ...profile, spec: historicalSpec })).toMatchObject({
       spec: historicalSpec,
     });
     expect(
       validateControlRecord({
         ...profile,
-        spec: { ...spec, max_campaign_ceiling_microusd: 0 },
+        spec: { ...spec, max_run_ceiling_microusd: 0 },
       }),
-    ).toMatchObject({ spec: { max_campaign_ceiling_microusd: 0 } });
+    ).toMatchObject({ spec: { max_run_ceiling_microusd: 0 } });
     expect(
       validateControlRecord({
         ...profile,
-        spec: { ...spec, max_campaign_ceiling_microusd: 1_000_000_000_000 },
+        spec: { ...spec, max_run_ceiling_microusd: 1_000_000_000_000 },
       }),
-    ).toMatchObject({ spec: { max_campaign_ceiling_microusd: 1_000_000_000_000 } });
+    ).toMatchObject({ spec: { max_run_ceiling_microusd: 1_000_000_000_000 } });
 
     for (const invalid of [-1, 1.5, "300000000", 1_000_000_000_001]) {
       expect(() =>
         validateControlRecord({
           ...profile,
-          spec: { ...spec, max_campaign_ceiling_microusd: invalid },
+          spec: { ...spec, max_run_ceiling_microusd: invalid },
         }),
       ).toThrow(ContractValidationError);
     }
   });
 
-  it("keeps Sandbox action result paths stable and scoped", () => {
-    expect(sandboxActionResultPath("campaign-test", "action-test")).toBe(
-      "sandbox-results/schema=v1/campaign-test/action-test/result.json",
-    );
-    expect(() => sandboxActionResultPath("../campaign", "action-test")).toThrow(
-      "campaign_id is not a safe identifier",
-    );
-    expect(() => sandboxActionResultPath("campaign-test", "action/test")).toThrow(
-      "action_id is not a safe identifier",
-    );
-  });
-
   it("validates scoped worker evidence manifests", () => {
     const digest = `sha256:${"a".repeat(64)}`;
     const path = workerEvidenceObjectPath(
-      "campaign-test",
+      "run-test",
       "action-test",
       "task-test",
       digest,
@@ -101,7 +89,7 @@ describe("canonical contracts", () => {
     const manifest = {
       schema_version: "v1",
       kind: "worker.evidence.manifest",
-      campaign_id: "campaign-test",
+      run_id: "run-test",
       action_id: "action-test",
       task_id: "task-test",
       objects: [{ path, digest, size: 42 }],
@@ -121,6 +109,7 @@ describe("canonical contracts", () => {
       trial_index: 1,
       input_digest: digest,
       trial_lock: { schema_version: 2, task: { digest } },
+      trial_lock_digest: digest,
       declared_image: "example.invalid/task:release",
       image: `example.invalid/task@${digest}`,
       cpus: 1,
@@ -161,61 +150,16 @@ describe("canonical contracts", () => {
       created_at: "2026-08-16T00:00:00Z",
       actor: { subject: "control", role: "service" },
       action_id: "action-test",
-      campaign_id: "campaign-test",
+      run_id: "run-test",
       operation: "create",
       adoption_not_before: "2026-08-16T00:01:00Z",
     });
     expect(controlRecordPath(record)).toBe(
-      "control/schema=v1/campaigns/campaign-test/actions/action-test/q-dispatch.json",
+      "control/schema=v1/runs/run-test/actions/action-test/q-dispatch.json",
     );
   });
 
-  it("validates fixed historical action dispositions", () => {
-    const digest = `sha256:${"a".repeat(64)}`;
-    const record = {
-      schema_version: "v1",
-      kind: "action.disposition",
-      record_id: "disposition-action-test",
-      created_at: "2026-08-21T00:00:00Z",
-      actor: { subject: "operator", role: "operator" },
-      campaign_id: "campaign-test",
-      task_id: "task-test",
-      action_id: "action-test",
-      source_receipt_id: "receipt-action-test",
-      source_receipt_digest: digest,
-      close_action_id: "action-close-test",
-      close_receipt_id: "receipt-close-test",
-      close_receipt_digest: digest,
-      batch_id: "disposition-batch-test",
-      batch_digest: digest,
-      batch_size: 2,
-      effective_outcome: "failed",
-      effective_observed_state: "AMBIGUOUS",
-      effective_error_code: "sandbox_external_outcome_unknown",
-      reason_code: "historical_non_replay_safe_command_ambiguity",
-      reason: "correct a proved historical observation",
-    } as const;
-
-    expect(validateControlRecord(record)).toEqual(record);
-    expect(controlRecordPath(record)).toBe(
-      "control/schema=v1/campaigns/campaign-test/actions/action-test/zzz-disposition.json",
-    );
-    for (const changed of [
-      { effective_outcome: "completed" },
-      { effective_observed_state: "COMPLETED" },
-      { effective_error_code: "another_error" },
-      { reason_code: "operator_override" },
-      { source_receipt_digest: "sha256:invalid" },
-      { batch_size: 101 },
-      { actor: { subject: "reader", role: "reader" } },
-      { undocumented: true },
-    ])
-      expect(() => validateControlRecord({ ...record, ...changed })).toThrow(
-        ContractValidationError,
-      );
-  });
-
-  it("validates service capacity profiles and Sandbox capacity records", () => {
+  it("validates service capacity profiles and Job capacity records", () => {
     const profile = {
       schema_version: "v1",
       kind: "profile.object",
@@ -226,8 +170,8 @@ describe("canonical contracts", () => {
       name: "capacity-test",
       spec: {
         namespace: "test",
-        max_active_sandboxes: 8,
-        hardware_limits: [{ hardware: "cpu-basic", max_active_sandboxes: 4 }],
+        max_active_jobs: 8,
+        hardware_limits: [{ hardware: "cpu-basic", max_active_jobs: 4 }],
         start_burst: 2,
         start_refill_tokens: 1,
         start_refill_period_seconds: 10,
@@ -235,12 +179,12 @@ describe("canonical contracts", () => {
     } as const;
     const grant = {
       schema_version: "v1",
-      kind: "sandbox.admission",
-      record_id: "sandbox-admission-test",
+      kind: "job.admission",
+      record_id: "job-admission-test",
       created_at: "2026-08-22T00:00:01.000Z",
       actor: { subject: "control", role: "service" },
-      action_id: "sandbox-action-test",
-      campaign_id: "campaign-test",
+      action_id: "job-action-test",
+      run_id: "run-test",
       namespace: "test",
       capacity_profile_id: `sha256:${"a".repeat(64)}`,
       hardware: "cpu-basic",
@@ -251,14 +195,14 @@ describe("canonical contracts", () => {
     } as const;
     const release = {
       schema_version: "v1",
-      kind: "sandbox.capacity-release",
-      record_id: "sandbox-capacity-release-test",
+      kind: "job.capacity-release",
+      record_id: "job-capacity-release-test",
       created_at: "2026-08-22T00:01:00.000Z",
       actor: { subject: "control", role: "service" },
-      action_id: "sandbox-action-test",
-      campaign_id: "campaign-test",
+      action_id: "job-action-test",
+      run_id: "run-test",
       grant_id: grant.record_id,
-      release_reason: "sandbox_closed",
+      release_reason: "job_terminal",
       evidence_record_id: "receipt-test",
     } as const;
 
@@ -275,68 +219,25 @@ describe("canonical contracts", () => {
     ).toThrow(ContractValidationError);
   });
 
-  it("requires a reviewed root bootstrap for inference-enabled Sandboxes", () => {
-    const sandbox = {
-      image: `registry.example/sandbox@sha256:${"a".repeat(64)}`,
-      hardware: "h200",
-      timeout_seconds: 21_600,
-      idle_timeout_seconds: 1_800,
-      inference_token: "required",
-      inference_upstream: "https://route.example.endpoints.huggingface.cloud/v1",
-      inference_model: "example/model",
-      inference_api: "chat-completions",
-      inference_max_requests: 256,
-      inference_max_concurrency: 1,
-      inference_max_total_concurrency: 1,
-      inference_timeout_seconds: 1_800,
-      inference_max_output_tokens: 32_768,
-      reservation_microusd: 20_000_000,
-      active_hourly_cost_microusd: 5_000_000,
-      max_sandboxes: 1,
-      max_commands: 128,
-      max_command_seconds: 3_600,
-      max_transfer_bytes: 1_048_576,
-      allowed_roots: ["/app", "/logs"],
-    };
-    const intent = {
-      schema_version: "v1",
-      kind: "action.intent",
-      record_id: "sandbox-action-test",
-      created_at: "2026-08-18T00:00:00Z",
-      actor: { subject: "control", role: "service" },
-      action_id: "sandbox-action-test",
-      campaign_id: "campaign-test",
-      action_kind: "sandbox.create",
-      generation: 0,
-      target: "task-test",
-      payload: { task_id: "task-test", sandbox },
-    };
-    expect(() => validateControlRecord(intent)).toThrow(ContractValidationError);
-    expect(
-      validateControlRecord({
-        ...intent,
-        payload: {
-          task_id: "task-test",
-          sandbox: {
-            ...sandbox,
-            root_bootstrap_command: ["/opt/worker/start-root-services"],
-          },
-        },
-      }),
-    ).toMatchObject({ kind: "action.intent", action_kind: "sandbox.create" });
-    expect(
+  it("does not expose a Sandbox contract or action kind", () => {
+    expect(JSON.stringify(schemas.controlRecord).toLowerCase()).not.toContain(
+      "sandbox",
+    );
+    expect(() =>
       validateControlRecord({
         schema_version: "v1",
-        kind: "action.dispatch",
-        record_id: "sandbox-dispatch-test",
+        kind: "action.intent",
+        record_id: "obsolete-action-test",
         created_at: "2026-08-18T00:00:00Z",
         actor: { subject: "control", role: "service" },
-        action_id: "sandbox-exec-test",
-        campaign_id: "campaign-test",
-        operation: "execute",
-        adoption_not_before: "2026-08-18T00:01:00Z",
+        action_id: "obsolete-action-test",
+        run_id: "run-test",
+        action_kind: "sandbox.create",
+        generation: 0,
+        target: "task-test",
+        payload: { task_id: "task-test" },
       }),
-    ).toMatchObject({ operation: "execute" });
+    ).toThrow(ContractValidationError);
   });
 
   it("keeps profile and action payloads closed", () => {
@@ -395,6 +296,9 @@ describe("canonical contracts", () => {
         timeout_seconds: 300,
         trusted_worker: true,
         inference_token: "required",
+        inference_upstream: "https://router.huggingface.co/v1",
+        inference_model: "example/model",
+        inference_api: "chat-completions",
         inference_max_requests: 64,
         inference_max_concurrency: 4,
         inference_timeout_seconds: 600,
@@ -414,10 +318,10 @@ describe("canonical contracts", () => {
         kind: "action.intent",
         record_id: "action-test",
         action_id: "action-test",
-        campaign_id: "campaign-test",
+        run_id: "run-test",
         action_kind: "job.launch",
         generation: 0,
-        target: "campaign",
+        target: "run",
         payload: { undocumented_provider_option: true },
       }),
     ).toThrow(ContractValidationError);
@@ -436,13 +340,13 @@ describe("canonical contracts", () => {
         route: "imported",
         models: ["model-one"],
         harnesses: ["pi"],
-        source_campaign_ids: ["20260815T000000Z-source"],
+        source_run_ids: ["20260815T000000Z-source"],
         source_revisions: ["revision-one"],
       },
     };
     expect(validateControlRecord(profile)).toEqual(profile);
     expect(
-      validateCampaignSubmission({
+      validateRunSubmission({
         benchmark: "shellbench-structured",
         model: "model-one",
         harness: "pi",
@@ -454,11 +358,11 @@ describe("canonical contracts", () => {
     expect(
       validateControlRecord({
         schema_version: "v1",
-        kind: "campaign.lock",
+        kind: "run.lock",
         record_id: "lock-real-task-id",
         created_at: "2026-08-16T00:00:00Z",
         actor: { subject: "migration", role: "migration" },
-        campaign_id: "campaign-real-task-id",
+        run_id: "run-real-task-id",
         profiles: [
           {
             kind: "benchmark",
@@ -510,7 +414,7 @@ describe("canonical contracts", () => {
         ceiling_microusd: 0,
         source_revision: `sha256:${"0".repeat(64)}`,
       }),
-    ).toMatchObject({ kind: "campaign.lock" });
+    ).toMatchObject({ kind: "run.lock" });
   });
 
   it("validates result catalog entries", () => {
@@ -523,8 +427,7 @@ describe("canonical contracts", () => {
       entries: [
         {
           publication_id: "publication-test",
-          campaign_id: "campaign-test",
-          run_id: null,
+          run_id: "run-test",
           published_at: "2026-08-16T00:00:00Z",
           benchmark: "benchmark-test",
           model: "model-test",
@@ -574,23 +477,23 @@ describe("canonical contracts", () => {
       controlRecordPath({
         kind: "action.intent",
         record_id: "action-1",
-        campaign_id: "campaign-1",
+        run_id: "run-1",
         action_id: "action-1",
       }),
-    ).toBe("control/schema=v1/campaigns/campaign-1/actions/action-1/intent.json");
+    ).toBe("control/schema=v1/runs/run-1/actions/action-1/intent.json");
     expect(
       controlRecordPath({
         kind: "action.advanced",
         record_id: "advanced-1",
-        campaign_id: "campaign-1",
+        run_id: "run-1",
         action_id: "action-1",
       }),
-    ).toBe("control/schema=v1/campaigns/campaign-1/actions/action-1/zz-advanced.json");
+    ).toBe("control/schema=v1/runs/run-1/actions/action-1/zz-advanced.json");
   });
 
-  it("validates campaign submission boundaries", () => {
+  it("validates run submission boundaries", () => {
     expect(
-      validateCampaignSubmission({
+      validateRunSubmission({
         benchmark: "control-smoke",
         model: "control-smoke",
         harness: "control-smoke",
@@ -600,7 +503,7 @@ describe("canonical contracts", () => {
       }),
     ).toMatchObject({ confirmed: true });
     expect(() =>
-      validateCampaignSubmission({
+      validateRunSubmission({
         benchmark: "x",
         model: "x",
         harness: "x",

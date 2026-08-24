@@ -52,7 +52,7 @@ def test_config_round_trip_stores_only_token_name(
     token_value = "hf_secret-value-that-must-not-be-written"
     config = HarborHFConfig(
         schema_version="harbor-hf/config/v1",
-        hf_job_token_name="campaign-job-token",
+        hf_job_token_name="run-job-token",
     )
 
     saved = save_harbor_hf_config(config, path)
@@ -62,17 +62,17 @@ def test_config_round_trip_stores_only_token_name(
     assert path.stat().st_mode & 0o777 == 0o600
     assert token_value not in path.read_text(encoding="utf-8")
     assert json.loads(path.read_text(encoding="utf-8")) == {
-        "hf_job_token_name": "campaign-job-token",
+        "hf_job_token_name": "run-job-token",
         "schema_version": "harbor-hf/config/v1",
     }
     token_store_path = path.parent / "stored_tokens"
     monkeypatch.setenv("HARBOR_HF_CONFIG", str(path))
     monkeypatch.setenv("HARBOR_HF_TOKEN_STORE", str(token_store_path))
-    save_harbor_hf_tokens({"campaign-job-token": token_value}, token_store_path)
+    save_harbor_hf_tokens({"run-job-token": token_value}, token_store_path)
     assert job_hf_token_status() == {
         "config_path": str(path),
         "token_store_path": str(path.parent / "stored_tokens"),
-        "selected_token_name": "campaign-job-token",
+        "selected_token_name": "run-job-token",
         "selected_token_available": True,
         "environment_override": True,
     }

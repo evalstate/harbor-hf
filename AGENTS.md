@@ -29,7 +29,7 @@
   report exactly what was exposed and where, remove it from the current version,
   and ask before rewriting public history or rotating credentials.
 
-## General campaign architecture
+## General run architecture
 
 - Keep Harbor-HF independent of specific benchmarks and models. Keep its core
   independent of harness names too. These names may appear in configuration,
@@ -46,18 +46,18 @@
 - Do not add model-specific scripts, workers, API routes, schema fields, or
   control branches. Keep model IDs, revisions, providers, prices, context
   limits, reasoning settings, and inference parameters in immutable profiles
-  and campaign locks. Represent behavior through general capabilities such as
+  and run locks. Represent behavior through general capabilities such as
   protocol, tool use, reasoning, structured output, and context size.
 - Keep Harbor-HF control and worker code independent of harness names. A
   supported Harbor harness must need only configuration. Code for a new harness
   belongs in a Harbor agent plugin behind the common agent interface and must
-  not change campaign, API, schema, or infrastructure logic.
+  not change run, API, schema, or infrastructure logic.
 - If a benchmark or model needs unsupported behavior, add a general capability
   at the correct Harbor or provider boundary, or reject it as unsupported.
   Apply the same rule to harnesses at the agent boundary. Never add a
   name-based special case in Harbor-HF.
-- Keep one-time migration tools outside the normal campaign path. Never use a
-  migration script to add campaign support.
+- Keep one-time migration tools outside the normal run path. Never use a
+  migration script to add run support.
 - Before merging support for a benchmark or model, verify that another
   compatible value can use the same path without implementation changes or a
   new package script. Apply the same test to harness support.
@@ -91,7 +91,7 @@
 - Treat Hugging Face repositories and Buckets as shared namespace
   infrastructure. Spaces and schedules are shared too. Endpoints follow the
   same rule. Reuse the canonical configured resources.
-- Never create a repository, Bucket, Space, or schedule for one campaign,
+- Never create a repository, Bucket, Space, or schedule for one run,
   repair, profile, lease, status record, result subset, or temporary workflow.
 - The complete steady-state Harbor-HF runtime inventory is one private control
   Space and one private `<artifact-bucket>` Bucket. Store control objects,
@@ -107,13 +107,13 @@
   credential and may be passed only to reviewed workers whose immutable
   deployment profile requires it. Do not publish either token's display name or
   local alias. Do not create another Harbor-HF credential for a migration,
-  campaign, repair, worker, backup, or result reader.
+  run, repair, worker, backup, or result reader.
 - Treat any other Harbor-HF service credential as a deprecation candidate. Do
   not revoke it until a private consumer audit and a canary using only the
   retained credential prove that control writes, evidence upload, endpoint
   cleanup, and publication still work.
 - Follow `docs/CONTROL_SERVICE.md` and
-  `docs/2026-08-16-harbor-hf-control-service-plan.md` when changing campaign
+  `docs/2026-08-16-harbor-hf-control-service-plan.md` when changing run
   control, the web application, profiles, storage, recovery, or publication
   architecture.
 - The TypeScript control service is the only planned shared control authority.
@@ -133,5 +133,5 @@
   `.agents/skills/project-authorization/SKILL.md`. Verify that the requested
   scope is approved in the repository-indexed project file before continuing.
 - Before planning, launching, monitoring, reconciling, recovering, verifying,
-  or publishing a Harbor HF campaign, read and follow
+  or publishing a Harbor HF run, read and follow
   `.agents/skills/harbor-hf/SKILL.md`.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import math
 import os
 import re
@@ -24,7 +25,13 @@ from harbor.models.job.lock import TrialLock
 from harbor.models.task.config import TaskConfig as TaskDefinitionConfig
 from harbor.models.trial.config import EnvironmentConfig
 
-from harbor_hf_agents.support.control_sandbox_environment import _ControlClient
+from harbor_hf_agents.support.control_client import (
+    ControlClient,
+    digest_json,
+    run_lock_profile,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 _ACCEPT_MANIFESTS = ", ".join(
     (
@@ -35,6 +42,10 @@ _ACCEPT_MANIFESTS = ", ".join(
     )
 )
 _BEARER_PARAMETER = re.compile(r'(\w+)="([^"]*)"')
+_MAX_TRANSFER_BYTES = 1024 * 1024 * 1024
+_MAX_TRANSFER_FILE_BYTES = 512 * 1024 * 1024
+_MAX_TRANSFER_FILES = 10_000
+_MAX_TRANSFER_PATH_DEPTH = 32
 
 
 @dataclass(frozen=True)
@@ -46,33 +57,47 @@ class ExpectedTask:
 
 
 def _required(name: str) -> str:
-    value = os.environ.get(name)
+    try:
+        value = os.environ[name]
+    except KeyError as error:
+        raise RuntimeError(
+            f"required preparation worker setting {name} is missing"
+        ) from error
     if not value:
-        raise RuntimeError(f"required preparation worker setting {name} is missing")
+        raise RuntimeError(f"required preparation worker setting {name} is empty")
     return value
 
 
-def _profile(lock: dict[str, Any], kind: str) -> dict[str, Any]:
-    matches = [item for item in lock.get("profiles", []) if item.get("kind") == kind]
-    if len(matches) != 1 or not isinstance(matches[0].get("spec"), dict):
-        raise RuntimeError(f"campaign lock must contain one {kind} profile")
-    return matches[0]["spec"]
+def _optional(
+    mapping: dict[str, Any],
+    key: str,
+) -> Any:  # noqa: ANN401 -- validated JSON values remain dynamic at this boundary
+    try:
+        return mapping[key]
+    except KeyError:
+        return None
 
 
-def _read_campaign_lock(campaign_id: str) -> dict[str, Any]:
-    return _ControlClient(campaign_id, "preparation").request(
+def _read_run_lock(run_id: str) -> dict[str, Any]:
+    client = ControlClient.from_environment()
+    if client.run_id != run_id:
+        raise RuntimeError("preparation worker run does not match its control client")
+    return client.request_sync(
         "GET",
-        f"/api/v1/campaigns/{campaign_id}/lock",
+        f"/api/v1/runs/{run_id}/lock",
         idempotency_key=f"prepare-lock-{_required('HARBOR_HF_ACTION_ID')}",
-        timeout=60.0,
+        timeout_seconds=60,
     )
 
 
 def _expected_tasks(lock: dict[str, Any]) -> tuple[ExpectedTask, ...]:
     output: list[ExpectedTask] = []
-    for value in lock.get("tasks", []):
+    tasks = lock["tasks"]
+    if not isinstance(tasks, list):
+        raise RuntimeError("run lock tasks must be a list")
+    for value in tasks:
         if not isinstance(value, dict):
-            raise RuntimeError("campaign task lock must be an object")
+            raise RuntimeError("run task lock must be an object")
         output.append(
             ExpectedTask(
                 task_id=str(value["task_id"]),
@@ -82,41 +107,41 @@ def _expected_tasks(lock: dict[str, Any]) -> tuple[ExpectedTask, ...]:
             )
         )
     if not output:
-        raise RuntimeError("campaign must contain at least one task")
+        raise RuntimeError("run must contain at least one task")
     if len({item.task_id for item in output}) != len(output):
-        raise RuntimeError("campaign task IDs must be unique")
+        raise RuntimeError("run task IDs must be unique")
     if len({(item.source_task_id, item.trial_index) for item in output}) != len(output):
-        raise RuntimeError("campaign source task trials must be unique")
+        raise RuntimeError("run source task trials must be unique")
     return tuple(output)
 
 
 def _job_config(lock: dict[str, Any]) -> JobConfig:
-    benchmark = _profile(lock, "benchmark")
-    model = _profile(lock, "model")
-    harness = _profile(lock, "harness")
-    deployment = _profile(lock, "deployment")
-    raw_job = benchmark.get("harbor_job")
-    raw_agent = harness.get("harbor_agent")
+    benchmark = run_lock_profile(lock, "benchmark")
+    model = run_lock_profile(lock, "model")
+    harness = run_lock_profile(lock, "harness")
+    deployment = run_lock_profile(lock, "deployment")
+    raw_job = _optional(benchmark, "harbor_job")
+    raw_agent = _optional(harness, "harbor_agent")
     if not isinstance(raw_job, dict) or not isinstance(raw_agent, dict):
-        raise RuntimeError("prepared campaign profiles must contain Harbor job data")
-    if deployment.get("preparation") != "required":
+        raise RuntimeError("prepared run profiles must contain Harbor job data")
+    if deployment["preparation"] != "required":
         raise RuntimeError("deployment does not require Harbor preparation")
     for key in ("agents", "environment", "retry", "job_name", "jobs_dir"):
         if key in raw_job:
             raise RuntimeError(f"benchmark Harbor job cannot set control field {key}")
     agent = copy.deepcopy(raw_agent)
-    if agent.get("model_name") != model.get("harbor_model_name"):
+    if agent["model_name"] != model["harbor_model_name"]:
         raise RuntimeError("Harbor agent model does not match the model profile")
     value = copy.deepcopy(raw_job)
     value.update(
         {
-            "job_name": f"prepare-{lock['campaign_id']}",
+            "job_name": f"prepare-{lock['run_id']}",
             "jobs_dir": "/tmp/harbor-hf-prepared-jobs",
             "agents": [agent],
             "environment": {
                 "import_path": (
-                    "harbor_hf_agents.support.control_sandbox_environment:"
-                    "ControlSandboxEnvironment"
+                    "harbor_hf_agents.support.control_job_environment:"
+                    "ControlJobEnvironment"
                 ),
                 "delete": True,
                 "kwargs": {},
@@ -167,7 +192,7 @@ def _bearer_token(challenge: str) -> str:
     )
     with urlopen(request, timeout=30) as response:  # noqa: S310 -- reviewed HTTPS registry URL
         payload = json.load(response)
-    token = payload.get("token") or payload.get("access_token")
+    token = payload["token"] if "token" in payload else payload["access_token"]
     if not isinstance(token, str) or not token:
         raise RuntimeError("OCI registry token response is invalid")
     return token
@@ -184,14 +209,14 @@ def _manifest_digest(registry: str, repository: str, reference: str) -> str:
             raise RuntimeError(
                 f"OCI manifest request failed with HTTP {error.code}"
             ) from error
-        token = _bearer_token(error.headers.get("WWW-Authenticate", ""))
+        token = _bearer_token(error.headers["WWW-Authenticate"] or "")
         headers["Authorization"] = f"Bearer {token}"
         response = urlopen(  # noqa: S310 -- reviewed HTTPS registry URL
             Request(url, method="HEAD", headers=headers),
             timeout=30,
         )
     with response:
-        digest = response.headers.get("Docker-Content-Digest")
+        digest = response.headers["Docker-Content-Digest"]
     if not digest or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise RuntimeError("OCI registry did not return a valid manifest digest")
     return digest
@@ -227,7 +252,16 @@ def _task_definition(path: Path) -> TaskDefinitionConfig:
             "non-Linux Harbor tasks are not supported by this deployment"
         )
     if not definition.environment.docker_image:
-        raise RuntimeError("HF Sandbox execution requires a prebuilt task image")
+        raise RuntimeError("HF Job execution requires a prebuilt task image")
+    verifier_environment = definition.verifier.environment
+    if (
+        verifier_environment is not None
+        and verifier_environment.docker_image is not None
+        and verifier_environment.docker_image != definition.environment.docker_image
+    ):
+        raise RuntimeError(
+            "direct HF Job execution cannot use a separate verifier image"
+        )
     return definition
 
 
@@ -237,23 +271,30 @@ def _source_name(lock: TrialLock) -> str:
 
 def _execution_trial_lock(
     lock: TrialLock,
-    task_id: str,
     max_command_seconds: int,
-    keepalive_seconds: int,
+    max_image_bytes: int,
+    max_image_entries: int,
+    declared_task_image: str,
+    task_image: str,
 ) -> TrialLock:
     environment = EnvironmentConfig.model_validate(
         {
             **lock.environment.model_dump(mode="json"),
             "import_path": (
-                "harbor_hf_agents.support.control_sandbox_environment:"
-                "ControlSandboxEnvironment"
+                "harbor_hf_agents.support.control_job_environment:ControlJobEnvironment"
             ),
             "type": None,
             "delete": True,
             "kwargs": {
-                "control_task_id": task_id,
                 "control_max_command_seconds": max_command_seconds,
-                "control_keepalive_seconds": keepalive_seconds,
+                "control_max_transfer_bytes": _MAX_TRANSFER_BYTES,
+                "control_max_transfer_file_bytes": _MAX_TRANSFER_FILE_BYTES,
+                "control_max_transfer_files": _MAX_TRANSFER_FILES,
+                "control_max_transfer_path_depth": _MAX_TRANSFER_PATH_DEPTH,
+                "control_max_image_bytes": max_image_bytes,
+                "control_max_image_entries": max_image_entries,
+                "control_declared_task_image": declared_task_image,
+                "control_task_image": task_image,
             },
         }
     )
@@ -270,7 +311,7 @@ def _trial_body(
     environment = definition.environment
     agent_base = definition.agent.timeout_sec
     if agent_base is None:
-        raise RuntimeError("HF Sandbox execution requires a bounded agent timeout")
+        raise RuntimeError("HF Job execution requires a bounded agent timeout")
     setup_base = harbor_lock.agent.override_setup_timeout_sec or 360.0
     phase_timeouts = {
         "agent_timeout_seconds": _scaled(
@@ -295,23 +336,23 @@ def _trial_body(
         ),
     }
     max_command_seconds = max(phase_timeouts.values())
-    idle_timeout_seconds = min(
-        sum(phase_timeouts.values()) + int(template["lifetime_overhead_seconds"]),
-        max_command_seconds + int(template["idle_timeout_overhead_seconds"]),
-    )
     prepared_lock = _execution_trial_lock(
         harbor_lock,
-        expected.task_id,
         max_command_seconds,
-        max(1, min(300, idle_timeout_seconds // 2)),
+        int(template["max_image_bytes"]),
+        int(template["max_image_entries"]),
+        str(environment.docker_image),
+        image,
     )
+    trial_lock = prepared_lock.model_dump(mode="json")
     return prepared_lock, {
         "phase": "trial",
         "task_id": expected.task_id,
         "source_task_id": expected.source_task_id,
         "trial_index": expected.trial_index,
         "input_digest": expected.input_digest,
-        "trial_lock": prepared_lock.model_dump(mode="json"),
+        "trial_lock": trial_lock,
+        "trial_lock_digest": digest_json(trial_lock),
         "declared_image": str(environment.docker_image),
         "image": image,
         "cpus": environment.cpus or int(template["default_cpus"]),
@@ -326,44 +367,46 @@ def _trial_body(
     }
 
 
-def _submit(client: _ControlClient, body: dict[str, Any], key: str) -> dict[str, Any]:
-    return client.request(
+def _submit(client: ControlClient, body: dict[str, Any], key: str) -> dict[str, Any]:
+    return client.request_sync(
         "POST",
-        f"/api/v1/campaigns/{client.campaign_id}/prepared-job",
+        f"/api/v1/runs/{client.run_id}/prepared-job",
         body=body,
         idempotency_key=key,
-        timeout=120.0,
+        timeout_seconds=120,
     )
 
 
 def _preparation_input(
     lock: dict[str, Any],
 ) -> tuple[str, tuple[ExpectedTask, ...], dict[str, Any], JobConfig]:
-    campaign_id = str(lock["campaign_id"])
-    deployment = _profile(lock, "deployment")
-    if version("harbor") != deployment.get("harbor_version"):
+    run_id = str(lock["run_id"])
+    deployment = run_lock_profile(lock, "deployment")
+    if version("harbor") != deployment["harbor_version"]:
         raise RuntimeError(
             "installed Harbor version does not match the deployment profile"
         )
-    if _required("HARBOR_HF_WORKER_REVISION") != deployment.get("worker_revision"):
+    if _required("HARBOR_HF_WORKER_REVISION") != deployment["worker_revision"]:
         raise RuntimeError(
             "preparation worker revision does not match the deployment profile"
         )
-    template = deployment.get("sandbox_template")
+    template = deployment["trial_job_template"]
     if not isinstance(template, dict):
-        raise RuntimeError("deployment has no Sandbox template")
-    return campaign_id, _expected_tasks(lock), template, _job_config(lock)
+        raise RuntimeError("deployment has no trial Job template")
+    return run_id, _expected_tasks(lock), template, _job_config(lock)
 
 
 async def _prepare(lock: dict[str, Any]) -> None:
-    campaign_id, expected, template, config = _preparation_input(lock)
+    run_id, expected, template, config = _preparation_input(lock)
     plan = await JobPlan.from_config(
         config,
-        job_id=uuid5(NAMESPACE_URL, f"harbor-hf:{campaign_id}"),
+        job_id=uuid5(NAMESPACE_URL, f"harbor-hf:{run_id}"),
     )
     if len(plan.job_lock.trials) != len(expected):
-        raise RuntimeError("resolved Harbor trial count does not match the campaign")
-    client = _ControlClient(campaign_id, "preparation")
+        raise RuntimeError("resolved Harbor trial count does not match the run")
+    client = ControlClient.from_environment()
+    if client.run_id != run_id:
+        raise RuntimeError("prepared run does not match its control client")
     prepared_locks: list[TrialLock] = []
     seen: dict[str, int] = {}
     definitions: dict[Path, TaskDefinitionConfig] = {}
@@ -375,13 +418,14 @@ async def _prepare(lock: dict[str, Any]) -> None:
         strict=True,
     ):
         source_name = _source_name(harbor_lock)
-        seen[source_name] = seen.get(source_name, 0) + 1
+        seen.setdefault(source_name, 0)
+        seen[source_name] += 1
         if (
             source_name != expected_task.source_task_id
             or seen[source_name] != expected_task.trial_index
             or harbor_lock.task.digest != expected_task.input_digest
         ):
-            raise RuntimeError("resolved Harbor task does not match the campaign lock")
+            raise RuntimeError("resolved Harbor task does not match the run lock")
         download = plan.task_download_results[trial_config.task.get_task_id()]
         if download.path not in definitions:
             definitions[download.path] = _task_definition(download.path)
@@ -423,34 +467,29 @@ async def _prepare(lock: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if _required("HARBOR_HF_WORKER_ROLE") != "preparation":
         raise RuntimeError("preparation worker role is invalid")
-    if os.environ.get("HF_TOKEN") or os.environ.get("HF_INFERENCE_TOKEN"):
+    if any(
+        name in os.environ and os.environ[name]
+        for name in ("HF_TOKEN", "HF_INFERENCE_TOKEN")
+    ):
         raise RuntimeError("preparation worker must not receive persistent credentials")
-    campaign_id = _required("HARBOR_HF_CAMPAIGN_ID")
-    print(
-        json.dumps(
-            {
-                "status": "starting",
-                "campaign_id": campaign_id,
-                "action_id": _required("HARBOR_HF_ACTION_ID"),
-            },
-            sort_keys=True,
-        ),
-        flush=True,
+    run_id = _required("HARBOR_HF_RUN_ID")
+    _LOGGER.info(
+        "Starting Harbor preparation for run %s with action %s",
+        run_id,
+        _required("HARBOR_HF_ACTION_ID"),
     )
-    lock = _read_campaign_lock(campaign_id)
+    lock = _read_run_lock(run_id)
     asyncio.run(_prepare(lock))
-    print(
-        json.dumps(
-            {
-                "status": "prepared",
-                "campaign_id": campaign_id,
-                "task_count": len(lock.get("tasks", [])),
-            },
-            sort_keys=True,
-        ),
-        flush=True,
+    tasks = lock["tasks"]
+    if not isinstance(tasks, list):
+        raise RuntimeError("run lock tasks must be a list")
+    _LOGGER.info(
+        "Prepared %d Harbor trials for run %s",
+        len(tasks),
+        run_id,
     )
 
 

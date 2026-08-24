@@ -12,9 +12,9 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Operate Harbor-HF through the TypeScript control service.",
 )
-campaign_app = typer.Typer(no_args_is_help=True, help="Submit and inspect campaigns.")
-app.add_typer(campaign_app, name="campaign")
-capacity_app = typer.Typer(help="Inspect and set the shared namespace Sandbox cap.")
+run_app = typer.Typer(no_args_is_help=True, help="Submit and inspect runs.")
+app.add_typer(run_app, name="run")
+capacity_app = typer.Typer(help="Inspect and set the shared namespace Job cap.")
 app.add_typer(capacity_app, name="capacity")
 
 
@@ -68,8 +68,8 @@ def _request(
     if response.status_code >= 400:
         try:
             body = response.json()
-            message = body.get("error", {}).get("message", "request rejected")
-        except (TypeError, ValueError):
+            message = body["error"]["message"]
+        except (KeyError, TypeError, ValueError):
             message = "request rejected"
         _fail(f"control API returned {response.status_code}: {message}")
     if response.status_code == 204:
@@ -83,7 +83,7 @@ def _echo(value: object) -> None:
 
 @capacity_app.callback(invoke_without_command=True)
 def capacity(ctx: typer.Context) -> None:
-    """Show the shared namespace Sandbox cap."""
+    """Show the shared namespace Job cap."""
     if ctx.invoked_subcommand is not None:
         return
     _echo(_request("GET", "/api/v1/capacity"))
@@ -91,17 +91,17 @@ def capacity(ctx: typer.Context) -> None:
 
 @capacity_app.command("set")
 def capacity_set(
-    max_sandboxes: Annotated[int, typer.Option("--max-sandboxes", min=1, max=1024)],
+    max_jobs: Annotated[int, typer.Option("--max-jobs", min=1, max=1024)],
     yes: Annotated[
         bool,
-        typer.Option("--yes", help="Confirm the namespace Sandbox cap change."),
+        typer.Option("--yes", help="Confirm the namespace Job cap change."),
     ] = False,
 ) -> None:
-    """Replace the promoted namespace Sandbox cap and start pacing."""
+    """Replace the promoted namespace Job cap and start pacing."""
     if not yes:
         typer.confirm(
-            f"Set the namespace Sandbox cap to {max_sandboxes}? "
-            "Existing campaigns keep their locked per-run Sandbox and worker limits.",
+            f"Set the namespace Job cap to {max_jobs}? "
+            "Existing runs keep their locked per-run Job and worker limits.",
             abort=True,
         )
     key = str(uuid4())
@@ -111,7 +111,7 @@ def capacity_set(
             "POST",
             "/api/v1/capacity",
             payload={
-                "max_active_sandboxes": max_sandboxes,
+                "max_active_jobs": max_jobs,
                 "confirmed": True,
             },
             idempotency_key=key,
@@ -125,20 +125,20 @@ def status() -> None:
     _echo(_request("GET", "/api/v1/system"))
 
 
-@campaign_app.command("list")
-def campaign_list() -> None:
-    """List campaigns from the control service."""
-    _echo(_request("GET", "/api/v1/campaigns"))
+@run_app.command("list")
+def run_list() -> None:
+    """List runs from the control service."""
+    _echo(_request("GET", "/api/v1/runs"))
 
 
-@campaign_app.command("status")
-def campaign_status(campaign_id: Annotated[str, typer.Argument()]) -> None:
-    """Show one campaign."""
-    _echo(_request("GET", f"/api/v1/campaigns/{campaign_id}"))
+@run_app.command("status")
+def run_status(run_id: Annotated[str, typer.Argument()]) -> None:
+    """Show one run."""
+    _echo(_request("GET", f"/api/v1/runs/{run_id}"))
 
 
-@campaign_app.command("submit")
-def campaign_submit(
+@run_app.command("submit")
+def run_submit(
     benchmark: Annotated[str, typer.Option("--benchmark")],
     model: Annotated[str, typer.Option("--model")],
     harness: Annotated[str, typer.Option("--harness")],
@@ -152,7 +152,7 @@ def campaign_submit(
         typer.Option("--yes", help="Confirm the resolved launch and cost ceiling."),
     ] = False,
 ) -> None:
-    """Submit profile references and return the durable campaign ID."""
+    """Submit profile references and return the durable run ID."""
     if not yes:
         typer.confirm(
             f"Launch {benchmark} with {model} through {harness}, "
@@ -173,11 +173,11 @@ def campaign_submit(
     }
     if start_paused:
         payload["start_paused"] = True
-    _echo(_request("POST", "/api/v1/campaigns", payload=payload, idempotency_key=key))
+    _echo(_request("POST", "/api/v1/runs", payload=payload, idempotency_key=key))
 
 
-def _campaign_action(
-    campaign_id: str,
+def _run_action(
+    run_id: str,
     action: str,
     *,
     task_id: str | None = None,
@@ -188,9 +188,9 @@ def _campaign_action(
 ) -> None:
     if not yes:
         prompt = (
-            f"Cancel run {campaign_id}?"
+            f"Cancel run {run_id}?"
             if action == "cancel"
-            else f"Apply {action} to {campaign_id}?"
+            else f"Apply {action} to {run_id}?"
         )
         typer.confirm(prompt, abort=True)
     key = str(uuid4())
@@ -208,43 +208,43 @@ def _campaign_action(
     _echo(
         _request(
             "POST",
-            f"/api/v1/campaigns/{campaign_id}/actions",
+            f"/api/v1/runs/{run_id}/actions",
             payload=payload,
             idempotency_key=key,
         )
     )
 
 
-@campaign_app.command("cancel")
-def campaign_cancel(
-    campaign_id: Annotated[str, typer.Argument()],
+@run_app.command("cancel")
+def run_cancel(
+    run_id: Annotated[str, typer.Argument()],
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
     """Cancel a run's open logical tasks without deleting evidence."""
-    _campaign_action(campaign_id, "cancel", reason=reason, yes=yes)
+    _run_action(run_id, "cancel", reason=reason, yes=yes)
 
 
-@campaign_app.command("pause")
-def campaign_pause(
-    campaign_id: Annotated[str, typer.Argument()],
+@run_app.command("pause")
+def run_pause(
+    run_id: Annotated[str, typer.Argument()],
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
     """Stop new task admission at the next durable task boundary."""
-    _campaign_action(campaign_id, "pause", reason=reason, yes=yes)
+    _run_action(run_id, "pause", reason=reason, yes=yes)
 
 
-@campaign_app.command("resume")
-def campaign_resume(
-    campaign_id: Annotated[str, typer.Argument()],
+@run_app.command("resume")
+def run_resume(
+    run_id: Annotated[str, typer.Argument()],
     task_limit: Annotated[int | None, typer.Option("--task-limit", min=1)] = None,
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
     """Resume unresolved tasks without repeating completed tasks."""
-    _campaign_action(
-        campaign_id,
+    _run_action(
+        run_id,
         "resume",
         task_limit=task_limit,
         reason=reason,
@@ -252,16 +252,16 @@ def campaign_resume(
     )
 
 
-@campaign_app.command("supersede")
-def campaign_supersede(
-    campaign_id: Annotated[str, typer.Argument()],
+@run_app.command("supersede")
+def run_supersede(
+    run_id: Annotated[str, typer.Argument()],
     publication_id: Annotated[str, typer.Option("--publication")],
     reason: Annotated[str, typer.Option("--reason")],
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Mark an older publication superseded after this campaign publishes."""
-    _campaign_action(
-        campaign_id,
+    """Mark an older publication superseded after this run publishes."""
+    _run_action(
+        run_id,
         "supersede",
         publication_id=publication_id,
         reason=reason,
@@ -269,9 +269,9 @@ def campaign_supersede(
     )
 
 
-@campaign_app.command("retry-infrastructure")
-def campaign_retry_infrastructure(
-    campaign_id: Annotated[str, typer.Argument()],
+@run_app.command("retry-infrastructure")
+def run_retry_infrastructure(
+    run_id: Annotated[str, typer.Argument()],
     task_id: Annotated[str | None, typer.Option("--task")] = None,
     all_eligible: Annotated[bool, typer.Option("--all-eligible")] = False,
     reason: Annotated[str | None, typer.Option("--reason")] = None,
@@ -280,8 +280,8 @@ def campaign_retry_infrastructure(
     """Request a bounded infrastructure-only replacement."""
     if all_eligible == bool(task_id):
         _fail("provide exactly one of --task or --all-eligible")
-    _campaign_action(
-        campaign_id,
+    _run_action(
+        run_id,
         "retry_infrastructure",
         task_id=None if all_eligible else task_id,
         reason=reason,
@@ -289,49 +289,15 @@ def campaign_retry_infrastructure(
     )
 
 
-@campaign_app.command("correct-action-dispositions")
-def campaign_correct_action_dispositions(
-    campaign_id: Annotated[str, typer.Argument()],
-    task_id: Annotated[str, typer.Option("--task")],
-    action_ids: Annotated[list[str], typer.Option("--action")],
-    reason: Annotated[str, typer.Option("--reason")],
-    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
-    yes: Annotated[bool, typer.Option("--yes")] = False,
-) -> None:
-    """Correct proved historical Sandbox command dispositions."""
-    if not action_ids:
-        raise typer.BadParameter("provide at least one --action")
-    ordered = sorted(action_ids)
-    if len(set(ordered)) != len(ordered):
-        raise typer.BadParameter("--action values must be unique")
-    if not yes:
-        typer.confirm(
-            f"Correct {len(ordered)} historical action dispositions?",
-            abort=True,
-        )
-    _echo(
-        _request(
-            "POST",
-            f"/api/v1/campaigns/{campaign_id}/tasks/{task_id}/action-dispositions",
-            payload={
-                "action_ids": ordered,
-                "reason": reason,
-                "confirmed": True,
-            },
-            idempotency_key=idempotency_key,
-        )
-    )
-
-
-@campaign_app.command("pause-endpoint")
-def campaign_pause_endpoint(
-    campaign_id: Annotated[str, typer.Argument()],
+@run_app.command("pause-endpoint")
+def run_pause_endpoint(
+    run_id: Annotated[str, typer.Argument()],
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Pause the campaign's one active managed endpoint."""
-    _campaign_action(
-        campaign_id,
+    """Pause the run's one active managed endpoint."""
+    _run_action(
+        run_id,
         "pause_endpoint",
         reason=reason,
         yes=yes,

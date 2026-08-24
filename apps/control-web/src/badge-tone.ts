@@ -37,7 +37,13 @@ const WARNING_STATUSES = new Set([
   "warning",
 ]);
 const CANCEL_STATUSES = new Set(["cancelled", "canceled"]);
-const INFO_STATUSES = new Set(["active", "publishing", "running", "scheduling"]);
+const INFO_STATUSES = new Set([
+  "active",
+  "cancelling",
+  "publishing",
+  "running",
+  "scheduling",
+]);
 
 const VALUE_TEXT_CLASS: Record<BadgeTone, string> = {
   success: "text-emerald-300",

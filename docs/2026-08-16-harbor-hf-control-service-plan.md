@@ -2,7 +2,7 @@
 title: Harbor-HF Control Service Plan
 author: Harbor-HF maintainers
 date: 2026-08-16
-tags: [harbor, hugging-face, campaigns, control, storage]
+tags: [harbor, hugging-face, runs, control, storage]
 ---
 
 # Harbor-HF control service plan
@@ -15,18 +15,20 @@ This plan replaces Harbor-HF's Git-backed live coordination with one publicly
 reachable, application-protected control Space, one private Bucket, and one
 operator-managed persistent Space secret. The Bucket holds control state, evidence, profiles, normalized results,
 and the catalog.
-Historical campaigns and publications remain immutable and readable.
+Historical runs and publications remain immutable and readable.
 
-**Status.** Approved for implementation. The current coordination Dataset and
-detached controller Job remain authoritative until the implementation passes
-its production gates and the new-write cutover is complete.
+**Status.** Superseded implementation record. The
+[control service specification](CONTROL_SERVICE.md) defines the current
+Run-native service and one-Job-per-attempt runtime. Sandbox actions,
+compatibility handling, and rollout instructions below describe the pre-reset
+system and are retained as dated design history.
 
 ## Web reliability and production usability
 
 The production web application must use SSE as its main update path. While SSE
 is connected, active queries do not poll. When the connection is down, visible
 pages may refresh active non-session queries once per minute. Typed control
-events refresh only the affected campaign, task, resource, profile, result, or
+events refresh only the affected run, task, resource, profile, result, or
 audit queries. They never refresh the browser session.
 
 A valid browser session remains usable through transient rate limits, server
@@ -49,7 +51,7 @@ to write while the deployment has writes disabled. Every browser mutation is
 disabled unless both checks pass, with a clear explanation. Server-side role,
 CSRF, write-mode, policy, and budget checks remain authoritative.
 
-Campaign launch uses approved profile aliases rather than free text. Before
+Run launch uses approved profile aliases rather than free text. Before
 submission, the browser shows each immutable profile ID and safe resolved spec,
 task count, model revision, hardware, attempt limit, estimated reservation, and
 the exact dollar ceiling. The request keeps exact `ceiling_microusd` units.
@@ -57,7 +59,7 @@ the exact dollar ceiling. The request keeps exact `ceiling_microusd` units.
 The integrated results browser replaces the archived viewer for normal result
 inspection. It provides bounded server-side model, benchmark, agent, status,
 and date filters, text search, useful sorting, and stable result detail routes.
-The detail view shows scores, task counts, revisions, the campaign link, and
+The detail view shows scores, task counts, revisions, the run link, and
 allowlisted provenance. Existing evidence redaction and cursor limits still
 apply.
 
@@ -69,7 +71,7 @@ the last successful update. It does not imply that a benchmark is running.
 Acceptance for this slice requires focused unit and browser tests for rate
 limits, server and network failures, SSE reconnect, no polling while connected,
 typed invalidation, session preservation, username display, hidden OAuth
-subjects, disabled writes, safe return paths, stale data, and result and campaign
+subjects, disabled writes, safe return paths, stale data, and result and run
 errors. Run the generated-contract check, formatting, lint, type checks, unit
 tests, browser tests, build, dependency checks, SimpleDoc, and public privacy
 check before publication.
@@ -80,7 +82,7 @@ change ACL keys, expose private evidence, or weaken server-side enforcement.
 ## Decision
 
 Build one publicly reachable, application-protected, always-on Docker Space per
-Harbor-HF namespace. The Space is the only normal writer of shared campaign
+Harbor-HF namespace. The Space is the only normal writer of shared run
 decisions. It exposes the control API,
 runs reconciliation, launches and adopts HF Jobs, manages endpoints, and
 finalizes publication.
@@ -104,14 +106,14 @@ defines the runtime and web application contract.
 
 ## Decision evidence
 
-The August 2026 four-model ShellBench campaign produced ten incident records.
+The August 2026 four-model ShellBench run produced ten incident records.
 Two of four final results needed a one-task replacement linked to 88 preserved
 parent outcomes. Several controller Jobs completed model work and then failed
 while updating control or publication state.
 
 The minimum worthwhile result is:
 
-- a supported campaign takes less than one minute of human work to submit;
+- a supported run takes less than one minute of human work to submit;
 - the submitting terminal may disconnect immediately after receiving a run ID;
 - completed logical tasks never run again;
 - retryable infrastructure failures are repaired without an operator-authored
@@ -120,7 +122,7 @@ The minimum worthwhile result is:
 - endpoints are paused after terminal work even when the control Space restarts;
 - one authenticated web application shows logical progress, physical retries,
   cost, publication, cleanup, and endpoint safety without direct Bucket access;
-- routine campaigns create no Hub repositories, Buckets, Spaces, or schedules;
+- routine runs create no Hub repositories, Buckets, Spaces, or schedules;
 - an operator is needed only for budget approval, provider substitution,
   credential exposure, deterministic shared defects, or unresolved provenance.
 
@@ -140,7 +142,7 @@ Harbor keeps its current responsibilities:
 Harbor-HF owns:
 
 - reusable model, deployment, harness, benchmark, and launch-policy profiles;
-- campaign expansion and logical identity;
+- run expansion and logical identity;
 - HF Job, Provider, Endpoint, Sandbox, Space, and Bucket integration;
 - infrastructure retry and repair decisions;
 - budget admission and endpoint cleanup;
@@ -167,7 +169,7 @@ resources are the complete Harbor-HF runtime inventory. HF-managed Job staging
 is shared platform infrastructure and is not a Harbor-HF runtime resource.
 
 Runtime code must not create a repository, Bucket, Space, or scheduled Job for
-a campaign, repair, profile, lease, status record, result subset, or temporary
+a run, repair, profile, lease, status record, result subset, or temporary
 workflow. Namespace bootstrap is a separate, idempotent operator action that may
 create only missing resources from the approved canonical inventory. Any other
 persistent resource requires a documented privacy, access, retention, or
@@ -180,7 +182,7 @@ recorded revisions and paths.
 
 | Existing resource | Disposition |
 |---|---|
-| `<namespace>/<legacy-coordination-dataset>` | Freeze after active campaigns finish; retain for historical audit |
+| `<namespace>/<legacy-coordination-dataset>` | Freeze after active runs finish; retain for historical audit |
 | `<namespace>/<legacy-results-dataset>` | Freeze after every retained publication is represented in the Bucket catalog |
 | `<namespace>/<legacy-smoke-dataset>` | Freeze as historical smoke evidence |
 | `<namespace>/<legacy-status-dataset>` | Freeze as historical detached-Job control evidence |
@@ -204,15 +206,15 @@ and the compiled React application. It also runs one bounded background
 reconciler and maintains one disposable local SQLite projection.
 
 The process authenticates operators, resolves approved profiles, writes
-campaign locks, advances campaign and task state, launches or adopts remote
+run locks, advances run and task state, launches or adopts remote
 resources, admits repairs, reserves spend, verifies cleanup, publishes results,
 and serves status and audit views. Every remote action follows the same
 intent-observe-receipt protocol.
 
-The API provides campaign, task, Job, Endpoint, profile, result, audit, and
+The API provides run, task, Job, Endpoint, profile, result, audit, and
 system resources. Mutations require idempotency keys and return `202 Accepted`
 after their immutable intent is durable. The CLI becomes a thin client of this
-API and returns the campaign ID without retaining local control authority.
+API and returns the run ID without retaining local control authority.
 
 The web application uses React, Vite, strict TypeScript, Tailwind CSS,
 shadcn/ui, React Router, TanStack Query, and TanStack Table. It presents logical
@@ -233,7 +235,7 @@ is not allowed.
 
 A future move to multiple active control replicas would require a transactional
 shared database or another single-writer mechanism. Multi-replica control is
-outside this plan because current campaign volume does not justify that cost.
+outside this plan because current run volume does not justify that cost.
 
 ## Credential model
 
@@ -253,15 +255,15 @@ state.
 
 The Space never injects `HF_TOKEN` into a Job and never gives a Job a writable
 mount of the canonical control Bucket. It derives a short-lived, signed worker
-capability for the exact campaign, launch action, and task set. The API accepts
-that capability only on the campaign-lock and attempt-receipt routes, and it
+capability for the exact run, launch action, and task set. The API accepts
+that capability only on the run-lock and attempt-receipt routes, and it
 records the worker as a service actor. A locked deployment marks inference as
 `required` or `forbidden`. Only a required, reviewed worker receives
 `HF_INFERENCE_TOKEN`; a forbidden deployment receives no operator-managed
-secret. Campaign-specific provider credentials are not persistent control-Space
+secret. Run-specific provider credentials are not persistent control-Space
 secrets.
 
-Do not mint another Harbor-HF credential for a migration, campaign, repair, or
+Do not mint another Harbor-HF credential for a migration, run, repair, or
 worker. Before revoking a control credential, audit every consumer and run a
 canary with only the retained credential configured. Never record a credential
 value, display name, or local alias in the repository, Bucket, Dataset, logs, or
@@ -275,16 +277,16 @@ permanent active and standby pair.
 ## Bucket layout
 
 The existing private Bucket gains a control prefix while keeping canonical run
-evidence under campaign and run prefixes.
+evidence under run and run prefixes.
 
 ```text
 control/schema=v1/
   profiles/
     objects/<kind>/sha256-<digest>.json
     promotions/<kind>/<alias>/<event-id>.json
-  campaigns/<campaign-id>/
+  runs/<run-id>/
     request.json
-    campaign.lock.json
+    run.lock.json
     actions/<action-id>/intent.json
     actions/<action-id>/receipt.json
     tasks/<task-id>/attempts/<attempt-id>/receipt.json
@@ -301,7 +303,7 @@ results/schema=v1/
   rows/metrics/<digest>.parquet
   rows/artifacts/<digest>.parquet
   catalog/<window>/<digest>.parquet
-campaigns/<campaign-id>/
+runs/<run-id>/
   runs/<run-id>/
     ... canonical evidence ...
 reassessments/<reassessment-id>/
@@ -312,9 +314,9 @@ Every shared control object is immutable. Mutable views are derived from those
 objects. Object keys include a stable identity or content digest. Rewriting an
 existing key with different bytes is an integrity failure.
 
-The control Space writes campaign locks, shared actions, terminal selections,
+The control Space writes run locks, shared actions, terminal selections,
 budget decisions, and publication receipts. Workers write only to their own
-physical attempt and evidence paths. Workers never edit a campaign summary,
+physical attempt and evidence paths. Workers never edit a run summary,
 logical task terminal record, profile alias, result projection, or catalog
 record.
 
@@ -346,7 +348,7 @@ OpenClaw, and other agents use the same profile contract.
 
 Profiles combine complete records and have no inheritance. A launch selects one
 profile of each required kind. The resolver validates capability compatibility
-and writes every resolved field into `campaign.lock.json`. The lock never depends
+and writes every resolved field into `run.lock.json`. The lock never depends
 on a later catalog lookup.
 
 Friendly aliases may move only through a promotion receipt that identifies the
@@ -356,7 +358,7 @@ promote a model or deployment profile.
 
 Profiles contain secret names and access requirements, never secret values.
 
-## Campaign submission
+## Run submission
 
 A normal operator request supplies:
 
@@ -375,9 +377,9 @@ Submission follows this order:
 4. Resolve the complete task set and exact task digests.
 5. Calculate the plan, duration range, and cost ceiling.
 6. Require approval when the paid-compute policy requires it.
-7. Write the request and complete campaign lock to the Bucket.
+7. Write the request and complete run lock to the Bucket.
 8. Write the first deterministic action intent.
-9. Return the campaign ID.
+9. Return the run ID.
 10. Continue reconciliation in the Space.
 
 No Hub resource is created during submission.
@@ -385,7 +387,7 @@ No Hub resource is created during submission.
 ## Safe external actions
 
 Every HF Job or Endpoint mutation uses a deterministic action ID derived from
-the locked campaign, action kind, target, and generation.
+the locked run, action kind, target, and generation.
 
 The Space writes `intent.json` before calling the external API. Before the first
 Job create request, it also writes an immutable action-dispatch fence. The HF
@@ -402,7 +404,7 @@ Recovery handles each crash window:
   create for the same action.
 - An intent with a matching Job or endpoint is adopted without another create
   or launch.
-- A receipt with a mismatched remote identity stops the campaign.
+- A receipt with a mismatched remote identity stops the run.
 - A terminal logical task prevents every later execution action for that task.
 - A matching existing receipt is success; different bytes are an integrity
   conflict.
@@ -428,11 +430,11 @@ does not call the adapter.
 
 A process exit between dispatch and receipt still leaves an older ambiguous
 action. Before infrastructure retry or cancellation, the service performs a
-bounded query for dispatched `sandbox.exec` actions in the selected campaign
+bounded query for dispatched `sandbox.exec` actions in the selected run
 and task that have no result or receipt. It can settle one only when all of the
 following facts are durable:
 
-- the action belongs to the selected campaign and task;
+- the action belongs to the selected run and task;
 - its `sandbox_create_action_id` and resource identity match the owning create
   action;
 - the canonical result path is absent;
@@ -465,7 +467,7 @@ ended; it does not state that the external effect was absent.
 Operator-specific incident identities, action counts, spend, and attempt state
 stay in a private hash-checked snapshot. Public documentation records only the
 general recovery contract. Recovery preserves the attempts, evidence, observed
-spend, campaign lock, task digest, profiles, ceiling, terminal selection, and
+spend, run lock, task digest, profiles, ceiling, terminal selection, and
 publication.
 
 ### Historical action dispositions
@@ -491,14 +493,14 @@ observation. If it is non-null, it must exactly equal the mandatory
 pure control-core predicate applies this rule in service admission, projection
 replay, tests, and the private preflight.
 
-Validation still checks the same campaign, task, create action, intent resource,
+Validation still checks the same run, task, create action, intent resource,
 create receipt resource, dispatch, both advancements, terminal close intent and
 receipt resource, and result absence. If more than one close qualifies, sort by
 receipt time and action ID and bind the first. The close prevents future effects
 from that Sandbox. Earlier command effects remain unknown.
 
 One target action has one deterministic disposition record at
-`zzz-disposition.json`. A campaign and task correction request carries a bounded
+`zzz-disposition.json`. A run and task correction request carries a bounded
 sorted action list, a batch ID derived from the hashed idempotency key, and a
 batch digest over the action list, fixed reason code, and operator reason. The
 service acquires every target action finalization fence in sorted order and
@@ -547,16 +549,16 @@ are already deployed. The null-resource repair uses this order:
    service;
 9. restart only the existing Space, rebuild from the Bucket, and prove that
    original receipt hashes are unchanged, recorded and effective states are both
-   visible, and campaign, attempts, selection, publication, spend, cleanup,
+   visible, and run, attempts, selection, publication, spend, cleanup,
    Jobs, Sandboxes, and Endpoints did not change; and
 10. perform a separate read-only sample acceptance review.
 
 The correction does not authorize another replacement attempt or a new
-campaign. The sealed task remains sealed, its existing benchmark-timeout outcome
+run. The sealed task remains sealed, its existing benchmark-timeout outcome
 and degraded diagnostic publication remain unchanged, and the valid-sample
 counter changes only if the separate review passes every final-Pi, token,
 provenance, isolation, evidence, cost, close, and cleanup gate. If that sample
-fails, stop because no third attempt or replacement campaign is authorized. If
+fails, stop because no third attempt or replacement run is authorized. If
 it passes, run practical-significance and paid-compute reviews before the
 private two-sample launch review and the 89-task diagnostic submission.
 
@@ -619,12 +621,12 @@ accepts 89 tasks at the approved concurrency of eight.
 The replacement and diagnostic launch policies require worker receipts, allow
 at most two preparation attempts and two infrastructure attempts, and publish
 as diagnostic evidence. Their reservations follow the existing per-action
-budget rules. Each policy also sets `max_campaign_ceiling_microusd`: 180,000,000
-for replacement and 300,000,000 for the diagnostic campaign.
+budget rules. Each policy also sets `max_run_ceiling_microusd`: 180,000,000
+for replacement and 300,000,000 for the diagnostic run.
 
-The service resolves the launch policy before it writes a campaign request or
+The service resolves the launch policy before it writes a run request or
 lock. It rejects a requested ceiling above the policy maximum before any durable
-campaign state or paid action exists. A requested ceiling at or below the
+run state or paid action exists. A requested ceiling at or below the
 maximum is stored unchanged in the request and lock and remains the runtime
 cumulative budget for reservations, observed spend, retries, and cleanup. The
 maximum is optional only so historical profile objects remain readable. The two
@@ -636,12 +638,12 @@ infrastructure outcome may receive a new physical attempt. A replacement never
 creates a new logical benchmark attempt.
 
 When 88 of 89 outcomes are terminal and one has a retryable infrastructure
-failure, the Space launches only that task. The final campaign result records
+failure, the Space launches only that task. The final run result records
 all physical attempts and selects one terminal outcome for each logical task.
 Manual replacement manifests and hand-built linked aggregates disappear from
 the normal workflow.
 
-A shared deterministic defect stops admission for every affected campaign until
+A shared deterministic defect stops admission for every affected run until
 a reviewed worker or data correction creates a new approved action contract.
 
 ## Endpoint safety
@@ -657,12 +659,12 @@ publish scores.
 The Space also configures scale-to-zero when supported. Scale-to-zero is a
 fallback and does not replace explicit verified pause.
 
-A campaign cannot complete until endpoint cleanup is verified. A Space restart
+A run cannot complete until endpoint cleanup is verified. A Space restart
 must not cancel the watchdog.
 
 ## Budget control
 
-The campaign lock records the approved cumulative ceiling and the pricing or
+The run lock records the approved cumulative ceiling and the pricing or
 manifest-ceiling basis for every route.
 
 The Space writes a reservation before launching paid work. It reconciles the
@@ -671,7 +673,7 @@ pricing retains the approved reservation instead of reporting an invented
 actual cost.
 
 Infrastructure replacements, failed Jobs, endpoint active time, repairs, and
-reassessments count against the same campaign budget. A changed provider,
+reassessments count against the same run budget. A changed provider,
 hardware type, method, or reuse assumption stops automatic continuation.
 
 ## Result publication
@@ -694,9 +696,9 @@ The Bucket remains canonical for both evidence and sanitized result rows. The
 Space keeps a disposable local query projection and never treats SQLite as
 permanent state.
 
-Publication runs after campaign completion and may retry independently. A
+Publication runs after run completion and may retry independently. A
 publication conflict cannot reopen a task, launch a model request, or change the
-campaign's terminal state. Existing matching bytes are adopted.
+run's terminal state. Existing matching bytes are adopted.
 
 Historical result Datasets remain immutable. Their exact revisions and source
 checksums stay in Bucket catalog records after new publication moves to the
@@ -704,7 +706,7 @@ Bucket-only path.
 
 ## State model
 
-The Space projects immutable records into the existing campaign vocabulary:
+The Space projects immutable records into the existing run vocabulary:
 
 ```text
 queued -> active -> verifying -> publishing -> completed
@@ -729,7 +731,7 @@ production mode.
 
 Cutover prerequisites are:
 
-- no active campaign controller or wave Jobs;
+- no active run controller or wave Jobs;
 - no active Harbor-HF scheduled recovery Jobs;
 - all managed endpoints paused with zero ready replicas;
 - the control Space deployed at an exact source revision;
@@ -744,14 +746,14 @@ At the boundary:
 1. Reject new submissions through the coordination Dataset path.
 2. Freeze its exact head in the migration record.
 3. Start the control Space write API.
-4. Route all new `v1` campaign requests through the Space.
+4. Route all new `v1` run requests through the Space.
 5. Stop creating or writing result Datasets.
 6. Publish new normalized results and catalog records to `<artifact-bucket>`.
 7. Route result views through the control Space.
 8. Suspend obsolete recovery schedules.
 9. Mark historical resources read-only in the resource inventory.
 
-There is no dual-write period. New campaign code does not read the old
+There is no dual-write period. New run code does not read the old
 coordination Dataset. Historical audit tools may continue to read it.
 
 ## Implementation stages
@@ -798,7 +800,7 @@ coordination Dataset. Historical audit tools may continue to read it.
   another frontend.
 - Add Tailwind CSS, shadcn/ui, React Router, TanStack Query, TanStack Table,
   React Hook Form, Zod, and bounded charts.
-- Add overview, campaign, task, Job, Endpoint, result, profile, and audit routes.
+- Add overview, run, task, Job, Endpoint, result, profile, and audit routes.
 - Add logical progress, physical attempts, spend, publication, cleanup, and
   endpoint safety views.
 - Generate the browser client from OpenAPI and reject stale generated output.
@@ -810,7 +812,7 @@ coordination Dataset. Historical audit tools may continue to read it.
 - Extract repeated built-in profiles from current manifests.
 - Add namespace profile objects and promotion receipts in the Bucket.
 - Add compatibility checks and automatic selection of one approved deployment.
-- Make the CLI submit profile references to the Space and return the campaign ID
+- Make the CLI submit profile references to the Space and return the run ID
   immediately.
 
 ### Workers and recovery
@@ -850,13 +852,13 @@ The implementation is ready only when all of these pass:
 
 - A known built-in profile launches from benchmark, model, harness, and budget
   inputs without an operator-authored manifest.
-- Submission returns a campaign ID after durable lock creation in under one
+- Submission returns a run ID after durable lock creation in under one
   minute of operator time.
 - Closing the submitting terminal does not affect progress.
 - Killing the Space before a Job launch, after a launch response, after evidence
   upload, and during publication causes no duplicate logical task execution.
 - A controller restart adopts Jobs and endpoints by deterministic action ID.
-- A representative 89-task campaign preserves every complete task after one
+- A representative 89-task run preserves every complete task after one
   injected sandbox infrastructure failure and reruns only the missing task.
 - A final Pi provider error cannot become a complete attempt because earlier
   turns used tokens or Harbor wrote an exception-free result.
@@ -873,7 +875,7 @@ The implementation is ready only when all of these pass:
   cleanup, Job, Sandbox, or Endpoint state and cannot authorize work.
 - A semantic zero, refusal, benchmark timeout, and verifier failure remain
   terminal.
-- Publication failure retries without changing campaign or task state.
+- Publication failure retries without changing run or task state.
 - Endpoint-backed success and failure both end paused with zero ready replicas.
 - Provider, endpoint, Job, repair, and reassessment costs remain under one
   approved cumulative ceiling.
@@ -889,14 +891,14 @@ The implementation is ready only when all of these pass:
 - A clean local filesystem rebuilds the full projection and selects the same
   next actions.
 - A clean launch creates no repository, Bucket, Space, Dataset, or schedule.
-- Historical campaign and publication checksums remain unchanged.
+- Historical run and publication checksums remain unchanged.
 - The local quality, mutation, schema, documentation, dependency, browser, and
   Space build gates pass.
 
 ## Valid-result implementation and rollout
 
 Merge the reviewed Sandbox admission work before changing result validity. That
-work keeps the rolling worker scheduler and adds durable campaign, namespace,
+work keeps the rolling worker scheduler and adds durable run, namespace,
 hardware, provider, start-rate, and budget admission. Its local checks, relevant
 CI, and Pi Reviewer must pass before merge.
 
@@ -909,7 +911,7 @@ main branch. The change must:
 - make bounded replacement depend on evidence validity rather than an outcome
   name;
 - record task exhaustion without selecting the final invalid receipt;
-- require exact valid selection coverage before campaign completion;
+- require exact valid selection coverage before run completion;
 - repeat those checks before publication;
 - add cooperative pause and exact resume at durable task boundaries;
 - write and verify result objects before the catalog makes them visible; and
@@ -934,25 +936,25 @@ existing Space, Bucket, credentials, and resource boundaries. Verify the deploye
 revision, health, write mode, promoted capacity profile, projection rebuild, and an
 unpaid control-path smoke test before any inference work.
 
-The next Terminal-Bench diagnostic is a new full campaign, not a repair of the old
-campaign. This explicit new campaign may run the full locked task set again so it
+The next Terminal-Bench diagnostic is a new full run, not a repair of the old
+run. This explicit new run may run the full locked task set again so it
 can produce one homogeneous result and test the sliding-window scheduler. Keep the
 benchmark, model, model revision, Pi version and reasoning, provider route,
 hardware, task inputs, timeouts, and one-trial setting unchanged. Record the new
 Harbor-HF implementation revision separately.
 
-Before launch, update the private paid launch review from the completed campaign's
+Before launch, update the private paid launch review from the completed run's
 measured costs and current prices. Compare a fresh run with stopping and with reuse,
 record the reservation envelope and worst-case next action, and verify durable
-control-plane authorization. Use the existing 300,000,000 microusd campaign ceiling
-only when that authorization covers the new campaign and admission proves that
+control-plane authorization. Use the existing 300,000,000 microusd run ceiling
+only when that authorization covers the new run and admission proves that
 `max(reserved, observed)` plus the next action fits. Otherwise stop before launch.
-Private campaign identifiers, costs, and authorization records do not belong in
+Private run identifiers, costs, and authorization records do not belong in
 this public plan.
 
 Use the first admitted task as the real paid pause-resume canary when the final
 control contract can do so truthfully. Require a durable valid receipt, pause new
-admission, verify Job and Sandbox cleanup, then resume the same campaign. Admit the
+admission, verify Job and Sandbox cleanup, then resume the same run. Admit the
 remaining tasks at worker concurrency eight. The sliding window must refill each
 free slot while tasks and approved capacity remain. Existing control actions and
 Sandbox state provide this evidence; do not add a monitoring-specific API.
@@ -963,10 +965,10 @@ logical task has one valid selected receipt and normalized rows, provenance,
 receipts, and catalog objects verify. A valid terminal outcome does not need a
 benchmark score, but it must satisfy the locked evidence policy.
 
-Append supersession only after the new publication commits. The old campaign,
+Append supersession only after the new publication commits. The old run,
 attempts, publication, catalog objects, and digests remain unchanged and directly
 readable. Completion also requires spend within the enforced ceiling, no pending
-action or cleanup, no active campaign Job or Sandbox, and every campaign-owned
+action or cleanup, no active run Job or Sandbox, and every run-owned
 Endpoint paused with zero ready replicas. The result remains diagnostic and makes
 no model-promotion or official five-trial claim. Reports must not invent an ETA.
 

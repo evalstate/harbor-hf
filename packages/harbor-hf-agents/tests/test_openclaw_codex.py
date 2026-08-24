@@ -42,7 +42,7 @@ async def test_codex_run_applies_prompt_template(tmp_path: Path) -> None:
 
     with (
         patch(
-            "harbor_hf_agents.openclaw_codex.agent.use_sandbox_inference_route",
+            "harbor_hf_agents.openclaw_codex.agent.use_job_inference_route",
             AsyncMock(return_value=False),
         ),
         patch(
@@ -50,13 +50,41 @@ async def test_codex_run_applies_prompt_template(tmp_path: Path) -> None:
             AsyncMock(return_value=False),
         ),
         patch(
-            "harbor_hf_agents.openclaw_codex.agent.stop_hf_inference_bridge",
+            "harbor_hf_agents.support.job_inference_route.stop_hf_inference_bridge",
             AsyncMock(),
         ),
     ):
         await agent.run("do work", AsyncMock(), AsyncMock())
 
     assert agent._run_prepared.await_args.args[0] == "wrapped: do work"
+
+
+@pytest.mark.asyncio
+async def test_codex_run_stops_bridge_after_failure(tmp_path: Path) -> None:
+    agent = OpenClawCodexAgent(
+        logs_dir=tmp_path,
+        model_name="openai/moonshotai/Kimi-K3:together",
+    )
+    environment = AsyncMock()
+    agent.exec_as_agent = AsyncMock()
+    agent._run_prepared = AsyncMock(side_effect=RuntimeError("agent failed"))
+    agent._harbor_hf_inference_bridge_active = True
+    stop_bridge = AsyncMock()
+
+    with (
+        patch(
+            "harbor_hf_agents.openclaw_codex.agent.use_job_inference_route",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "harbor_hf_agents.support.job_inference_route.stop_hf_inference_bridge",
+            stop_bridge,
+        ),
+        pytest.raises(RuntimeError, match="agent failed"),
+    ):
+        await agent.run("do work", environment, AsyncMock())
+
+    stop_bridge.assert_awaited_once_with(agent, environment)
 
 
 def test_codex_trajectory_uses_subclass_identity(tmp_path: Path) -> None:

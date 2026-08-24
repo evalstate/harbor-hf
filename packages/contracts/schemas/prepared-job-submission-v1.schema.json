@@ -13,6 +13,7 @@
         "trial_index",
         "input_digest",
         "trial_lock",
+        "trial_lock_digest",
         "declared_image",
         "image",
         "cpus",
@@ -53,6 +54,10 @@
           "type": "object",
           "minProperties": 1,
           "additionalProperties": true
+        },
+        "trial_lock_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
         },
         "declared_image": {
           "type": "string",

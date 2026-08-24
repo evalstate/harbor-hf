@@ -23,7 +23,7 @@ import { Badge, Button, ErrorNotice, Hint } from "./ui";
 
 const adminNavigation = [
   ["/overview", "Overview", Gauge, hints.nav.overview],
-  ["/runs", "Runs", ClipboardList, hints.nav.campaigns],
+  ["/runs", "Runs", ClipboardList, hints.nav.runs],
   ["/jobs", "Jobs", ServerCog, hints.nav.jobs],
   ["/endpoints", "Endpoints", Network, hints.nav.endpoints],
   ["/results", "Results", BarChart3, hints.nav.results],
@@ -39,7 +39,6 @@ function isAdminPath(path: string): boolean {
   return (
     path === "/overview" ||
     path.startsWith("/runs") ||
-    path.startsWith("/campaigns") ||
     path.startsWith("/jobs") ||
     path.startsWith("/endpoints") ||
     path.startsWith("/results") ||

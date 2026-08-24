@@ -1,18 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
-from harbor_hf.campaigns import (
-    CampaignLock,
-    build_campaign_lock,
-    build_campaign_plan,
-    estimated_partial_wave_cost,
-)
 from harbor_hf.control import (
     ActionOutcomePayload,
     ActionReservedPayload,
-    CampaignEvent,
-    CampaignSubmittedPayload,
-    ExecutionOutcomePayload,
-    ExecutionStartedPayload,
+    AttemptOutcomePayload,
+    AttemptStartedPayload,
+    RunEvent,
+    RunSubmittedPayload,
     TerminalPayload,
     WaveLifecyclePayload,
     new_event,
@@ -24,19 +18,25 @@ from harbor_hf.reconciler import (
     ReconcileContext,
     plan_reconciliation,
 )
+from harbor_hf.runs import (
+    RunLock,
+    build_run_lock,
+    build_run_plan,
+    estimated_partial_wave_cost,
+)
 
 NOW = datetime(2026, 7, 14, tzinfo=UTC)
 
 
-def _campaign(remote_spec: ExperimentSpec) -> tuple[CampaignLock, CampaignEvent]:
-    plan = build_campaign_plan(remote_spec)
-    lock = build_campaign_lock(plan, "campaign-one", clock=lambda: NOW)
+def _run(remote_spec: ExperimentSpec) -> tuple[RunLock, RunEvent]:
+    plan = build_run_plan(remote_spec)
+    lock = build_run_lock(plan, "run-one", clock=lambda: NOW)
     submitted = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.submitted",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.submitted",
         producer="cli",
-        payload=CampaignSubmittedPayload(plan_digest=lock.plan_digest),
+        payload=RunSubmittedPayload(plan_digest=lock.plan_digest),
         clock=lambda: NOW,
         identifier=lambda: "1" * 32,
     )
@@ -62,14 +62,14 @@ def test_reconcile_groups_agents_by_deployment_digest(
             ),
         }
     )
-    lock, submitted = _campaign(spec)
+    lock, submitted = _run(spec)
 
     projection, plan = plan_reconciliation(lock, [submitted])
 
     assert projection.status == "queued"
     assert plan.action_count == 1
     assert len(plan.actions[0].shard_ids) == 2
-    assert plan.actions[0].deployment_digest == lock.runs[0].deployment_digest
+    assert plan.actions[0].deployment_digest == lock.executions[0].deployment_digest
 
 
 def test_reconcile_chunks_waves_and_is_deterministic(
@@ -86,7 +86,7 @@ def test_reconcile_chunks_waves_and_is_deterministic(
             ),
         }
     )
-    lock, submitted = _campaign(spec)
+    lock, submitted = _run(spec)
 
     context = ReconcileContext(limits=AdmissionLimits(deployment_active_waves=2))
     _projection, first = plan_reconciliation(lock, [submitted], context=context)
@@ -98,12 +98,12 @@ def test_reconcile_chunks_waves_and_is_deterministic(
 
 
 def test_reconcile_omits_reserved_actions(remote_spec: ExperimentSpec) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     _projection, initial = plan_reconciliation(lock, [submitted])
     action = initial.actions[0]
     reserved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
@@ -121,14 +121,14 @@ def test_reconcile_omits_reserved_actions(remote_spec: ExperimentSpec) -> None:
     assert observed.actions == []
 
 
-def test_reconcile_terminal_campaign_has_no_actions(
+def test_reconcile_terminal_run_has_no_actions(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _campaign(remote_spec)
+    lock, submitted = _run(remote_spec)
     completed = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
-        kind="campaign.completed",
+        subject_type="run",
+        subject_id=lock.run_id,
+        kind="run.completed",
         producer="reconciler",
         payload=TerminalPayload(message="complete"),
         clock=lambda: NOW + timedelta(seconds=1),
@@ -141,9 +141,9 @@ def test_reconcile_terminal_campaign_has_no_actions(
     assert plan.actions == []
 
 
-def _two_shard_campaign(
+def _two_shard_run(
     remote_spec: ExperimentSpec,
-) -> tuple[CampaignLock, CampaignEvent]:
+) -> tuple[RunLock, RunEvent]:
     tasks = {f"task-{index}": f"sha256:{index:064x}" for index in range(1, 3)}
     spec = remote_spec.model_copy(
         update={
@@ -155,15 +155,15 @@ def _two_shard_campaign(
             ),
         }
     )
-    return _campaign(spec)
+    return _run(spec)
 
 
 def _submitted_wave_events(
-    lock: CampaignLock, action: ReconcileAction, closed_at: datetime
-) -> list[CampaignEvent]:
+    lock: RunLock, action: ReconcileAction, closed_at: datetime
+) -> list[RunEvent]:
     reserved = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.reserved",
         producer="reconciler",
         payload=ActionReservedPayload(
@@ -176,8 +176,8 @@ def _submitted_wave_events(
         identifier=lambda: "a" * 32,
     )
     succeeded = new_event(
-        subject_type="campaign",
-        subject_id=lock.campaign_id,
+        subject_type="run",
+        subject_id=lock.run_id,
         kind="action.succeeded",
         producer="wave-controller",
         payload=ActionOutcomePayload(action_id=action.action_id),
@@ -204,7 +204,7 @@ def _submitted_wave_events(
 def test_reconcile_requeues_untouched_shards_after_wave_closes(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _two_shard_campaign(remote_spec)
+    lock, submitted = _two_shard_run(remote_spec)
     _projection, initial = plan_reconciliation(lock, [submitted], now=NOW)
     action = initial.actions[0]
     closed_at = NOW + timedelta(seconds=60)
@@ -222,23 +222,23 @@ def test_reconcile_requeues_untouched_shards_after_wave_closes(
 def test_reconcile_closed_wave_retains_shards_with_terminal_evidence(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _two_shard_campaign(remote_spec)
+    lock, submitted = _two_shard_run(remote_spec)
     _projection, initial = plan_reconciliation(lock, [submitted], now=NOW)
     action = initial.actions[0]
     finished_shard, untouched_shard = action.shard_ids
     trial_id = next(
         trial.trial_id
-        for run in lock.runs
+        for run in lock.executions
         for shard in run.shards
         if shard.shard_id == finished_shard
         for trial in shard.trials
     )
     started = new_event(
-        subject_type="execution",
+        subject_type="attempt",
         subject_id="exec-1",
-        kind="execution.started",
+        kind="attempt.started",
         producer="wave-controller",
-        payload=ExecutionStartedPayload(
+        payload=AttemptStartedPayload(
             trial_id=trial_id,
             shard_id=finished_shard,
             physical_attempt=1,
@@ -248,11 +248,11 @@ def test_reconcile_closed_wave_retains_shards_with_terminal_evidence(
         identifier=lambda: "d" * 32,
     )
     completed = new_event(
-        subject_type="execution",
+        subject_type="attempt",
         subject_id="exec-1",
-        kind="execution.completed",
+        kind="attempt.completed",
         producer="wave-controller",
-        payload=ExecutionOutcomePayload(trial_id=trial_id, physical_attempt=1),
+        payload=AttemptOutcomePayload(trial_id=trial_id, physical_attempt=1),
         clock=lambda: NOW + timedelta(seconds=20),
         identifier=lambda: "e" * 32,
     )
@@ -286,17 +286,17 @@ def test_reconcile_closed_wave_retries_skipped_trial_in_partial_shard(
             ),
         }
     )
-    lock, submitted = _campaign(spec)
+    lock, submitted = _run(spec)
     _projection, initial = plan_reconciliation(lock, [submitted], now=NOW)
     action = initial.actions[0]
-    shard = lock.runs[0].shards[0]
+    shard = lock.executions[0].shards[0]
     completed_trial, skipped_trial = [trial.trial_id for trial in shard.trials]
     started = new_event(
-        subject_type="execution",
+        subject_type="attempt",
         subject_id="exec-1",
-        kind="execution.started",
+        kind="attempt.started",
         producer="wave-controller",
-        payload=ExecutionStartedPayload(
+        payload=AttemptStartedPayload(
             trial_id=completed_trial,
             shard_id=shard.shard_id,
             physical_attempt=1,
@@ -306,11 +306,11 @@ def test_reconcile_closed_wave_retries_skipped_trial_in_partial_shard(
         identifier=lambda: "d" * 32,
     )
     completed = new_event(
-        subject_type="execution",
+        subject_type="attempt",
         subject_id="exec-1",
-        kind="execution.completed",
+        kind="attempt.completed",
         producer="wave-controller",
-        payload=ExecutionOutcomePayload(trial_id=completed_trial, physical_attempt=1),
+        payload=AttemptOutcomePayload(trial_id=completed_trial, physical_attempt=1),
         clock=lambda: NOW + timedelta(seconds=20),
         identifier=lambda: "e" * 32,
     )
@@ -334,23 +334,23 @@ def test_reconcile_closed_wave_retries_skipped_trial_in_partial_shard(
 def test_reconcile_closed_wave_routes_retryable_evidence_to_retry(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _two_shard_campaign(remote_spec)
+    lock, submitted = _two_shard_run(remote_spec)
     _projection, initial = plan_reconciliation(lock, [submitted], now=NOW)
     action = initial.actions[0]
     failed_shard, untouched_shard = action.shard_ids
     trial_id = next(
         trial.trial_id
-        for run in lock.runs
+        for run in lock.executions
         for shard in run.shards
         if shard.shard_id == failed_shard
         for trial in shard.trials
     )
     started = new_event(
-        subject_type="execution",
+        subject_type="attempt",
         subject_id="exec-1",
-        kind="execution.started",
+        kind="attempt.started",
         producer="wave-controller",
-        payload=ExecutionStartedPayload(
+        payload=AttemptStartedPayload(
             trial_id=trial_id,
             shard_id=failed_shard,
             physical_attempt=1,
@@ -360,11 +360,11 @@ def test_reconcile_closed_wave_routes_retryable_evidence_to_retry(
         identifier=lambda: "d" * 32,
     )
     failed = new_event(
-        subject_type="execution",
+        subject_type="attempt",
         subject_id="exec-1",
-        kind="execution.failed",
+        kind="attempt.failed",
         producer="wave-controller",
-        payload=ExecutionOutcomePayload(
+        payload=AttemptOutcomePayload(
             trial_id=trial_id, physical_attempt=1, category="transient"
         ),
         clock=lambda: NOW + timedelta(seconds=20),
@@ -395,25 +395,25 @@ def test_reconcile_closed_wave_routes_retryable_evidence_to_retry(
 def test_reconcile_groups_retryable_shards_by_deployment(
     remote_spec: ExperimentSpec,
 ) -> None:
-    lock, submitted = _two_shard_campaign(remote_spec)
+    lock, submitted = _two_shard_run(remote_spec)
     _projection, initial = plan_reconciliation(lock, [submitted], now=NOW)
     action = initial.actions[0]
     trial_shards = [
         (shard.trials[0].trial_id, shard.shard_id)
-        for run in lock.runs
+        for run in lock.executions
         for shard in run.shards
     ]
     events = [submitted]
     for index, (trial_id, shard_id) in enumerate(trial_shards, start=1):
-        execution_id = f"exec-{index}"
+        attempt_id = f"exec-{index}"
         events.extend(
             [
                 new_event(
-                    subject_type="execution",
-                    subject_id=execution_id,
-                    kind="execution.started",
+                    subject_type="attempt",
+                    subject_id=attempt_id,
+                    kind="attempt.started",
                     producer="wave-controller",
-                    payload=ExecutionStartedPayload(
+                    payload=AttemptStartedPayload(
                         trial_id=trial_id,
                         shard_id=shard_id,
                         physical_attempt=1,
@@ -423,11 +423,11 @@ def test_reconcile_groups_retryable_shards_by_deployment(
                     identifier=lambda index=index: f"{index + 3:032x}",
                 ),
                 new_event(
-                    subject_type="execution",
-                    subject_id=execution_id,
-                    kind="execution.failed",
+                    subject_type="attempt",
+                    subject_id=attempt_id,
+                    kind="attempt.failed",
                     producer="wave-controller",
-                    payload=ExecutionOutcomePayload(
+                    payload=AttemptOutcomePayload(
                         trial_id=trial_id,
                         physical_attempt=1,
                         category="transient",

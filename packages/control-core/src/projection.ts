@@ -1,15 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import type {
   ActionAdvanced,
   ActionDispatch,
-  ActionDisposition,
   ActionIntent,
   ActionReceipt,
   AttemptReceipt,
   BudgetEvent,
-  CampaignLock,
-  CampaignRequest,
+  RunLock,
+  RunRequest,
   EndpointResource,
   HarborHFControlRecordV1,
   OperatorAcl,
@@ -17,16 +17,15 @@ import type {
   ProfilePromotion,
   PublicationReceipt,
   PublicationSupersession,
-  SandboxAdmissionGrant,
-  SandboxCapacityRelease,
+  JobAdmissionGrant,
+  JobCapacityRelease,
+  TaskCancellation,
   TaskExhaustion,
   TerminalSelection,
 } from "@harbor-hf/contracts";
 import {
   ContractValidationError,
   canonicalJson,
-  deterministicId,
-  sandboxActionResultPath,
   sha256,
   validateControlRecord,
 } from "@harbor-hf/contracts";
@@ -36,7 +35,6 @@ import {
   attemptAdmissibility,
   requiredPositiveMetrics,
 } from "./attempt-admissibility.js";
-import { historicalDispositionResourceMatches } from "./disposition-policy.js";
 import { type ControlEvent, decodeEventCursor, eventCursor } from "./events.js";
 import { verifyEvidenceReference, verifyWorkerEvidence } from "./evidence.js";
 import type { PromotedProfile } from "./profiles.js";
@@ -45,14 +43,25 @@ import type { ImmutableObjectStore, ObjectEntry } from "./store.js";
 interface ObjectRow {
   key: string;
   digest: string;
+  source_identity: string;
   kind: string;
   record_id: string;
   created_at: string;
   body: string;
 }
 
-interface CampaignRow {
-  campaign_id: string;
+type EventObjectRow = Selectable<ObjectRow> & { event_order: number };
+
+interface VerifiedObjectEntry extends ObjectEntry {
+  digest: string;
+}
+
+interface ProjectedObjectEntry extends ObjectEntry {
+  digest: string;
+}
+
+interface RunRow {
+  run_id: string;
   created_at: string;
   request_body: string | null;
   lock_body: string | null;
@@ -61,7 +70,7 @@ interface CampaignRow {
 
 interface ActionRow {
   action_id: string;
-  campaign_id: string;
+  run_id: string;
   action_kind: string;
   generation: number;
   target: string;
@@ -73,31 +82,17 @@ interface ActionRow {
   created_at: string;
 }
 
-interface DispositionRow {
-  action_id: string;
-  campaign_id: string;
-  task_id: string;
-  record_id: string;
-  source_receipt_id: string;
-  source_receipt_digest: string;
-  close_action_id: string;
-  close_receipt_id: string;
-  close_receipt_digest: string;
-  batch_id: string;
-  batch_digest: string;
-  batch_size: number;
-  effective_outcome: string;
-  effective_observed_state: string;
-  effective_error_code: string;
-  reason_code: string;
-  reason: string;
-  created_at: string;
-  body: string;
+interface JobRow extends ActionRow {
+  launch_action_id: string;
+  assigned_tasks: number;
+  assigned_task_ids_body: string;
+  cost_microusd: number;
+  is_replacement: number;
 }
 
 interface DispatchRow {
   action_id: string;
-  campaign_id: string;
+  run_id: string;
   operation: string;
   adoption_not_before: string;
   created_at: string;
@@ -106,7 +101,7 @@ interface DispatchRow {
 
 interface AdmissionRow {
   action_id: string;
-  campaign_id: string;
+  run_id: string;
   namespace: string;
   capacity_profile_id: string;
   hardware: string;
@@ -120,7 +115,7 @@ interface AdmissionRow {
 
 interface CapacityReleaseRow {
   action_id: string;
-  campaign_id: string;
+  run_id: string;
   grant_id: string;
   release_reason: string;
   evidence_record_id: string;
@@ -130,13 +125,13 @@ interface CapacityReleaseRow {
 
 interface AdvancementRow {
   action_id: string;
-  campaign_id: string;
+  run_id: string;
   created_at: string;
   body: string;
 }
 
 interface TaskRow {
-  campaign_id: string;
+  run_id: string;
   task_id: string;
   input_digest: string;
   terminal_outcome: string | null;
@@ -146,7 +141,7 @@ interface TaskRow {
 interface AttemptRow {
   attempt_id: string;
   action_id: string;
-  campaign_id: string;
+  run_id: string;
   task_id: string;
   outcome: string;
   replacement_eligible: number;
@@ -160,9 +155,10 @@ interface AttemptRow {
 
 interface ExhaustionRow {
   record_id: string;
-  campaign_id: string;
+  run_id: string;
   task_id: string;
-  last_attempt_id: string;
+  source_action_id: string;
+  last_attempt_id: string | null;
   attempt_count: number;
   reason: string;
   created_at: string;
@@ -171,7 +167,7 @@ interface ExhaustionRow {
 
 interface BudgetRow {
   record_id: string;
-  campaign_id: string;
+  run_id: string;
   event_kind: string;
   amount_microusd: number;
   created_at: string;
@@ -179,7 +175,7 @@ interface BudgetRow {
 
 interface EndpointRow {
   action_id: string;
-  campaign_id: string;
+  run_id: string;
   endpoint_id: string;
   desired_state: string;
   observed_state: string;
@@ -191,7 +187,7 @@ interface EndpointRow {
 
 interface PublicationRow {
   publication_id: string;
-  campaign_id: string;
+  run_id: string;
   status: string;
   catalog_digest: string | null;
   body: string;
@@ -200,9 +196,9 @@ interface PublicationRow {
 
 interface SupersessionRow {
   record_id: string;
-  campaign_id: string;
+  run_id: string;
   publication_id: string;
-  superseded_campaign_id: string;
+  superseded_run_id: string;
   superseded_publication_id: string;
   reason: string;
   created_at: string;
@@ -242,12 +238,12 @@ interface MigrationRow {
 
 interface DatabaseSchema {
   objects: ObjectRow;
-  campaigns: CampaignRow;
+  runs: RunRow;
   actions: ActionRow;
-  dispositions: DispositionRow;
+  jobs: JobRow;
   dispatches: DispatchRow;
-  sandbox_admissions: AdmissionRow;
-  sandbox_capacity_releases: CapacityReleaseRow;
+  job_admissions: AdmissionRow;
+  job_capacity_releases: CapacityReleaseRow;
   advancements: AdvancementRow;
   tasks: TaskRow;
   attempts: AttemptRow;
@@ -262,13 +258,14 @@ interface DatabaseSchema {
   migrations: MigrationRow;
 }
 
-export interface CampaignView {
-  campaign_id: string;
+export interface RunView {
+  run_id: string;
   created_at: string;
   status: string;
   ceiling_microusd: number;
   reserved_microusd: number;
   observed_microusd: number;
+  budget_exceeded: boolean;
   total_tasks: number;
   terminal_tasks: number;
   admissible_tasks: number;
@@ -284,23 +281,6 @@ export interface CampaignView {
   paused: boolean;
 }
 
-export interface ActionDispositionView {
-  action_id: string;
-  campaign_id: string;
-  task_id: string;
-  recorded_outcome: string;
-  recorded_observed_state: string;
-  effective_outcome: string;
-  effective_observed_state: string;
-  effective_error_code: string;
-  reason_code: string;
-  corrected_at: string;
-  actor_role: string;
-  disposition_record_id: string;
-  batch_id: string;
-  batch_size: number;
-}
-
 export interface SystemView {
   ready: boolean;
   rebuilding: boolean;
@@ -313,17 +293,36 @@ export interface SystemView {
 
 export class ProjectionIntegrityError extends Error {}
 
-const terminalSandboxStates = new Set([
-  "CANCELED",
-  "CANCELLED",
-  "COMPLETED",
-  "DELETED",
-  "ERROR",
-  "STOPPED",
-]);
-
 function body(value: unknown): string {
   return canonicalJson(value).trimEnd();
+}
+
+function controlEvent(row: EventObjectRow, epoch: string): ControlEvent {
+  const record = JSON.parse(row.body) as HarborHFControlRecordV1;
+  const data: Record<string, unknown> = {
+    key: row.key,
+    digest: row.digest,
+    record_id: row.record_id,
+  };
+  for (const field of [
+    "run_id",
+    "task_id",
+    "attempt_id",
+    "action_id",
+    "action_kind",
+    "publication_id",
+    "profile_kind",
+    "alias",
+  ] as const) {
+    if (field in record)
+      data[field] = (record as unknown as Record<string, unknown>)[field];
+  }
+  return {
+    id: eventCursor(epoch, row.event_order),
+    type: row.kind,
+    occurred_at: row.created_at,
+    data,
+  };
 }
 
 async function verifyAttemptEvidence(
@@ -336,11 +335,27 @@ async function verifyAttemptEvidence(
   else await verifyWorkerEvidence(store, record);
 }
 
-function parseRecord(bytes: Uint8Array, entry: ObjectEntry): HarborHFControlRecordV1 {
-  const text = new TextDecoder().decode(bytes);
-  if (sha256(bytes) !== entry.digest) {
-    throw new ProjectionIntegrityError(`digest mismatch for ${entry.key}`);
+function validateObjectEntry(entry: ObjectEntry): void {
+  if (!Number.isSafeInteger(entry.size) || entry.size < 0)
+    throw new ProjectionIntegrityError(`invalid size for ${entry.key}`);
+  if (typeof entry.source_identity !== "string" || entry.source_identity.length === 0) {
+    throw new ProjectionIntegrityError(`missing source identity for ${entry.key}`);
   }
+}
+
+function verifiedEntry(bytes: Uint8Array, entry: ObjectEntry): VerifiedObjectEntry {
+  validateObjectEntry(entry);
+  if (bytes.byteLength !== entry.size) {
+    throw new ProjectionIntegrityError(`size mismatch for ${entry.key}`);
+  }
+  return { ...entry, digest: sha256(bytes) };
+}
+
+function parseRecord(
+  bytes: Uint8Array,
+  entry: VerifiedObjectEntry,
+): HarborHFControlRecordV1 {
+  const text = new TextDecoder().decode(bytes);
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -383,9 +398,9 @@ function jobStateIsTerminal(state: string | null): boolean {
   return state !== null && terminalJobStates.has(state.toUpperCase());
 }
 
-export function assignedTasksFromIntent(intentBody: string): number {
+function assignedTaskIdsFromIntent(intentBody: string): string[] {
   const intent = JSON.parse(intentBody) as ActionIntent;
-  return Array.isArray(intent.payload.task_ids) ? intent.payload.task_ids.length : 0;
+  return Array.isArray(intent.payload.task_ids) ? intent.payload.task_ids : [];
 }
 
 function launchStillRunning(
@@ -445,9 +460,18 @@ function jobIdentity(row: Selectable<ActionRow>): string {
   if (typeof payloadResourceId === "string") return payloadResourceId;
   const launchActionId = intent.payload.launch_action_id;
   if (typeof launchActionId === "string") return launchActionId;
-  const sandboxCreateId = intent.payload.sandbox_create_action_id;
-  if (typeof sandboxCreateId === "string") return sandboxCreateId;
   return row.action_id;
+}
+
+function jobLaunchActionId(row: Selectable<ActionRow>): string {
+  if (row.action_kind === "job.launch") return row.action_id;
+  const intent = JSON.parse(row.intent_body) as ActionIntent;
+  const launchActionId = intent.payload.launch_action_id;
+  if (typeof launchActionId !== "string")
+    throw new ProjectionIntegrityError(
+      `Job action has no launch action: ${row.action_id}`,
+    );
+  return launchActionId;
 }
 
 function receiptCostMicrousd(row: Selectable<ActionRow>): number {
@@ -456,18 +480,38 @@ function receiptCostMicrousd(row: Selectable<ActionRow>): number {
   return receipt.cost_microusd ?? 0;
 }
 
-const hardwareActionKinds = [
-  "job.launch",
-  "job.observe",
-  "job.cancel",
-  "sandbox.create",
-  "sandbox.observe",
-  "sandbox.close",
-] as const;
+function jobActionTakesPrecedence(
+  candidate: Selectable<ActionRow>,
+  current: Selectable<JobRow>,
+): boolean {
+  const candidateHasReceipt = candidate.receipt_body !== null;
+  const currentHasReceipt = current.receipt_body !== null;
+  if (candidateHasReceipt !== currentHasReceipt) return candidateHasReceipt;
+  const created = candidate.created_at.localeCompare(current.created_at);
+  return created !== 0
+    ? created > 0
+    : candidate.action_id.localeCompare(current.action_id) > 0;
+}
+
+function projectedJobStillRunning(
+  job: Pick<Selectable<JobRow>, "observed_state" | "receipt_body">,
+): boolean {
+  if (job.receipt_body === null) return true;
+  if (job.observed_state?.startsWith("suppressed-")) return false;
+  if (jobStateIsTerminal(job.observed_state)) return false;
+  return (JSON.parse(job.receipt_body) as ActionReceipt).outcome !== "failed";
+}
+
+const hardwareActionKinds = ["job.launch", "job.observe", "job.cancel"] as const;
+
+function isHardwareActionKind(actionKind: string): boolean {
+  return hardwareActionKinds.some((kind) => kind === actionKind);
+}
 
 export class Projection {
   private database: Database.Database;
   readonly db: Kysely<DatabaseSchema>;
+  private eventEpoch = randomUUID();
   private state: SystemView = {
     ready: false,
     rebuilding: true,
@@ -501,23 +545,32 @@ export class Projection {
     return { ...this.state };
   }
 
+  eventCursorIsCurrent(cursor: string): boolean {
+    return decodeEventCursor(cursor).epoch === this.eventEpoch;
+  }
+
   private async latestEventCursor(): Promise<string | null> {
     const row = await this.db
       .selectFrom("objects")
-      .select(["key", "created_at"])
-      .orderBy("created_at", "desc")
-      .orderBy("key", "desc")
+      .select(sql<number>`rowid`.as("event_order"))
+      .orderBy(sql`rowid`, "desc")
       .executeTakeFirst();
-    return row ? eventCursor(row.created_at, row.key) : null;
+    return row ? eventCursor(this.eventEpoch, row.event_order) : null;
   }
 
   async objectDigest(key: string): Promise<string | null> {
+    return (await this.objectMetadata(key))?.digest ?? null;
+  }
+
+  private async objectMetadata(
+    key: string,
+  ): Promise<{ digest: string; source_identity: string } | null> {
     const row = await this.db
       .selectFrom("objects")
-      .select("digest")
+      .select(["digest", "source_identity"])
       .where("key", "=", key)
       .executeTakeFirst();
-    return row?.digest ?? null;
+    return row ?? null;
   }
 
   private async initialize(): Promise<void> {
@@ -526,15 +579,16 @@ export class Projection {
       .ifNotExists()
       .addColumn("key", "text", (column) => column.primaryKey())
       .addColumn("digest", "text", (column) => column.notNull())
+      .addColumn("source_identity", "text", (column) => column.notNull())
       .addColumn("kind", "text", (column) => column.notNull())
       .addColumn("record_id", "text", (column) => column.notNull())
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("body", "text", (column) => column.notNull())
       .execute();
     await this.db.schema
-      .createTable("campaigns")
+      .createTable("runs")
       .ifNotExists()
-      .addColumn("campaign_id", "text", (column) => column.primaryKey())
+      .addColumn("run_id", "text", (column) => column.primaryKey())
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("request_body", "text")
       .addColumn("lock_body", "text")
@@ -546,7 +600,7 @@ export class Projection {
       .createTable("actions")
       .ifNotExists()
       .addColumn("action_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("action_kind", "text", (column) => column.notNull())
       .addColumn("generation", "integer", (column) => column.notNull())
       .addColumn("target", "text", (column) => column.notNull())
@@ -558,43 +612,40 @@ export class Projection {
       .addColumn("created_at", "text", (column) => column.notNull())
       .execute();
     await this.db.schema
-      .createTable("dispositions")
+      .createTable("jobs")
       .ifNotExists()
-      .addColumn("action_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
-      .addColumn("task_id", "text", (column) => column.notNull())
-      .addColumn("record_id", "text", (column) => column.notNull().unique())
-      .addColumn("source_receipt_id", "text", (column) => column.notNull())
-      .addColumn("source_receipt_digest", "text", (column) => column.notNull())
-      .addColumn("close_action_id", "text", (column) => column.notNull())
-      .addColumn("close_receipt_id", "text", (column) => column.notNull())
-      .addColumn("close_receipt_digest", "text", (column) => column.notNull())
-      .addColumn("batch_id", "text", (column) => column.notNull())
-      .addColumn("batch_digest", "text", (column) => column.notNull())
-      .addColumn("batch_size", "integer", (column) => column.notNull())
-      .addColumn("effective_outcome", "text", (column) => column.notNull())
-      .addColumn("effective_observed_state", "text", (column) => column.notNull())
-      .addColumn("effective_error_code", "text", (column) => column.notNull())
-      .addColumn("reason_code", "text", (column) => column.notNull())
-      .addColumn("reason", "text", (column) => column.notNull())
+      .addColumn("launch_action_id", "text", (column) => column.primaryKey())
+      .addColumn("action_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
+      .addColumn("action_kind", "text", (column) => column.notNull())
+      .addColumn("generation", "integer", (column) => column.notNull())
+      .addColumn("target", "text", (column) => column.notNull())
+      .addColumn("intent_body", "text", (column) => column.notNull())
+      .addColumn("receipt_body", "text")
+      .addColumn("outcome", "text")
+      .addColumn("observed_state", "text")
+      .addColumn("resource_id", "text")
       .addColumn("created_at", "text", (column) => column.notNull())
-      .addColumn("body", "text", (column) => column.notNull())
+      .addColumn("assigned_tasks", "integer", (column) => column.notNull())
+      .addColumn("assigned_task_ids_body", "text", (column) => column.notNull())
+      .addColumn("cost_microusd", "integer", (column) => column.notNull())
+      .addColumn("is_replacement", "integer", (column) => column.notNull())
       .execute();
     await this.db.schema
       .createTable("dispatches")
       .ifNotExists()
       .addColumn("action_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("operation", "text", (column) => column.notNull())
       .addColumn("adoption_not_before", "text", (column) => column.notNull())
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("body", "text", (column) => column.notNull())
       .execute();
     await this.db.schema
-      .createTable("sandbox_admissions")
+      .createTable("job_admissions")
       .ifNotExists()
       .addColumn("action_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("namespace", "text", (column) => column.notNull())
       .addColumn("capacity_profile_id", "text", (column) => column.notNull())
       .addColumn("hardware", "text", (column) => column.notNull())
@@ -606,10 +657,10 @@ export class Projection {
       .addColumn("body", "text", (column) => column.notNull())
       .execute();
     await this.db.schema
-      .createTable("sandbox_capacity_releases")
+      .createTable("job_capacity_releases")
       .ifNotExists()
       .addColumn("action_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("grant_id", "text", (column) => column.notNull())
       .addColumn("release_reason", "text", (column) => column.notNull())
       .addColumn("evidence_record_id", "text", (column) => column.notNull())
@@ -620,26 +671,26 @@ export class Projection {
       .createTable("advancements")
       .ifNotExists()
       .addColumn("action_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("body", "text", (column) => column.notNull())
       .execute();
     await this.db.schema
       .createTable("tasks")
       .ifNotExists()
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("task_id", "text", (column) => column.notNull())
       .addColumn("input_digest", "text", (column) => column.notNull())
       .addColumn("terminal_outcome", "text")
       .addColumn("selected_attempt_id", "text")
-      .addPrimaryKeyConstraint("tasks_pk", ["campaign_id", "task_id"])
+      .addPrimaryKeyConstraint("tasks_pk", ["run_id", "task_id"])
       .execute();
     await this.db.schema
       .createTable("attempts")
       .ifNotExists()
       .addColumn("attempt_id", "text", (column) => column.primaryKey())
       .addColumn("action_id", "text", (column) => column.notNull())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("task_id", "text", (column) => column.notNull())
       .addColumn("outcome", "text", (column) => column.notNull())
       .addColumn("replacement_eligible", "integer", (column) => column.notNull())
@@ -654,9 +705,10 @@ export class Projection {
       .createTable("task_exhaustions")
       .ifNotExists()
       .addColumn("record_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("task_id", "text", (column) => column.notNull())
-      .addColumn("last_attempt_id", "text", (column) => column.notNull())
+      .addColumn("source_action_id", "text", (column) => column.notNull())
+      .addColumn("last_attempt_id", "text")
       .addColumn("attempt_count", "integer", (column) => column.notNull())
       .addColumn("reason", "text", (column) => column.notNull())
       .addColumn("created_at", "text", (column) => column.notNull())
@@ -666,7 +718,7 @@ export class Projection {
       .createTable("budgets")
       .ifNotExists()
       .addColumn("record_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("event_kind", "text", (column) => column.notNull())
       .addColumn("amount_microusd", "integer", (column) => column.notNull())
       .addColumn("created_at", "text", (column) => column.notNull())
@@ -675,7 +727,7 @@ export class Projection {
       .createTable("endpoints")
       .ifNotExists()
       .addColumn("action_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("endpoint_id", "text", (column) => column.notNull())
       .addColumn("desired_state", "text", (column) => column.notNull())
       .addColumn("observed_state", "text", (column) => column.notNull())
@@ -688,7 +740,7 @@ export class Projection {
       .createTable("publications")
       .ifNotExists()
       .addColumn("publication_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("status", "text", (column) => column.notNull())
       .addColumn("catalog_digest", "text")
       .addColumn("body", "text", (column) => column.notNull())
@@ -698,9 +750,9 @@ export class Projection {
       .createTable("publication_supersessions")
       .ifNotExists()
       .addColumn("record_id", "text", (column) => column.primaryKey())
-      .addColumn("campaign_id", "text", (column) => column.notNull())
+      .addColumn("run_id", "text", (column) => column.notNull())
       .addColumn("publication_id", "text", (column) => column.notNull())
-      .addColumn("superseded_campaign_id", "text", (column) => column.notNull())
+      .addColumn("superseded_run_id", "text", (column) => column.notNull())
       .addColumn("superseded_publication_id", "text", (column) =>
         column.notNull().unique(),
       )
@@ -743,28 +795,28 @@ export class Projection {
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("body", "text", (column) => column.notNull())
       .execute();
-    await sql`CREATE INDEX IF NOT EXISTS actions_campaign_idx ON actions(campaign_id, created_at)`.execute(
+    await sql`CREATE INDEX IF NOT EXISTS actions_run_idx ON actions(run_id, created_at)`.execute(
       this.db,
     );
-    await sql`CREATE INDEX IF NOT EXISTS sandbox_admissions_campaign_idx ON sandbox_admissions(campaign_id, created_at)`.execute(
+    await sql`CREATE INDEX IF NOT EXISTS jobs_page_idx ON jobs(created_at DESC, action_id DESC)`.execute(
       this.db,
     );
-    await sql`CREATE INDEX IF NOT EXISTS sandbox_admissions_namespace_idx ON sandbox_admissions(namespace, created_at)`.execute(
+    await sql`CREATE INDEX IF NOT EXISTS jobs_run_page_idx ON jobs(run_id, created_at DESC, action_id DESC)`.execute(
       this.db,
     );
-    await sql`CREATE INDEX IF NOT EXISTS dispositions_campaign_task_idx ON dispositions(campaign_id, task_id, created_at)`.execute(
+    await sql`CREATE INDEX IF NOT EXISTS job_admissions_run_idx ON job_admissions(run_id, created_at)`.execute(
       this.db,
     );
-    await sql`CREATE INDEX IF NOT EXISTS dispositions_batch_idx ON dispositions(batch_id)`.execute(
+    await sql`CREATE INDEX IF NOT EXISTS job_admissions_namespace_idx ON job_admissions(namespace, created_at)`.execute(
       this.db,
     );
-    await sql`CREATE INDEX IF NOT EXISTS attempts_task_idx ON attempts(campaign_id, task_id, created_at)`.execute(
+    await sql`CREATE INDEX IF NOT EXISTS attempts_task_idx ON attempts(run_id, task_id, created_at)`.execute(
       this.db,
     );
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS attempts_action_task_idx ON attempts(action_id, task_id)`.execute(
       this.db,
     );
-    await sql`CREATE UNIQUE INDEX IF NOT EXISTS task_exhaustions_task_idx ON task_exhaustions(campaign_id, task_id)`.execute(
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS task_exhaustions_task_idx ON task_exhaustions(run_id, task_id)`.execute(
       this.db,
     );
   }
@@ -783,12 +835,12 @@ export class Projection {
       "attempts",
       "tasks",
       "advancements",
-      "sandbox_capacity_releases",
-      "sandbox_admissions",
+      "job_capacity_releases",
+      "job_admissions",
       "dispatches",
-      "dispositions",
+      "jobs",
       "actions",
-      "campaigns",
+      "runs",
       "objects",
     ] as const) {
       await this.db.deleteFrom(table).execute();
@@ -799,6 +851,9 @@ export class Projection {
     store: ImmutableObjectStore,
     prefix = "control/schema=v1",
   ): Promise<void> {
+    // Local row order is rebuilt from immutable objects. A new epoch makes
+    // clients with a prior cursor replay instead of skipping an object.
+    this.eventEpoch = randomUUID();
     this.state = {
       ...this.state,
       ready: false,
@@ -810,21 +865,27 @@ export class Projection {
         left.key.localeCompare(right.key),
       );
       await this.clear();
+      const seen = new Set<string>();
       const supersessions: Array<{
-        entry: ObjectEntry;
+        entry: VerifiedObjectEntry;
         record: PublicationSupersession;
       }> = [];
       for (const entry of entries) {
+        validateObjectEntry(entry);
+        if (seen.has(entry.key))
+          throw new ProjectionIntegrityError(`duplicate object listing: ${entry.key}`);
+        seen.add(entry.key);
         const bytes = await store.read(entry.key);
-        const record = parseRecord(bytes, entry);
+        const verified = verifiedEntry(bytes, entry);
+        const record = parseRecord(bytes, verified);
         await verifyAttemptEvidence(store, record);
         if (record.kind === "publication.supersession")
-          supersessions.push({ entry, record });
-        else await this.apply(entry, record);
+          supersessions.push({ entry: verified, record });
+        else await this.apply(verified, record);
       }
       for (const deferred of supersessions)
         await this.apply(deferred.entry, deferred.record);
-      await this.verifyInvariants(store);
+      await this.verifyInvariants();
       this.state = {
         ready: true,
         rebuilding: false,
@@ -850,45 +911,52 @@ export class Projection {
   async sync(
     store: ImmutableObjectStore,
     prefix = "control/schema=v1",
-  ): Promise<number> {
+  ): Promise<ControlEvent[]> {
     try {
       const entries = [...(await store.list(prefix))].sort((left, right) =>
         left.key.localeCompare(right.key),
       );
       const seen = new Set<string>();
       const supersessions: Array<{
-        entry: ObjectEntry;
+        entry: VerifiedObjectEntry;
         record: PublicationSupersession;
       }> = [];
-      let ingested = 0;
+      const ingested: ControlEvent[] = [];
       for (const entry of entries) {
+        validateObjectEntry(entry);
         if (seen.has(entry.key))
           throw new ProjectionIntegrityError(`duplicate object listing: ${entry.key}`);
         seen.add(entry.key);
-        const projected = await this.objectDigest(entry.key);
+        const projected = await this.objectMetadata(entry.key);
         if (projected) {
-          if (projected !== entry.digest)
+          if (projected.source_identity !== entry.source_identity) {
             throw new ProjectionIntegrityError(
-              `immutable object changed: ${entry.key}`,
+              `source identity mismatch for ${entry.key}`,
             );
+          }
           continue;
         }
         const bytes = await store.read(entry.key);
-        const record = parseRecord(bytes, entry);
+        const verified = verifiedEntry(bytes, entry);
+        const record = parseRecord(bytes, verified);
         await verifyAttemptEvidence(store, record);
         if (record.kind === "publication.supersession")
-          supersessions.push({ entry, record });
-        else await this.apply(entry, record);
-        ingested += 1;
+          supersessions.push({ entry: verified, record });
+        else {
+          await this.apply(verified, record);
+          ingested.push(await this.eventForKey(entry.key));
+        }
       }
-      for (const deferred of supersessions)
+      for (const deferred of supersessions) {
         await this.apply(deferred.entry, deferred.record);
-      await this.verifyInvariants(store);
+        ingested.push(await this.eventForKey(deferred.entry.key));
+      }
+      await this.verifyInvariants();
       this.state = {
         ...this.state,
         ready: true,
         rebuilding: false,
-        object_count: this.state.object_count + ingested,
+        object_count: this.state.object_count + ingested.length,
         last_sync_at: new Date().toISOString(),
         event_cursor: await this.latestEventCursor(),
         integrity_error: null,
@@ -909,22 +977,40 @@ export class Projection {
   async ingest(
     key: string,
     digest: string,
+    sourceIdentity: string,
     record: HarborHFControlRecordV1,
-    store: ImmutableObjectStore,
-  ): Promise<void> {
-    const entry = { key, digest, size: canonicalJson(record).length };
+  ): Promise<ControlEvent> {
+    const entry: ProjectedObjectEntry = {
+      key,
+      digest,
+      size: new TextEncoder().encode(canonicalJson(record)).byteLength,
+      source_identity: sourceIdentity,
+    };
+    validateObjectEntry(entry);
     await this.apply(entry, record);
-    await this.verifyInvariants(store);
+    await this.verifyInvariants();
+    const event = await this.eventForKey(key);
     this.state = {
       ...this.state,
       object_count: this.state.object_count + 1,
       last_sync_at: new Date().toISOString(),
-      event_cursor: await this.latestEventCursor(),
+      event_cursor: event.id,
     };
+    return event;
+  }
+
+  private async eventForKey(key: string): Promise<ControlEvent> {
+    const row = await this.db
+      .selectFrom("objects")
+      .selectAll()
+      .select(sql<number>`rowid`.as("event_order"))
+      .where("key", "=", key)
+      .executeTakeFirstOrThrow();
+    return controlEvent(row, this.eventEpoch);
   }
 
   private async apply(
-    entry: ObjectEntry,
+    entry: ProjectedObjectEntry,
     record: HarborHFControlRecordV1,
   ): Promise<void> {
     await this.db
@@ -932,6 +1018,7 @@ export class Projection {
       .values({
         key: entry.key,
         digest: entry.digest,
+        source_identity: entry.source_identity,
         kind: record.kind,
         record_id: record.record_id,
         created_at: record.created_at,
@@ -939,11 +1026,11 @@ export class Projection {
       })
       .execute();
     switch (record.kind) {
-      case "campaign.request":
-        await this.applyCampaignRequest(record);
+      case "run.request":
+        await this.applyRunRequest(record);
         break;
-      case "campaign.lock":
-        await this.applyCampaignLock(record);
+      case "run.lock":
+        await this.applyRunLock(record);
         break;
       case "action.intent":
         await this.applyActionIntent(record);
@@ -951,17 +1038,14 @@ export class Projection {
       case "action.dispatch":
         await this.applyActionDispatch(record);
         break;
-      case "sandbox.admission":
-        await this.applySandboxAdmission(record);
+      case "job.admission":
+        await this.applyJobAdmission(record);
         break;
-      case "sandbox.capacity-release":
-        await this.applySandboxCapacityRelease(record);
+      case "job.capacity-release":
+        await this.applyJobCapacityRelease(record);
         break;
       case "action.receipt":
         await this.applyActionReceipt(record);
-        break;
-      case "action.disposition":
-        await this.applyActionDisposition(record);
         break;
       case "action.advanced":
         await this.applyActionAdvanced(record);
@@ -974,6 +1058,9 @@ export class Projection {
         break;
       case "task.exhaustion":
         await this.applyTaskExhaustion(record);
+        break;
+      case "task.cancellation":
+        await this.applyTaskCancellation(record);
         break;
       case "budget.event":
         await this.applyBudget(record);
@@ -1009,34 +1096,34 @@ export class Projection {
     }
   }
 
-  private async applyCampaignRequest(record: CampaignRequest): Promise<void> {
+  private async applyRunRequest(record: RunRequest): Promise<void> {
     await this.db
-      .insertInto("campaigns")
+      .insertInto("runs")
       .values({
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         created_at: record.created_at,
         request_body: body(record),
         lock_body: null,
         ceiling_microusd: record.ceiling_microusd,
       })
       .onConflict((conflict) =>
-        conflict.column("campaign_id").doUpdateSet({ request_body: body(record) }),
+        conflict.column("run_id").doUpdateSet({ request_body: body(record) }),
       )
       .execute();
   }
 
-  private async applyCampaignLock(record: CampaignLock): Promise<void> {
+  private async applyRunLock(record: RunLock): Promise<void> {
     await this.db
-      .insertInto("campaigns")
+      .insertInto("runs")
       .values({
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         created_at: record.created_at,
         request_body: null,
         lock_body: body(record),
         ceiling_microusd: record.ceiling_microusd,
       })
       .onConflict((conflict) =>
-        conflict.column("campaign_id").doUpdateSet({
+        conflict.column("run_id").doUpdateSet({
           lock_body: body(record),
           ceiling_microusd: record.ceiling_microusd,
         }),
@@ -1046,7 +1133,7 @@ export class Projection {
       await this.db
         .insertInto("tasks")
         .values({
-          campaign_id: record.campaign_id,
+          run_id: record.run_id,
           task_id: task.task_id,
           input_digest: task.input_digest,
           terminal_outcome: null,
@@ -1061,7 +1148,7 @@ export class Projection {
       .insertInto("actions")
       .values({
         action_id: record.action_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         action_kind: record.action_kind,
         generation: record.generation,
         target: record.target,
@@ -1073,22 +1160,22 @@ export class Projection {
         created_at: record.created_at,
       })
       .execute();
+    if (isHardwareActionKind(record.action_kind))
+      await this.projectJobAction(record.action_id);
   }
 
   private async applyActionDispatch(record: ActionDispatch): Promise<void> {
     const action = await this.db
       .selectFrom("actions")
-      .select(["campaign_id", "receipt_body"])
+      .select(["run_id", "receipt_body"])
       .where("action_id", "=", record.action_id)
       .executeTakeFirst();
     if (!action)
       throw new ProjectionIntegrityError(
         `dispatch has no action intent: ${record.action_id}`,
       );
-    if (action.campaign_id !== record.campaign_id)
-      throw new ProjectionIntegrityError(
-        `dispatch campaign mismatch: ${record.action_id}`,
-      );
+    if (action.run_id !== record.run_id)
+      throw new ProjectionIntegrityError(`dispatch run mismatch: ${record.action_id}`);
     if (action.receipt_body)
       throw new ProjectionIntegrityError(
         `dispatch was recorded after action completion: ${record.action_id}`,
@@ -1097,7 +1184,7 @@ export class Projection {
       .insertInto("dispatches")
       .values({
         action_id: record.action_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         operation: record.operation,
         adoption_not_before: record.adoption_not_before,
         created_at: record.created_at,
@@ -1106,25 +1193,25 @@ export class Projection {
       .execute();
   }
 
-  private async applySandboxAdmission(record: SandboxAdmissionGrant): Promise<void> {
+  private async applyJobAdmission(record: JobAdmissionGrant): Promise<void> {
     const action = await this.db
       .selectFrom("actions")
-      .select(["campaign_id", "action_kind", "receipt_body"])
+      .select(["run_id", "action_kind", "receipt_body"])
       .where("action_id", "=", record.action_id)
       .executeTakeFirst();
-    if (action?.action_kind !== "sandbox.create")
+    if (action?.action_kind !== "job.launch")
       throw new ProjectionIntegrityError(
-        `Sandbox admission has no create intent: ${record.action_id}`,
+        `Job admission has no launch intent: ${record.action_id}`,
       );
-    if (action.campaign_id !== record.campaign_id || action.receipt_body)
+    if (action.run_id !== record.run_id || action.receipt_body)
       throw new ProjectionIntegrityError(
-        `Sandbox admission state is invalid: ${record.action_id}`,
+        `Job admission state is invalid: ${record.action_id}`,
       );
     await this.db
-      .insertInto("sandbox_admissions")
+      .insertInto("job_admissions")
       .values({
         action_id: record.action_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         namespace: record.namespace,
         capacity_profile_id: record.capacity_profile_id,
         hardware: record.hardware,
@@ -1138,30 +1225,26 @@ export class Projection {
       .execute();
   }
 
-  private async applySandboxCapacityRelease(
-    record: SandboxCapacityRelease,
-  ): Promise<void> {
+  private async applyJobCapacityRelease(record: JobCapacityRelease): Promise<void> {
     const grant = await this.db
-      .selectFrom("sandbox_admissions")
-      .select(["campaign_id", "body"])
+      .selectFrom("job_admissions")
+      .select(["run_id", "body"])
       .where("action_id", "=", record.action_id)
       .executeTakeFirst();
-    const grantRecord = grant
-      ? (JSON.parse(grant.body) as SandboxAdmissionGrant)
-      : null;
+    const grantRecord = grant ? (JSON.parse(grant.body) as JobAdmissionGrant) : null;
     if (
       !grant ||
-      grant.campaign_id !== record.campaign_id ||
+      grant.run_id !== record.run_id ||
       grantRecord?.record_id !== record.grant_id
     )
       throw new ProjectionIntegrityError(
-        `Sandbox capacity release has no matching grant: ${record.action_id}`,
+        `Job capacity release has no matching grant: ${record.action_id}`,
       );
     await this.db
-      .insertInto("sandbox_capacity_releases")
+      .insertInto("job_capacity_releases")
       .values({
         action_id: record.action_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         grant_id: record.grant_id,
         release_reason: record.release_reason,
         evidence_record_id: record.evidence_record_id,
@@ -1179,10 +1262,8 @@ export class Projection {
       .executeTakeFirst();
     if (!action)
       throw new ProjectionIntegrityError(`receipt has no intent: ${record.action_id}`);
-    if (action.campaign_id !== record.campaign_id)
-      throw new ProjectionIntegrityError(
-        `receipt campaign mismatch: ${record.action_id}`,
-      );
+    if (action.run_id !== record.run_id)
+      throw new ProjectionIntegrityError(`receipt run mismatch: ${record.action_id}`);
     await this.db
       .updateTable("actions")
       .set({
@@ -1193,54 +1274,97 @@ export class Projection {
       })
       .where("action_id", "=", record.action_id)
       .execute();
+    if (isHardwareActionKind(action.action_kind))
+      await this.projectJobAction(record.action_id);
   }
 
-  private async applyActionDisposition(record: ActionDisposition): Promise<void> {
+  /**
+   * Materializes one latest row per physical Job as action records arrive.
+   *
+   * Receipt-backed actions take precedence over newer pending polls, matching
+   * the durable Job view without reducing the full action history at read time.
+   */
+  private async projectJobAction(actionId: string): Promise<void> {
+    const candidate = await this.db
+      .selectFrom("actions")
+      .selectAll()
+      .where("action_id", "=", actionId)
+      .executeTakeFirstOrThrow();
+
+    const launchActionId = jobLaunchActionId(candidate);
+    const launch =
+      candidate.action_kind === "job.launch"
+        ? candidate
+        : await this.db
+            .selectFrom("actions")
+            .selectAll()
+            .where("action_id", "=", launchActionId)
+            .executeTakeFirst();
+    // Immutable object listing order is not action chronology. A launch that
+    // sorts later will project this action when the launch itself is applied.
+    if (launch?.action_kind !== "job.launch") {
+      if (this.state.rebuilding) return;
+      throw new ProjectionIntegrityError(
+        `Job action has no launch action: ${candidate.action_id}`,
+      );
+    }
+
+    const current = await this.db
+      .selectFrom("jobs")
+      .selectAll()
+      .where("launch_action_id", "=", launchActionId)
+      .executeTakeFirst();
+    if (current && !jobActionTakesPrecedence(candidate, current)) return;
+
+    const taskIds = assignedTaskIdsFromIntent(launch.intent_body);
+    const launchIntent = JSON.parse(launch.intent_body) as ActionIntent;
+    const projected: Selectable<JobRow> = {
+      ...candidate,
+      launch_action_id: launchActionId,
+      assigned_tasks: taskIds.length,
+      assigned_task_ids_body: body(taskIds),
+      cost_microusd: receiptCostMicrousd(candidate),
+      is_replacement: typeof launchIntent.payload.prior_attempt_id === "string" ? 1 : 0,
+    };
     await this.db
-      .insertInto("dispositions")
-      .values({
-        action_id: record.action_id,
-        campaign_id: record.campaign_id,
-        task_id: record.task_id,
-        record_id: record.record_id,
-        source_receipt_id: record.source_receipt_id,
-        source_receipt_digest: record.source_receipt_digest,
-        close_action_id: record.close_action_id,
-        close_receipt_id: record.close_receipt_id,
-        close_receipt_digest: record.close_receipt_digest,
-        batch_id: record.batch_id,
-        batch_digest: record.batch_digest,
-        batch_size: record.batch_size,
-        effective_outcome: record.effective_outcome,
-        effective_observed_state: record.effective_observed_state,
-        effective_error_code: record.effective_error_code,
-        reason_code: record.reason_code,
-        reason: record.reason,
-        created_at: record.created_at,
-        body: body(record),
-      })
+      .insertInto("jobs")
+      .values(projected)
+      .onConflict((conflict) =>
+        conflict.column("launch_action_id").doUpdateSet(projected),
+      )
       .execute();
+    if (candidate.action_kind === "job.launch" && !current) {
+      const deferred = await this.db
+        .selectFrom("actions")
+        .select("action_id")
+        .where("action_kind", "in", ["job.observe", "job.cancel"])
+        .where(
+          sql<boolean>`json_extract(intent_body, '$.payload.launch_action_id') = ${launchActionId}`,
+        )
+        .execute();
+      for (const action of deferred) await this.projectJobAction(action.action_id);
+    }
   }
 
   private async applyActionAdvanced(record: ActionAdvanced): Promise<void> {
     const action = await this.db
       .selectFrom("actions")
-      .select(["campaign_id", "receipt_body"])
+      .select(["run_id", "receipt_body"])
       .where("action_id", "=", record.action_id)
       .executeTakeFirst();
     if (!action?.receipt_body)
       throw new ProjectionIntegrityError(
         `advanced action has no receipt: ${record.action_id}`,
       );
-    if (action.campaign_id !== record.campaign_id)
+    if (action.run_id !== record.run_id)
       throw new ProjectionIntegrityError(
-        `advanced action campaign mismatch: ${record.action_id}`,
+        `advanced action run mismatch: ${record.action_id}`,
       );
     await this.db
       .insertInto("advancements")
       .values({
         action_id: record.action_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         created_at: record.created_at,
         body: body(record),
       })
@@ -1248,10 +1372,30 @@ export class Projection {
   }
 
   private async applyAttempt(record: AttemptReceipt): Promise<void> {
+    const action = await this.db
+      .selectFrom("actions")
+      .select(["action_kind", "run_id", "intent_body"])
+      .where("action_id", "=", record.action_id)
+      .executeTakeFirst();
+    if (action?.action_kind !== "job.launch" || action.run_id !== record.run_id)
+      throw new ProjectionIntegrityError(
+        `attempt has no matching Job launch: ${record.attempt_id}`,
+      );
+    const intent = JSON.parse(action.intent_body) as ActionIntent;
+    if (
+      (intent.payload.worker_role ?? "execution") !== "execution" ||
+      !Array.isArray(intent.payload.task_ids) ||
+      intent.payload.task_ids.length !== 1 ||
+      intent.payload.task_id !== record.task_id ||
+      intent.payload.task_ids[0] !== record.task_id
+    )
+      throw new ProjectionIntegrityError(
+        `attempt Job assignment mismatch: ${record.attempt_id}`,
+      );
     const task = await this.db
       .selectFrom("tasks")
       .select("task_id")
-      .where("campaign_id", "=", record.campaign_id)
+      .where("run_id", "=", record.run_id)
       .where("task_id", "=", record.task_id)
       .executeTakeFirst();
     if (!task)
@@ -1263,7 +1407,7 @@ export class Projection {
       .values({
         attempt_id: record.attempt_id,
         action_id: record.action_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         task_id: record.task_id,
         outcome: record.outcome,
         replacement_eligible: record.replacement_eligible ? 1 : 0,
@@ -1285,7 +1429,7 @@ export class Projection {
       .executeTakeFirst();
     if (
       !attempt ||
-      attempt.campaign_id !== record.campaign_id ||
+      attempt.run_id !== record.run_id ||
       attempt.task_id !== record.task_id ||
       attempt.outcome !== record.outcome
     ) {
@@ -1296,7 +1440,7 @@ export class Projection {
     const result = await this.db
       .updateTable("tasks")
       .set({ terminal_outcome: record.outcome, selected_attempt_id: record.attempt_id })
-      .where("campaign_id", "=", record.campaign_id)
+      .where("run_id", "=", record.run_id)
       .where("task_id", "=", record.task_id)
       .where((eb) =>
         eb.or([
@@ -1310,27 +1454,52 @@ export class Projection {
   }
 
   private async applyTaskExhaustion(record: TaskExhaustion): Promise<void> {
-    const attempt = await this.db
-      .selectFrom("attempts")
-      .select(["campaign_id", "task_id", "outcome", "replacement_eligible"])
-      .where("attempt_id", "=", record.last_attempt_id)
+    const source = await this.db
+      .selectFrom("actions")
+      .select(["action_kind", "run_id", "intent_body"])
+      .where("action_id", "=", record.source_action_id)
       .executeTakeFirst();
-    if (
-      !attempt ||
-      attempt.campaign_id !== record.campaign_id ||
-      attempt.task_id !== record.task_id
-    )
+    if (source?.action_kind !== "job.launch" || source.run_id !== record.run_id)
       throw new ProjectionIntegrityError(
-        `task exhaustion does not match attempt: ${record.record_id}`,
+        `task exhaustion has no matching Job launch: ${record.record_id}`,
       );
-    const replaceable =
-      attempt.outcome === "infrastructure" && Number(attempt.replacement_eligible) > 0;
+    let replaceable = false;
+    if (record.last_attempt_id === null) {
+      const intent = JSON.parse(source.intent_body) as ActionIntent;
+      if (
+        intent.payload.worker_role !== "preparation" ||
+        !Array.isArray(intent.payload.task_ids) ||
+        !intent.payload.task_ids.includes(record.task_id)
+      )
+        throw new ProjectionIntegrityError(
+          `preparation exhaustion task mismatch: ${record.record_id}`,
+        );
+    } else {
+      const attempt = await this.db
+        .selectFrom("attempts")
+        .select(["run_id", "task_id", "action_id", "outcome", "replacement_eligible"])
+        .where("attempt_id", "=", record.last_attempt_id)
+        .executeTakeFirst();
+      if (
+        !attempt ||
+        attempt.run_id !== record.run_id ||
+        attempt.task_id !== record.task_id ||
+        attempt.action_id !== record.source_action_id
+      )
+        throw new ProjectionIntegrityError(
+          `task exhaustion does not match attempt: ${record.record_id}`,
+        );
+      replaceable =
+        attempt.outcome === "infrastructure" &&
+        Number(attempt.replacement_eligible) > 0;
+    }
     await this.db
       .insertInto("task_exhaustions")
       .values({
         record_id: record.record_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         task_id: record.task_id,
+        source_action_id: record.source_action_id,
         last_attempt_id: record.last_attempt_id,
         attempt_count: record.attempt_count,
         reason: record.reason,
@@ -1344,7 +1513,36 @@ export class Projection {
         terminal_outcome: replaceable ? "infrastructure" : "invalid",
         selected_attempt_id: null,
       })
-      .where("campaign_id", "=", record.campaign_id)
+      .where("run_id", "=", record.run_id)
+      .where("task_id", "=", record.task_id)
+      .where("terminal_outcome", "is", null)
+      .executeTakeFirst();
+    if (Number(result.numUpdatedRows) !== 1)
+      throw new ProjectionIntegrityError(`task is already terminal: ${record.task_id}`);
+  }
+
+  private async applyTaskCancellation(record: TaskCancellation): Promise<void> {
+    const source = await this.db
+      .selectFrom("actions")
+      .select(["action_kind", "run_id", "intent_body"])
+      .where("action_id", "=", record.source_action_id)
+      .executeTakeFirst();
+    if (source?.action_kind !== "run.cancel" || source.run_id !== record.run_id)
+      throw new ProjectionIntegrityError(
+        `task cancellation has no matching Run cancellation: ${record.record_id}`,
+      );
+    const intent = JSON.parse(source.intent_body) as ActionIntent;
+    if (
+      typeof intent.payload.task_id === "string" &&
+      intent.payload.task_id !== record.task_id
+    )
+      throw new ProjectionIntegrityError(
+        `task cancellation scope mismatch: ${record.record_id}`,
+      );
+    const result = await this.db
+      .updateTable("tasks")
+      .set({ terminal_outcome: "cancelled", selected_attempt_id: null })
+      .where("run_id", "=", record.run_id)
       .where("task_id", "=", record.task_id)
       .where("terminal_outcome", "is", null)
       .executeTakeFirst();
@@ -1357,7 +1555,7 @@ export class Projection {
       .insertInto("budgets")
       .values({
         record_id: record.record_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         event_kind: record.event_kind,
         amount_microusd: record.amount_microusd,
         created_at: record.created_at,
@@ -1370,7 +1568,7 @@ export class Projection {
       .insertInto("endpoints")
       .values({
         action_id: record.action_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         endpoint_id: record.endpoint_id,
         desired_state: record.desired_state,
         observed_state: record.observed_state,
@@ -1387,7 +1585,7 @@ export class Projection {
       .insertInto("publications")
       .values({
         publication_id: record.publication_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         status: record.publication_state,
         catalog_digest: record.catalog_digest,
         body: body(record),
@@ -1401,17 +1599,17 @@ export class Projection {
   ): Promise<void> {
     const current = await this.db
       .selectFrom("publications")
-      .select(["campaign_id"])
+      .select(["run_id"])
       .where("publication_id", "=", record.publication_id)
       .executeTakeFirst();
     const previous = await this.db
       .selectFrom("publications")
-      .select(["campaign_id"])
+      .select(["run_id"])
       .where("publication_id", "=", record.superseded_publication_id)
       .executeTakeFirst();
     if (
-      current?.campaign_id !== record.campaign_id ||
-      previous?.campaign_id !== record.superseded_campaign_id
+      current?.run_id !== record.run_id ||
+      previous?.run_id !== record.superseded_run_id
     )
       throw new ProjectionIntegrityError(
         `publication supersession does not match publications: ${record.record_id}`,
@@ -1420,9 +1618,9 @@ export class Projection {
       .insertInto("publication_supersessions")
       .values({
         record_id: record.record_id,
-        campaign_id: record.campaign_id,
+        run_id: record.run_id,
         publication_id: record.publication_id,
-        superseded_campaign_id: record.superseded_campaign_id,
+        superseded_run_id: record.superseded_run_id,
         superseded_publication_id: record.superseded_publication_id,
         reason: record.reason,
         created_at: record.created_at,
@@ -1471,216 +1669,7 @@ export class Projection {
       .execute();
   }
 
-  private async verifyDispositionInvariants(
-    store: ImmutableObjectStore,
-  ): Promise<void> {
-    const dispositions = await this.db
-      .selectFrom("dispositions")
-      .selectAll()
-      .orderBy("created_at")
-      .orderBy("record_id")
-      .execute();
-    const batches = new Map<
-      string,
-      {
-        digest: string;
-        size: number;
-        campaignId: string;
-        taskId: string;
-        reasonCode: string;
-        reason: string;
-        actionIds: string[];
-        count: number;
-      }
-    >();
-    for (const row of dispositions) {
-      const record = JSON.parse(row.body) as ActionDisposition;
-      if (record.actor.role !== "operator")
-        throw new ProjectionIntegrityError(
-          `disposition actor is not an operator: ${record.record_id}`,
-        );
-      if (record.record_id !== deterministicId("disposition", record.action_id))
-        throw new ProjectionIntegrityError(
-          `disposition identity mismatch: ${record.record_id}`,
-        );
-      const action = await this.db
-        .selectFrom("actions")
-        .selectAll()
-        .where("action_id", "=", record.action_id)
-        .executeTakeFirst();
-      if (!action || action.campaign_id !== record.campaign_id)
-        throw new ProjectionIntegrityError(
-          `disposition action mismatch: ${record.record_id}`,
-        );
-      const task = await this.db
-        .selectFrom("tasks")
-        .select("task_id")
-        .where("campaign_id", "=", record.campaign_id)
-        .where("task_id", "=", record.task_id)
-        .executeTakeFirst();
-      if (!task)
-        throw new ProjectionIntegrityError(
-          `disposition task mismatch: ${record.record_id}`,
-        );
-      const intent = JSON.parse(action.intent_body) as ActionIntent;
-      const sourceReceipt = action.receipt_body
-        ? (JSON.parse(action.receipt_body) as ActionReceipt)
-        : null;
-      if (
-        action.action_kind !== "sandbox.exec" ||
-        intent.payload.task_id !== record.task_id ||
-        !sourceReceipt ||
-        sourceReceipt.record_id !== record.source_receipt_id ||
-        sha256(canonicalJson(sourceReceipt)) !== record.source_receipt_digest ||
-        sourceReceipt.outcome !== "completed" ||
-        sourceReceipt.observed_state !== "suppressed-sandbox-cleanup-ambiguous" ||
-        (sourceReceipt.error_code ?? null) !== null
-      )
-        throw new ProjectionIntegrityError(
-          `disposition source receipt mismatch: ${record.record_id}`,
-        );
-      const dispatch = await this.db
-        .selectFrom("dispatches")
-        .select("operation")
-        .where("action_id", "=", record.action_id)
-        .executeTakeFirst();
-      const advanced = await this.db
-        .selectFrom("advancements")
-        .select("action_id")
-        .where("action_id", "=", record.action_id)
-        .executeTakeFirst();
-      if (dispatch?.operation !== "execute" || !advanced)
-        throw new ProjectionIntegrityError(
-          `disposition action fence mismatch: ${record.record_id}`,
-        );
-      const createActionId = intent.payload.sandbox_create_action_id;
-      const resourceId = intent.payload.resource_id;
-      if (typeof createActionId !== "string" || typeof resourceId !== "string")
-        throw new ProjectionIntegrityError(
-          `disposition ownership is incomplete: ${record.record_id}`,
-        );
-      if (!historicalDispositionResourceMatches(sourceReceipt.resource_id, resourceId))
-        throw new ProjectionIntegrityError(
-          `disposition source resource mismatch: ${record.record_id}`,
-        );
-      const create = await this.db
-        .selectFrom("actions")
-        .selectAll()
-        .where("action_id", "=", createActionId)
-        .executeTakeFirst();
-      if (
-        !create ||
-        create.campaign_id !== record.campaign_id ||
-        create.action_kind !== "sandbox.create" ||
-        create.resource_id !== resourceId
-      )
-        throw new ProjectionIntegrityError(
-          `disposition create action mismatch: ${record.record_id}`,
-        );
-      const createIntent = JSON.parse(create.intent_body) as ActionIntent;
-      if (createIntent.payload.task_id !== record.task_id)
-        throw new ProjectionIntegrityError(
-          `disposition create task mismatch: ${record.record_id}`,
-        );
-      const closeRows = await this.db
-        .selectFrom("actions")
-        .selectAll()
-        .where("campaign_id", "=", record.campaign_id)
-        .where("action_kind", "=", "sandbox.close")
-        .where("receipt_body", "is not", null)
-        .execute();
-      const eligibleCloses: Array<{
-        actionId: string;
-        receipt: ActionReceipt;
-      }> = [];
-      for (const close of closeRows) {
-        const closeIntent = JSON.parse(close.intent_body) as ActionIntent;
-        const closeReceipt = JSON.parse(close.receipt_body as string) as ActionReceipt;
-        if (
-          closeIntent.payload.task_id !== record.task_id ||
-          closeIntent.payload.sandbox_create_action_id !== createActionId ||
-          closeIntent.payload.resource_id !== resourceId ||
-          closeReceipt.resource_id !== resourceId ||
-          closeReceipt.outcome !== "completed" ||
-          !terminalSandboxStates.has(closeReceipt.observed_state.toUpperCase())
-        )
-          continue;
-        const closeAdvanced = await this.db
-          .selectFrom("advancements")
-          .select("action_id")
-          .where("action_id", "=", close.action_id)
-          .executeTakeFirst();
-        if (closeAdvanced)
-          eligibleCloses.push({ actionId: close.action_id, receipt: closeReceipt });
-      }
-      eligibleCloses.sort(
-        (left, right) =>
-          left.receipt.created_at.localeCompare(right.receipt.created_at) ||
-          left.actionId.localeCompare(right.actionId),
-      );
-      const selectedClose = eligibleCloses[0];
-      if (
-        !selectedClose ||
-        selectedClose.actionId !== record.close_action_id ||
-        selectedClose.receipt.record_id !== record.close_receipt_id ||
-        sha256(canonicalJson(selectedClose.receipt)) !== record.close_receipt_digest
-      )
-        throw new ProjectionIntegrityError(
-          `disposition close proof mismatch: ${record.record_id}`,
-        );
-      const resultPath = sandboxActionResultPath(record.campaign_id, record.action_id);
-      const resultPrefix = resultPath.slice(0, -"/result.json".length);
-      if ((await store.list(resultPrefix)).some((entry) => entry.key === resultPath))
-        throw new ProjectionIntegrityError(
-          `disposition action has a durable result: ${record.record_id}`,
-        );
-      const batch = batches.get(record.batch_id);
-      if (
-        batch &&
-        (batch.digest !== record.batch_digest ||
-          batch.size !== record.batch_size ||
-          batch.campaignId !== record.campaign_id ||
-          batch.taskId !== record.task_id ||
-          batch.reasonCode !== record.reason_code ||
-          batch.reason !== record.reason)
-      )
-        throw new ProjectionIntegrityError(
-          `disposition batch conflict: ${record.batch_id}`,
-        );
-      batches.set(record.batch_id, {
-        digest: record.batch_digest,
-        size: record.batch_size,
-        campaignId: record.campaign_id,
-        taskId: record.task_id,
-        reasonCode: record.reason_code,
-        reason: record.reason,
-        actionIds: [...(batch?.actionIds ?? []), record.action_id],
-        count: (batch?.count ?? 0) + 1,
-      });
-    }
-    for (const [batchId, batch] of batches) {
-      if (batch.count > batch.size)
-        throw new ProjectionIntegrityError(
-          `disposition batch exceeds declared size: ${batchId}`,
-        );
-      if (
-        batch.count === batch.size &&
-        sha256(
-          canonicalJson({
-            action_ids: [...batch.actionIds].sort(),
-            reason_code: batch.reasonCode,
-            reason: batch.reason,
-          }),
-        ) !== batch.digest
-      )
-        throw new ProjectionIntegrityError(
-          `disposition batch digest mismatch: ${batchId}`,
-        );
-    }
-  }
-
-  private async verifyInvariants(store: ImmutableObjectStore): Promise<void> {
-    await this.verifyDispositionInvariants(store);
+  private async verifyInvariants(): Promise<void> {
     const profileRows = await this.db
       .selectFrom("profiles")
       .select(["profile_id", "profile_kind", "spec_body"])
@@ -1711,21 +1700,21 @@ export class Projection {
           JSON.parse(profile.spec_body) as { start_burst: number },
         ]),
     );
-    const grants = await this.db.selectFrom("sandbox_admissions").selectAll().execute();
+    const grants = await this.db.selectFrom("job_admissions").selectAll().execute();
     for (const grant of grants) {
       const profile = capacityProfiles.get(grant.capacity_profile_id);
       if (!profile)
         throw new ProjectionIntegrityError(
-          `Sandbox admission references missing capacity profile: ${grant.action_id}`,
+          `Job admission references missing capacity profile: ${grant.action_id}`,
         );
       if (grant.tokens_remaining > profile.start_burst)
         throw new ProjectionIntegrityError(
-          `Sandbox admission token state exceeds profile: ${grant.action_id}`,
+          `Job admission token state exceeds profile: ${grant.action_id}`,
         );
     }
     const grantsByRecord = new Map(
       grants.map((grant) => [
-        grant.body ? (JSON.parse(grant.body) as SandboxAdmissionGrant).record_id : "",
+        grant.body ? (JSON.parse(grant.body) as JobAdmissionGrant).record_id : "",
         grant,
       ]),
     );
@@ -1735,7 +1724,7 @@ export class Projection {
       const previous = grantsByRecord.get(grant.previous_grant_id);
       if (!previous || previous.namespace !== grant.namespace)
         throw new ProjectionIntegrityError(
-          `Sandbox admission predecessor is invalid: ${grant.action_id}`,
+          `Job admission predecessor is invalid: ${grant.action_id}`,
         );
       followers.set(
         grant.previous_grant_id,
@@ -1743,20 +1732,37 @@ export class Projection {
       );
     }
     if ([...followers.values()].some((count) => count > 1))
-      throw new ProjectionIntegrityError("Sandbox admission chain has a fork");
+      throw new ProjectionIntegrityError("Job admission chain has a fork");
     for (const namespace of new Set(grants.map((grant) => grant.namespace))) {
       const namespaceGrants = grants.filter((grant) => grant.namespace === namespace);
       const tips = namespaceGrants.filter((grant) => {
-        const record = JSON.parse(grant.body) as SandboxAdmissionGrant;
+        const record = JSON.parse(grant.body) as JobAdmissionGrant;
         return !followers.has(record.record_id);
       });
       if (tips.length !== 1)
         throw new ProjectionIntegrityError(
-          `Sandbox admission chain has ${tips.length} tips: ${namespace}`,
+          `Job admission chain has ${tips.length} tips: ${namespace}`,
+        );
+    }
+    const hardwareActions = await this.db
+      .selectFrom("actions")
+      .selectAll()
+      .where("action_kind", "in", [...hardwareActionKinds])
+      .execute();
+    const launchRuns = new Map(
+      hardwareActions
+        .filter((action) => action.action_kind === "job.launch")
+        .map((action) => [action.action_id, action.run_id]),
+    );
+    for (const action of hardwareActions) {
+      if (action.action_kind === "job.launch") continue;
+      if (launchRuns.get(jobLaunchActionId(action)) !== action.run_id)
+        throw new ProjectionIntegrityError(
+          `Job action has no launch action: ${action.action_id}`,
         );
     }
     const releases = await this.db
-      .selectFrom("sandbox_capacity_releases")
+      .selectFrom("job_capacity_releases")
       .selectAll()
       .execute();
     for (const release of releases) {
@@ -1767,65 +1773,75 @@ export class Projection {
         .executeTakeFirst();
       if (evidence?.kind !== "action.receipt")
         throw new ProjectionIntegrityError(
-          `Sandbox capacity release evidence is missing: ${release.action_id}`,
+          `Job capacity release evidence is missing: ${release.action_id}`,
         );
       const receipt = JSON.parse(evidence.body) as ActionReceipt;
       const grant = grantsByRecord.get(release.grant_id);
       if (
         !grant ||
         grant.action_id !== release.action_id ||
-        grant.campaign_id !== release.campaign_id
+        grant.run_id !== release.run_id
       )
         throw new ProjectionIntegrityError(
-          `Sandbox capacity release grant mismatch: ${release.action_id}`,
+          `Job capacity release grant mismatch: ${release.action_id}`,
         );
-      if (receipt.campaign_id !== release.campaign_id)
+      if (receipt.run_id !== release.run_id)
         throw new ProjectionIntegrityError(
-          `Sandbox capacity release evidence campaign mismatch: ${release.action_id}`,
+          `Job capacity release evidence run mismatch: ${release.action_id}`,
         );
-      if (release.release_reason === "create_failed") {
+      if (release.release_reason === "launch_failed") {
         if (
           receipt.action_id !== release.action_id ||
           receipt.resource_id !== null ||
           !["failed", "completed"].includes(receipt.outcome)
         )
           throw new ProjectionIntegrityError(
-            `Sandbox failed-create release proof is invalid: ${release.action_id}`,
+            `Job failed-launch release proof is invalid: ${release.action_id}`,
           );
-      } else {
-        const close = await this.db
+      } else if (release.release_reason === "launch_suppressed") {
+        if (
+          receipt.action_id !== release.action_id ||
+          receipt.resource_id !== null ||
+          receipt.outcome !== "completed" ||
+          !receipt.observed_state.startsWith("suppressed-")
+        )
+          throw new ProjectionIntegrityError(
+            `Job suppressed-launch release proof is invalid: ${release.action_id}`,
+          );
+      } else if (
+        receipt.outcome !== "completed" ||
+        !terminalJobStates.has(receipt.observed_state.toUpperCase())
+      )
+        throw new ProjectionIntegrityError(
+          `Job terminal release proof is invalid: ${release.action_id}`,
+        );
+      else {
+        const evidenceAction = await this.db
           .selectFrom("actions")
           .select(["action_kind", "intent_body"])
           .where("action_id", "=", receipt.action_id)
           .executeTakeFirst();
-        const closeIntent = close
-          ? (JSON.parse(close.intent_body) as ActionIntent)
+        const evidenceIntent = evidenceAction
+          ? (JSON.parse(evidenceAction.intent_body) as ActionIntent)
           : null;
         if (
-          close?.action_kind !== "sandbox.close" ||
-          closeIntent?.payload.sandbox_create_action_id !== release.action_id ||
-          receipt.outcome !== "completed" ||
-          !terminalSandboxStates.has(receipt.observed_state.toUpperCase())
+          !evidenceAction ||
+          !["job.observe", "job.cancel"].includes(evidenceAction.action_kind) ||
+          evidenceIntent?.payload.launch_action_id !== release.action_id
         )
           throw new ProjectionIntegrityError(
-            `Sandbox close release proof is invalid: ${release.action_id}`,
+            `Job terminal release action is invalid: ${release.action_id}`,
           );
       }
     }
 
-    const campaignRows = await this.db
-      .selectFrom("campaigns")
-      .select(["campaign_id", "ceiling_microusd"])
+    const runRows = await this.db
+      .selectFrom("runs")
+      .select(["run_id", "ceiling_microusd"])
       .execute();
     const budgetRows = await this.db
       .selectFrom("budgets")
-      .select([
-        "campaign_id",
-        "event_kind",
-        "amount_microusd",
-        "created_at",
-        "record_id",
-      ])
+      .select(["run_id", "event_kind", "amount_microusd", "created_at", "record_id"])
       .orderBy("created_at")
       .orderBy("record_id")
       .execute();
@@ -1833,16 +1849,16 @@ export class Projection {
       string,
       { ceiling: number; reserved: number; observed: number }
     >(
-      campaignRows.map((campaign) => [
-        campaign.campaign_id,
-        { ceiling: campaign.ceiling_microusd, reserved: 0, observed: 0 },
+      runRows.map((run) => [
+        run.run_id,
+        { ceiling: run.ceiling_microusd, reserved: 0, observed: 0 },
       ]),
     );
     for (const event of budgetRows) {
-      const state = budgetState.get(event.campaign_id);
+      const state = budgetState.get(event.run_id);
       if (!state)
         throw new ProjectionIntegrityError(
-          `budget event references missing campaign: ${event.campaign_id}`,
+          `budget event references missing run: ${event.run_id}`,
         );
       if (event.event_kind === "reserve") state.reserved += event.amount_microusd;
       else if (event.event_kind === "release") state.reserved -= event.amount_microusd;
@@ -1850,41 +1866,36 @@ export class Projection {
         state.observed = Math.max(state.observed, event.amount_microusd);
       if (state.reserved < 0)
         throw new ProjectionIntegrityError(
-          `budget release exceeds reservation: ${event.campaign_id}`,
+          `budget release exceeds reservation: ${event.run_id}`,
         );
-      budgetState.set(event.campaign_id, state);
+      budgetState.set(event.run_id, state);
     }
     const attemptCosts = await this.db
       .selectFrom("attempts")
-      .select(({ fn }) => [
-        "campaign_id",
-        fn.sum<number>("cost_microusd").as("observed"),
-      ])
-      .groupBy("campaign_id")
+      .select(({ fn }) => ["run_id", fn.sum<number>("cost_microusd").as("observed")])
+      .groupBy("run_id")
       .execute();
-    const attemptByCampaign = new Map(
-      attemptCosts.map((row) => [row.campaign_id, Number(row.observed ?? 0)]),
+    const attemptByRun = new Map(
+      attemptCosts.map((row) => [row.run_id, Number(row.observed ?? 0)]),
     );
-    for (const campaignId of attemptByCampaign.keys()) {
-      if (!budgetState.has(campaignId))
+    for (const runId of attemptByRun.keys()) {
+      if (!budgetState.has(runId))
+        throw new ProjectionIntegrityError(`attempt references missing run: ${runId}`);
+    }
+    const hardwareByRun = await this.hardwareObservedByRun();
+    for (const runId of hardwareByRun.keys()) {
+      if (!budgetState.has(runId))
         throw new ProjectionIntegrityError(
-          `attempt references missing campaign: ${campaignId}`,
+          `hardware receipt references missing run: ${runId}`,
         );
     }
-    const hardwareByCampaign = await this.hardwareObservedByCampaign();
-    for (const campaignId of hardwareByCampaign.keys()) {
-      if (!budgetState.has(campaignId))
-        throw new ProjectionIntegrityError(
-          `hardware receipt references missing campaign: ${campaignId}`,
-        );
-    }
-    for (const [campaignId, state] of budgetState) {
-      const attempts = attemptByCampaign.get(campaignId) ?? 0;
-      const hardware = hardwareByCampaign.get(campaignId) ?? 0;
+    for (const [runId, state] of budgetState) {
+      const attempts = attemptByRun.get(runId) ?? 0;
+      const hardware = hardwareByRun.get(runId) ?? 0;
       state.observed = Math.max(state.observed, attempts + hardware);
     }
     const overBudget = [...budgetState.entries()].find(
-      ([, state]) => Math.max(state.reserved, state.observed) > state.ceiling,
+      ([, state]) => state.reserved > state.ceiling,
     );
     if (overBudget)
       throw new ProjectionIntegrityError(`budget exceeds ceiling: ${overBudget[0]}`);
@@ -1934,34 +1945,6 @@ export class Projection {
     }));
   }
 
-  async pendingDispatchedSandboxCommandActions(
-    campaignId: string,
-    taskId?: string,
-    limit = 1_025,
-  ): Promise<ActionIntent[]> {
-    const rows = await this.db
-      .selectFrom("actions")
-      .innerJoin("dispatches", "dispatches.action_id", "actions.action_id")
-      .select("actions.intent_body")
-      .where("actions.campaign_id", "=", campaignId)
-      .where("actions.action_kind", "in", [
-        "sandbox.exec",
-        "sandbox.write",
-        "sandbox.read",
-      ])
-      .where("actions.receipt_body", "is", null)
-      .$if(taskId !== undefined, (query) =>
-        query.where(
-          sql<boolean>`json_extract(actions.intent_body, '$.payload.task_id') = ${taskId}`,
-        ),
-      )
-      .orderBy("actions.created_at")
-      .orderBy("actions.action_id")
-      .limit(limit)
-      .execute();
-    return rows.map((row) => JSON.parse(row.intent_body) as ActionIntent);
-  }
-
   async actionDispatch(actionId: string): Promise<Selectable<DispatchRow> | null> {
     return (
       (await this.db
@@ -1992,52 +1975,48 @@ export class Projection {
     );
   }
 
-  async sandboxAdmission(actionId: string): Promise<SandboxAdmissionGrant | null> {
+  async jobAdmission(actionId: string): Promise<JobAdmissionGrant | null> {
     const row = await this.db
-      .selectFrom("sandbox_admissions")
+      .selectFrom("job_admissions")
       .select("body")
       .where("action_id", "=", actionId)
       .executeTakeFirst();
-    return row ? (JSON.parse(row.body) as SandboxAdmissionGrant) : null;
+    return row ? (JSON.parse(row.body) as JobAdmissionGrant) : null;
   }
 
-  async sandboxCapacityRelease(
-    actionId: string,
-  ): Promise<SandboxCapacityRelease | null> {
+  async jobCapacityRelease(actionId: string): Promise<JobCapacityRelease | null> {
     const row = await this.db
-      .selectFrom("sandbox_capacity_releases")
+      .selectFrom("job_capacity_releases")
       .select("body")
       .where("action_id", "=", actionId)
       .executeTakeFirst();
-    return row ? (JSON.parse(row.body) as SandboxCapacityRelease) : null;
+    return row ? (JSON.parse(row.body) as JobCapacityRelease) : null;
   }
 
-  async activeSandboxAdmissions(namespace: string): Promise<SandboxAdmissionGrant[]> {
+  async activeJobAdmissions(namespace: string): Promise<JobAdmissionGrant[]> {
     const rows = await this.db
-      .selectFrom("sandbox_admissions")
+      .selectFrom("job_admissions")
       .leftJoin(
-        "sandbox_capacity_releases",
-        "sandbox_capacity_releases.action_id",
-        "sandbox_admissions.action_id",
+        "job_capacity_releases",
+        "job_capacity_releases.action_id",
+        "job_admissions.action_id",
       )
-      .select("sandbox_admissions.body")
-      .where("sandbox_admissions.namespace", "=", namespace)
-      .where("sandbox_capacity_releases.action_id", "is", null)
-      .orderBy("sandbox_admissions.created_at")
-      .orderBy("sandbox_admissions.action_id")
+      .select("job_admissions.body")
+      .where("job_admissions.namespace", "=", namespace)
+      .where("job_capacity_releases.action_id", "is", null)
+      .orderBy("job_admissions.created_at")
+      .orderBy("job_admissions.action_id")
       .execute();
-    return rows.map((row) => JSON.parse(row.body) as SandboxAdmissionGrant);
+    return rows.map((row) => JSON.parse(row.body) as JobAdmissionGrant);
   }
 
-  async latestSandboxAdmission(
-    namespace: string,
-  ): Promise<SandboxAdmissionGrant | null> {
+  async latestJobAdmission(namespace: string): Promise<JobAdmissionGrant | null> {
     const rows = await this.db
-      .selectFrom("sandbox_admissions")
+      .selectFrom("job_admissions")
       .select("body")
       .where("namespace", "=", namespace)
       .execute();
-    const grants = rows.map((row) => JSON.parse(row.body) as SandboxAdmissionGrant);
+    const grants = rows.map((row) => JSON.parse(row.body) as JobAdmissionGrant);
     if (grants.length === 0) return null;
     const predecessors = new Set(
       grants
@@ -2047,87 +2026,40 @@ export class Projection {
     const tips = grants.filter((grant) => !predecessors.has(grant.record_id));
     if (tips.length !== 1)
       throw new ProjectionIntegrityError(
-        `Sandbox admission chain has ${tips.length} tips: ${namespace}`,
+        `Job admission chain has ${tips.length} tips: ${namespace}`,
       );
-    return tips[0] as SandboxAdmissionGrant;
+    return tips[0] as JobAdmissionGrant;
   }
 
-  async dispatchedSandboxCreateActionIds(): Promise<Set<string>> {
-    const rows = await this.db
-      .selectFrom("actions")
-      .innerJoin("dispatches", "dispatches.action_id", "actions.action_id")
-      .select("actions.action_id")
-      .where("actions.action_kind", "=", "sandbox.create")
-      .execute();
-    return new Set(rows.map((row) => row.action_id));
-  }
-
-  async campaignPendingSandboxCreateCount(campaignId: string): Promise<number> {
+  async runRequest(runId: string): Promise<RunRequest | null> {
     const row = await this.db
-      .selectFrom("actions")
-      .select(({ fn }) => fn.countAll<number>().as("count"))
-      .where("campaign_id", "=", campaignId)
-      .where("action_kind", "=", "sandbox.create")
-      .where("receipt_body", "is", null)
-      .executeTakeFirstOrThrow();
-    return Number(row.count);
-  }
-
-  async campaignPendingSandboxCreate(campaignId: string): Promise<ActionIntent | null> {
-    const row = await this.db
-      .selectFrom("actions")
-      .select("intent_body")
-      .where("campaign_id", "=", campaignId)
-      .where("action_kind", "=", "sandbox.create")
-      .where("receipt_body", "is", null)
-      .orderBy("created_at")
-      .orderBy("action_id")
-      .executeTakeFirst();
-    return row ? (JSON.parse(row.intent_body) as ActionIntent) : null;
-  }
-
-  async pendingSandboxCreates(limit = 1_024): Promise<ActionIntent[]> {
-    const rows = await this.db
-      .selectFrom("actions")
-      .select("intent_body")
-      .where("action_kind", "=", "sandbox.create")
-      .where("receipt_body", "is", null)
-      .orderBy("created_at")
-      .orderBy("action_id")
-      .limit(limit)
-      .execute();
-    return rows.map((row) => JSON.parse(row.intent_body) as ActionIntent);
-  }
-
-  async campaignRequest(campaignId: string): Promise<CampaignRequest | null> {
-    const row = await this.db
-      .selectFrom("campaigns")
+      .selectFrom("runs")
       .select("request_body")
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .executeTakeFirst();
-    return row?.request_body ? (JSON.parse(row.request_body) as CampaignRequest) : null;
+    return row?.request_body ? (JSON.parse(row.request_body) as RunRequest) : null;
   }
 
-  async campaignIdForIdempotency(keyDigest: string): Promise<string | null> {
+  async runIdForIdempotency(keyDigest: string): Promise<string | null> {
     const rows = await this.db
-      .selectFrom("campaigns")
-      .select(["campaign_id", "request_body"])
+      .selectFrom("runs")
+      .select(["run_id", "request_body"])
       .execute();
     for (const row of rows) {
       if (!row.request_body) continue;
-      const request = JSON.parse(row.request_body) as CampaignRequest;
-      if (request.idempotency_key_digest === keyDigest) return row.campaign_id;
+      const request = JSON.parse(row.request_body) as RunRequest;
+      if (request.idempotency_key_digest === keyDigest) return row.run_id;
     }
     return null;
   }
 
-  async campaignLock(campaignId: string): Promise<CampaignLock | null> {
+  async runLock(runId: string): Promise<RunLock | null> {
     const row = await this.db
-      .selectFrom("campaigns")
+      .selectFrom("runs")
       .select("lock_body")
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .executeTakeFirst();
-    return row?.lock_body ? (JSON.parse(row.lock_body) as CampaignLock) : null;
+    return row?.lock_body ? (JSON.parse(row.lock_body) as RunLock) : null;
   }
 
   async budget(recordId: string): Promise<Selectable<BudgetRow> | null> {
@@ -2164,12 +2096,14 @@ export class Projection {
     );
   }
 
-  async campaignAttempts(campaignId: string): Promise<Selectable<AttemptRow>[]> {
+  async runAttempts(runId: string): Promise<Selectable<AttemptRow>[]> {
     return this.db
       .selectFrom("attempts")
       .selectAll()
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .orderBy("created_at")
+      .orderBy("task_id")
+      .orderBy("attempt_id")
       .execute();
   }
 
@@ -2183,14 +2117,12 @@ export class Projection {
     );
   }
 
-  async campaignPublication(
-    campaignId: string,
-  ): Promise<Selectable<PublicationRow> | null> {
+  async runPublication(runId: string): Promise<Selectable<PublicationRow> | null> {
     return (
       (await this.db
         .selectFrom("publications")
         .selectAll()
-        .where("campaign_id", "=", campaignId)
+        .where("run_id", "=", runId)
         .orderBy("created_at", "desc")
         .executeTakeFirst()) ?? null
     );
@@ -2216,25 +2148,22 @@ export class Projection {
     );
   }
 
-  async campaignPaused(campaignId: string): Promise<boolean> {
+  async runPaused(runId: string): Promise<boolean> {
     const lifecycle = await this.db
       .selectFrom("actions")
       .select(["action_kind"])
-      .where("campaign_id", "=", campaignId)
-      .where("action_kind", "in", ["campaign.pause", "campaign.resume"])
+      .where("run_id", "=", runId)
+      .where("action_kind", "in", ["run.pause", "run.resume"])
       .orderBy("created_at", "desc")
       .orderBy("action_id", "desc")
       .executeTakeFirst();
-    return lifecycle?.action_kind === "campaign.pause";
+    return lifecycle?.action_kind === "run.pause";
   }
 
-  async launchActionStillRunning(
-    campaignId: string,
-    actionId: string,
-  ): Promise<boolean> {
-    const actions = await this.campaignActions(campaignId);
+  async launchActionStillRunning(runId: string, actionId: string): Promise<boolean> {
+    const actions = await this.runActions(runId);
     const launch = actions.find((action) => action.action_id === actionId);
-    if (!launch || launch.action_kind !== "job.launch") return false;
+    if (launch?.action_kind !== "job.launch") return false;
     return launchStillRunning(launch, actions);
   }
 
@@ -2242,10 +2171,10 @@ export class Projection {
    * Open tasks that were assigned to an execution Job that failed or stopped
    * before those tasks sealed, and that are not on a still-running Job.
    */
-  async abandonedUnresolvedTaskIds(campaignId: string): Promise<string[]> {
-    const actions = await this.campaignActions(campaignId);
+  async abandonedUnresolvedTaskIds(runId: string): Promise<string[]> {
+    const actions = await this.runActions(runId);
     const open = new Set(
-      (await this.tasks(campaignId))
+      (await this.tasks(runId))
         .filter((task) => !task.terminal_outcome)
         .map((task) => task.task_id),
     );
@@ -2271,82 +2200,144 @@ export class Projection {
   }
 
   async taskExhaustion(
-    campaignId: string,
+    runId: string,
     taskId: string,
   ): Promise<Selectable<ExhaustionRow> | null> {
     return (
       (await this.db
         .selectFrom("task_exhaustions")
         .selectAll()
-        .where("campaign_id", "=", campaignId)
+        .where("run_id", "=", runId)
         .where("task_id", "=", taskId)
         .executeTakeFirst()) ?? null
     );
   }
 
-  async campaigns(limit = 50, offset = 0): Promise<CampaignView[]> {
+  async runs(limit = 50, offset = 0): Promise<RunView[]> {
     const rows = await this.db
-      .selectFrom("campaigns")
+      .selectFrom("runs")
       .selectAll()
       .orderBy("created_at", "desc")
-      .orderBy("campaign_id", "desc")
+      .orderBy("run_id", "desc")
       .limit(limit)
       .offset(offset)
       .execute();
-    return Promise.all(rows.map((row) => this.campaignView(row)));
+    return Promise.all(rows.map((row) => this.runView(row)));
   }
 
-  async campaign(campaignId: string): Promise<CampaignView | null> {
-    const row = await this.db
-      .selectFrom("campaigns")
+  /**
+   * Returns only Runs that can still require reconciliation.
+   *
+   * Completed history is excluded before the more expensive derived Run views
+   * are built. The final status filter handles invalid or cancelled candidates.
+   */
+  async activeRuns(): Promise<RunView[]> {
+    const rows = await this.db
+      .selectFrom("runs")
       .selectAll()
-      .where("campaign_id", "=", campaignId)
-      .executeTakeFirst();
-    return row ? this.campaignView(row) : null;
+      .where(
+        sql<boolean>`EXISTS (
+          SELECT 1 FROM tasks
+          WHERE tasks.run_id = runs.run_id
+            AND tasks.terminal_outcome IS NULL
+        ) OR EXISTS (
+          SELECT 1 FROM actions
+          WHERE actions.run_id = runs.run_id
+            AND actions.receipt_body IS NULL
+        ) OR EXISTS (
+          SELECT 1 FROM actions
+          LEFT JOIN advancements
+            ON advancements.action_id = actions.action_id
+          WHERE actions.run_id = runs.run_id
+            AND actions.receipt_body IS NOT NULL
+            AND advancements.action_id IS NULL
+        ) OR EXISTS (
+          SELECT 1 FROM endpoints
+          WHERE endpoints.run_id = runs.run_id
+            AND endpoints.cleanup_verified = 0
+        ) OR (
+          EXISTS (SELECT 1 FROM tasks WHERE tasks.run_id = runs.run_id)
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks
+            WHERE tasks.run_id = runs.run_id
+              AND tasks.terminal_outcome IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM task_exhaustions
+            WHERE task_exhaustions.run_id = runs.run_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM publications
+            WHERE publications.run_id = runs.run_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM actions
+            WHERE actions.run_id = runs.run_id
+              AND actions.action_kind = 'run.cancel'
+          )
+        )`,
+      )
+      .orderBy("created_at")
+      .orderBy("run_id")
+      .execute();
+    const views = await Promise.all(rows.map((row) => this.runView(row)));
+    return views.filter(
+      (run) =>
+        !["cancelled", "completed", "completed-invalid", "failed"].includes(run.status),
+    );
   }
 
-  private async campaignView(row: Selectable<CampaignRow>): Promise<CampaignView> {
+  async run(runId: string): Promise<RunView | null> {
+    const row = await this.db
+      .selectFrom("runs")
+      .selectAll()
+      .where("run_id", "=", runId)
+      .executeTakeFirst();
+    return row ? this.runView(row) : null;
+  }
+
+  private async runView(row: Selectable<RunRow>): Promise<RunView> {
     const taskCounts = await this.db
       .selectFrom("tasks")
       .select(({ fn }) => [
         fn.countAll<number>().as("total"),
         fn.count<number>("terminal_outcome").as("terminal"),
       ])
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .executeTakeFirstOrThrow();
     const successCounts = await this.db
       .selectFrom("tasks")
       .select(({ fn }) => fn.countAll<number>().as("successful"))
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .where("terminal_outcome", "=", "complete")
       .executeTakeFirstOrThrow();
     const actionCounts = await this.db
       .selectFrom("actions")
       .select(({ fn }) => fn.countAll<number>().as("pending"))
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .where("receipt_body", "is", null)
       .executeTakeFirstOrThrow();
     const budgets = await this.db
       .selectFrom("budgets")
       .selectAll()
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .orderBy("created_at", "desc")
       .execute();
     const attemptCost = await this.db
       .selectFrom("attempts")
       .select(({ fn }) => fn.sum<number>("cost_microusd").as("observed"))
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .executeTakeFirstOrThrow();
     const publication = await this.db
       .selectFrom("publications")
       .select("status")
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .orderBy("created_at", "desc")
       .executeTakeFirst();
     const endpointRows = await this.db
       .selectFrom("endpoints")
       .selectAll()
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .orderBy("created_at", "desc")
       .orderBy("action_id", "desc")
       .execute();
@@ -2361,12 +2352,12 @@ export class Projection {
     const taskRows = await this.db
       .selectFrom("tasks")
       .selectAll()
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .execute();
     const attemptRows = await this.db
       .selectFrom("attempts")
       .select(["attempt_id", "body"])
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .execute();
     const attemptsById = new Map(
       attemptRows.map((attempt) => [
@@ -2374,7 +2365,7 @@ export class Projection {
         JSON.parse(attempt.body) as AttemptReceipt,
       ]),
     );
-    const lock = row.lock_body ? (JSON.parse(row.lock_body) as CampaignLock) : null;
+    const lock = row.lock_body ? (JSON.parse(row.lock_body) as RunLock) : null;
     const required = lock ? requiredPositiveMetrics(lock) : [];
     const selected = taskRows.flatMap((task) => {
       const attempt = task.selected_attempt_id
@@ -2389,16 +2380,45 @@ export class Projection {
     const exhaustionCount = await this.db
       .selectFrom("task_exhaustions")
       .select(({ fn }) => fn.countAll<number>().as("count"))
-      .where("campaign_id", "=", row.campaign_id)
+      .where("run_id", "=", row.run_id)
       .executeTakeFirstOrThrow();
     const exhausted = Number(exhaustionCount.count);
     const total = Number(taskCounts.total);
     const terminal = Number(taskCounts.terminal);
     const successful = Number(successCounts.successful);
     const pending = Number(actionCounts.pending);
-    const cancelled = await this.hasCampaignAction(row.campaign_id, "campaign.cancel");
-    const paused = await this.campaignPaused(row.campaign_id);
-    const replacement = await this.replacementProgress(row.campaign_id);
+    const cancellationRows = await this.db
+      .selectFrom("actions")
+      .select("intent_body")
+      .where("run_id", "=", row.run_id)
+      .where("action_kind", "=", "run.cancel")
+      .execute();
+    const cancellations = cancellationRows.map(
+      (action) => JSON.parse(action.intent_body) as ActionIntent,
+    );
+    const globalCancellation = cancellations.some(
+      (action) => typeof action.payload.task_id !== "string",
+    );
+    const scopedCancellationTargets = new Set(
+      cancellations.flatMap((action) =>
+        typeof action.payload.task_id === "string" ? [action.payload.task_id] : [],
+      ),
+    );
+    const scopedCancellationPending = taskRows.some(
+      (task) =>
+        scopedCancellationTargets.has(task.task_id) && task.terminal_outcome === null,
+    );
+    const allTasksCancelled =
+      terminal === total &&
+      total > 0 &&
+      taskRows.every((task) => task.terminal_outcome === "cancelled");
+    const cancellationPending =
+      cancellations.length > 0 &&
+      ((globalCancellation && (terminal < total || pending > 0)) ||
+        scopedCancellationPending ||
+        (allTasksCancelled && pending > 0));
+    const paused = await this.runPaused(row.run_id);
+    const replacement = await this.replacementProgress(row.run_id);
     const reserved = budgets.reduce(
       (sum, item) =>
         item.event_kind === "reserve"
@@ -2410,13 +2430,22 @@ export class Projection {
     );
     const observed = Math.max(
       Number(attemptCost.observed ?? 0) +
-        (await this.hardwareObservedMicrousd(row.campaign_id)),
+        (await this.hardwareObservedMicrousd(row.run_id)),
       budgets
         .filter((item) => item.event_kind === "reconcile")
         .reduce((sum, item) => Math.max(sum, item.amount_microusd), 0),
     );
+    const budgetExceeded = observed > row.ceiling_microusd;
     let status = "queued";
-    if (cancelled) status = "cancelled";
+    if (
+      (globalCancellation || allTasksCancelled) &&
+      terminal === total &&
+      total > 0 &&
+      pending === 0
+    )
+      status = "cancelled";
+    else if (cancellationPending) status = "cancelling";
+    else if (budgetExceeded) status = "budget-exceeded";
     else if (terminal === total && total > 0 && exhausted > 0) status = "failed";
     else if (terminal === total && total > 0) {
       if (admissible !== total || invalidSelected > 0) status = "completed-invalid";
@@ -2428,12 +2457,13 @@ export class Projection {
     } else if (paused) status = "paused";
     else if (pending > 0 || terminal > 0) status = "active";
     return {
-      campaign_id: row.campaign_id,
+      run_id: row.run_id,
       created_at: row.created_at,
       status,
       ceiling_microusd: row.ceiling_microusd,
       reserved_microusd: reserved,
       observed_microusd: observed,
+      budget_exceeded: budgetExceeded,
       total_tasks: total,
       terminal_tasks: terminal,
       admissible_tasks: admissible,
@@ -2445,33 +2475,37 @@ export class Projection {
       replacement_recorded_tasks: replacement.recorded,
       publication_status: publication?.status ?? null,
       cleanup_pending: cleanupPending,
-      cancellation_requested: cancelled,
+      cancellation_requested: cancellations.length > 0,
       paused,
     };
   }
 
   private async replacementProgress(
-    campaignId: string,
+    runId: string,
   ): Promise<{ assigned: number; recorded: number }> {
-    const actions = await this.campaignActions(campaignId);
-    const runningLaunchIds: string[] = [];
+    const replacements = await this.db
+      .selectFrom("jobs")
+      .select([
+        "launch_action_id",
+        "assigned_task_ids_body",
+        "observed_state",
+        "receipt_body",
+      ])
+      .where("run_id", "=", runId)
+      .where("is_replacement", "=", 1)
+      .execute();
+    const running = replacements.filter(projectedJobStillRunning);
+    const runningLaunchIds = running.map((job) => job.launch_action_id);
     const assigned = new Set<string>();
-    for (const action of actions) {
-      if (action.action_kind !== "job.launch") continue;
-      if (action.observed_state?.startsWith("suppressed-")) continue;
-      const intent = JSON.parse(action.intent_body) as ActionIntent;
-      if (intent.payload.worker_role === "preparation") continue;
-      if (!launchStillRunning(action, actions)) continue;
-      if (!Array.isArray(intent.payload.task_ids)) continue;
-      runningLaunchIds.push(action.action_id);
-      for (const taskId of intent.payload.task_ids) assigned.add(taskId);
-    }
+    for (const job of running)
+      for (const taskId of JSON.parse(job.assigned_task_ids_body) as string[])
+        assigned.add(taskId);
     if (assigned.size === 0 || runningLaunchIds.length === 0)
       return { assigned: 0, recorded: 0 };
     const recordedRows = await this.db
       .selectFrom("attempts")
       .select("task_id")
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .where("action_id", "in", runningLaunchIds)
       .execute();
     return {
@@ -2481,14 +2515,14 @@ export class Projection {
   }
 
   async tasks(
-    campaignId: string,
+    runId: string,
     limit?: number,
     offset = 0,
   ): Promise<Selectable<TaskRow>[]> {
     const query = this.db
       .selectFrom("tasks")
       .selectAll()
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .orderBy("task_id");
     return limit === undefined
       ? query.execute()
@@ -2496,7 +2530,7 @@ export class Projection {
   }
 
   async task(
-    campaignId: string,
+    runId: string,
     taskId: string,
   ): Promise<{
     task: Selectable<TaskRow>;
@@ -2505,14 +2539,14 @@ export class Projection {
     const task = await this.db
       .selectFrom("tasks")
       .selectAll()
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .where("task_id", "=", taskId)
       .executeTakeFirst();
     if (!task) return null;
     const attempts = await this.db
       .selectFrom("attempts")
       .selectAll()
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .where("task_id", "=", taskId)
       .orderBy("created_at")
       .execute();
@@ -2525,88 +2559,6 @@ export class Projection {
     };
   }
 
-  async actionDisposition(actionId: string): Promise<ActionDisposition | null> {
-    const row = await this.db
-      .selectFrom("dispositions")
-      .select("body")
-      .where("action_id", "=", actionId)
-      .executeTakeFirst();
-    return row ? (JSON.parse(row.body) as ActionDisposition) : null;
-  }
-
-  async actionDispositionsByBatch(batchId: string): Promise<ActionDisposition[]> {
-    const rows = await this.db
-      .selectFrom("dispositions")
-      .select("body")
-      .where("batch_id", "=", batchId)
-      .orderBy("action_id")
-      .execute();
-    return rows.map((row) => JSON.parse(row.body) as ActionDisposition);
-  }
-
-  async actionDispositionViews(
-    campaignId: string,
-    taskId: string,
-    limit = 50,
-    offset = 0,
-  ): Promise<ActionDispositionView[]> {
-    const rows = await this.db
-      .selectFrom("dispositions")
-      .innerJoin("actions", "actions.action_id", "dispositions.action_id")
-      .select([
-        "dispositions.action_id",
-        "dispositions.campaign_id",
-        "dispositions.task_id",
-        "dispositions.record_id",
-        "dispositions.effective_outcome",
-        "dispositions.effective_observed_state",
-        "dispositions.effective_error_code",
-        "dispositions.reason_code",
-        "dispositions.batch_id",
-        "dispositions.batch_size",
-        "dispositions.created_at",
-        "dispositions.body",
-        "actions.outcome",
-        "actions.observed_state",
-      ])
-      .where("dispositions.campaign_id", "=", campaignId)
-      .where("dispositions.task_id", "=", taskId)
-      .orderBy("dispositions.created_at")
-      .orderBy("dispositions.action_id")
-      .limit(limit)
-      .offset(offset)
-      .execute();
-    return rows.map((row) => {
-      const disposition = JSON.parse(row.body) as ActionDisposition;
-      return {
-        action_id: row.action_id,
-        campaign_id: row.campaign_id,
-        task_id: row.task_id,
-        recorded_outcome: row.outcome ?? "unknown",
-        recorded_observed_state: row.observed_state ?? "unknown",
-        effective_outcome: row.effective_outcome,
-        effective_observed_state: row.effective_observed_state,
-        effective_error_code: row.effective_error_code,
-        reason_code: row.reason_code,
-        corrected_at: row.created_at,
-        actor_role: disposition.actor.role,
-        disposition_record_id: row.record_id,
-        batch_id: row.batch_id,
-        batch_size: row.batch_size,
-      };
-    });
-  }
-
-  async sandboxLifecycleActions(): Promise<Selectable<ActionRow>[]> {
-    return this.db
-      .selectFrom("actions")
-      .selectAll()
-      .where("action_kind", "in", ["sandbox.create", "sandbox.close"])
-      .orderBy("created_at", "desc")
-      .orderBy("action_id", "desc")
-      .execute();
-  }
-
   async actions(limit = 100): Promise<Selectable<ActionRow>[]> {
     return this.db
       .selectFrom("actions")
@@ -2617,25 +2569,25 @@ export class Projection {
       .execute();
   }
 
-  async campaignActions(campaignId: string): Promise<Selectable<ActionRow>[]> {
+  async runActions(runId: string): Promise<Selectable<ActionRow>[]> {
     return this.db
       .selectFrom("actions")
       .selectAll()
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .orderBy("created_at", "desc")
       .orderBy("action_id", "desc")
       .execute();
   }
 
   async retryActionForAttempt(
-    campaignId: string,
+    runId: string,
     priorAttemptId: string,
   ): Promise<Selectable<ActionRow> | null> {
     return (
       (await this.db
         .selectFrom("actions")
         .selectAll()
-        .where("campaign_id", "=", campaignId)
+        .where("run_id", "=", runId)
         .where("action_kind", "=", "job.launch")
         .where(
           sql<boolean>`json_extract(intent_body, '$.payload.prior_attempt_id') = ${priorAttemptId}`,
@@ -2646,11 +2598,11 @@ export class Projection {
     );
   }
 
-  async hasCampaignAction(campaignId: string, actionKind: string): Promise<boolean> {
+  async hasRunAction(runId: string, actionKind: string): Promise<boolean> {
     const row = await this.db
       .selectFrom("actions")
       .select("action_id")
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .where("action_kind", "=", actionKind)
       .limit(1)
       .executeTakeFirst();
@@ -2660,7 +2612,7 @@ export class Projection {
   private collapseHardwareRows(rows: Selectable<ActionRow>[]): Selectable<ActionRow>[] {
     const latest = new Map<string, Selectable<ActionRow>>();
     for (const row of rows) {
-      const key = `${row.campaign_id}:${jobIdentity(row)}`;
+      const key = `${row.run_id}:${jobIdentity(row)}`;
       const existing = latest.get(key);
       if (!existing) {
         latest.set(key, row);
@@ -2672,7 +2624,7 @@ export class Projection {
     return [...latest.values()];
   }
 
-  private async hardwareObservedByCampaign(): Promise<Map<string, number>> {
+  private async hardwareObservedByRun(): Promise<Map<string, number>> {
     const rows = await this.db
       .selectFrom("actions")
       .selectAll()
@@ -2682,17 +2634,17 @@ export class Projection {
       .execute();
     const sums = new Map<string, number>();
     for (const row of this.collapseHardwareRows(rows)) {
-      const current = sums.get(row.campaign_id) ?? 0;
-      sums.set(row.campaign_id, current + receiptCostMicrousd(row));
+      const current = sums.get(row.run_id) ?? 0;
+      sums.set(row.run_id, current + receiptCostMicrousd(row));
     }
     return sums;
   }
 
-  private async hardwareObservedMicrousd(campaignId: string): Promise<number> {
+  private async hardwareObservedMicrousd(runId: string): Promise<number> {
     const rows = await this.db
       .selectFrom("actions")
       .selectAll()
-      .where("campaign_id", "=", campaignId)
+      .where("run_id", "=", runId)
       .where("action_kind", "in", [...hardwareActionKinds])
       .orderBy("created_at", "desc")
       .orderBy("action_id", "desc")
@@ -2704,43 +2656,36 @@ export class Projection {
   }
 
   /**
-   * Returns the latest row per HF Job. In-flight observe/cancel intents have no
-   * receipt `resource_id` yet, so identity comes from the intent payload. A
-   * pending poll does not replace the last receipt-backed observation.
-   * `cost_microusd` is the locked hardware cost on that latest receipt.
+   * Returns the materialized latest row per HF Job.
+   *
+   * Global pages are bounded in SQLite before rows are loaded. A Run-scoped
+   * query intentionally returns every projected Job for stable detail views.
    */
   async jobs(
-    limit = 100,
+    limit: number | null = 100,
     offset = 0,
-    campaignId?: string,
+    runId?: string,
   ): Promise<
-    Array<Selectable<ActionRow> & { cost_microusd: number; assigned_tasks: number }>
-  > {
-    let query = this.db
-      .selectFrom("actions")
-      .selectAll()
-      .where("action_kind", "in", ["job.launch", "job.observe", "job.cancel"]);
-    if (campaignId) query = query.where("campaign_id", "=", campaignId);
-    const rows = await query
-      .orderBy("created_at", "desc")
-      .orderBy("action_id", "desc")
-      .execute();
-    const latest = new Map<string, Selectable<ActionRow>>();
-    for (const row of rows) {
-      const key = jobIdentity(row);
-      const existing = latest.get(key);
-      if (!existing) {
-        latest.set(key, row);
-        continue;
+    Array<
+      Selectable<ActionRow> & {
+        launch_action_id: string;
+        cost_microusd: number;
+        assigned_tasks: number;
       }
-      if (existing.receipt_body === null && row.receipt_body !== null)
-        latest.set(key, row);
-    }
-    return [...latest.values()].slice(offset, offset + limit).map((row) => ({
-      ...row,
-      cost_microusd: receiptCostMicrousd(row),
-      assigned_tasks: assignedTasksFromIntent(row.intent_body),
-    }));
+    >
+  > {
+    let query = this.db.selectFrom("jobs").selectAll();
+    if (runId) query = query.where("run_id", "=", runId);
+    const ordered = query.orderBy("created_at", "desc").orderBy("action_id", "desc");
+    const rows = await (limit === null
+      ? offset === 0
+        ? ordered
+        : ordered.limit(-1).offset(offset)
+      : ordered.limit(limit).offset(offset)
+    ).execute();
+    return rows.map(
+      ({ assigned_task_ids_body: _taskIds, is_replacement: _retry, ...row }) => row,
+    );
   }
 
   async endpoints(limit = 100, offset = 0): Promise<Selectable<EndpointRow>[]> {
@@ -2865,68 +2810,17 @@ export class Projection {
   }
 
   async audit(cursor: string | null, limit = 100): Promise<ControlEvent[]> {
-    let query = this.db.selectFrom("objects").selectAll();
+    let query = this.db
+      .selectFrom("objects")
+      .selectAll()
+      .select(sql<number>`rowid`.as("event_order"));
     if (cursor) {
       const decoded = decodeEventCursor(cursor);
-      query = query.where((expression) =>
-        expression.or([
-          expression("created_at", ">", decoded.occurred_at),
-          expression.and([
-            expression("created_at", "=", decoded.occurred_at),
-            expression("key", ">", decoded.key),
-          ]),
-        ]),
-      );
+      if (decoded.epoch === this.eventEpoch)
+        query = query.where(sql<boolean>`rowid > ${decoded.order}`);
     }
-    const rows = await query
-      .orderBy("created_at")
-      .orderBy("key")
-      .limit(limit)
-      .execute();
-    const dispositionActionIds = rows
-      .filter((row) => row.kind === "action.disposition")
-      .map((row) => (JSON.parse(row.body) as ActionDisposition).action_id);
-    const recordedActions =
-      dispositionActionIds.length > 0
-        ? await this.db
-            .selectFrom("actions")
-            .select(["action_id", "outcome", "observed_state"])
-            .where("action_id", "in", dispositionActionIds)
-            .execute()
-        : [];
-    const recordedByAction = new Map(
-      recordedActions.map((action) => [action.action_id, action]),
-    );
-    return rows.map((row) => {
-      const data: Record<string, unknown> = {
-        key: row.key,
-        digest: row.digest,
-        record_id: row.record_id,
-      };
-      if (row.kind === "action.disposition") {
-        const disposition = JSON.parse(row.body) as ActionDisposition;
-        const recorded = recordedByAction.get(disposition.action_id);
-        Object.assign(data, {
-          campaign_id: disposition.campaign_id,
-          task_id: disposition.task_id,
-          action_id: disposition.action_id,
-          batch_id: disposition.batch_id,
-          corrected: true,
-          recorded_outcome: recorded?.outcome ?? "unknown",
-          recorded_observed_state: recorded?.observed_state ?? "unknown",
-          effective_outcome: disposition.effective_outcome,
-          effective_observed_state: disposition.effective_observed_state,
-          effective_error_code: disposition.effective_error_code,
-          reason_code: disposition.reason_code,
-        });
-      }
-      return {
-        id: eventCursor(row.created_at, row.key),
-        type: row.kind,
-        occurred_at: row.created_at,
-        data,
-      };
-    });
+    const rows = await query.orderBy(sql`rowid`).limit(limit).execute();
+    return rows.map((row) => controlEvent(row, this.eventEpoch));
   }
 
   async close(): Promise<void> {

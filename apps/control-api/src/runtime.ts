@@ -14,7 +14,6 @@ import {
   attestInferenceToken,
   HuggingFaceActions,
   HuggingFaceBucketStore,
-  type HuggingFaceSandboxGateway,
   NoopActions,
 } from "@harbor-hf/hf-adapters";
 import { AuthenticationService, AuthStore } from "./auth.js";
@@ -26,10 +25,10 @@ export interface Runtime {
   store: ImmutableObjectStore;
   service: ControlService;
   auth: AuthenticationService;
-  sandboxes: HuggingFaceSandboxGateway | null;
   reconciler: Reconciler;
+  readonly ready: boolean;
   initialize(): Promise<void>;
-  start(): void;
+  start(onReconcilerError?: (error: unknown) => void): void;
   close(): Promise<void>;
 }
 
@@ -68,20 +67,25 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
   const publisher = new ResultPublisher(store, projection, service);
   const reconciler = new Reconciler(service, projection, external, publisher, {
     interval_ms: config.reconcile_interval_ms,
+    sync_interval_ms: config.sync_interval_ms,
     observation_interval_ms: config.observe_interval_ms,
     worker_receipt_grace_ms: config.worker_receipt_grace_ms,
     batch_size: 16,
   });
   const abort = new AbortController();
+  let initializationReady = false;
   return {
     config,
     projection,
     store,
     service,
     auth,
-    sandboxes: hfActions?.sandboxes ?? null,
     reconciler,
+    get ready() {
+      return initializationReady && projection.system().ready;
+    },
     async initialize() {
+      initializationReady = false;
       if (config.hf_inference_token)
         await attestInferenceToken({ accessToken: config.hf_inference_token });
       await auth.initialize();
@@ -89,7 +93,10 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
       await service.initialize(profiles);
       if (config.write_mode !== "disabled") {
         if (!service.capacityProfileOrNull())
-          await service.setMaxActiveSandboxes(config.max_active_sandboxes);
+          await service.setMaxActiveJobs(
+            config.max_active_jobs,
+            `capacity-bootstrap-${config.max_active_jobs}`,
+          );
         service.requireCapacityProfile();
       }
       if (
@@ -108,11 +115,14 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
         };
         await service.append(acl);
       }
+      initializationReady = true;
     },
-    start() {
-      if (config.write_mode !== "disabled") reconciler.start(abort.signal);
+    start(onReconcilerError?: (error: unknown) => void) {
+      if (config.write_mode !== "disabled")
+        reconciler.start(abort.signal, onReconcilerError);
     },
     async close() {
+      initializationReady = false;
       abort.abort();
       await reconciler.stop();
       authStore.close();

@@ -11,7 +11,7 @@ from huggingface_hub import CommitOperationAdd, HfApi
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel, ConfigDict, Field
 
-from harbor_hf.control import CampaignStoreApi
+from harbor_hf.control import RunStoreApi
 from harbor_hf.results import (
     CatalogDecision,
     CatalogRow,
@@ -31,7 +31,7 @@ from harbor_hf.results import (
     read_index_file,
 )
 
-DatasetApi = CampaignStoreApi
+DatasetApi = RunStoreApi
 
 _MAX_COMMIT_ATTEMPTS = 8
 _MAX_REGULAR_BLOB_BYTES = 5 * 1024 * 1024
@@ -73,7 +73,7 @@ class ResultReceipt(FrozenModel):
         "harbor-hf/result-publication/v1"
     )
     publication_id: str
-    run_id: str
+    execution_id: str
     source_checksum: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     files: dict[str, str]
 
@@ -116,14 +116,14 @@ class HubDatasetPublisher:
         *,
         publisher_id: str,
         leases: PublisherLeaseStore,
-        api: CampaignStoreApi | None = None,
+        api: RunStoreApi | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if not publisher_id:
             raise ValueError("publisher ID is required")
         self.publisher_id = publisher_id
         self.leases = leases
-        self.api = api or cast(CampaignStoreApi, HfApi())
+        self.api = api or cast(RunStoreApi, HfApi())
         self.clock = clock
 
     def publish(
@@ -202,7 +202,8 @@ class HubDatasetPublisher:
                     dataset,
                     operations,
                     commit_message=(
-                        f"feat: publish results {publication.tables.runs[0].run_id}"
+                        "feat: publish results "
+                        f"{publication.tables.executions[0].execution_id}"
                     ),
                     repo_type="dataset",
                     revision="main",
@@ -227,7 +228,7 @@ class HubDatasetPublisher:
         if (
             observed.schema_version != expected.schema_version
             or observed.publication_id != expected.publication_id
-            or observed.run_id != expected.run_id
+            or observed.execution_id != expected.execution_id
             or observed.source_checksum != expected.source_checksum
             or observed.files != expected.files
         ):
@@ -320,7 +321,9 @@ class HubDatasetPublisher:
                 response = self.api.create_commit(
                     index_dataset,
                     operations,
-                    commit_message=f"feat: index result {tables.runs[0].run_id}",
+                    commit_message=(
+                        f"feat: index result {tables.executions[0].execution_id}"
+                    ),
                     repo_type="dataset",
                     revision="main",
                     parent_commit=head,
@@ -390,7 +393,7 @@ class HubDatasetPublisher:
                     "canonical catalog snapshot is required before publication"
                 )
             existing = []
-        by_run = {item.run_id: item for item in existing}
+        by_run = {item.execution_id: item for item in existing}
         withdrawn = (
             scope == "primary"
             and self._latest_catalog_decision(dataset, revision, row.publication_id)
@@ -453,13 +456,13 @@ class HubDatasetPublisher:
         if decision.action == "promote" and target.publication_role != "final":
             raise DatasetPublicationError("only final publications can be promoted")
         primary = {
-            row.run_id: row
+            row.execution_id: row
             for row in self._read_catalog_window(dataset, revision, scope="primary")
         }
         if decision.action == "withdraw":
             primary = {
-                run_id: row
-                for run_id, row in primary.items()
+                execution_id: row
+                for execution_id, row in primary.items()
                 if row.publication_id != decision.publication_id
             }
         else:
@@ -632,13 +635,13 @@ def _replace_active_run[Row: GlobalIndexRow | CatalogRow](
     existing: list[Row], row: Row
 ) -> dict[str, Row]:
     by_run = {
-        item.run_id: item
+        item.execution_id: item
         for item in sorted(
             existing,
             key=lambda item: (item.completed_at, item.publication_id),
         )
     }
-    by_run[row.run_id] = row
+    by_run[row.execution_id] = row
     return by_run
 
 

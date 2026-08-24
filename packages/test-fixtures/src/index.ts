@@ -34,11 +34,10 @@ export function smokeProfiles(
   reservationMicrousd = 0,
   successWithoutWorkerReceipt = true,
   inferenceToken: "forbidden" | "required" = "forbidden",
-  maxCampaignCeilingMicrousd?: number,
+  maxRunCeilingMicrousd?: number,
   requiredPositiveMetrics: string[] = [],
-  workerMaxTasksPerJob?: number,
 ): LoadedProfile[] {
-  if (taskCount < 1) throw new Error("test campaign needs at least one task");
+  if (taskCount < 1) throw new Error("test run needs at least one task");
   const taskIds = Array.from(
     { length: taskCount },
     (_, index) => `task-${String(index + 1).padStart(3, "0")}`,
@@ -74,11 +73,11 @@ export function smokeProfiles(
       timeout_seconds: 300,
       trusted_worker: true,
       inference_token: inferenceToken,
-      ...(workerMaxTasksPerJob === undefined
-        ? {}
-        : { worker_max_tasks_per_job: workerMaxTasksPerJob }),
       ...(inferenceToken === "required"
         ? {
+            inference_upstream: "https://router.huggingface.co/v1",
+            inference_model: "control-smoke",
+            inference_api: "chat-completions",
             inference_max_requests: 64,
             inference_max_concurrency: 4,
             inference_timeout_seconds: 600,
@@ -89,9 +88,9 @@ export function smokeProfiles(
     profile("launch_policy", "control-smoke", {
       max_infrastructure_attempts: maxInfrastructureAttempts,
       reservation_microusd: reservationMicrousd,
-      ...(maxCampaignCeilingMicrousd === undefined
+      ...(maxRunCeilingMicrousd === undefined
         ? {}
-        : { max_campaign_ceiling_microusd: maxCampaignCeilingMicrousd }),
+        : { max_run_ceiling_microusd: maxRunCeilingMicrousd }),
       success_without_worker_receipt: successWithoutWorkerReceipt,
       publication_role: "diagnostic",
       required_positive_metrics: requiredPositiveMetrics,
@@ -99,15 +98,22 @@ export function smokeProfiles(
   ];
 }
 
-export function preparedProfiles(): LoadedProfile[] {
-  const taskId = "task-001-trial-1";
-  const taskDigest = sha256("task-001");
+export function preparedProfiles(taskCount = 1): LoadedProfile[] {
+  if (taskCount < 1) throw new Error("prepared profiles require at least one task");
+  const sourceTaskIds = Array.from(
+    { length: taskCount },
+    (_, index) => `task-${String(index + 1).padStart(3, "0")}`,
+  );
+  const taskIds = sourceTaskIds.map((taskId) => `${taskId}-trial-1`);
   return [
     profile("benchmark", "prepared-benchmark", {
-      task_ids: [taskId],
-      task_digests: [taskDigest],
-      source_task_ids: ["task-001"],
-      trial_indices: [1],
+      task_ids: taskIds as [string, ...string[]],
+      task_digests: sourceTaskIds.map((taskId) => sha256(taskId)) as [
+        string,
+        ...string[],
+      ],
+      source_task_ids: sourceTaskIds as [string, ...string[]],
+      trial_indices: sourceTaskIds.map(() => 1) as [number, ...number[]],
       benchmark: "prepared-benchmark",
       revision: sha256("prepared-benchmark"),
       harbor_job: {
@@ -149,7 +155,7 @@ export function preparedProfiles(): LoadedProfile[] {
       trusted_worker: true,
       inference_token: "forbidden",
       preparation: "required",
-      sandbox_template: {
+      trial_job_template: {
         flavors: [
           {
             hardware: "cpu-basic",
@@ -160,26 +166,22 @@ export function preparedProfiles(): LoadedProfile[] {
             active_hourly_cost_microusd: 10000,
           },
         ],
-        max_sandboxes: 2,
-        max_commands: 128,
-        max_command_seconds: 3600,
-        max_transfer_bytes: 67108864,
-        allowed_roots: ["/app", "/logs", "/tmp"],
+        root_bootstrap_command: ["/opt/worker/start-root-services"],
+        max_jobs: 2,
         default_cpus: 1,
         default_memory_mb: 2048,
         default_storage_mb: 10240,
         default_gpus: 0,
         max_timeout_seconds: 7200,
         lifetime_overhead_seconds: 300,
-        idle_timeout_overhead_seconds: 300,
+        max_image_bytes: 20 * 1024 * 1024 * 1024,
+        max_image_entries: 500_000,
       },
       inference_provider: "provider",
       input_price_microusd_per_million_tokens: 100000,
       output_price_microusd_per_million_tokens: 200000,
       harbor_version: "0.21.0",
       worker_revision: "abcdef0",
-      worker_concurrency: 1,
-      worker_max_tasks_per_job: 1,
       context_window: 131072,
     }),
     profile("launch_policy", "prepared-policy", {
@@ -209,9 +211,8 @@ export async function createTestControl(
   reservationMicrousd = 0,
   successWithoutWorkerReceipt = true,
   inferenceToken: "forbidden" | "required" = "forbidden",
-  maxCampaignCeilingMicrousd?: number,
+  maxRunCeilingMicrousd?: number,
   requiredPositiveMetrics: string[] = [],
-  workerMaxTasksPerJob?: number,
 ): Promise<TestControl> {
   const root = await mkdtemp(join(tmpdir(), "harbor-hf-control-test-"));
   const bucket = join(root, "bucket");
@@ -224,9 +225,8 @@ export async function createTestControl(
     reservationMicrousd,
     successWithoutWorkerReceipt,
     inferenceToken,
-    maxCampaignCeilingMicrousd,
+    maxRunCeilingMicrousd,
     requiredPositiveMetrics,
-    workerMaxTasksPerJob,
   );
   const service = new ControlService("test", store, projection, profiles);
   await projection.rebuild(store);

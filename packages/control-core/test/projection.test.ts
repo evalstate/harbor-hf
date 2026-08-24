@@ -1,7 +1,11 @@
-import { type SandboxPolicy, sha256 } from "@harbor-hf/contracts";
+import type { AttemptReceipt } from "@harbor-hf/contracts";
+import { canonicalJson, deterministicId, sha256 } from "@harbor-hf/contracts";
+import { NoopActions } from "@harbor-hf/hf-adapters";
 import { createTestControl, type TestControl } from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it } from "vitest";
 import { Projection, ProjectionIntegrityError } from "../src/projection.js";
+import { ResultPublisher } from "../src/publication.js";
+import { Reconciler } from "../src/reconciler.js";
 import type { ImmutableObjectStore, ObjectEntry } from "../src/store.js";
 
 const controls: TestControl[] = [];
@@ -38,6 +42,25 @@ class ListingStore implements ImmutableObjectStore {
   }
 }
 
+class ReadCountingStore implements ImmutableObjectStore {
+  readonly readKeys: string[] = [];
+
+  constructor(private readonly source: ImmutableObjectStore) {}
+
+  list(prefix: string): Promise<readonly ObjectEntry[]> {
+    return this.source.list(prefix);
+  }
+
+  async read(key: string): Promise<Uint8Array> {
+    this.readKeys.push(key);
+    return this.source.read(key);
+  }
+
+  create(key: string, bytes: Uint8Array) {
+    return this.source.create(key, bytes);
+  }
+}
+
 describe("projection replay", () => {
   it("is independent of Bucket listing order", async () => {
     const control = await createTestControl();
@@ -45,178 +68,76 @@ describe("projection replay", () => {
     const submitted = await control.service.submit(
       { ...input, ceiling_microusd: 1_000 },
       "listing-order-key",
-      {
-        subject: "operator",
-        role: "operator",
-      },
+      { subject: "operator", role: "operator" },
     );
-    const policy: SandboxPolicy = {
-      image: `example.invalid/task@sha256:${"a".repeat(64)}`,
-      hardware: "cpu-basic",
-      timeout_seconds: 600,
-      idle_timeout_seconds: 300,
-      inference_token: "forbidden",
-      reservation_microusd: 100,
-      active_hourly_cost_microusd: 10,
-      max_sandboxes: 1,
-      max_commands: 8,
-      max_command_seconds: 300,
-      max_transfer_bytes: 1_048_576,
-      allowed_roots: ["/app", "/tmp"],
-    };
-    const createActionId = "sandbox-create-listing-order";
-    expect(
-      await control.service.reserveSandbox(
-        submitted.campaign_id,
-        createActionId,
-        new Date(Date.now() - 1_000).toISOString(),
-        policy.reservation_microusd,
-      ),
-    ).toBe(true);
-    const close = control.service.actionIntent(
-      submitted.campaign_id,
-      "sandbox.close",
-      "sandbox-listing-order",
-      0,
-      {
-        task_id: "control-smoke-task",
-        sandbox_create_action_id: createActionId,
-        resource_id: "sandbox-listing-order",
-        sandbox: policy,
-      },
-    );
-    await control.service.writeAction(close);
-    const receipt = await control.service.receipt(close, {
-      outcome: "completed",
-      observed_state: "CANCELED",
-      resource_id: "sandbox-listing-order",
-      cost_microusd: 50,
-    });
-    await control.service.markAdvanced(close, receipt);
     const projection = await Projection.open(`${control.root}/reverse.sqlite`);
     await projection.rebuild(
       new ListingStore(control.store, (entries) => [...entries].reverse()),
     );
-    expect(await projection.campaign(submitted.campaign_id)).toEqual(
-      await control.projection.campaign(submitted.campaign_id),
+    expect(await projection.run(submitted.run_id)).toEqual(
+      await control.projection.run(submitted.run_id),
     );
     await projection.close();
   });
 
-  it("finds only dispatched pending Sandbox commands in one task", async () => {
+  it("replays scoped equal-timestamp events in insertion order", async () => {
     const control = await createTestControl();
     controls.push(control);
-    const submitted = await control.service.submit(
-      { ...input, ceiling_microusd: 1_000 },
-      "pending-sandbox-command-key",
-      { subject: "operator", role: "operator" },
-    );
-    const policy: SandboxPolicy = {
-      image: `example.invalid/task@sha256:${"b".repeat(64)}`,
-      hardware: "cpu-basic",
-      timeout_seconds: 600,
-      idle_timeout_seconds: 300,
-      inference_token: "forbidden",
-      reservation_microusd: 0,
-      active_hourly_cost_microusd: 0,
-      max_sandboxes: 1,
-      max_commands: 8,
-      max_command_seconds: 300,
-      max_transfer_bytes: 1_048_576,
-      allowed_roots: ["/app", "/tmp"],
-    };
-    const create = control.service.actionIntent(
-      submitted.campaign_id,
-      "sandbox.create",
-      "sandbox-pending-command",
-      0,
-      { task_id: "task-001", sandbox: policy },
-    );
-    await control.service.writeAction(create);
-    const createReceipt = await control.service.receipt(create, {
-      outcome: "created",
-      observed_state: "RUNNING",
-      resource_id: "sandbox-pending-command-resource",
+    const projection = await Projection.open(`${control.root}/events.sqlite`);
+    const occurredAt = "2026-08-24T00:00:00.000Z";
+    await projection.db
+      .insertInto("objects")
+      .values({
+        key: "control/schema=v1/test/z-event.json",
+        digest: `sha256:${"a".repeat(64)}`,
+        source_identity: `xet:${"a".repeat(64)}`,
+        kind: "action.intent",
+        record_id: "z-event",
+        created_at: occurredAt,
+        body: canonicalJson({
+          record_id: "z-event",
+          run_id: "run-event",
+          task_id: "task-event",
+          action_kind: "job.observe",
+          profile_kind: "capacity",
+        }),
+      })
+      .execute();
+    const firstPage = await projection.audit(null, 10);
+    expect(firstPage).toHaveLength(1);
+    expect(firstPage[0]?.data).toMatchObject({
+      run_id: "run-event",
+      task_id: "task-event",
+      action_kind: "job.observe",
+      profile_kind: "capacity",
     });
-    await control.service.markAdvanced(create, createReceipt);
-    const command = control.service.actionIntent(
-      submitted.campaign_id,
-      "sandbox.exec",
-      "sandbox-pending-command",
-      0,
-      {
-        task_id: "task-001",
-        sandbox_create_action_id: create.action_id,
-        resource_id: "sandbox-pending-command-resource",
-        sandbox: policy,
-        command: ["true"],
-        cwd: "/app",
-        timeout_seconds: 30,
-      },
-    );
-    await control.service.writeAction(command);
-    await control.service.dispatchAction(command, "2026-08-18T00:00:00.000Z");
-    const undispatched = control.service.actionIntent(
-      submitted.campaign_id,
-      "sandbox.exec",
-      "sandbox-undispatched-command",
-      0,
-      {
-        task_id: "task-001",
-        sandbox_create_action_id: create.action_id,
-        resource_id: "sandbox-pending-command-resource",
-        sandbox: policy,
-        command: ["false"],
-        cwd: "/app",
-        timeout_seconds: 30,
-      },
-    );
-    await control.service.writeAction(undispatched);
+    const firstEventCursor = firstPage[0]?.id;
+    if (!firstEventCursor) throw new Error("first replay event has no cursor");
 
-    expect(
-      await control.projection.pendingDispatchedSandboxCommandActions(
-        submitted.campaign_id,
-        "task-001",
-      ),
-    ).toEqual([command]);
-    expect(
-      await control.projection.pendingDispatchedSandboxCommandActions(
-        submitted.campaign_id,
-        "another-task",
-      ),
-    ).toEqual([]);
-    expect(await control.projection.actionAdvanced(command.action_id)).toBe(false);
-
-    const ambiguous = await control.service.ambiguousSandboxReceipt(command, {
-      subject: "operator",
-      role: "operator",
+    await projection.db
+      .insertInto("objects")
+      .values({
+        key: "control/schema=v1/test/a-event.json",
+        digest: `sha256:${"b".repeat(64)}`,
+        source_identity: `xet:${"b".repeat(64)}`,
+        kind: "attempt.receipt",
+        record_id: "a-event",
+        created_at: occurredAt,
+        body: canonicalJson({
+          record_id: "a-event",
+          run_id: "run-event",
+          task_id: "task-event-2",
+        }),
+      })
+      .execute();
+    const secondPage = await projection.audit(firstEventCursor, 10);
+    expect(secondPage).toHaveLength(1);
+    expect(secondPage[0]).toMatchObject({
+      type: "attempt.receipt",
+      occurred_at: occurredAt,
+      data: { run_id: "run-event", task_id: "task-event-2" },
     });
-    await control.service.markAdvanced(command, ambiguous);
-    const nextCommand = control.service.actionIntent(
-      submitted.campaign_id,
-      "sandbox.exec",
-      "sandbox-next-command",
-      0,
-      {
-        task_id: "task-001",
-        sandbox_create_action_id: create.action_id,
-        resource_id: "sandbox-pending-command-resource",
-        sandbox: policy,
-        command: ["false"],
-        cwd: "/app",
-        timeout_seconds: 30,
-      },
-    );
-    await expect(control.service.admitSandboxCommand(nextCommand, 1)).rejects.toThrow(
-      "Sandbox command count exceeds immutable policy",
-    );
-    expect(
-      await control.projection.pendingDispatchedSandboxCommandActions(
-        submitted.campaign_id,
-        "task-001",
-      ),
-    ).toEqual([]);
-    expect(await control.projection.actionAdvanced(command.action_id)).toBe(true);
+    await projection.close();
   });
 
   it("rejects duplicate listings and conflicting bytes", async () => {
@@ -242,6 +163,177 @@ describe("projection replay", () => {
     await corrupt.close();
   });
 
+  it("reads only new objects and persists its computed digest", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const first = {
+      schema_version: "v1",
+      kind: "operator.acl",
+      record_id: "operator-acl-first",
+      created_at: "2026-08-24T00:00:00.000Z",
+      actor: { subject: "projection-test", role: "migration" },
+      operators: ["operator"],
+      readers: [],
+    } as const;
+    const firstKey = "control/schema=v1/auth/operator-acl-first.json";
+    const firstBytes = new TextEncoder().encode(canonicalJson(first));
+    await control.store.create(firstKey, firstBytes);
+    const rebuildKeys = (await control.store.list("control/schema=v1")).map(
+      (entry) => entry.key,
+    );
+
+    const counting = new ReadCountingStore(control.store);
+    const projection = await Projection.open(`${control.root}/read-count.sqlite`);
+    await projection.rebuild(counting);
+    expect(counting.readKeys).toEqual(rebuildKeys);
+    expect(await projection.objectDigest(firstKey)).toBe(sha256(firstBytes));
+
+    counting.readKeys.length = 0;
+    expect(await projection.sync(counting)).toEqual([]);
+    expect(counting.readKeys).toEqual([]);
+
+    const second = {
+      ...first,
+      record_id: "operator-acl-second",
+      created_at: "2026-08-24T00:00:01.000Z",
+      readers: ["reader"],
+    } as const;
+    const secondKey = "control/schema=v1/auth/operator-acl-second.json";
+    const secondBytes = new TextEncoder().encode(canonicalJson(second));
+    await control.store.create(secondKey, secondBytes);
+
+    const events = await projection.sync(counting);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "operator.acl",
+      data: {
+        key: secondKey,
+        digest: sha256(secondBytes),
+        record_id: second.record_id,
+      },
+    });
+    expect(counting.readKeys).toEqual([secondKey]);
+    expect(await projection.objectDigest(secondKey)).toBe(sha256(secondBytes));
+
+    counting.readKeys.length = 0;
+    expect(await projection.sync(counting)).toEqual([]);
+    expect(counting.readKeys).toEqual([]);
+    await projection.close();
+  });
+
+  it("detects an overwrite between create and the first Bucket sync", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const entries = await control.store.list("control/schema=v1");
+    const adopted = entries[0];
+    if (!adopted) throw new Error("expected an initialized control object");
+    const counting = new ReadCountingStore(control.store);
+
+    expect(await control.projection.sync(counting)).toEqual([]);
+    expect(counting.readKeys).toEqual([]);
+
+    const changed = new ReadCountingStore(
+      new ListingStore(control.store, (listed) =>
+        listed.map((entry) =>
+          entry.key === adopted.key
+            ? { ...entry, source_identity: `changed:${entry.source_identity}` }
+            : entry,
+        ),
+      ),
+    );
+    await expect(control.projection.sync(changed)).rejects.toThrow(
+      `source identity mismatch for ${adopted.key}`,
+    );
+    expect(changed.readKeys).toEqual([]);
+    expect(control.projection.system().ready).toBe(false);
+  });
+
+  it("rejects ingestion when a store omits source identity", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const submitted = await control.service.submit(input, "missing-source-identity", {
+      subject: "operator",
+      role: "operator",
+    });
+    const lock = await control.projection.runLock(submitted.run_id);
+    if (!lock) throw new Error("run lock is missing");
+    const body = canonicalJson(lock);
+
+    await expect(
+      control.projection.ingest(
+        "control/schema=v1/test/missing-source-identity.json",
+        sha256(body),
+        undefined as never,
+        lock,
+      ),
+    ).rejects.toThrow("missing source identity");
+  });
+
+  it("detects a same-size overwrite from changed xetHash metadata without a read", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const first = {
+      schema_version: "v1",
+      kind: "operator.acl",
+      record_id: "metadata-overwrite-xethash",
+      created_at: "2026-08-24T00:00:00.000Z",
+      actor: { subject: "projection-test", role: "migration" },
+      operators: ["operator"],
+      readers: [],
+    } as const;
+    const firstKey = `control/schema=v1/auth/${first.record_id}.json`;
+    const firstBytes = new TextEncoder().encode(canonicalJson(first));
+    await control.store.create(firstKey, firstBytes);
+    const identity = (changed: boolean) => `xet:${(changed ? "b" : "a").repeat(64)}`;
+    const listed = (changed: boolean) =>
+      new ListingStore(control.store, (entries) =>
+        entries.map((entry) =>
+          entry.key === firstKey
+            ? { ...entry, source_identity: identity(changed) }
+            : entry,
+        ),
+      );
+    const projection = await Projection.open(`${control.root}/metadata-xethash.sqlite`);
+    await projection.rebuild(listed(false));
+    const counting = new ReadCountingStore(listed(true));
+
+    await expect(projection.sync(counting)).rejects.toBeInstanceOf(
+      ProjectionIntegrityError,
+    );
+    expect(counting.readKeys).toEqual([]);
+    expect(projection.system().ready).toBe(false);
+    await projection.close();
+  });
+
+  it("returns active Runs without scanning completed history", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await control.service.setMaxActiveJobs(4, "projection-capacity-four");
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    const completed = await control.service.submit(input, "completed-active-runs-key", {
+      subject: "operator",
+      role: "operator",
+    });
+    for (let index = 0; index < 10; index += 1) await reconciler.tick();
+    expect(await control.projection.run(completed.run_id)).toMatchObject({
+      status: "completed",
+    });
+
+    const active = await control.service.submit(input, "active-runs-key", {
+      subject: "operator",
+      role: "operator",
+    });
+    expect((await control.projection.activeRuns()).map((run) => run.run_id)).toEqual([
+      active.run_id,
+    ]);
+  });
+
   it("lists only the latest observed state for each Job", async () => {
     const control = await createTestControl();
     controls.push(control);
@@ -256,6 +348,7 @@ describe("projection replay", () => {
     const actor = { subject: "operator" as const, role: "operator" as const };
     const resourceId = "job-latest-state";
     const payload = {
+      task_id: "control-smoke-task",
       task_ids: ["control-smoke-task"],
       max_infrastructure_attempts: 1,
       success_without_worker_receipt: true,
@@ -297,16 +390,21 @@ describe("projection replay", () => {
         costMicrousd: 40_000,
       },
     ];
+    let launchActionId: string | null = null;
     for (const record of records) {
       const intent = control.service.actionIntent(
-        submitted.campaign_id,
+        submitted.run_id,
         record.kind,
         resourceId,
         record.generation,
-        payload,
+        {
+          ...payload,
+          ...(launchActionId ? { launch_action_id: launchActionId } : {}),
+        },
         actor,
         record.createdAt,
       );
+      if (record.kind === "job.launch") launchActionId = intent.action_id;
       await control.service.writeAction(intent);
       await control.service.receipt(intent, {
         outcome: record.kind === "job.launch" ? "created" : "completed",
@@ -319,7 +417,7 @@ describe("projection replay", () => {
     const jobs = await control.projection.jobs();
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({
-      campaign_id: submitted.campaign_id,
+      run_id: submitted.run_id,
       action_kind: "job.observe",
       observed_state: "ERROR",
       resource_id: resourceId,
@@ -327,10 +425,67 @@ describe("projection replay", () => {
       assigned_tasks: 1,
     });
     expect(jobs[0]?.created_at).toBe("2026-08-21T10:04:40.000Z");
-    expect(await control.projection.jobs(100, 0, submitted.campaign_id)).toHaveLength(
-      1,
+    expect(await control.projection.jobs(100, 0, submitted.run_id)).toHaveLength(1);
+    expect(await control.projection.jobs(100, 0, "run-missing")).toHaveLength(0);
+  });
+
+  it("keeps launch assignments on the latest cancellation row", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const submitted = await control.service.submit(
+      input,
+      "jobs-cancel-assignment-key",
+      {
+        subject: "operator",
+        role: "operator",
+      },
     );
-    expect(await control.projection.jobs(100, 0, "campaign-missing")).toHaveLength(0);
+    const resourceId = "job-cancel-assignment";
+    const launch = control.service.actionIntent(
+      submitted.run_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_id: "task-001",
+        task_ids: ["task-001"],
+      },
+      undefined,
+      "2026-08-21T11:30:00.000Z",
+    );
+    await control.service.writeAction(launch);
+    await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "RUNNING",
+      resource_id: resourceId,
+    });
+    const cancellation = control.service.actionIntent(
+      submitted.run_id,
+      "job.cancel",
+      resourceId,
+      0,
+      {
+        resource_id: resourceId,
+        launch_action_id: launch.action_id,
+      },
+      undefined,
+      "2026-08-21T11:30:10.000Z",
+    );
+    await control.service.writeAction(cancellation);
+    await control.service.receipt(cancellation, {
+      outcome: "completed",
+      observed_state: "CANCELED",
+      resource_id: resourceId,
+    });
+
+    expect(await control.projection.jobs()).toMatchObject([
+      {
+        action_kind: "job.cancel",
+        launch_action_id: launch.action_id,
+        assigned_tasks: 1,
+      },
+    ]);
   });
 
   it("does not list a pending observe as a second Job", async () => {
@@ -343,11 +498,11 @@ describe("projection replay", () => {
     const actor = { subject: "operator" as const, role: "operator" as const };
     const resourceId = "job-pending-observe";
     const launch = control.service.actionIntent(
-      submitted.campaign_id,
+      submitted.run_id,
       "job.launch",
-      "campaign-tasks",
+      "task-001",
       0,
-      { task_ids: ["control-smoke-task"] },
+      { task_id: "task-001", task_ids: ["task-001"] },
       actor,
       "2026-08-21T11:00:00.000Z",
     );
@@ -358,7 +513,7 @@ describe("projection replay", () => {
       resource_id: resourceId,
     });
     const observed = control.service.actionIntent(
-      submitted.campaign_id,
+      submitted.run_id,
       "job.observe",
       resourceId,
       0,
@@ -376,7 +531,7 @@ describe("projection replay", () => {
       resource_id: resourceId,
     });
     const pending = control.service.actionIntent(
-      submitted.campaign_id,
+      submitted.run_id,
       "job.observe",
       resourceId,
       1,
@@ -399,6 +554,183 @@ describe("projection replay", () => {
     });
   });
 
+  it("paginates materialized Jobs without reducing action history", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const submitted = await control.service.submit(input, "jobs-page-key", {
+      subject: "operator",
+      role: "operator",
+    });
+    const actor = { subject: "operator" as const, role: "operator" as const };
+    const launches: string[] = [];
+
+    for (let jobIndex = 0; jobIndex < 3; jobIndex += 1) {
+      const resourceId = `job-page-${jobIndex}`;
+      const launch = control.service.actionIntent(
+        submitted.run_id,
+        "job.launch",
+        `task-001-${jobIndex}`,
+        0,
+        {
+          worker_role: "execution",
+          task_id: "task-001",
+          task_ids: ["task-001"],
+          ...(jobIndex === 1 ? { prior_attempt_id: "attempt-infrastructure" } : {}),
+        },
+        actor,
+        `2026-08-21T13:00:0${jobIndex}.000Z`,
+      );
+      launches.push(launch.action_id);
+      await control.service.writeAction(launch);
+      await control.service.receipt(launch, {
+        outcome: "created",
+        observed_state: "RUNNING",
+        resource_id: resourceId,
+      });
+
+      for (let generation = 0; generation < 10; generation += 1) {
+        const observed = control.service.actionIntent(
+          submitted.run_id,
+          "job.observe",
+          resourceId,
+          generation,
+          {
+            resource_id: resourceId,
+            launch_action_id: launch.action_id,
+          },
+          actor,
+          `2026-08-21T13:0${jobIndex + 1}:${String(generation).padStart(2, "0")}.000Z`,
+        );
+        await control.service.writeAction(observed);
+        await control.service.receipt(observed, {
+          outcome: "completed",
+          observed_state: "RUNNING",
+          resource_id: resourceId,
+          cost_microusd: generation,
+        });
+      }
+    }
+
+    const cancellation = control.service.actionIntent(
+      submitted.run_id,
+      "job.cancel",
+      "job-page-2",
+      0,
+      {
+        resource_id: "job-page-2",
+        launch_action_id: launches[2],
+      },
+      actor,
+      "2026-08-21T13:04:00.000Z",
+    );
+    await control.service.writeAction(cancellation);
+    await control.service.receipt(cancellation, {
+      outcome: "completed",
+      observed_state: "CANCELED",
+      resource_id: "job-page-2",
+    });
+    const pending = control.service.actionIntent(
+      submitted.run_id,
+      "job.observe",
+      "job-page-1",
+      10,
+      {
+        resource_id: "job-page-1",
+        launch_action_id: launches[1],
+      },
+      actor,
+      "2026-08-21T13:05:00.000Z",
+    );
+    await control.service.writeAction(pending);
+
+    const firstPage = await control.projection.jobs(2);
+    const secondPage = await control.projection.jobs(2, 2);
+    expect(firstPage.map((job) => job.launch_action_id)).toEqual([
+      launches[2],
+      launches[1],
+    ]);
+    expect(secondPage.map((job) => job.launch_action_id)).toEqual([launches[0]]);
+    expect([...firstPage, ...secondPage].map((job) => job.assigned_tasks)).toEqual([
+      1, 1, 1,
+    ]);
+    expect(firstPage[0]).toMatchObject({
+      action_kind: "job.cancel",
+      observed_state: "CANCELED",
+    });
+    expect(firstPage[1]).toMatchObject({
+      action_kind: "job.observe",
+      observed_state: "RUNNING",
+      receipt_body: expect.any(String),
+    });
+
+    const runJobs = await control.projection.jobs(null, 0, submitted.run_id);
+    expect(runJobs).toEqual([...firstPage, ...secondPage]);
+    const projectedCount = await control.projection.db
+      .selectFrom("jobs")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow();
+    const actionCount = await control.projection.db
+      .selectFrom("actions")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow();
+    expect(Number(projectedCount.count)).toBe(3);
+    expect(Number(actionCount.count)).toBeGreaterThan(30);
+
+    expect(await control.projection.run(submitted.run_id)).toMatchObject({
+      replacement_assigned_tasks: 1,
+      replacement_recorded_tasks: 0,
+    });
+
+    const rebuilt = await Projection.open(`${control.root}/jobs-rebuilt.sqlite`);
+    await rebuilt.rebuild(control.store);
+    expect(await rebuilt.jobs(null, 0, submitted.run_id)).toEqual(runJobs);
+    await rebuilt.close();
+  });
+
+  it("excludes suppressed replacement launches from running progress", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const submitted = await control.service.submit(
+      input,
+      "suppressed-replacement-key",
+      {
+        subject: "operator",
+        role: "operator",
+      },
+    );
+    const launch = control.service.actionIntent(
+      submitted.run_id,
+      "job.launch",
+      "task-001-replacement",
+      0,
+      {
+        worker_role: "execution",
+        task_id: "task-001",
+        task_ids: ["task-001"],
+        prior_attempt_id: "attempt-infrastructure",
+      },
+      { subject: "operator", role: "operator" },
+      "2026-08-21T13:00:00.000Z",
+    );
+    await control.service.writeAction(launch);
+    await control.service.receipt(launch, {
+      outcome: "completed",
+      observed_state: "suppressed-paused",
+      resource_id: null,
+    });
+
+    expect(await control.projection.jobs(null, 0, submitted.run_id)).toMatchObject([
+      {
+        observed_state: "suppressed-paused",
+        receipt_body: expect.any(String),
+      },
+    ]);
+    expect(await control.projection.run(submitted.run_id)).toMatchObject({
+      replacement_assigned_tasks: 0,
+      replacement_recorded_tasks: 0,
+    });
+  });
+
   it("sums attempt receipts with Job hardware receipts", async () => {
     const control = await createTestControl(1, 1, 1_000);
     controls.push(control);
@@ -413,11 +745,11 @@ describe("projection replay", () => {
     const actor = { subject: "operator" as const, role: "operator" as const };
     const resourceId = "job-observed-sum";
     const launch = control.service.actionIntent(
-      submitted.campaign_id,
+      submitted.run_id,
       "job.launch",
-      "campaign-tasks",
+      "task-001",
       0,
-      { task_ids: ["control-smoke-task"] },
+      { task_id: "task-001", task_ids: ["task-001"] },
       actor,
       "2026-08-21T12:00:00.000Z",
     );
@@ -428,7 +760,7 @@ describe("projection replay", () => {
       resource_id: resourceId,
     });
     const observed = control.service.actionIntent(
-      submitted.campaign_id,
+      submitted.run_id,
       "job.observe",
       resourceId,
       0,
@@ -448,7 +780,7 @@ describe("projection replay", () => {
     const evidencePath = `evidence/test/${evidenceDigest.slice("sha256:".length)}`;
     await control.store.create(evidencePath, evidenceBytes);
     await control.service.attempt({
-      campaign_id: submitted.campaign_id,
+      run_id: submitted.run_id,
       task_id: "task-001",
       attempt_id: "attempt-observed-sum",
       action_id: launch.action_id,
@@ -460,8 +792,56 @@ describe("projection replay", () => {
       metrics: {},
       completed_at: "2026-08-21T12:00:20.000Z",
     });
-    expect(await control.projection.campaign(submitted.campaign_id)).toMatchObject({
+    expect(await control.projection.run(submitted.run_id)).toMatchObject({
       observed_microusd: 100,
     });
+  });
+
+  it("rejects a replayed attempt assigned to another Job task", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const submitted = await control.service.submit(input, "replay-task-binding", {
+      subject: "operator",
+      role: "operator",
+    });
+    const launch = control.service.actionIntent(
+      submitted.run_id,
+      "job.launch",
+      "other-task",
+      0,
+      {
+        worker_role: "execution",
+        task_id: "other-task",
+        task_ids: ["other-task"],
+      },
+    );
+    await control.service.writeAction(launch);
+    const attempt: AttemptReceipt = {
+      schema_version: "v1",
+      kind: "attempt.receipt",
+      record_id: deterministicId("attempt-receipt", "replay-task-mismatch"),
+      created_at: "2026-08-21T12:00:00.000Z",
+      actor: { subject: "trusted-worker", role: "service" },
+      run_id: submitted.run_id,
+      task_id: "task-001",
+      attempt_id: "replay-task-mismatch",
+      action_id: launch.action_id,
+      outcome: "complete",
+      replacement_eligible: false,
+      evidence_digest: sha256("replay-task-mismatch"),
+      evidence_path: "evidence/replay-task-mismatch",
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-21T12:00:00.000Z",
+    };
+    const attemptBody = canonicalJson(attempt);
+    await expect(
+      control.projection.ingest(
+        "control/schema=v1/test/replay-task-mismatch.json",
+        sha256(attemptBody),
+        sha256(attemptBody),
+        attempt,
+      ),
+    ).rejects.toThrow("attempt Job assignment mismatch");
   });
 });

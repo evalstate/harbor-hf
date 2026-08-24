@@ -13,10 +13,10 @@
       "$ref": "#/$defs/OperatorAcl"
     },
     {
-      "$ref": "#/$defs/CampaignRequest"
+      "$ref": "#/$defs/RunRequest"
     },
     {
-      "$ref": "#/$defs/CampaignLock"
+      "$ref": "#/$defs/RunLock"
     },
     {
       "$ref": "#/$defs/PreparedTrial"
@@ -31,16 +31,13 @@
       "$ref": "#/$defs/ActionDispatch"
     },
     {
-      "$ref": "#/$defs/SandboxAdmissionGrant"
+      "$ref": "#/$defs/JobAdmissionGrant"
     },
     {
-      "$ref": "#/$defs/SandboxCapacityRelease"
+      "$ref": "#/$defs/JobCapacityRelease"
     },
     {
       "$ref": "#/$defs/ActionReceipt"
-    },
-    {
-      "$ref": "#/$defs/ActionDisposition"
     },
     {
       "$ref": "#/$defs/ActionAdvanced"
@@ -53,6 +50,9 @@
     },
     {
       "$ref": "#/$defs/TaskExhaustion"
+    },
+    {
+      "$ref": "#/$defs/TaskCancellation"
     },
     {
       "$ref": "#/$defs/BudgetEvent"
@@ -325,7 +325,7 @@
         }
       ]
     },
-    "CampaignRequest": {
+    "RunRequest": {
       "allOf": [
         {
           "$ref": "#/$defs/Base"
@@ -339,7 +339,7 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "idempotency_key_digest",
             "profiles",
             "ceiling_microusd"
@@ -349,7 +349,7 @@
               "const": "v1"
             },
             "kind": {
-              "const": "campaign.request"
+              "const": "run.request"
             },
             "record_id": {
               "$ref": "#/$defs/Id"
@@ -360,7 +360,7 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "idempotency_key_digest": {
@@ -386,7 +386,7 @@
         }
       ]
     },
-    "CampaignLock": {
+    "RunLock": {
       "allOf": [
         {
           "$ref": "#/$defs/Base"
@@ -400,7 +400,7 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "profiles",
             "tasks",
             "ceiling_microusd",
@@ -411,7 +411,7 @@
               "const": "v1"
             },
             "kind": {
-              "const": "campaign.lock"
+              "const": "run.lock"
             },
             "record_id": {
               "$ref": "#/$defs/Id"
@@ -422,7 +422,7 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "profiles": {
@@ -471,7 +471,7 @@
             "created_at",
             "actor",
             "action_id",
-            "campaign_id",
+            "run_id",
             "action_kind",
             "generation",
             "target",
@@ -496,27 +496,22 @@
             "action_id": {
               "$ref": "#/$defs/Id"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "action_kind": {
               "enum": [
-                "campaign.admit",
+                "run.admit",
                 "job.launch",
                 "job.observe",
                 "job.cancel",
                 "endpoint.resume",
                 "endpoint.pause",
-                "sandbox.create",
-                "sandbox.observe",
-                "sandbox.exec",
-                "sandbox.write",
-                "sandbox.read",
-                "sandbox.close",
                 "publication.publish",
-                "campaign.cancel",
-                "campaign.pause",
-                "campaign.resume",
+                "run.cancel",
+                "run.pause",
+                "run.resume",
+                "run.retry-infrastructure",
                 "publication.supersede"
               ]
             },
@@ -552,7 +547,7 @@
             "created_at",
             "actor",
             "action_id",
-            "campaign_id",
+            "run_id",
             "operation",
             "adoption_not_before"
           ],
@@ -575,155 +570,14 @@
             "action_id": {
               "$ref": "#/$defs/Id"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "operation": {
-              "enum": ["create", "observe", "execute", "write", "read", "close"]
+              "enum": ["create"]
             },
             "adoption_not_before": {
               "$ref": "#/$defs/Timestamp"
-            }
-          }
-        }
-      ]
-    },
-    "SandboxAdmissionGrant": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/Base"
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "schema_version",
-            "kind",
-            "record_id",
-            "created_at",
-            "actor",
-            "action_id",
-            "campaign_id",
-            "namespace",
-            "capacity_profile_id",
-            "hardware",
-            "reserved_provider_requests",
-            "tokens_remaining",
-            "refill_cursor_at",
-            "previous_grant_id"
-          ],
-          "properties": {
-            "schema_version": {
-              "const": "v1"
-            },
-            "kind": {
-              "const": "sandbox.admission"
-            },
-            "record_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "created_at": {
-              "$ref": "#/$defs/Timestamp"
-            },
-            "actor": {
-              "$ref": "#/$defs/Actor"
-            },
-            "action_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "campaign_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "namespace": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 160
-            },
-            "capacity_profile_id": {
-              "$ref": "#/$defs/Digest"
-            },
-            "hardware": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 160
-            },
-            "reserved_provider_requests": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 65536
-            },
-            "tokens_remaining": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 1024
-            },
-            "refill_cursor_at": {
-              "$ref": "#/$defs/Timestamp"
-            },
-            "previous_grant_id": {
-              "oneOf": [
-                {
-                  "$ref": "#/$defs/Id"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          }
-        }
-      ]
-    },
-    "SandboxCapacityRelease": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/Base"
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "schema_version",
-            "kind",
-            "record_id",
-            "created_at",
-            "actor",
-            "action_id",
-            "campaign_id",
-            "grant_id",
-            "release_reason",
-            "evidence_record_id"
-          ],
-          "properties": {
-            "schema_version": {
-              "const": "v1"
-            },
-            "kind": {
-              "const": "sandbox.capacity-release"
-            },
-            "record_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "created_at": {
-              "$ref": "#/$defs/Timestamp"
-            },
-            "actor": {
-              "$ref": "#/$defs/Actor"
-            },
-            "action_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "campaign_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "grant_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "release_reason": {
-              "enum": ["create_failed", "sandbox_closed"]
-            },
-            "evidence_record_id": {
-              "$ref": "#/$defs/Id"
             }
           }
         }
@@ -744,7 +598,7 @@
             "created_at",
             "actor",
             "action_id",
-            "campaign_id",
+            "run_id",
             "outcome",
             "observed_state"
           ],
@@ -767,7 +621,7 @@
             "action_id": {
               "$ref": "#/$defs/Id"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "outcome": {
@@ -805,121 +659,6 @@
         }
       ]
     },
-    "ActionDisposition": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/Base"
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "schema_version",
-            "kind",
-            "record_id",
-            "created_at",
-            "actor",
-            "campaign_id",
-            "task_id",
-            "action_id",
-            "source_receipt_id",
-            "source_receipt_digest",
-            "close_action_id",
-            "close_receipt_id",
-            "close_receipt_digest",
-            "batch_id",
-            "batch_digest",
-            "batch_size",
-            "effective_outcome",
-            "effective_observed_state",
-            "effective_error_code",
-            "reason_code",
-            "reason"
-          ],
-          "properties": {
-            "schema_version": {
-              "const": "v1"
-            },
-            "kind": {
-              "const": "action.disposition"
-            },
-            "record_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "created_at": {
-              "$ref": "#/$defs/Timestamp"
-            },
-            "actor": {
-              "allOf": [
-                {
-                  "$ref": "#/$defs/Actor"
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "role": {
-                      "const": "operator"
-                    }
-                  }
-                }
-              ]
-            },
-            "campaign_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "task_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "action_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "source_receipt_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "source_receipt_digest": {
-              "$ref": "#/$defs/Digest"
-            },
-            "close_action_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "close_receipt_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "close_receipt_digest": {
-              "$ref": "#/$defs/Digest"
-            },
-            "batch_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "batch_digest": {
-              "$ref": "#/$defs/Digest"
-            },
-            "batch_size": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            },
-            "effective_outcome": {
-              "const": "failed"
-            },
-            "effective_observed_state": {
-              "const": "AMBIGUOUS"
-            },
-            "effective_error_code": {
-              "const": "sandbox_external_outcome_unknown"
-            },
-            "reason_code": {
-              "const": "historical_non_replay_safe_command_ambiguity"
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1000
-            }
-          }
-        }
-      ]
-    },
     "ActionAdvanced": {
       "allOf": [
         {
@@ -935,7 +674,7 @@
             "created_at",
             "actor",
             "action_id",
-            "campaign_id"
+            "run_id"
           ],
           "properties": {
             "schema_version": {
@@ -956,7 +695,7 @@
             "action_id": {
               "$ref": "#/$defs/Id"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             }
           }
@@ -977,7 +716,7 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "task_id",
             "attempt_id",
             "action_id",
@@ -1004,7 +743,7 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "task_id": {
@@ -1074,7 +813,7 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "task_id",
             "attempt_id",
             "outcome",
@@ -1096,7 +835,7 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "task_id": {
@@ -1142,7 +881,7 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "event_kind",
             "amount_microusd"
           ],
@@ -1162,7 +901,7 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "event_kind": {
@@ -1191,7 +930,7 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "action_id",
             "endpoint_id",
             "desired_state",
@@ -1216,7 +955,7 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "action_id": {
@@ -1266,7 +1005,7 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "publication_id",
             "publication_state",
             "object_digests",
@@ -1288,7 +1027,7 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "publication_id": {
@@ -1568,6 +1307,19 @@
         "inference_token": {
           "enum": ["forbidden", "required"]
         },
+        "inference_upstream": {
+          "type": "string",
+          "pattern": "^https://(?:router\\.huggingface\\.co|[a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.endpoints\\.huggingface\\.cloud|[a-z0-9-]+\\.hf\\.jobs/scopes/[A-Za-z0-9._~/-]+)(?:/v1)?$",
+          "maxLength": 1024
+        },
+        "inference_model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "inference_api": {
+          "enum": ["chat-completions", "responses"]
+        },
         "inference_max_requests": {
           "type": "integer",
           "minimum": 1,
@@ -1587,9 +1339,6 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1048576
-        },
-        "sandbox": {
-          "$ref": "#/$defs/SandboxPolicy"
         },
         "inference_provider": {
           "type": "string",
@@ -1615,16 +1364,6 @@
           "minLength": 7,
           "maxLength": 160
         },
-        "worker_concurrency": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 64
-        },
-        "worker_max_tasks_per_job": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100000
-        },
         "context_window": {
           "type": "integer",
           "minimum": 1024,
@@ -1647,202 +1386,8 @@
           "minimum": 1,
           "maximum": 604800
         },
-        "sandbox_template": {
-          "$ref": "#/$defs/SandboxTemplate"
-        }
-      },
-      "allOf": [
-        {
-          "if": {
-            "required": ["inference_token"],
-            "properties": {
-              "inference_token": {
-                "const": "required"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "inference_max_requests",
-              "inference_max_concurrency",
-              "inference_timeout_seconds",
-              "inference_max_output_tokens"
-            ],
-            "properties": {
-              "inference_max_requests": {},
-              "inference_max_concurrency": {},
-              "inference_timeout_seconds": {},
-              "inference_max_output_tokens": {}
-            }
-          }
-        },
-        {
-          "if": {
-            "required": ["preparation"],
-            "properties": {
-              "preparation": {
-                "const": "required"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "preparation_job_command",
-              "preparation_timeout_seconds",
-              "sandbox_template",
-              "inference_provider",
-              "input_price_microusd_per_million_tokens",
-              "output_price_microusd_per_million_tokens",
-              "harbor_version",
-              "worker_revision",
-              "worker_concurrency",
-              "worker_max_tasks_per_job",
-              "context_window"
-            ],
-            "properties": {
-              "preparation_job_command": {},
-              "preparation_timeout_seconds": {},
-              "sandbox_template": {},
-              "inference_provider": {},
-              "input_price_microusd_per_million_tokens": {},
-              "output_price_microusd_per_million_tokens": {},
-              "harbor_version": {},
-              "worker_revision": {},
-              "worker_concurrency": {},
-              "worker_max_tasks_per_job": {},
-              "context_window": {}
-            }
-          }
-        }
-      ]
-    },
-    "SandboxPolicy": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "image",
-        "hardware",
-        "timeout_seconds",
-        "idle_timeout_seconds",
-        "reservation_microusd",
-        "active_hourly_cost_microusd",
-        "max_sandboxes",
-        "max_commands",
-        "max_command_seconds",
-        "max_transfer_bytes",
-        "allowed_roots"
-      ],
-      "properties": {
-        "image": {
-          "type": "string",
-          "pattern": "^.+@sha256:[0-9a-f]{64}$",
-          "maxLength": 1024
-        },
-        "hardware": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 160
-        },
-        "timeout_seconds": {
-          "type": "integer",
-          "minimum": 60,
-          "maximum": 86400
-        },
-        "idle_timeout_seconds": {
-          "type": "integer",
-          "minimum": 60,
-          "maximum": 86400
-        },
-        "inference_token": {
-          "enum": ["forbidden", "required"]
-        },
-        "inference_upstream": {
-          "type": "string",
-          "pattern": "^https://(?:router\\.huggingface\\.co|[a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.endpoints\\.huggingface\\.cloud|[a-z0-9-]+\\.hf\\.jobs/scopes/[A-Za-z0-9._~/-]+)(?:/v1)?$",
-          "maxLength": 1024
-        },
-        "inference_model": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512
-        },
-        "inference_api": {
-          "enum": ["chat-completions", "responses"]
-        },
-        "inference_max_requests": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 4096
-        },
-        "inference_max_concurrency": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 64
-        },
-        "inference_max_total_concurrency": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65536
-        },
-        "inference_timeout_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 3600
-        },
-        "inference_max_output_tokens": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1048576
-        },
-        "root_bootstrap_command": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": {
-            "type": "string",
-            "maxLength": 4096
-          }
-        },
-        "reservation_microusd": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 1000000000000
-        },
-        "active_hourly_cost_microusd": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 1000000000000
-        },
-        "max_sandboxes": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1024
-        },
-        "max_commands": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 4096
-        },
-        "max_command_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 86400
-        },
-        "max_transfer_bytes": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 67108864
-        },
-        "allowed_roots": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 32,
-          "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "pattern": "^/",
-            "maxLength": 512
-          }
+        "trial_job_template": {
+          "$ref": "#/$defs/TrialJobTemplate"
         }
       },
       "allOf": [
@@ -1863,8 +1408,7 @@
               "inference_max_requests",
               "inference_max_concurrency",
               "inference_timeout_seconds",
-              "inference_max_output_tokens",
-              "root_bootstrap_command"
+              "inference_max_output_tokens"
             ],
             "properties": {
               "inference_upstream": {},
@@ -1872,10 +1416,42 @@
               "inference_api": {},
               "inference_max_requests": {},
               "inference_max_concurrency": {},
-              "inference_max_total_concurrency": {},
               "inference_timeout_seconds": {},
-              "inference_max_output_tokens": {},
-              "root_bootstrap_command": {}
+              "inference_max_output_tokens": {}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["preparation"],
+            "properties": {
+              "preparation": {
+                "const": "required"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "preparation_job_command",
+              "preparation_timeout_seconds",
+              "trial_job_template",
+              "inference_provider",
+              "input_price_microusd_per_million_tokens",
+              "output_price_microusd_per_million_tokens",
+              "harbor_version",
+              "worker_revision",
+              "context_window"
+            ],
+            "properties": {
+              "preparation_job_command": {},
+              "preparation_timeout_seconds": {},
+              "inference_provider": {},
+              "input_price_microusd_per_million_tokens": {},
+              "output_price_microusd_per_million_tokens": {},
+              "harbor_version": {},
+              "worker_revision": {},
+              "context_window": {},
+              "trial_job_template": {}
             }
           }
         }
@@ -1888,7 +1464,7 @@
         "route",
         "models",
         "harnesses",
-        "source_campaign_ids",
+        "source_run_ids",
         "source_revisions"
       ],
       "properties": {
@@ -1913,7 +1489,7 @@
             "$ref": "#/$defs/Id"
           }
         },
-        "source_campaign_ids": {
+        "source_run_ids": {
           "type": "array",
           "minItems": 1,
           "maxItems": 256,
@@ -1957,7 +1533,7 @@
           "minimum": 0,
           "maximum": 1000000000000
         },
-        "max_campaign_ceiling_microusd": {
+        "max_run_ceiling_microusd": {
           "type": "integer",
           "minimum": 0,
           "maximum": 1000000000000
@@ -1994,7 +1570,7 @@
       "additionalProperties": false,
       "required": [
         "namespace",
-        "max_active_sandboxes",
+        "max_active_jobs",
         "hardware_limits",
         "start_burst",
         "start_refill_tokens",
@@ -2006,25 +1582,20 @@
           "minLength": 1,
           "maxLength": 160
         },
-        "max_active_sandboxes": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1024
-        },
         "hardware_limits": {
           "type": "array",
           "maxItems": 32,
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["hardware", "max_active_sandboxes"],
+            "required": ["hardware", "max_active_jobs"],
             "properties": {
               "hardware": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 160
               },
-              "max_active_sandboxes": {
+              "max_active_jobs": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 1024
@@ -2046,6 +1617,11 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 86400
+        },
+        "max_active_jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
         }
       }
     },
@@ -2075,8 +1651,23 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "idempotency_key_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "idempotency_payload_digest": {
+          "$ref": "#/$defs/Digest"
+        },
         "task_ids": {
           "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "selected_task_ids": {
+          "type": "array",
+          "minItems": 1,
           "maxItems": 100000,
           "uniqueItems": true,
           "items": {
@@ -2093,11 +1684,25 @@
             }
           ]
         },
+        "prior_attempt_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
         "reason": {
           "type": ["string", "null"],
           "maxLength": 1000
         },
         "job_image": {
+          "type": "string",
+          "pattern": "^.+@sha256:[0-9a-f]{64}$",
+          "maxLength": 1024
+        },
+        "task_image": {
           "type": "string",
           "pattern": "^.+@sha256:[0-9a-f]{64}$",
           "maxLength": 1024
@@ -2120,6 +1725,16 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 604800
+        },
+        "max_image_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1099511627776
+        },
+        "max_image_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
         },
         "success_without_worker_receipt": {
           "type": "boolean"
@@ -2190,59 +1805,14 @@
         "watchdog_verified": {
           "type": "boolean"
         },
-        "sandbox": {
-          "$ref": "#/$defs/SandboxPolicy"
-        },
-        "campaign_lock_digest": {
+        "run_lock_digest": {
           "$ref": "#/$defs/Digest"
-        },
-        "sandbox_create_action_id": {
-          "$ref": "#/$defs/Id"
-        },
-        "command": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": {
-            "type": "string",
-            "maxLength": 1048576
-          }
-        },
-        "cwd": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512
-        },
-        "path": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512
-        },
-        "content_digest": {
-          "$ref": "#/$defs/Digest"
-        },
-        "content_size": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 67108864
-        },
-        "mode": {
-          "type": "string",
-          "pattern": "^0[0-7]{3}$"
         },
         "worker_role": {
           "enum": ["preparation", "execution"]
         },
         "prepared_job_digest": {
           "$ref": "#/$defs/Digest"
-        },
-        "sandbox_authorized": {
-          "type": "boolean"
-        },
-        "sandbox_timeout_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 86400
         },
         "preparation_attempt": {
           "type": "integer",
@@ -2270,6 +1840,30 @@
             "type": "string",
             "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
           }
+        },
+        "max_jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "inference_upstream": {
+          "type": "string",
+          "pattern": "^https://(?:router\\.huggingface\\.co|[a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.endpoints\\.huggingface\\.cloud|[a-z0-9-]+\\.hf\\.jobs/scopes/[A-Za-z0-9._~/-]+)(?:/v1)?$",
+          "maxLength": 1024
+        },
+        "inference_model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "inference_api": {
+          "enum": ["chat-completions", "responses"]
+        },
+        "inference_max_total_concurrency": {
+          "description": "Maximum provider request units reserved across active trial Jobs in one Run.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
         }
       }
     },
@@ -2664,9 +2258,9 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "preparation_id",
-            "campaign_lock_digest",
+            "run_lock_digest",
             "task_id",
             "source_task_id",
             "trial_index",
@@ -2700,13 +2294,13 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "preparation_id": {
               "$ref": "#/$defs/Id"
             },
-            "campaign_lock_digest": {
+            "run_lock_digest": {
               "$ref": "#/$defs/Digest"
             },
             "task_id": {
@@ -2815,9 +2409,9 @@
             "record_id",
             "created_at",
             "actor",
-            "campaign_id",
+            "run_id",
             "preparation_id",
-            "campaign_lock_digest",
+            "run_lock_digest",
             "harbor_version",
             "job_config",
             "job_lock_header",
@@ -2840,13 +2434,13 @@
             "actor": {
               "$ref": "#/$defs/Actor"
             },
-            "campaign_id": {
+            "run_id": {
               "$ref": "#/$defs/Id"
             },
             "preparation_id": {
               "$ref": "#/$defs/Id"
             },
-            "campaign_lock_digest": {
+            "run_lock_digest": {
               "$ref": "#/$defs/Digest"
             },
             "harbor_version": {
@@ -2878,7 +2472,328 @@
         }
       ]
     },
-    "SandboxFlavor": {
+    "TaskExhaustion": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "kind",
+            "record_id",
+            "created_at",
+            "actor",
+            "run_id",
+            "task_id",
+            "source_action_id",
+            "last_attempt_id",
+            "attempt_count",
+            "reason"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "v1"
+            },
+            "kind": {
+              "const": "task.exhaustion"
+            },
+            "record_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            },
+            "run_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "source_action_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "last_attempt_id": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attempt_count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          }
+        }
+      ]
+    },
+    "TaskCancellation": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "kind",
+            "record_id",
+            "created_at",
+            "actor",
+            "run_id",
+            "task_id",
+            "source_action_id",
+            "reason"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "v1"
+            },
+            "kind": {
+              "const": "task.cancellation"
+            },
+            "record_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            },
+            "run_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "task_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "source_action_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          }
+        }
+      ]
+    },
+    "PublicationSupersession": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "kind",
+            "record_id",
+            "created_at",
+            "actor",
+            "run_id",
+            "publication_id",
+            "superseded_run_id",
+            "superseded_publication_id",
+            "reason"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "v1"
+            },
+            "kind": {
+              "const": "publication.supersession"
+            },
+            "record_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            },
+            "run_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "publication_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "superseded_run_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "superseded_publication_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          }
+        }
+      ]
+    },
+    "JobAdmissionGrant": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "kind",
+            "record_id",
+            "created_at",
+            "actor",
+            "action_id",
+            "run_id",
+            "namespace",
+            "capacity_profile_id",
+            "hardware",
+            "reserved_provider_requests",
+            "tokens_remaining",
+            "refill_cursor_at",
+            "previous_grant_id"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "v1"
+            },
+            "kind": {
+              "const": "job.admission"
+            },
+            "record_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            },
+            "action_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "namespace": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "capacity_profile_id": {
+              "$ref": "#/$defs/Digest"
+            },
+            "hardware": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "reserved_provider_requests": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "tokens_remaining": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            },
+            "refill_cursor_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "previous_grant_id": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "JobCapacityRelease": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "kind",
+            "record_id",
+            "created_at",
+            "actor",
+            "action_id",
+            "run_id",
+            "grant_id",
+            "release_reason",
+            "evidence_record_id"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "v1"
+            },
+            "kind": {
+              "const": "job.capacity-release"
+            },
+            "record_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            },
+            "action_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "run_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "grant_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "release_reason": {
+              "enum": ["launch_failed", "launch_suppressed", "job_terminal"]
+            },
+            "evidence_record_id": {
+              "$ref": "#/$defs/Id"
+            }
+          }
+        }
+      ]
+    },
+    "TrialJobFlavor": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2922,23 +2837,21 @@
         }
       }
     },
-    "SandboxTemplate": {
+    "TrialJobTemplate": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "flavors",
-        "max_sandboxes",
-        "max_commands",
-        "max_command_seconds",
-        "max_transfer_bytes",
-        "allowed_roots",
+        "max_jobs",
         "default_cpus",
         "default_memory_mb",
         "default_storage_mb",
         "default_gpus",
         "max_timeout_seconds",
         "lifetime_overhead_seconds",
-        "idle_timeout_overhead_seconds"
+        "max_image_bytes",
+        "max_image_entries",
+        "root_bootstrap_command"
       ],
       "properties": {
         "flavors": {
@@ -2946,38 +2859,7 @@
           "minItems": 1,
           "maxItems": 32,
           "items": {
-            "$ref": "#/$defs/SandboxFlavor"
-          }
-        },
-        "max_sandboxes": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1024
-        },
-        "max_commands": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 4096
-        },
-        "max_command_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 86400
-        },
-        "max_transfer_bytes": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 67108864
-        },
-        "allowed_roots": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 32,
-          "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "pattern": "^/",
-            "maxLength": 512
+            "$ref": "#/$defs/TrialJobFlavor"
           }
         },
         "inference_token": {
@@ -3007,6 +2889,7 @@
           "maximum": 64
         },
         "inference_max_total_concurrency": {
+          "description": "Maximum provider request units reserved across active trial Jobs in one Run.",
           "type": "integer",
           "minimum": 1,
           "maximum": 65536
@@ -3060,10 +2943,20 @@
           "minimum": 0,
           "maximum": 86400
         },
-        "idle_timeout_overhead_seconds": {
+        "max_image_bytes": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 86400
+          "minimum": 1,
+          "maximum": 1099511627776
+        },
+        "max_image_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "max_jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
         }
       },
       "allOf": [
@@ -3097,122 +2990,6 @@
               "inference_timeout_seconds": {},
               "inference_max_output_tokens": {},
               "root_bootstrap_command": {}
-            }
-          }
-        }
-      ]
-    },
-    "TaskExhaustion": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/Base"
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "schema_version",
-            "kind",
-            "record_id",
-            "created_at",
-            "actor",
-            "campaign_id",
-            "task_id",
-            "last_attempt_id",
-            "attempt_count",
-            "reason"
-          ],
-          "properties": {
-            "schema_version": {
-              "const": "v1"
-            },
-            "kind": {
-              "const": "task.exhaustion"
-            },
-            "record_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "created_at": {
-              "$ref": "#/$defs/Timestamp"
-            },
-            "actor": {
-              "$ref": "#/$defs/Actor"
-            },
-            "campaign_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "task_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "last_attempt_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "attempt_count": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1000
-            }
-          }
-        }
-      ]
-    },
-    "PublicationSupersession": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/Base"
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "schema_version",
-            "kind",
-            "record_id",
-            "created_at",
-            "actor",
-            "campaign_id",
-            "publication_id",
-            "superseded_campaign_id",
-            "superseded_publication_id",
-            "reason"
-          ],
-          "properties": {
-            "schema_version": {
-              "const": "v1"
-            },
-            "kind": {
-              "const": "publication.supersession"
-            },
-            "record_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "created_at": {
-              "$ref": "#/$defs/Timestamp"
-            },
-            "actor": {
-              "$ref": "#/$defs/Actor"
-            },
-            "campaign_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "publication_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "superseded_campaign_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "superseded_publication_id": {
-              "$ref": "#/$defs/Id"
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 1000
             }
           }
         }

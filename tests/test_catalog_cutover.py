@@ -19,9 +19,9 @@ from harbor_hf.catalog_cutover import (
 )
 from harbor_hf.result_publisher import publisher_lease_path
 from harbor_hf.results import (
+    ExecutionRow,
     PublicationProvenance,
     ResultTables,
-    RunRow,
     build_catalog_row,
     build_result_publication,
     catalog_publication_lookup_path,
@@ -115,16 +115,16 @@ class FailingIndexApi(FakeApi):
 
 
 def _publication() -> tuple[ResultTables, dict[str, bytes]]:
-    run = RunRow(
+    run = ExecutionRow(
         publication_id="publication-one",
-        run_id="run-one",
+        execution_id="execution-one",
         source_bucket="hf://buckets/private-evidence",
-        source_prefix="campaigns/campaign-one/runs/run-one",
+        source_prefix="runs/run-one/executions/run-one",
         source_checksum="sha256:" + "1" * 64,
-        run_lock_path="run.lock.json",
-        run_lock_sha256="sha256:" + "2" * 64,
+        execution_lock_path="execution.lock.json",
+        execution_lock_sha256="sha256:" + "2" * 64,
         control_commit="3" * 40,
-        campaign_id="campaign-one",
+        run_id="run-one",
         experiment="experiment-one",
         evaluation_id="old-evaluation",
         publication_role="diagnostic",
@@ -154,13 +154,13 @@ def _publication() -> tuple[ResultTables, dict[str, bytes]]:
         benchmark_failed_count=0,
         infrastructure_exhausted_count=0,
         unsupported_count=0,
-        execution_count=0,
+        attempt_count=0,
     )
     tables = ResultTables(
         publication_id=run.publication_id,
-        runs=[run],
+        executions=[run],
         trials=[],
-        executions=[],
+        attempts=[],
         metrics=[],
         artifacts=[],
         provenance=PublicationProvenance(
@@ -271,17 +271,17 @@ def test_cutover_derives_missing_unsupported_count(tmp_path: Path) -> None:
     projection = json.loads(
         api.snapshots[("org/results", RESULT_HEAD)][projection_path]
     )
-    runs = projection["tables"]["runs"]
+    executions = projection["tables"]["executions"]
     table = pq.read_table(
-        pa.BufferReader(api.snapshots[("org/results", RESULT_HEAD)][runs["path"]])
+        pa.BufferReader(api.snapshots[("org/results", RESULT_HEAD)][executions["path"]])
     )
     values = table.to_pylist()
     del values[0]["unsupported_count"]
     sink = pa.BufferOutputStream()
     pq.write_table(pa.Table.from_pylist(values), sink)
     content = sink.getvalue().to_pybytes()
-    api.snapshots[("org/results", RESULT_HEAD)][runs["path"]] = content
-    runs["sha256"] = "sha256:" + hashlib.sha256(content).hexdigest()
+    api.snapshots[("org/results", RESULT_HEAD)][executions["path"]] = content
+    executions["sha256"] = "sha256:" + hashlib.sha256(content).hexdigest()
     api.snapshots[("org/results", RESULT_HEAD)][projection_path] = (
         json.dumps(projection, sort_keys=True, separators=(",", ":")).encode() + b"\n"
     )
@@ -369,7 +369,7 @@ def test_cutover_refuses_publication_added_at_expected_head(tmp_path: Path) -> N
     path = "data/catalog/schema=v1/windows/2048.parquet"
     original = read_catalog_file(api.snapshots[("org/index", INDEX_HEAD)][path])[0]
     added = original.model_copy(
-        update={"publication_id": "publication-two", "run_id": "run-two"}
+        update={"publication_id": "publication-two", "execution_id": "execution-two"}
     )
     sink = pa.BufferOutputStream()
     pq.write_table(

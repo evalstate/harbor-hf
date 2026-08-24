@@ -19,12 +19,12 @@ depends on adding an agent to Harbor's enum, factory, or installed-agent tree.
 There are no legacy aliases, fallback renderers, or parallel built-in-agent
 paths.
 
-Historical campaigns remain readable through their immutable locks and evidence.
+Historical runs remain readable through their immutable locks and evidence.
 They do not keep the superseded execution path alive for new work.
 
 The planned TypeScript control service does not move benchmark agents into the
 Space. This Python package remains a pinned remote Job dependency and writes
-only its assigned attempt evidence. Shared campaign decisions stay in the
+only its assigned attempt evidence. Shared run decisions stay in the
 TypeScript service described by [the control service
 specification](CONTROL_SERVICE.md).
 
@@ -83,7 +83,7 @@ checkout, or rely on the caller's current directory or `PYTHONPATH`.
 
 ### `harbor-hf`
 
-`harbor-hf` owns remote orchestration and the boundary between locked campaign
+`harbor-hf` owns remote orchestration and the boundary between locked run
 configuration and the selected custom agent:
 
 - immutable source preparation;
@@ -112,7 +112,7 @@ The existing records already cover the required identities:
 | Existing record | Authority |
 | --- | --- |
 | `ExperimentSpec` | Requested execution policy and its agent, model, provider, and source. |
-| `RunLock` and campaign locks | Immutable resolved configuration and source revisions. |
+| `ExecutionLock` and run locks | Immutable resolved configuration and source revisions. |
 | `HarborExecutionRequest` | Exact Harbor job configuration and independent verification policy. |
 | Harbor `result.json` | Observed agent and model identity, usage, rewards, and exceptions. |
 | `HarborCompatibilityBundle` | Typed, checksummed compatibility view of Harbor output. |
@@ -163,7 +163,7 @@ exists. They do not branch on `hermes`, `openclaw`, `openclaw-codex`, or `pi`.
    custom agent import path.
 2. Planning resolves the normal matrix cell and includes the import path,
    underlying agent revision, and pinned worker revision in the existing run and
-   campaign digests.
+   run digests.
 3. The worker checks out upstream Harbor and `harbor-hf` at their full commits
    using the existing immutable source-preparation boundary.
 4. The Harbor command layers
@@ -181,7 +181,7 @@ exists. They do not branch on `hermes`, `openclaw`, `openclaw-codex`, or `pi`.
 9. Generic evidence collection requires the locked trajectory schema and, when
    declared by the registry, at least one non-empty session JSONL.
 10. Secret scanning, checksums, terminal markers, retry decisions, and
-    publication follow the existing campaign pipeline.
+    publication follow the existing run pipeline.
 
 A successful trial must match the locked import path, logical agent name,
 reported agent revision, routed model identity, task digest, and evidence
@@ -204,13 +204,13 @@ public root-execution API. The bridge:
 - logs neither bodies nor headers.
 - terminates after the trial.
 
-The agent runs as the unprivileged sandbox user and receives only a localhost
+The agent runs as an unprivileged runtime user and receives only a localhost
 URL and a non-secret placeholder key. It never receives `HF_TOKEN`, provider or
 judge credentials, the scoped route URL, authorization headers, or secret files.
 
 User separation is a launch invariant. A paid canary must prove that the bridge
 and agent have different UIDs and that the agent cannot read the bridge process
-environment. Failure to enforce that boundary blocks the campaign. Redaction
+environment. Failure to enforce that boundary blocks the run. Redaction
 cannot substitute for isolation.
 
 ## Agent Requirements
@@ -279,7 +279,7 @@ execution under the same logical trial:
 - custom-agent package installation failure unrelated to its locked content.
 - private ingress startup or authentication failure.
 - provider transport failure covered by the locked retry policy.
-- missing terminal evidence caused by worker or sandbox loss.
+- missing terminal evidence caused by worker or Job loss.
 - artifact publication failure.
 
 The following remain terminal agent or benchmark outcomes:
@@ -295,22 +295,22 @@ semantic rerun.
 
 ## Migration
 
-This is a hard replacement for new provider campaigns:
+This is a hard replacement for new provider runs:
 
 1. Add the existing-schema `import_path` and Git-revision support plus the
    generic registry.
 2. Add `uv --with` installation from the already pinned worker checkout.
 3. Implement all four custom agents and neutral shared support under
    `packages/harbor-hf-agents`.
-4. Migrate every provider campaign profile to its custom-agent `import_path`.
+4. Migrate every provider run profile to its custom-agent `import_path`.
 5. Remove name-based provider branches, built-in-agent assumptions, custom
    runtime-manifest work, exact session filename entries, and Harbor fork pins.
 6. Run local contract and mutation tests.
 7. Run one Fireworks and one Together paid canary for every applicable wire API
    and agent family.
-8. Launch full campaigns only after all canaries pass.
+8. Launch full runs only after all canaries pass.
 
-No new provider campaign may use the old path after step 5. Historical evidence
+No new provider run may use the old path after step 5. Historical evidence
 remains readable but cannot select the removed writer.
 
 ## Verification matrix
@@ -319,7 +319,7 @@ Local validation must cover:
 
 - import-path validation and worker-revision pinning;
 - full-commit and exact-package revision enforcement;
-- deterministic run and campaign digests;
+- deterministic run and run digests;
 - dependency-free `uv --with` installation without Harbor lock drift;
 - custom-agent loading through unmodified Harbor;
 - registry rejection of unknown agents and unsupported APIs;

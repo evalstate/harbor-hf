@@ -6,10 +6,6 @@
       "title": "Attempt",
       "type": "integer"
     },
-    "campaign_id": {
-      "title": "Campaign Id",
-      "type": "string"
-    },
     "input_digest": {
       "title": "Input Digest",
       "type": "string"
@@ -20,6 +16,10 @@
     },
     "plan_digest": {
       "title": "Plan Digest",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
       "type": "string"
     },
     "schema_version": {
@@ -39,7 +39,7 @@
     }
   },
   "required": [
-    "campaign_id",
+    "run_id",
     "plan_digest",
     "input_digest",
     "worker_revision",

@@ -8,9 +8,9 @@ import type {
 } from "@harbor-hf/contracts";
 import { describe, expect, it } from "vitest";
 import {
-  preparedSandboxPolicy,
+  preparedTrialJobLaunch,
   ProfileResolutionError,
-  validatePreparedCampaignProfiles,
+  validatePreparedRunProfiles,
 } from "../src/profiles.js";
 
 const digest = `sha256:${"a".repeat(64)}`;
@@ -68,7 +68,7 @@ function deployment(): DeploymentProfileSpec {
     trusted_worker: true,
     inference_token: "forbidden",
     preparation: "required",
-    sandbox_template: {
+    trial_job_template: {
       flavors: [
         {
           hardware: "cpu-basic",
@@ -96,26 +96,21 @@ function deployment(): DeploymentProfileSpec {
       inference_timeout_seconds: 1_800,
       inference_max_output_tokens: 32_768,
       root_bootstrap_command: ["/opt/worker/start-root-services"],
-      max_sandboxes: 2,
-      max_commands: 128,
-      max_command_seconds: 1_800,
-      max_transfer_bytes: 67_108_864,
-      allowed_roots: ["/app", "/logs", "/tmp"],
+      max_jobs: 2,
       default_cpus: 1,
       default_memory_mb: 2_048,
       default_storage_mb: 10_240,
       default_gpus: 0,
       max_timeout_seconds: 7_200,
       lifetime_overhead_seconds: 540,
-      idle_timeout_overhead_seconds: 300,
+      max_image_bytes: 20 * 1024 * 1024 * 1024,
+      max_image_entries: 500_000,
     },
     inference_provider: "provider",
     input_price_microusd_per_million_tokens: 100_000,
     output_price_microusd_per_million_tokens: 200_000,
     harbor_version: "0.21.0",
     worker_revision: "abcdef0",
-    worker_concurrency: 2,
-    worker_max_tasks_per_job: 2,
     context_window: 131_072,
   };
 }
@@ -127,9 +122,9 @@ function preparedTrial(): PreparedTrial {
     record_id: "prepared-task-a",
     created_at: "2026-08-18T00:00:00Z",
     actor: { subject: "harbor-hf-control", role: "service" },
-    campaign_id: "campaign-example",
+    run_id: "run-example",
     preparation_id: "preparation-example",
-    campaign_lock_digest: digest,
+    run_lock_digest: digest,
     task_id: "task-a-trial-1",
     source_task_id: "task-a",
     trial_index: 1,
@@ -149,23 +144,37 @@ function preparedTrial(): PreparedTrial {
   };
 }
 
-describe("prepared campaign profiles", () => {
-  it("resolve one immutable Sandbox policy from prepared resources", () => {
+describe("prepared run profiles", () => {
+  it("resolves one immutable trial Job launch from prepared resources", () => {
     const value = deployment();
     expect(() =>
-      validatePreparedCampaignProfiles(value, benchmark, model, harness, tasks),
+      validatePreparedRunProfiles(value, benchmark, model, harness, tasks),
     ).not.toThrow();
-    expect(preparedSandboxPolicy(value, preparedTrial())).toMatchObject({
-      image: `example.invalid/task@${digest}`,
+    expect(preparedTrialJobLaunch(value, preparedTrial())).toMatchObject({
+      job_image: `example.invalid/worker@${digest}`,
+      task_image: `example.invalid/task@${digest}`,
+      job_command: [
+        "/bin/sh",
+        "-c",
+        [
+          "set -eu",
+          "'/opt/worker/start-root-services'",
+          "unset HF_INFERENCE_TOKEN HARBOR_HF_INFERENCE_TOKEN",
+          "exec 'run-worker'",
+        ].join("\n"),
+      ],
       hardware: "cpu-upgrade",
       timeout_seconds: 3_000,
-      idle_timeout_seconds: 1_200,
-      reservation_microusd: 25_000,
+      active_hourly_cost_microusd: 30_000,
+      max_jobs: 2,
+      max_image_bytes: 20 * 1024 * 1024 * 1024,
+      max_image_entries: 500_000,
+      inference_token: "required",
       inference_model: "example/model:provider",
     });
   });
 
-  it("rejects inference credentials in prepared outer Jobs", () => {
+  it("allows an inference credential on prepared execution Jobs", () => {
     const value = {
       ...deployment(),
       inference_token: "required" as const,
@@ -175,13 +184,30 @@ describe("prepared campaign profiles", () => {
       inference_max_output_tokens: 32_768,
     };
     expect(() =>
-      validatePreparedCampaignProfiles(value, benchmark, model, harness, tasks),
-    ).toThrow("must not receive an inference credential");
+      validatePreparedRunProfiles(value, benchmark, model, harness, tasks),
+    ).not.toThrow();
+  });
+
+  it("quotes bootstrap and worker arguments in the composed shell command", () => {
+    const value = deployment();
+    value.job_command = ["run worker", "it's-locked"];
+    value.trial_job_template.root_bootstrap_command = ["/root setup", "first"];
+
+    expect(preparedTrialJobLaunch(value, preparedTrial()).job_command).toEqual([
+      "/bin/sh",
+      "-c",
+      [
+        "set -eu",
+        "'/root setup' 'first'",
+        "unset HF_INFERENCE_TOKEN HARBOR_HF_INFERENCE_TOKEN",
+        `exec 'run worker' 'it'"'"'s-locked'`,
+      ].join("\n"),
+    ]);
   });
 
   it("rejects incomplete benchmark source mappings", () => {
     expect(() =>
-      validatePreparedCampaignProfiles(
+      validatePreparedRunProfiles(
         deployment(),
         { ...benchmark, source_task_ids: ["task-a"] },
         model,
@@ -194,7 +220,7 @@ describe("prepared campaign profiles", () => {
   it("rejects duplicate source trial identities", () => {
     const duplicate = [tasks[0] as TaskLock, { ...tasks[1], source_task_id: "task-a" }];
     expect(() =>
-      validatePreparedCampaignProfiles(
+      validatePreparedRunProfiles(
         deployment(),
         {
           ...benchmark,

@@ -21,10 +21,10 @@ from harbor_hf_agents.openclaw.agent import (
 
 
 @pytest.fixture(autouse=True)
-def no_sandbox_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_job_inference_route(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         openclaw_agent,
-        "use_sandbox_inference_route",
+        "use_job_inference_route",
         AsyncMock(return_value=False),
     )
 

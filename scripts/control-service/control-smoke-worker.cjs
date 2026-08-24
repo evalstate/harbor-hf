@@ -45,7 +45,7 @@ async function main() {
     process.env.HARBOR_HF_BUCKET_ID
   )
     throw new Error("control smoke credentials are forbidden in workers");
-  const campaignId = requiredEnvironment("HARBOR_HF_CAMPAIGN_ID");
+  const runId = requiredEnvironment("HARBOR_HF_RUN_ID");
   const actionId = requiredEnvironment("HARBOR_HF_ACTION_ID");
   const capability = requiredEnvironment("HARBOR_HF_WORKER_CAPABILITY");
   const taskIds = JSON.parse(requiredEnvironment("HARBOR_HF_TASK_IDS_JSON"));
@@ -94,20 +94,18 @@ async function main() {
     throw new Error(`control request failed with status ${lastStatus}`);
   }
 
-  const lock = await request(
-    `/api/v1/campaigns/${encodeURIComponent(campaignId)}/lock`,
-  );
+  const lock = await request(`/api/v1/runs/${encodeURIComponent(runId)}/lock`);
   if (
-    lock.campaign_id !== campaignId ||
+    lock.run_id !== runId ||
     !Array.isArray(lock.tasks) ||
     !lock.tasks.some((task) => task && task.task_id === taskId)
   )
-    throw new Error("campaign lock identity is invalid");
+    throw new Error("run lock identity is invalid");
 
   const evidenceBytes = Buffer.from(
     canonicalJson({
       action_id: actionId,
-      campaign_id: campaignId,
+      run_id: runId,
       kind: "control.smoke.receipt",
       schema_version: "v1",
       task_id: taskId,
@@ -115,7 +113,7 @@ async function main() {
     "utf8",
   );
   const evidenceDigest = digest(evidenceBytes);
-  const attemptPath = `/api/v1/campaigns/${encodeURIComponent(campaignId)}/tasks/${encodeURIComponent(taskId)}/attempts`;
+  const attemptPath = `/api/v1/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/attempts`;
   const evidence = await request(attemptPath, {
     method: "POST",
     headers: {
@@ -139,7 +137,7 @@ async function main() {
   const manifestBytes = Buffer.from(
     canonicalJson({
       action_id: actionId,
-      campaign_id: campaignId,
+      run_id: runId,
       kind: "worker.evidence.manifest",
       objects: [
         {
@@ -194,7 +192,7 @@ async function main() {
     }),
   });
   if (
-    receipt.campaign_id !== campaignId ||
+    receipt.run_id !== runId ||
     receipt.task_id !== taskId ||
     typeof receipt.attempt_id !== "string"
   )

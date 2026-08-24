@@ -1,14 +1,14 @@
-"""Kimi Code over the Harbor-HF sandbox inference route."""
+"""Kimi Code over the Harbor-HF Job inference route."""
 
 from harbor.agents.installed.kimi_code import KimiCode
 
-from harbor_hf_agents.support.sandbox_chat_completions import (
-    SandboxChatCompletionsAgent,
+from harbor_hf_agents.support.job_chat_completions import (
+    JobChatCompletionsAgent,
 )
 
 
-class KimiCodeAgent(SandboxChatCompletionsAgent, KimiCode):
-    """Harbor Kimi Code bound to the locked sandbox loopback inference route.
+class KimiCodeAgent(JobChatCompletionsAgent, KimiCode):
+    """Harbor Kimi Code bound to the locked Job loopback inference route.
 
     Upstream Kimi Code reads ``KIMI_MODEL_API_KEY`` and ``KIMI_MODEL_BASE_URL``
     from the process environment. Execution Jobs do not receive those values.

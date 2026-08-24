@@ -60,7 +60,7 @@ class FakeBucketWriterApi:
         self, bucket_id: str, paths: Iterable[str], **kwargs: object
     ) -> list[object]:
         assert bucket_id == "org/evidence"
-        assert list(paths) == ["campaigns/campaign-one/_SUCCESS"]
+        assert list(paths) == ["runs/run-one/_SUCCESS"]
         assert kwargs == {}
         return self.observed
 
@@ -107,10 +107,10 @@ class FakeClaims:
 
 
 def test_lists_and_caches_bucket_evidence(tmp_path: Path) -> None:
-    prefix = "campaigns/campaign-one/runs/run-one"
+    prefix = "runs/run-one/executions/run-one"
     api = FakeBucketApi(
         {
-            f"{prefix}/run-summary.json": b"summary",
+            f"{prefix}/execution-summary.json": b"summary",
             f"{prefix}/_SUCCESS": b"",
         }
     )
@@ -118,13 +118,13 @@ def test_lists_and_caches_bucket_evidence(tmp_path: Path) -> None:
 
     assert reader.list_files(bucket="hf://buckets/org/evidence", prefix=prefix) == [
         "_SUCCESS",
-        "run-summary.json",
+        "execution-summary.json",
     ]
     assert (
         reader.read_bytes(
             bucket="hf://buckets/org/evidence",
             prefix=prefix,
-            path="run-summary.json",
+            path="execution-summary.json",
         )
         == b"summary"
     )
@@ -132,19 +132,19 @@ def test_lists_and_caches_bucket_evidence(tmp_path: Path) -> None:
         reader.read_bytes(
             bucket="hf://buckets/org/evidence",
             prefix=prefix,
-            path="run-summary.json",
+            path="execution-summary.json",
         )
         == b"summary"
     )
     assert api.list_calls == [("org/evidence", prefix, True)]
     assert api.downloads == 1
     assert api.download_batches == [
-        [f"{prefix}/_SUCCESS", f"{prefix}/run-summary.json"]
+        [f"{prefix}/_SUCCESS", f"{prefix}/execution-summary.json"]
     ]
 
 
 def test_selective_prefetch_avoids_large_unrequested_evidence(tmp_path: Path) -> None:
-    prefix = "campaigns/campaign-one"
+    prefix = "runs/run-one"
     api = FakeBucketApi(
         {
             f"{prefix}/wave/checksums.json": b"checksums",
@@ -171,7 +171,7 @@ def test_selective_prefetch_avoids_large_unrequested_evidence(tmp_path: Path) ->
 def test_interrupted_download_never_becomes_a_cached_evidence_object(
     tmp_path: Path,
 ) -> None:
-    prefix = "campaigns/campaign-one/runs/run-one"
+    prefix = "runs/run-one/executions/run-one"
 
     class InterruptedApi(FakeBucketApi):
         fail = True
@@ -208,7 +208,7 @@ def test_interrupted_download_never_becomes_a_cached_evidence_object(
 
 
 def test_refresh_discards_cached_evidence_bytes(tmp_path: Path) -> None:
-    prefix = "campaigns/campaign-one/runs/run-one"
+    prefix = "runs/run-one/executions/run-one"
     path = f"{prefix}/record.json"
     api = FakeBucketApi({path: b"first"})
     reader = HubBucketEvidenceReader(tmp_path, api=api)
@@ -227,10 +227,10 @@ def test_refresh_discards_cached_evidence_bytes(tmp_path: Path) -> None:
 
 
 def test_rejects_missing_and_escaped_bucket_objects(tmp_path: Path) -> None:
-    prefix = "campaigns/campaign-one/runs/run-one"
+    prefix = "runs/run-one/executions/run-one"
     reader = HubBucketEvidenceReader(
         tmp_path,
-        api=FakeBucketApi({"campaigns/other/run-summary.json": b"summary"}),
+        api=FakeBucketApi({"runs/other/execution-summary.json": b"summary"}),
     )
 
     with pytest.raises(BucketEvidenceError, match="escaped"):
@@ -242,7 +242,7 @@ def test_rejects_missing_and_escaped_bucket_objects(tmp_path: Path) -> None:
     )
     with pytest.raises(BucketEvidenceError, match="missing"):
         missing.read_bytes(
-            bucket="org/evidence", prefix=prefix, path="run-summary.json"
+            bucket="org/evidence", prefix=prefix, path="execution-summary.json"
         )
 
 
@@ -252,7 +252,7 @@ def test_writer_creates_absent_immutable_object_with_exact_batch() -> None:
 
     created = writer.write_immutable(
         bucket="hf://buckets/org/evidence",
-        path="campaigns/campaign-one/_SUCCESS",
+        path="runs/run-one/_SUCCESS",
         content=b"new evidence",
     )
 
@@ -261,7 +261,7 @@ def test_writer_creates_absent_immutable_object_with_exact_batch() -> None:
     assert api.batch_calls == [
         (
             "org/evidence",
-            [(b"new evidence", "campaigns/campaign-one/_SUCCESS")],
+            [(b"new evidence", "runs/run-one/_SUCCESS")],
             {},
         )
     ]
@@ -274,7 +274,7 @@ def test_writer_serializes_check_and_write_with_distributed_claim() -> None:
 
     assert writer.write_immutable(
         bucket="org/evidence",
-        path="campaigns/campaign-one/_SUCCESS",
+        path="runs/run-one/_SUCCESS",
         content=b"new evidence",
     )
 
@@ -295,7 +295,7 @@ def test_writer_does_not_fail_completed_write_when_claim_release_fails() -> None
 
     created = writer.write_immutable(
         bucket="org/evidence",
-        path="campaigns/campaign-one/_SUCCESS",
+        path="runs/run-one/_SUCCESS",
         content=b"new evidence",
     )
 
@@ -304,13 +304,13 @@ def test_writer_does_not_fail_completed_write_when_claim_release_fails() -> None
 
 
 def test_writer_adopts_only_byte_identical_immutable_object() -> None:
-    remote = SimpleNamespace(path="campaigns/campaign-one/_SUCCESS")
+    remote = SimpleNamespace(path="runs/run-one/_SUCCESS")
     api = FakeBucketWriterApi([remote])
     writer = HubBucketEvidenceWriter(api=api)
 
     created = writer.write_immutable(
         bucket="org/evidence",
-        path="campaigns/campaign-one/_SUCCESS",
+        path="runs/run-one/_SUCCESS",
         content=b"existing",
     )
 
@@ -318,7 +318,7 @@ def test_writer_adopts_only_byte_identical_immutable_object() -> None:
     assert api.download_calls == [
         (
             "org/evidence",
-            "campaigns/campaign-one/_SUCCESS",
+            "runs/run-one/_SUCCESS",
             True,
             "object",
             True,
@@ -331,7 +331,7 @@ def test_writer_adopts_only_byte_identical_immutable_object() -> None:
     ("observed", "message"),
     [
         (
-            [SimpleNamespace(path="campaigns/campaign-one/other")],
+            [SimpleNamespace(path="runs/run-one/other")],
             "Bucket immutable-path lookup is ambiguous",
         ),
         (
@@ -340,8 +340,8 @@ def test_writer_adopts_only_byte_identical_immutable_object() -> None:
         ),
         (
             [
-                SimpleNamespace(path="campaigns/campaign-one/_SUCCESS"),
-                SimpleNamespace(path="campaigns/campaign-one/_SUCCESS"),
+                SimpleNamespace(path="runs/run-one/_SUCCESS"),
+                SimpleNamespace(path="runs/run-one/_SUCCESS"),
             ],
             "Bucket immutable-path lookup is ambiguous",
         ),
@@ -355,7 +355,7 @@ def test_writer_rejects_ambiguous_immutable_lookup(
     with pytest.raises(BucketEvidenceError) as captured:
         HubBucketEvidenceWriter(api=api).write_immutable(
             bucket="org/evidence",
-            path="campaigns/campaign-one/_SUCCESS",
+            path="runs/run-one/_SUCCESS",
             content=b"existing",
         )
 
@@ -365,28 +365,28 @@ def test_writer_rejects_ambiguous_immutable_lookup(
 
 
 def test_writer_rejects_conflicting_or_unreadable_existing_object() -> None:
-    remote = SimpleNamespace(path="campaigns/campaign-one/_SUCCESS")
+    remote = SimpleNamespace(path="runs/run-one/_SUCCESS")
     conflicting = FakeBucketWriterApi([remote])
 
     with pytest.raises(BucketEvidenceError) as conflict:
         HubBucketEvidenceWriter(api=conflicting).write_immutable(
             bucket="org/evidence",
-            path="campaigns/campaign-one/_SUCCESS",
+            path="runs/run-one/_SUCCESS",
             content=b"different",
         )
 
     assert str(conflict.value) == (
-        "Bucket immutable evidence conflicts: campaigns/campaign-one/_SUCCESS"
+        "Bucket immutable evidence conflicts: runs/run-one/_SUCCESS"
     )
     unreadable = FakeBucketWriterApi([remote])
     unreadable.write_download = False
     with pytest.raises(BucketEvidenceError) as read_error:
         HubBucketEvidenceWriter(api=unreadable).write_immutable(
             bucket="org/evidence",
-            path="campaigns/campaign-one/_SUCCESS",
+            path="runs/run-one/_SUCCESS",
             content=b"existing",
         )
 
     assert str(read_error.value) == (
-        "Bucket evidence object cannot be read: campaigns/campaign-one/_SUCCESS"
+        "Bucket evidence object cannot be read: runs/run-one/_SUCCESS"
     )

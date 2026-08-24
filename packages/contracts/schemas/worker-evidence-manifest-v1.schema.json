@@ -4,18 +4,11 @@
   "title": "WorkerEvidenceManifestV1",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "kind",
-    "campaign_id",
-    "action_id",
-    "task_id",
-    "objects"
-  ],
+  "required": ["schema_version", "kind", "run_id", "action_id", "task_id", "objects"],
   "properties": {
     "schema_version": { "const": "v1" },
     "kind": { "const": "worker.evidence.manifest" },
-    "campaign_id": { "$ref": "#/$defs/WorkerEvidenceId" },
+    "run_id": { "$ref": "#/$defs/WorkerEvidenceId" },
     "action_id": { "$ref": "#/$defs/WorkerEvidenceId" },
     "task_id": { "$ref": "#/$defs/WorkerEvidenceId" },
     "objects": {

@@ -17,22 +17,22 @@ Collect these values before editing a manifest:
 - private namespace, the configured `<control-space>` and `<artifact-bucket>`,
   and the `HF_TOKEN` secret key; keep deployed identifiers in private operator
   state;
-- controller image digest, worker commit, Harbor commit, and Sandbox flavor;
+- preparation and execution image digests, worker commit, and Harbor commit;
 - provider request concurrency and request interval, or selected endpoint
   serving profile;
-- trial and shard timeouts plus wave, Sandbox, controller Job, judge, and
+- trial and shard timeouts plus wave, preparation Job, execution Job, judge, and
   capture timeouts;
-- campaign spend cap, per-wave reservation, retry policy, and maximum active
+- run spend cap, per-wave reservation, retry policy, and maximum active
   waves;
 - publication role and evaluation identity.
 
 Missing policy choices should remain visible. Do not silently copy them from a
-campaign with a different model, runtime, agent, judge, or provider.
+run with a different model, runtime, agent, judge, or provider.
 
 Inventory the namespace before planning. Reuse existing Harbor-HF resources and
 separate data with stable prefixes. Do not create a repository, Bucket, Space,
 Dataset, schedule, status store, lease store, backup store, or result service
-for one campaign or profile. Follow
+for one run or profile. Follow
 `docs/2026-08-16-harbor-hf-control-service-plan.md` for the canonical target
 layout.
 
@@ -45,7 +45,7 @@ keep-awake schedule.
 
 ## Immutable identity review
 
-Inspect every behavior-affecting reference. Full campaigns require:
+Inspect every behavior-affecting reference. Full runs require:
 
 - 40-character lowercase commits for anonymously readable public Git sources,
   or a verified content and manifest digest for a local-directory bundle;
@@ -77,7 +77,7 @@ Compute the expected logical trial count independently:
 logical trials = selected tasks * logical attempts * resolved matrix cells
 ```
 
-The campaign plan reports `run_count`, `shard_count`, and `trial_count`. Inspect
+The run plan reports `run_count`, `shard_count`, and `trial_count`. Inspect
 `runs[].shards[].trials[]` to verify task names and logical attempts. Include
 literal task names that contain spaces, brackets, or deprecation labels when
 they are part of the pinned protocol.
@@ -96,13 +96,13 @@ A synthetic token test cannot select Harbor trial concurrency.
 The profile ladder starts at concurrency 1 and tests powers of two. Each point
 needs at least `max(8, 2 * concurrency)` observations, and boundary points need
 three successful repetitions. Store raw measurements and the selected profile
-in the private Bucket. Bind the selected profile to the campaign when the
+in the private Bucket. Bind the selected profile to the run when the
 manifest supports it.
 
 Provider-backed agents still need profiling. Provider request concurrency,
 Harbor trial concurrency, request spacing, and active waves are separate
 limits. Record all four. The controller uses one parent-checked namespace claim
-per provider service, so independent campaigns cannot run internal waves against
+per provider service, so independent runs cannot run internal waves against
 the same service concurrently. This conservative limit stays at one until a
 future immutable contract can prove and divide a larger shared quota.
 
@@ -147,12 +147,12 @@ The gate is:
 bounded estimate <= execution.timeout_seconds
 ```
 
-The enclosing controller Job must also satisfy the limits in
-`docs/run-spec.md`. Endpoint-backed Jobs need at least 4,800 seconds beyond the
-execution timeout and must stay within the controller ceiling. Sandbox idle
-time must exceed the longest uninterrupted agent or verifier command.
+The enclosing Job must also satisfy the limits in `docs/run-spec.md`.
+Endpoint-backed Jobs need at least 4,800 seconds beyond the execution timeout
+and must stay within the Job ceiling. A trial Job timeout must exceed the
+longest uninterrupted agent or verifier command.
 
-For provider-backed campaigns, the same execution deadline still bounds Harbor
+For provider-backed runs, the same execution deadline still bounds Harbor
 work. A long controller Job does not rescue a wave whose shorter execution
 deadline has expired.
 
@@ -162,7 +162,7 @@ Generate a current plan and run:
 
 ```bash
 uv run harbor-hf validate MANIFEST
-uv run harbor-hf campaign plan MANIFEST --format json > PLAN.json
+uv run harbor-hf run plan MANIFEST --format json > PLAN.json
 uv run python .agents/skills/harbor-hf/scripts/check_wave_budget.py \
   --manifest MANIFEST \
   --plan PLAN.json \
@@ -202,9 +202,9 @@ the conservative effective concurrency to 1. Even an unrealistically low
 three-minute planning duration needs 124,200 seconds before reserve. The
 16,200-second deadline is impossible.
 
-The safe correction changes the immutable campaign manifest. Reduce the number
+The safe correction changes the immutable run manifest. Reduce the number
 of shards per wave until the measured estimate fits. If one shard remains too
-large, reduce `max_trials_per_shard`. Generate a new campaign identity and keep
+large, reduce `max_trials_per_shard`. Generate a new run identity and keep
 the superseded manifest as provenance.
 
 ## Canary design
@@ -230,25 +230,25 @@ cleanup time for the full-wave calculation.
 
 ## Spend arithmetic
 
-Provider campaigns require `max_spend_usd` and `estimated_wave_cost_usd`
+Provider runs require `max_spend_usd` and `estimated_wave_cost_usd`
 together. The controller reserves the next wave estimate and may retain it after
 the wave closes when provider billing is unattributed.
 
 Before launch, compute:
 
 ```text
-maximum concurrently reserved campaign spend = estimated next-wave cost
+maximum concurrently reserved run spend = estimated next-wave cost
 
 retry reservation requirement =
     estimated cost of every infrastructure retry generation allowed by policy
 ```
 
-Both must fit the campaign cap. Do not assume a closed wave releases its full
+Both must fit the run cap. Do not assume a closed wave releases its full
 reservation. If the cap cannot admit the declared retry generation, fix the
-manifest before launch. An immutable campaign whose retained reservation blocks
-a retry needs a linked replacement campaign or an explicit terminal decision.
+manifest before launch. An immutable run whose retained reservation blocks
+a retry needs a linked replacement run or an explicit terminal decision.
 
-Endpoint campaigns also need price and startup estimates together with active
+Endpoint runs also need price and startup estimates together with active
 drain plus retry estimates.
 Unknown quota or price fails profiling preflight.
 
@@ -262,7 +262,7 @@ Keep a small, secret-free launch record with:
 - effective concurrency and its limiting factor;
 - planning trial duration and headroom factor plus reserve and worst-wave
   estimate;
-- execution, Sandbox, and controller deadlines;
+- preparation and execution Job deadlines;
 - spend cap, per-wave estimate, active-wave bound, and retry capacity;
 - canary and pilot evidence paths;
 - operator authorization and timestamp.

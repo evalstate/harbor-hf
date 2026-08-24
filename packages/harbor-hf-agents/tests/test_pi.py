@@ -8,10 +8,10 @@ import pytest
 from harbor.models.agent.context import AgentContext
 
 from harbor_hf_agents.pi.agent import PiAgent, pi_jsonl_to_atif_trajectory
-from harbor_hf_agents.support.provider_outcome import TransientProviderError
-from harbor_hf_agents.support.sandbox_inference_route import (
-    use_sandbox_inference_route,
+from harbor_hf_agents.support.job_inference_route import (
+    use_job_inference_route,
 )
+from harbor_hf_agents.support.provider_outcome import TransientProviderError
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def _exec_result(output: str | None = None) -> AsyncMock:
     )
 
 
-def _exec_with_empty_sandbox_probe(*_args, **kwargs) -> AsyncMock:
+def _exec_with_empty_job_probe(*_args, **kwargs) -> AsyncMock:
     command = kwargs.get("command", "")
     return _exec_result("" if "/run/harbor-hf-inference.json" in command else None)
 
@@ -109,7 +109,7 @@ def test_pi_jsonl_converts_tool_use_to_atif(temp_dir) -> None:
 
 
 @pytest.mark.asyncio
-async def test_uses_prepared_sandbox_loopback_route() -> None:
+async def test_uses_prepared_job_loopback_route() -> None:
     agent = AsyncMock()
     route = {
         "schema_version": "v1",
@@ -118,28 +118,37 @@ async def test_uses_prepared_sandbox_loopback_route() -> None:
         "api_key": "harbor-local-inference-bridge",
         "model": "example/model",
     }
-    agent.exec_as_root.return_value = AsyncMock(
-        return_code=0,
-        stdout=json.dumps(route),
-        stderr="",
-    )
     env: dict[str, str] = {}
 
-    assert await use_sandbox_inference_route(
-        agent,
-        AsyncMock(),
-        env,
-        base_url_key="OPENAI_BASE_URL",
-        api_key_key="OPENAI_API_KEY",
-        api="chat-completions",
-        allowed_model="example/model",
-    )
+    with (
+        patch(
+            "harbor_hf_agents.support.job_inference_route._load_job_route",
+            return_value=route,
+        ),
+        patch(
+            "harbor_hf_agents.support.job_inference_route._job_bridge_pid",
+            return_value=123,
+        ),
+    ):
+        assert await use_job_inference_route(
+            agent,
+            AsyncMock(),
+            env,
+            base_url_key="OPENAI_BASE_URL",
+            api_key_key="OPENAI_API_KEY",
+            api="chat-completions",
+            allowed_model="example/model",
+        )
     assert env == {
         "OPENAI_BASE_URL": "http://127.0.0.1:18080/v1",
         "OPENAI_API_KEY": "harbor-local-inference-bridge",
     }
     agent.exec_as_agent.assert_awaited_once()
-    assert "cat /proc/$pid/environ" in agent.exec_as_agent.await_args.kwargs["command"]
+    command = agent.exec_as_agent.await_args.kwargs["command"]
+    assert "/proc/123/environ" in command
+    assert "CapBnd" in command
+    assert "/run/harbor-hf-inference.token" in command
+    agent.exec_as_root.assert_not_awaited()
 
 
 class TestPiAgent:
@@ -288,7 +297,7 @@ class TestPiAgent:
     async def test_api_key_forwarding_openai(self, temp_dir):
         agent = PiAgent(logs_dir=temp_dir, model_name="openai/gpt-4")
         mock_env = AsyncMock()
-        mock_env.exec.side_effect = _exec_with_empty_sandbox_probe
+        mock_env.exec.side_effect = _exec_with_empty_job_probe
         env_vars = {
             "OPENAI_API_KEY": "sk-456",
             "OPENAI_BASE_URL": "https://proxy.example/v1",
@@ -322,7 +331,7 @@ class TestPiAgent:
             models_json=models_json,
         )
         mock_env = AsyncMock()
-        mock_env.exec.side_effect = _exec_with_empty_sandbox_probe
+        mock_env.exec.side_effect = _exec_with_empty_job_probe
         mock_env.capabilities.mounted = False
         env_vars = {
             "OPENAI_API_KEY": "scoped-token",

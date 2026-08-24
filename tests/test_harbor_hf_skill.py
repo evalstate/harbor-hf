@@ -26,7 +26,7 @@ def _object_list(value: object) -> list[object]:
 
 def _manifest(*, max_shards_per_wave: int) -> dict[str, object]:
     return {
-        "metadata": {"name": "test-campaign"},
+        "metadata": {"name": "test-run"},
         "matrix": {
             "deployments": [
                 {
@@ -49,12 +49,12 @@ def _plan(
     *, shard_trial_counts: list[int], max_shards_per_wave: int
 ) -> dict[str, object]:
     return {
-        "experiment": "test-campaign",
-        "run_count": 1,
+        "experiment": "test-run",
+        "execution_count": 1,
         "shard_count": len(shard_trial_counts),
         "trial_count": sum(shard_trial_counts),
         "max_shards_per_wave": max_shards_per_wave,
-        "runs": [
+        "executions": [
             {
                 "deployment": "provider",
                 "deployment_digest": "sha256:" + "1" * 64,
@@ -73,7 +73,7 @@ def _run_check(
     manifest: dict[str, object],
     plan: dict[str, object],
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object] | None]:
-    manifest_path = tmp_path / "campaign.yaml"
+    manifest_path = tmp_path / "run.yaml"
     plan_path = tmp_path / "plan.json"
     output_path = tmp_path / "report.json"
     manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")

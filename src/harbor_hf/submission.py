@@ -30,8 +30,6 @@ from harbor_hf.benchmark_staging import (
     stage_benchmark_bundle,
     verify_staged_benchmark_bundle,
 )
-from harbor_hf.campaign_input import write_campaign_input
-from harbor_hf.campaigns import CampaignLock, EndpointWaveTarget, WaveLock
 from harbor_hf.controller_status import (
     ControllerAttemptReservation,
     ControllerLaunchClaim,
@@ -42,6 +40,7 @@ from harbor_hf.controller_status import (
 )
 from harbor_hf.coordination import bucket_id, coordination_repository
 from harbor_hf.credentials import configured_job_hf_token
+from harbor_hf.executions import ExecutionLock
 from harbor_hf.judge_recorder import JUDGE_RECORDER_PORT
 from harbor_hf.models import (
     BundleBenchmarkSource,
@@ -53,7 +52,8 @@ from harbor_hf.models import (
 )
 from harbor_hf.process import ProcessError
 from harbor_hf.provider_proxy import PROVIDER_RECORDER_PORT
-from harbor_hf.runs import RunLock
+from harbor_hf.run_input import write_run_input
+from harbor_hf.runs import EndpointWaveTarget, RunLock, WaveLock
 
 _JOB_ID = re.compile(r"(?<![a-f0-9])[a-f0-9]{24}(?![a-f0-9])")
 _GITHUB_REPOSITORY = re.compile(
@@ -110,7 +110,7 @@ class BucketApi(Protocol):
 class Submission(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    run_id: str
+    execution_id: str
     artifact_prefix: str
     job_id: str | None
     source_lock_digest: str
@@ -127,10 +127,10 @@ class WaveSubmission(BaseModel):
     command: list[str]
 
 
-class CampaignControllerSubmission(BaseModel):
+class RunControllerSubmission(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    campaign_id: str
+    run_id: str
     plan_digest: str
     input_digest: str
     input_uri: str
@@ -337,20 +337,20 @@ def _wave_benchmark_bundle_volume(lock: WaveLock) -> list[str]:
     # without a hash, so collecting the models themselves in a set raises
     # TypeError. The digest is the bundle's identity.
     sources: dict[str, BundleBenchmarkSource] = {}
-    for run in lock.runs:
+    for run in lock.executions:
         source = run.configuration.benchmark_source
         if isinstance(source, BundleBenchmarkSource):
             sources[source.content_digest] = source
     if not sources:
         return []
     if len(sources) != 1:
-        raise ValueError("wave runs must use one benchmark bundle")
+        raise ValueError("wave executions must use one benchmark bundle")
     return _benchmark_bundle_volume(
         next(iter(sources.values())), namespace=lock.remote.job.namespace
     )
 
 
-def endpoint_lease_label(lock: RunLock) -> str:
+def endpoint_lease_label(lock: ExecutionLock) -> str:
     endpoint = _endpoint_binding(lock)
     return endpoint_lease_label_for(endpoint.namespace, endpoint.name)
 
@@ -360,22 +360,22 @@ def endpoint_lease_label_for(namespace: str, name: str) -> str:
     return hashlib.sha256(identity).hexdigest()[:32]
 
 
-def job_secret_names(lock: RunLock | WaveLock) -> list[str]:
+def job_secret_names(lock: ExecutionLock | WaveLock) -> list[str]:
     names = {lock.remote.job.token_secret_name}
-    run_locks = (
+    execution_locks = (
         [lock]
-        if isinstance(lock, RunLock)
-        else [run.configuration for run in lock.runs]
+        if isinstance(lock, ExecutionLock)
+        else [run.configuration for run in lock.executions]
     )
-    for run_lock in run_locks:
-        judge = run_lock.benchmark_judge
+    for execution_lock in execution_locks:
+        judge = execution_lock.benchmark_judge
         if judge is not None:
             names.add(judge.api_key_secret_name)
     token_name = lock.remote.job.token_secret_name
     return [token_name, *sorted(names - {token_name})]
 
 
-def _secret_arguments(lock: RunLock | WaveLock) -> list[str]:
+def _secret_arguments(lock: ExecutionLock | WaveLock) -> list[str]:
     return [
         argument for name in job_secret_names(lock) for argument in ("--secrets", name)
     ]
@@ -383,7 +383,7 @@ def _secret_arguments(lock: RunLock | WaveLock) -> list[str]:
 
 @contextmanager
 def _materialized_job_secrets(
-    lock: RunLock | WaveLock, command: list[str]
+    lock: ExecutionLock | WaveLock, command: list[str]
 ) -> Iterator[list[str]]:
     with _materialized_named_job_secrets(job_secret_names(lock), command) as rendered:
         yield rendered
@@ -466,14 +466,14 @@ def _materialized_named_job_secrets(
 
 
 def build_submit_command(
-    lock: RunLock,
+    lock: ExecutionLock,
     *,
     input_dir: Path | str,
     bucket: str,
 ) -> list[str]:
     if lock.judge_required_tasks:
         raise ValueError(
-            "judge-required runs must use campaign execution for per-trial evidence"
+            "judge-required executions must use run-managed per-trial execution"
         )
     job = lock.remote.job
     return [
@@ -489,7 +489,7 @@ def build_submit_command(
         f"{job.timeout_seconds}s",
         *_secret_arguments(lock),
         "--label",
-        f"harbor-hf-run={lock.run_id}",
+        f"harbor-hf-execution={lock.execution_id}",
         "--label",
         f"harbor-hf-endpoint={endpoint_lease_label(lock)}",
         "--volume",
@@ -506,7 +506,7 @@ def build_submit_command(
             "harbor-hf",
             "worker",
             "/input/manifest.yaml",
-            "/input/run.lock.json",
+            "/input/execution.lock.json",
             "--output-root",
             "/output",
         ),
@@ -521,7 +521,7 @@ def build_submit_wave_command(
 ) -> list[str]:
     if not isinstance(lock.target, EndpointWaveTarget):
         raise ValueError(
-            "provider wave locks must run inside their owning campaign controller"
+            "provider wave locks must run inside their owning run controller"
         )
     job = lock.remote.job
     labels = [
@@ -534,7 +534,7 @@ def build_submit_wave_command(
         ),
     ]
     exposed_ports: list[str] = []
-    if any(run.configuration.judge_required_tasks for run in lock.runs):
+    if any(run.configuration.judge_required_tasks for run in lock.executions):
         exposed_ports.extend(["--expose", str(JUDGE_RECORDER_PORT)])
     return [
         "hf",
@@ -562,7 +562,7 @@ def build_submit_wave_command(
             "harbor-hf",
             "wave-worker",
             "/input/manifest.yaml",
-            "/input/campaign.lock.json",
+            "/input/run.lock.json",
             "/input/wave.lock.json",
             "--output-root",
             "/output",
@@ -570,8 +570,8 @@ def build_submit_wave_command(
     ]
 
 
-def build_submit_campaign_controller_command(
-    lock: CampaignLock,
+def build_submit_run_controller_command(
+    lock: RunLock,
     spec: ExperimentSpec,
     *,
     input_dir: Path | str,
@@ -579,9 +579,9 @@ def build_submit_campaign_controller_command(
     attempt: int,
 ) -> list[str]:
     if spec.remote is None or lock.controller_policy is None:
-        raise ValueError("campaign controller submission requires provider settings")
+        raise ValueError("run controller submission requires provider settings")
     if attempt < 1 or attempt > lock.controller_policy.max_attempts:
-        raise ValueError("campaign controller attempt is outside its locked limit")
+        raise ValueError("run controller attempt is outside its locked limit")
     job = spec.remote.job
     exposed_ports = ["--expose", str(PROVIDER_RECORDER_PORT)]
     if spec.benchmark.judge is not None:
@@ -600,13 +600,13 @@ def build_submit_campaign_controller_command(
         *exposed_ports,
         *[
             argument
-            for name in campaign_job_secret_names(spec)
+            for name in run_job_secret_names(spec)
             for argument in ("--secrets", name)
         ],
         "--label",
-        "harbor-hf-role=campaign-controller",
+        "harbor-hf-role=run-controller",
         "--label",
-        f"harbor-hf-campaign={lock.campaign_id}",
+        f"harbor-hf-run={lock.run_id}",
         "--label",
         f"harbor-hf-plan={lock.plan_digest.removeprefix('sha256:')[:16]}",
         "--label",
@@ -621,9 +621,9 @@ def build_submit_campaign_controller_command(
         *locked_source_command(
             spec.remote.worker,
             "harbor-hf",
-            "campaign-controller",
+            "run-controller",
             "/input/manifest.yaml",
-            "/input/campaign.lock.json",
+            "/input/run.lock.json",
             "--attempt",
             str(attempt),
             *(["--prior-job-terminal"] if attempt > 1 else []),
@@ -633,13 +633,13 @@ def build_submit_campaign_controller_command(
     ]
 
 
-def require_campaign_job_secret_sources(spec: ExperimentSpec) -> None:
-    remote_job_secret_values(campaign_job_secret_names(spec))
+def require_run_job_secret_sources(spec: ExperimentSpec) -> None:
+    remote_job_secret_values(run_job_secret_names(spec))
 
 
-def campaign_job_secret_names(spec: ExperimentSpec) -> list[str]:
+def run_job_secret_names(spec: ExperimentSpec) -> list[str]:
     if spec.remote is None:
-        raise ValueError("campaign controller requires remote execution")
+        raise ValueError("run controller requires remote execution")
     names = {spec.remote.job.token_secret_name}
     if spec.benchmark.judge is not None:
         names.add(spec.benchmark.judge.api_key_secret_name)
@@ -647,15 +647,15 @@ def campaign_job_secret_names(spec: ExperimentSpec) -> list[str]:
     return [token_name, *sorted(names - {token_name})]
 
 
-def _endpoint_binding(lock: RunLock) -> EndpointRef:
+def _endpoint_binding(lock: ExecutionLock) -> EndpointRef:
     deployment = lock.deployment
     if not isinstance(deployment, DeploymentProfile) or deployment.endpoint is None:
-        raise ValueError("run lock has no endpoint binding")
+        raise ValueError("execution lock has no endpoint binding")
     return deployment.endpoint
 
 
 def submit(
-    lock: RunLock,
+    lock: ExecutionLock,
     *,
     input_dir: Path,
     bucket: str,
@@ -664,7 +664,7 @@ def submit(
     bucket_api: BucketApi | None = None,
     bundle: PreparedBenchmarkBundle | None = None,
 ) -> Submission:
-    _validate_run_source_input(lock, source_lock, input_dir)
+    _validate_execution_source_input(lock, source_lock, input_dir)
     remote_job_secret_values(job_secret_names(lock))
     if bucket_api is None:
         from huggingface_hub import HfApi
@@ -685,7 +685,7 @@ def submit(
     input_source = stage_job_input(
         input_dir,
         bucket=input_bucket,
-        identity=lock.run_id,
+        identity=lock.execution_id,
         api=bucket_api,
     )
     command = build_submit_command(lock, input_dir=input_source, bucket=bucket)
@@ -695,7 +695,7 @@ def submit(
     if match is None:
         raise ValueError("HF Jobs submission did not return a job ID")
     return Submission(
-        run_id=lock.run_id,
+        execution_id=lock.execution_id,
         artifact_prefix=lock.artifact_prefix,
         job_id=match.group(),
         source_lock_digest=source_lock_digest(source_lock),
@@ -704,8 +704,8 @@ def submit(
     )
 
 
-def _validate_run_source_input(
-    lock: RunLock,
+def _validate_execution_source_input(
+    lock: ExecutionLock,
     source_lock: BenchmarkSourceLock,
     input_dir: Path,
 ) -> None:
@@ -717,13 +717,13 @@ def _validate_run_source_input(
             lock.benchmark_dataset, lock.benchmark_dataset_digest
         )
         if lock.benchmark_source is not None or source.reference != expected:
-            raise ValueError("benchmark source lock does not match the run lock")
+            raise ValueError("benchmark source lock does not match the execution lock")
     elif lock.benchmark_source != source:
-        raise ValueError("benchmark source lock does not match the run lock")
+        raise ValueError("benchmark source lock does not match the execution lock")
 
 
-def submit_campaign_controller(
-    lock: CampaignLock,
+def submit_run_controller(
+    lock: RunLock,
     spec: ExperimentSpec,
     *,
     request: bytes,
@@ -736,10 +736,10 @@ def submit_campaign_controller(
     attempt: int = 1,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     identifier: Callable[[], str] = lambda: uuid.uuid4().hex,
-) -> CampaignControllerSubmission:
+) -> RunControllerSubmission:
     if spec.remote is None or lock.controller_policy is None:
-        raise ValueError("campaign controller submission requires provider settings")
-    remote_job_secret_values(campaign_job_secret_names(spec))
+        raise ValueError("run controller submission requires provider settings")
+    remote_job_secret_values(run_job_secret_names(spec))
     ensure_private_coordination_repository(spec.remote.job.namespace, api=bucket_api)
     input_bucket = ensure_private_job_input_bucket(
         spec.remote.job.namespace, api=bucket_api
@@ -752,9 +752,9 @@ def submit_campaign_controller(
         bucket=input_bucket,
         api=bucket_api,
     )
-    with tempfile.TemporaryDirectory(prefix="harbor-hf-campaign-input-") as name:
+    with tempfile.TemporaryDirectory(prefix="harbor-hf-run-input-") as name:
         staging = Path(name)
-        input_manifest = write_campaign_input(
+        input_manifest = write_run_input(
             staging,
             request=request,
             lock=lock,
@@ -762,12 +762,12 @@ def submit_campaign_controller(
         input_uri = stage_job_input(
             staging,
             bucket=input_bucket,
-            identity=lock.campaign_id,
+            identity=lock.run_id,
             api=bucket_api,
         )
-    existing = state_store.read_attempt(lock.campaign_id, attempt)
+    existing = state_store.read_attempt(lock.run_id, attempt)
     reservation = ControllerAttemptReservation(
-        campaign_id=lock.campaign_id,
+        run_id=lock.run_id,
         plan_digest=lock.plan_digest,
         input_digest=input_manifest.input_digest,
         input_uri=input_uri,
@@ -781,7 +781,7 @@ def submit_campaign_controller(
     if existing is not None and existing != reservation:
         raise ValueError("existing controller attempt changed the launch contract")
     state_store.reserve_attempt(reservation)
-    command = build_submit_campaign_controller_command(
+    command = build_submit_run_controller_command(
         lock,
         spec,
         input_dir=input_uri,
@@ -795,30 +795,30 @@ def submit_campaign_controller(
         labels=labels,
         runner=runner,
         command=command,
-        secret_names=campaign_job_secret_names(spec),
+        secret_names=run_job_secret_names(spec),
         reservation=reservation,
         state_store=state_store,
         clock=clock,
         identifier=identifier,
     )
-    return CampaignControllerSubmission(
-        campaign_id=lock.campaign_id,
+    return RunControllerSubmission(
+        run_id=lock.run_id,
         plan_digest=lock.plan_digest,
         input_digest=input_manifest.input_digest,
         input_uri=input_uri,
         job_id=job_id,
         attempt=attempt,
-        launch_receipt=controller_launch_receipt_path(lock.campaign_id, attempt),
+        launch_receipt=controller_launch_receipt_path(lock.run_id, attempt),
         source_lock=lock.source_lock,
         source_lock_digest=source_lock_digest(lock.source_lock),
-        secret_names=campaign_job_secret_names(spec),
+        secret_names=run_job_secret_names(spec),
         bundle=bundle_receipt,
         command=command,
     )
 
 
-def launch_reserved_campaign_controller(
-    lock: CampaignLock,
+def launch_reserved_run_controller(
+    lock: RunLock,
     spec: ExperimentSpec,
     reservation: ControllerAttemptReservation,
     *,
@@ -827,17 +827,17 @@ def launch_reserved_campaign_controller(
     state_store: ControllerStateStore,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     identifier: Callable[[], str] = lambda: uuid.uuid4().hex,
-) -> CampaignControllerSubmission:
+) -> RunControllerSubmission:
     if spec.remote is None:
-        raise ValueError("campaign controller requires remote execution")
-    remote_job_secret_values(campaign_job_secret_names(spec))
+        raise ValueError("run controller requires remote execution")
+    remote_job_secret_values(run_job_secret_names(spec))
     if (
-        reservation.campaign_id != lock.campaign_id
+        reservation.run_id != lock.run_id
         or reservation.plan_digest != lock.plan_digest
         or reservation.worker_revision != spec.remote.worker.revision
     ):
         raise ValueError("controller attempt reservation changed the launch contract")
-    command = build_submit_campaign_controller_command(
+    command = build_submit_run_controller_command(
         lock,
         spec,
         input_dir=reservation.input_uri,
@@ -850,25 +850,23 @@ def launch_reserved_campaign_controller(
         labels=_controller_labels(lock, reservation.attempt),
         runner=runner,
         command=command,
-        secret_names=campaign_job_secret_names(spec),
+        secret_names=run_job_secret_names(spec),
         reservation=reservation,
         state_store=state_store,
         clock=clock,
         identifier=identifier,
     )
-    return CampaignControllerSubmission(
-        campaign_id=lock.campaign_id,
+    return RunControllerSubmission(
+        run_id=lock.run_id,
         plan_digest=lock.plan_digest,
         input_digest=reservation.input_digest,
         input_uri=reservation.input_uri,
         job_id=job_id,
         attempt=reservation.attempt,
-        launch_receipt=controller_launch_receipt_path(
-            lock.campaign_id, reservation.attempt
-        ),
+        launch_receipt=controller_launch_receipt_path(lock.run_id, reservation.attempt),
         source_lock=lock.source_lock,
         source_lock_digest=source_lock_digest(lock.source_lock),
-        secret_names=campaign_job_secret_names(spec),
+        secret_names=run_job_secret_names(spec),
         bundle=None,
         command=command,
     )
@@ -894,7 +892,7 @@ def _launch_or_adopt_controller(
         return adopted
     acquired_at = clock().astimezone(UTC)
     claim = ControllerLaunchClaim(
-        campaign_id=reservation.campaign_id,
+        run_id=reservation.run_id,
         plan_digest=reservation.plan_digest,
         attempt=reservation.attempt,
         launcher_id=identifier(),
@@ -938,7 +936,7 @@ def _existing_controller_launch(
     namespace: str,
     labels: Mapping[str, str],
 ) -> str | None:
-    recorded = state_store.read_launch(reservation.campaign_id, reservation.attempt)
+    recorded = state_store.read_launch(reservation.run_id, reservation.attempt)
     if recorded is not None:
         return _validated_launch_receipt(recorded, reservation)
     existing = _find_controller_jobs(jobs_api, namespace, labels)
@@ -980,7 +978,7 @@ def _record_controller_launch(
     job_id: str,
 ) -> str:
     receipt = ControllerLaunchReceipt(
-        campaign_id=reservation.campaign_id,
+        run_id=reservation.run_id,
         plan_digest=reservation.plan_digest,
         input_digest=reservation.input_digest,
         attempt=reservation.attempt,
@@ -995,13 +993,13 @@ def _validated_launch_receipt(
     reservation: ControllerAttemptReservation,
 ) -> str:
     expected = (
-        reservation.campaign_id,
+        reservation.run_id,
         reservation.plan_digest,
         reservation.input_digest,
         reservation.attempt,
     )
     observed = (
-        receipt.campaign_id,
+        receipt.run_id,
         receipt.plan_digest,
         receipt.input_digest,
         receipt.attempt,
@@ -1011,10 +1009,10 @@ def _validated_launch_receipt(
     return receipt.job_id
 
 
-def _controller_labels(lock: CampaignLock, attempt: int) -> dict[str, str]:
+def _controller_labels(lock: RunLock, attempt: int) -> dict[str, str]:
     return {
-        "harbor-hf-role": "campaign-controller",
-        "harbor-hf-campaign": lock.campaign_id,
+        "harbor-hf-role": "run-controller",
+        "harbor-hf-run": lock.run_id,
         "harbor-hf-plan": lock.plan_digest.removeprefix("sha256:")[:16],
         "harbor-hf-controller-attempt": str(attempt),
     }
