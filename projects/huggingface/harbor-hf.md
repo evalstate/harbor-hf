@@ -33,6 +33,7 @@ Installer activation-command amendment approved at: 2026-08-20T19:07:58Z
 Installer runbook amendment approved: 2026-08-19
 Installer lifecycle simplification approved: 2026-08-19
 Upstream merge amendment approved: 2026-08-19
+Local upstream conflict-resolution amendment approved: 2026-08-19
 Installer credential-and-lock hardening approved: 2026-08-19
 Installer scope-and-source hardening approved: 2026-08-19
 Installer subprocess-and-phase hardening approved: 2026-08-19
@@ -217,6 +218,7 @@ No project-scope amendment remains pending. Operational gates still apply:
 - Approved expanding the terse installer pointers into an agent-oriented high-level installation and execution-model runbook. This amendment is documentation-only and does not authorize running installer commands, hosted mutations, credentials, spending, push, or a pull request.
 - Approved replacing implicit two-pass apply with explicit provision and configure phases, replacing installer canary activation with direct operator-confirmed activation of the inspected installation, adding a separate emergency disable command, and removing name-based canary policy. Activation must not change hardware or incur cost. No hosted mutation, credential handling, push, or pull request is authorized.
 - Approved fetching and locally merging the canonical upstream default branch into the current topic branch, including bounded conflict resolution and verification. No push, pull request, hosted mutation, credential handling, or spend is authorized.
+- Approved fetching and locally merging the configured canonical upstream default branch into `tweaks`, resolving conflicts without discarding existing local commits or reviewed security behavior, running relevant validation and the public-privacy check, and committing the verified integration locally. No push, pull request, deployment, hosted mutation, credential movement, force operation, rebase, reset, inference, or spend is authorized; stop for a product or architecture decision that cannot be resolved mechanically.
 - Approved requiring a fresh Bucket create/read-back capability probe before accepting a proposed control credential and safely reclaiming valid owner-only installer locks after confirmed process death or reboot. This is local implementation and test authorization only; no real credential or hosted probe is authorized.
 - Approved strict non-mutating fine-grained control-credential scope attestation, fail-closed receipt/Space source-SHA recovery, removal of recursive durable-record listing during credential checks, focused tests, documentation, and local commits. No real credential, hosted probe, installer remote command, resource mutation, activation, spend, push, or pull request is authorized.
 - Approved sanitizing advisory-lock subprocess environments, exact resources-only phase-one revalidation, per-target verification locking, focused tests, documentation, and local commits. No real credential, installer remote command, hosted mutation, activation, spend, push, or pull request is authorized.
