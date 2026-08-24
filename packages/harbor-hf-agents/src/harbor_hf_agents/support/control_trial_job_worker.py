@@ -294,13 +294,14 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
         or value["trial_index"] != expected["trial_index"]
     ):
         raise PreparedDataError("prepared trial does not match the run lock")
-    # The preparation and execution workers share this Python encoder. The
-    # control service separately binds the complete prepared record.
-    if digest_json(value["trial_lock"]) != value["trial_lock_digest"]:
+    harbor_lock = TrialLock.model_validate(value["trial_lock"])
+    # JavaScript JSON round trips render an integral Python float such as 1.0
+    # as 1. Restore Harbor's typed representation before checking its digest.
+    normalized_trial_lock = harbor_lock.model_dump(mode="json", exclude_unset=True)
+    if digest_json(normalized_trial_lock) != value["trial_lock_digest"]:
         raise PreparedDataError(
             f"prepared Harbor trial lock digest does not match: {task_id}"
         )
-    harbor_lock = TrialLock.model_validate(value["trial_lock"])
     if harbor_lock.task.digest != value["input_digest"]:
         raise PreparedDataError("prepared Harbor task digest does not match")
     task_image = _validate_prepared_image(value)

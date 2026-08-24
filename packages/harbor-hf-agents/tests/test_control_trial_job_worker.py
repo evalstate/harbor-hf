@@ -236,6 +236,25 @@ def test_reads_one_prepared_worker_configuration(
     assert config.task.timeout_seconds == 2_460
 
 
+def test_accepts_python_float_after_javascript_json_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = _lock()
+    prepared_job, prepared_trial = _prepared_records(lock)
+    prepared_trial["trial_lock"]["timeout_multiplier"] = 1
+    _configure(monkeypatch)
+    monkeypatch.setattr(worker, "_read_prepared_job", lambda _: prepared_job)
+    monkeypatch.setattr(
+        worker,
+        "_read_prepared_trial",
+        lambda _run_id, _task_id: prepared_trial,
+    )
+
+    config = worker._locked_config(lock)
+
+    assert config.task.trial_lock.timeout_multiplier == 1.0
+
+
 def test_multi_task_run_fetches_only_the_assigned_prepared_trial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
