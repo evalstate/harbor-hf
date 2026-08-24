@@ -319,6 +319,17 @@ describe("control API", () => {
     expect(campaigns.json()).toMatchObject({
       error: { code: "control_not_ready" },
     });
+    const login = await app.inject({
+      method: "GET",
+      url: "/auth/login?return_to=%2Foverview",
+    });
+    expect(login.statusCode).toBe(503);
+    expect(login.json()).toMatchObject({
+      error: { code: "control_not_ready" },
+    });
+    expect((await app.inject({ method: "POST", url: "/auth/logout" })).statusCode).toBe(
+      204,
+    );
     await app.close();
   });
 

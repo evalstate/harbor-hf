@@ -9,6 +9,7 @@ import {
   JOBS_REFRESH_INTERVAL_MS,
   keys,
   useAllProfiles,
+  useCampaignJobs,
   useJobs,
   useLiveUpdates,
 } from "../src/queries";
@@ -68,6 +69,16 @@ describe("live query updates", () => {
     expect(affected).toContainEqual(keys.task("campaign-1", "task-1"));
     expect(affected).not.toContainEqual(keys.session);
     expect(affected).not.toContainEqual(keys.results);
+  });
+
+  it("refreshes the complete campaign Job list for Job actions", () => {
+    const affected = affectedQueryKeys({
+      type: "action.receipt",
+      occurred_at: "2026-08-18T00:00:00Z",
+      data: { campaign_id: "campaign-1", action_kind: "job.observe" },
+    });
+    expect(affected).toContainEqual(keys.jobs);
+    expect(affected).toContainEqual(keys.campaignJobs("campaign-1"));
   });
 
   it("invalidates every capacity view after capacity profile promotion", () => {
@@ -215,14 +226,21 @@ describe("live query updates", () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it("requests Jobs scoped to a campaign", async () => {
-    const fetchMock = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ items: [], next_cursor: null }), {
+  it("loads every Job page scoped to a campaign", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return new Response(
+        JSON.stringify(
+          url.includes("cursor=page-2")
+            ? { items: [{ resource_id: "job-2" }], next_cursor: null }
+            : { items: [{ resource_id: "job-1" }], next_cursor: "page-2" },
+        ),
+        {
           status: 200,
           headers: { "content-type": "application/json" },
-        }),
-    );
+        },
+      );
+    });
     vi.stubGlobal("fetch", fetchMock);
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -230,11 +248,12 @@ describe("live query updates", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    renderHook(() => useJobs(undefined, "campaign-1"), { wrapper });
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const { result } = renderHook(() => useCampaignJobs("campaign-1"), { wrapper });
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(2));
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
-      "/api/v1/jobs?campaign_id=campaign-1",
+      "/api/v1/jobs?limit=100&campaign_id=campaign-1",
     );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=page-2");
   });
 });
 

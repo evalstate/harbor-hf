@@ -4,8 +4,13 @@ import {
   type ButtonHTMLAttributes,
   type HTMLAttributes,
   type ReactNode,
+  useCallback,
   useId,
+  useLayoutEffect,
+  useRef,
+  useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { ApiError } from "./api";
 import { BADGE_TONE_CLASS, badgeTone } from "./badge-tone";
 import { cn, logicalOutcomeHint, logicalOutcomeLabel } from "./lib";
@@ -45,8 +50,70 @@ export function Hint({
   icon?: boolean;
 }) {
   const id = useId();
+  const anchor = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{
+    left: number;
+    top?: number;
+    bottom?: number;
+  }>({ left: 12, top: 12 });
+  const updatePosition = useCallback(() => {
+    const bounds = anchor.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const width = Math.min(288, window.innerWidth - 24);
+    const left = Math.min(
+      Math.max(bounds.left, 12),
+      Math.max(12, window.innerWidth - width - 12),
+    );
+    if (bounds.top > 180)
+      setPosition({ left, bottom: window.innerHeight - bounds.top + 8 });
+    else setPosition({ left, top: bounds.bottom + 8 });
+  }, []);
+  const show = () => {
+    updatePosition();
+    setOpen(true);
+  };
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open, updatePosition]);
+  const tooltip =
+    typeof document === "undefined"
+      ? null
+      : createPortal(
+          <span
+            aria-hidden={!open}
+            id={id}
+            role="tooltip"
+            className={cn(
+              "pointer-events-none fixed z-[100] w-72 max-w-[calc(100vw-1.5rem)] rounded-lg border border-cyan-500/50 bg-slate-800 p-3 text-left text-xs font-normal normal-case leading-5 tracking-normal text-slate-100 shadow-2xl ring-1 ring-black/50",
+              open ? "visible opacity-100" : "invisible opacity-0",
+            )}
+            style={position}
+          >
+            {text}
+          </span>,
+          document.body,
+        );
   return (
-    <span className="group relative inline-flex max-w-full items-center gap-1">
+    // biome-ignore lint/a11y/noStaticElementInteractions: Keyboard focus comes from the surrounding control or optional icon button.
+    <span
+      aria-describedby={id}
+      className="relative inline-flex max-w-full items-center gap-1"
+      ref={anchor}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+      onFocusCapture={show}
+      onMouseEnter={show}
+      onMouseLeave={() => setOpen(false)}
+    >
       <span className="cursor-help border-b border-dotted border-slate-500">
         {children}
       </span>
@@ -62,14 +129,7 @@ export function Hint({
           <CircleHelp size={13} />
         </button>
       ) : null}
-      <span
-        id={id}
-        role="tooltip"
-        aria-hidden="true"
-        className="pointer-events-none invisible absolute bottom-full left-0 z-50 mb-2 w-72 max-w-[calc(100vw-1.5rem)] rounded-lg border border-slate-700 bg-slate-900 p-3 text-left text-xs leading-5 text-slate-300 opacity-0 shadow-xl group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
-      >
-        {text}
-      </span>
+      {tooltip}
     </span>
   );
 }

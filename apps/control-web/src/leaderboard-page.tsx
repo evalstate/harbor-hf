@@ -211,6 +211,7 @@ export function LeaderboardPage() {
       header: () => <Hint text={hints.leaderboard.benchmark}>Benchmark</Hint>,
     },
     {
+      accessorFn: (row) => scoreLabel(row),
       id: "score",
       header: () => <Hint text={hints.leaderboard.score}>Score</Hint>,
       cell: ({ row }) => scoreLabel(row.original),

@@ -797,9 +797,11 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
 
   app.addHook("onRequest", async (request) => {
     const path = request.url.split("?", 1)[0] ?? request.url;
-    if (path.startsWith("/health/") || path.startsWith("/auth/")) return;
+    if (path.startsWith("/health/") || path === "/auth/logout") return;
     if (path === "/api/v1/system") return;
-    if (!path.startsWith("/api/")) return;
+    if (!path.startsWith("/api/") && !path.startsWith("/auth/")) return;
+    // OAuth role lookup reads the projected ACL. Starting or completing login
+    // before replay reaches that ACL would reject an authorized identity.
     if (runtime.projection.system().ready) return;
     throw new ControlNotReadyError("projection is rebuilding");
   });

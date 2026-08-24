@@ -27,6 +27,7 @@ export const keys = {
   tasks: (id: string) => ["tasks", id] as const,
   task: (campaign: string, task: string) => ["task", campaign, task] as const,
   jobs: ["jobs"] as const,
+  campaignJobs: (id: string) => ["campaign-jobs", id] as const,
   endpoints: ["endpoints"] as const,
   profiles: ["profiles"] as const,
   results: ["results"] as const,
@@ -157,22 +158,37 @@ export const useTask = (campaign: string, task: string) =>
   });
 export const JOBS_REFRESH_INTERVAL_MS = 10_000;
 
-export const useJobs = (cursor?: string, campaignId?: string) =>
+export const useJobs = (cursor?: string) =>
   useQuery({
-    queryKey: [...keys.jobs, campaignId ?? null, cursor ?? null],
-    queryFn: () =>
-      request<JobList>(
-        collectionUrl("/api/v1/jobs", cursor, undefined, {
-          campaign_id: campaignId,
-        }),
-      ),
+    queryKey: [...keys.jobs, cursor ?? null],
+    queryFn: () => request<JobList>(collectionUrl("/api/v1/jobs", cursor)),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
     staleTime: 5_000,
     refetchInterval: JOBS_REFRESH_INTERVAL_MS,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
-    enabled: campaignId === undefined || Boolean(campaignId),
+  });
+export const useCampaignJobs = (campaignId: string) =>
+  useQuery({
+    queryKey: keys.campaignJobs(campaignId),
+    queryFn: async (): Promise<JobList> => ({
+      items: await collectPagedItems((cursor) =>
+        request<JobList>(
+          collectionUrl("/api/v1/jobs", cursor, 100, {
+            campaign_id: campaignId,
+          }),
+        ),
+      ),
+      next_cursor: null,
+    }),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+    staleTime: 5_000,
+    refetchInterval: JOBS_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    enabled: Boolean(campaignId),
   });
 export const useEndpoints = (cursor?: string) =>
   useQuery({
@@ -295,9 +311,13 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
   if (event.type.startsWith("action.")) {
     const actionKind = stringData(event, "action_kind") ?? "";
     if (actionKind.startsWith("endpoint.")) affected.push(keys.endpoints);
-    else if (actionKind.startsWith("job.") || actionKind.startsWith("sandbox."))
+    else if (actionKind.startsWith("job.") || actionKind.startsWith("sandbox.")) {
       affected.push(keys.jobs);
-    else affected.push(keys.jobs, keys.endpoints);
+      affected.push(campaignId ? keys.campaignJobs(campaignId) : ["campaign-jobs"]);
+    } else {
+      affected.push(keys.jobs, keys.endpoints);
+      affected.push(campaignId ? keys.campaignJobs(campaignId) : ["campaign-jobs"]);
+    }
   }
   return affected;
 }

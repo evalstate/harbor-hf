@@ -67,6 +67,7 @@ import {
   useAllProfiles,
   useAudit,
   useCampaign,
+  useCampaignJobs,
   useCampaigns,
   useCapacity,
   useEndpoints,
@@ -242,6 +243,15 @@ function jobColumns(includeCampaign: boolean): ColumnDef<JobRow>[] {
   ];
 }
 
+function jobIsActive(job: JobRow): boolean {
+  const state = String(job.observed_state ?? "pending").toUpperCase();
+  return (
+    !["CANCELED", "CANCELLED", "COMPLETED", "DELETED", "ERROR", "STOPPED"].includes(
+      state,
+    ) && !state.startsWith("SUPPRESSED-")
+  );
+}
+
 function ReplacementProgress({
   campaign,
   capacity,
@@ -290,20 +300,26 @@ function ReplacementProgress({
 }
 
 function CampaignJobs({ campaignId }: { campaignId: string }) {
-  const query = useJobs(undefined, campaignId);
+  const query = useCampaignJobs(campaignId);
+  const jobs = query.data?.items ?? [];
+  const active = jobs.filter(jobIsActive).length;
   return (
     <section className="mt-8">
       <h2 className="text-lg font-semibold text-white">
-        <Hint text={hints.campaign.jobs}>Jobs</Hint>
+        <Hint text={hints.campaign.jobs}>Physical HF Jobs</Hint>
       </h2>
       <p className="mb-4 mt-1 text-sm text-slate-400">
-        HF Jobs launched for this campaign. Assigned is the task count on that Job, not
-        a new run.
+        {query.data
+          ? `${counted(jobs.length, "Job")} recorded, ${active} active. `
+          : null}
+        A Job is a remote worker process that can run many logical tasks through several
+        Sandboxes. Assigned is the task count on that Job, not a count of active
+        processes.
       </p>
       <QueryContent query={query}>
         <DataTable
           columns={jobColumns(false)}
-          data={query.data?.items ?? []}
+          data={jobs}
           empty="No Jobs have been launched"
         />
       </QueryContent>
@@ -1068,6 +1084,13 @@ export function CampaignsPage() {
         ),
       },
       {
+        accessorFn: (row) => {
+          const recovering =
+            campaignIsRecovering(row) && row.replacement_assigned_tasks > 0;
+          return recovering
+            ? `${row.replacement_recorded_tasks}/${row.replacement_assigned_tasks} replacement tasks`
+            : `${row.terminal_tasks}/${row.total_tasks} tasks`;
+        },
         id: "progress",
         header: () => <Hint text={hints.campaign.logicalTasks}>Logical progress</Hint>,
         cell: ({ row }) => {
@@ -1468,20 +1491,29 @@ export function CampaignPage() {
           </dl>
         </Card>
       ) : null}
-      <QueryContent query={tasks}>
-        {campaignIsRecovering(item) ? (
-          <p className="mb-3 text-sm text-slate-400">
-            Outcome is the selected seal. A replacement Job can be assigned to a row
-            that still shows Infrastructure.
-          </p>
-        ) : null}
-        <DataTable
-          columns={columns}
-          data={tasks.data?.items ?? []}
-          empty="No tasks are locked"
-        />
-        <CursorPager navigation={navigation} nextCursor={tasks.data?.next_cursor} />
-      </QueryContent>
+      <section className="mt-8">
+        <h2 className="text-lg font-semibold text-white">
+          <Hint text={hints.campaign.logicalTasks}>Logical benchmark tasks</Hint>
+        </h2>
+        <p className="mb-4 mt-1 text-sm text-slate-400">
+          One row per locked benchmark case. A task keeps one selected sealed outcome,
+          even when multiple Jobs or attempts worked on it.
+        </p>
+        <QueryContent query={tasks}>
+          {campaignIsRecovering(item) ? (
+            <p className="mb-3 text-sm text-slate-400">
+              Outcome is the selected seal. A replacement Job can be assigned to a row
+              that still shows Infrastructure.
+            </p>
+          ) : null}
+          <DataTable
+            columns={columns}
+            data={tasks.data?.items ?? []}
+            empty="No tasks are locked"
+          />
+          <CursorPager navigation={navigation} nextCursor={tasks.data?.next_cursor} />
+        </QueryContent>
+      </section>
     </QueryContent>
   );
 }
@@ -1726,6 +1758,10 @@ export function ResultsPage() {
       cell: ({ row }) => labeledHarness(row.original.agent ?? row.original.harness),
     },
     {
+      accessorFn: (row) =>
+        row.primary_metric
+          ? `${row.primary_metric.value.toFixed(4)} ${row.primary_metric.unit}`
+          : "—",
       id: "score",
       header: () => <Hint text={hints.results.primaryMetric}>Primary metric</Hint>,
       cell: ({ row }) => {
@@ -1734,11 +1770,17 @@ export function ResultsPage() {
       },
     },
     {
+      accessorFn: (row) => formatPassRate(row),
       id: "pass_rate",
       header: () => <Hint text={hints.results.passRate}>Pass rate</Hint>,
       cell: ({ row }) => formatPassRate(row.original),
     },
     {
+      accessorFn: (row) =>
+        row.inference_cost_microusd === null ||
+        row.inference_cost_microusd === undefined
+          ? "—"
+          : formatMoney(row.inference_cost_microusd),
       id: "inference_cost",
       header: () => <Hint text={hints.results.tokenCost}>Token cost</Hint>,
       cell: ({ row }) =>
@@ -1998,6 +2040,8 @@ export function ResultPage() {
       cell: ({ row }) => formatMoney(row.original.cost_microusd),
     },
     {
+      accessorFn: (row) =>
+        `${formatTokens(row.input_tokens)} in / ${formatTokens(row.output_tokens)} out`,
       id: "tokens",
       header: () => <Hint text={hints.results.taskTokens}>Tokens</Hint>,
       cell: ({ row }) =>
@@ -2248,6 +2292,12 @@ export function AuditPage() {
       cell: ({ getValue }) => <Badge>{humanize(String(getValue()))}</Badge>,
     },
     {
+      accessorFn: (row) => {
+        const campaignId = row.data.campaign_id;
+        return typeof campaignId === "string"
+          ? campaignId
+          : String(row.data.record_id ?? row.id);
+      },
       id: "record_id",
       header: () => <Hint text={hints.audit.identity}>Identity</Hint>,
       meta: { className: "min-w-0" },
@@ -2263,6 +2313,7 @@ export function AuditPage() {
       },
     },
     {
+      accessorFn: (row) => String(row.data.digest ?? "—"),
       id: "digest",
       header: () => <Hint text={hints.audit.digest}>Digest</Hint>,
       cell: ({ row }) => (

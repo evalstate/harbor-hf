@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { ApiError, type SessionResponse } from "../src/api";
+import { loginHref } from "../src/layout";
 import { formatMoney } from "../src/lib";
 import { keys } from "../src/queries";
 
@@ -147,25 +148,11 @@ afterEach(() => {
 });
 
 describe("control web", () => {
-  it("returns OAuth login to the current path without iframe query credentials", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => json({ authenticated: false, login_url: "/auth/login" }, 401)),
-    );
-    renderApp(`/results?platform_access=${"x".repeat(600)}#private`);
-    expect(
-      await screen.findByRole("navigation", { name: "Primary" }),
-    ).toHaveTextContent("Admin");
-    expect(screen.getByRole("link", { name: /^Leaderboard$/ })).toHaveAttribute(
-      "href",
-      "/",
-    );
-    expect(
-      await screen.findByRole("link", { name: /sign in with hugging face/i }),
-    ).toHaveAttribute("href", "/auth/login?return_to=%2Fresults");
+  it("builds an OAuth guard for an admin path", () => {
+    expect(loginHref("/results")).toBe("/auth/login?return_to=%2Fresults");
   });
 
-  it("shows the username and never renders the OAuth subject", async () => {
+  it("shows only the username and sign-out control in account chrome", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -181,17 +168,10 @@ describe("control web", () => {
     renderApp("/overview");
     expect(await screen.findByText("visible-user")).toBeInTheDocument();
     expect(screen.queryByText("opaque-oauth-subject")).not.toBeInTheDocument();
-
-    const detailsButton = screen.getByRole("button", {
-      name: "Account and session details",
-    });
-    const detailsId = detailsButton.getAttribute("aria-describedby");
-    const details = detailsId ? document.getElementById(detailsId) : null;
-    expect(details).toHaveAttribute("role", "tooltip");
-    expect(details).toHaveClass("invisible", "absolute");
-    expect(details).toHaveTextContent("Operator role");
-    expect(details).toHaveTextContent("Your role grants permission");
-    expect(details).toHaveTextContent("Session expires");
+    expect(
+      screen.queryByRole("button", { name: "Account and session details" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeVisible();
   });
 
   it("keeps the authenticated shell and stale data after a transient session failure", async () => {
@@ -299,7 +279,7 @@ describe("control web", () => {
     );
     renderApp("/campaigns");
     expect(await screen.findByRole("button", { name: "Start a run" })).toBeDisabled();
-    expect(screen.getByText(/role grants permission/i)).toBeInTheDocument();
+    expect(screen.getByText("Disabled", { exact: true })).toBeInTheDocument();
   });
 
   it("requires a separate acknowledgement before run cancellation", async () => {
@@ -420,7 +400,9 @@ describe("control web", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("21/75 replacement receipts")).toBeInTheDocument();
     expect(await screen.findByText("75 tasks")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Jobs" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Physical HF Jobs" }),
+    ).toBeInTheDocument();
   });
 
   it("lists campaign Jobs with Hub inspect links", async () => {
@@ -471,7 +453,7 @@ describe("control web", () => {
           });
         if (path.includes("/api/v1/campaigns/campaign-1/tasks"))
           return json({ items: [], next_cursor: null });
-        if (path.includes("/api/v1/jobs?campaign_id=campaign-1"))
+        if (path.includes("/api/v1/jobs") && path.includes("campaign_id=campaign-1"))
           return json({
             items: [
               {
@@ -503,7 +485,9 @@ describe("control web", () => {
       "href",
       "https://huggingface.co/jobs/test/693994e21a39f67af5a41ad0",
     );
-    expect(screen.getByRole("heading", { name: "Jobs" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Physical HF Jobs" }),
+    ).toBeInTheDocument();
   });
 
   it("links Jobs to the Hub inspect page", async () => {
@@ -732,8 +716,7 @@ describe("control web", () => {
     renderApp("/runs");
     const table = await screen.findByRole("table");
     expect(table).toHaveClass("table-fixed");
-    expect(table.parentElement).toHaveClass("overflow-hidden");
-    expect(table.parentElement).not.toHaveClass("overflow-x-auto");
+    expect(table.parentElement).toHaveClass("max-h-[70vh]", "overflow-auto");
     expect(await screen.findByRole("link", { name: runName })).toHaveAttribute(
       "href",
       `/runs/${runName}`,
@@ -1308,16 +1291,22 @@ describe("control web", () => {
     ).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(nav).toHaveTextContent("Admin");
-    expect(screen.getByRole("link", { name: /^Overview$/ })).toHaveAttribute(
-      "href",
-      "/auth/login?return_to=%2Foverview",
-    );
-    expect(screen.getByRole("link", { name: /^Runs$/ })).toHaveAttribute(
-      "href",
-      "/auth/login?return_to=%2Fruns",
-    );
+    for (const [label, path] of [
+      ["Overview", "/overview"],
+      ["Runs", "/runs"],
+      ["Jobs", "/jobs"],
+      ["Endpoints", "/endpoints"],
+      ["Results", "/results"],
+      ["Profiles", "/profiles"],
+      ["Audit", "/audit"],
+    ])
+      expect(screen.getByRole("link", { name: label })).toHaveAttribute(
+        "href",
+        loginHref(path),
+      );
+    expect(screen.queryByText(/admin views require/i)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: /sign in with hugging face/i }),
-    ).toHaveAttribute("href", "/auth/login?return_to=%2F");
+      screen.queryByRole("link", { name: /sign in with hugging face/i }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -1,9 +1,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, type SessionResponse, signOut } from "./api";
 import { ControlStateProvider, type DisplayActor } from "./control-state";
-import { Layout } from "./layout";
+import { Layout, loginHref } from "./layout";
 import {
   AuditPage,
   CampaignPage,
@@ -19,7 +19,7 @@ import {
   TaskPage,
 } from "./pages";
 import { keys, useLiveUpdates, useSession, useSystem } from "./queries";
-import { Button, Card, ErrorNotice, Loading, QueryContent } from "./ui";
+import { ErrorNotice, Loading, QueryContent } from "./ui";
 
 function isPublicBoard(path: string): boolean {
   return path === "/" || path === "/leaderboard";
@@ -40,34 +40,19 @@ function GuestShell({ children }: { children: ReactNode }) {
   );
 }
 
-function SignInCard({ returnTo }: { returnTo: string }) {
-  return (
-    <Card className="mx-auto mt-16 max-w-md text-center">
-      <div className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-cyan-400 text-xl font-black text-slate-950">
-        H
-      </div>
-      <h1 className="mt-5 text-xl font-semibold">Harbor-HF Control</h1>
-      <p className="mt-2 text-sm leading-6 text-slate-400">
-        Admin views require a Hugging Face login. Your session may have expired, been
-        revoked, or been lost during a service restart.
-      </p>
-      <a
-        className="mt-6 inline-block"
-        href={`/auth/login?return_to=${encodeURIComponent(returnTo)}`}
-      >
-        <Button>Sign in with Hugging Face</Button>
-      </a>
-    </Card>
-  );
+function LoginRedirect({ returnTo }: { returnTo: string }) {
+  const href = loginHref(returnTo);
+  useEffect(() => {
+    window.location.replace(href);
+  }, [href]);
+  return <Loading />;
 }
 
 function AuthenticatedApp({
   actor,
-  expiresAt,
   sessionError,
 }: {
   actor: DisplayActor;
-  expiresAt?: string | undefined;
   sessionError: unknown;
 }) {
   const client = useQueryClient();
@@ -93,7 +78,6 @@ function AuthenticatedApp({
         actor={actor}
         writeMode={writeMode}
         live={live}
-        sessionExpiresAt={expiresAt}
         serviceError={sessionError ?? (system.data ? system.error : null)}
         onSignOut={() => logout.mutate()}
         signingOut={logout.isPending}
@@ -149,13 +133,7 @@ export default function App() {
       : null;
 
   if (actor) {
-    return (
-      <AuthenticatedApp
-        actor={actor}
-        expiresAt={session.data?.expires_at}
-        sessionError={session.error}
-      />
-    );
+    return <AuthenticatedApp actor={actor} sessionError={session.error} />;
   }
 
   if (isPublicBoard(location.pathname)) {
@@ -172,11 +150,7 @@ export default function App() {
     session.data?.authenticated === false;
   if (unauthorized) {
     // Private Space embeds add signed query parameters that must not enter OAuth state.
-    return (
-      <GuestShell>
-        <SignInCard returnTo={location.pathname} />
-      </GuestShell>
-    );
+    return <LoginRedirect returnTo={location.pathname} />;
   }
 
   const error =

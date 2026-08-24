@@ -1,7 +1,6 @@
 export const hints = {
   nav: {
-    admin:
-      "Operator views. Hugging Face login is required. Campaigns, Jobs, results, profiles, and audit stay here.",
+    admin: "Operator views. Campaigns, Jobs, results, profiles, and audit stay here.",
     overview:
       "Queue, active runs, recorded spend, and Endpoint cleanup risk from the control projection.",
     campaigns:
