@@ -2688,6 +2688,63 @@ describe("control service", () => {
     ).toBe(true);
   });
 
+  it("requeues Job observe after a non-terminal observe never wrote the next one", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "requeue-broken-observe-key",
+      operator,
+    );
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch")
+          return {
+            outcome: "created",
+            observed_state: "SCHEDULING",
+            resource_id: "job-broken-observe-chain",
+          };
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "ERROR",
+            resource_id: "job-broken-observe-chain",
+          };
+        return new NoopActions().execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    let observe:
+      | Awaited<ReturnType<typeof control.projection.campaignActions>>[number]
+      | undefined;
+    for (let round = 0; round < 8 && !observe; round += 1) {
+      await reconciler.tick();
+      observe = (await control.projection.campaignActions(result.campaign_id)).find(
+        (action) =>
+          action.action_kind === "job.observe" && action.receipt_body === null,
+      );
+    }
+    expect(observe).toBeDefined();
+    await control.service.receipt(JSON.parse(observe?.intent_body ?? "null"), {
+      outcome: "completed",
+      observed_state: "SCHEDULING",
+      resource_id: "job-broken-observe-chain",
+    });
+    await settle(reconciler, 3);
+    expect(
+      (await control.projection.campaignActions(result.campaign_id)).some(
+        (action) =>
+          action.action_kind === "job.observe" && action.observed_state === "ERROR",
+      ),
+    ).toBe(true);
+  });
+
   it("relaunches tasks left open after an execution Job errors", async () => {
     const control = await createTestControl(2, 2, 0, false, "forbidden", undefined, [
       "input_tokens",

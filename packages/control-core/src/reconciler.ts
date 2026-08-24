@@ -18,15 +18,15 @@ import {
   requiredPositiveMetrics,
 } from "./attempt-admissibility.js";
 import { preparationRequired } from "./profiles.js";
-import type { ResultPublisher } from "./publication.js";
 import type { Projection } from "./projection.js";
+import type { ResultPublisher } from "./publication.js";
 import {
+  type ControlService,
   executionReservationCategory,
   executionTaskBatches,
   infrastructureSealReplaceable,
-  PolicyError,
-  type ControlService,
   type JobBudgetReservation,
+  PolicyError,
 } from "./service.js";
 
 export interface ExternalActionResult {
@@ -298,6 +298,7 @@ export class Reconciler {
     }
     handled += await this.cleanupTerminalTaskSandboxes();
     for (const campaign of await this.projection.campaigns(10_000)) {
+      if (await this.continueJobObservation(campaign.campaign_id)) handled += 1;
       if (await this.continueUnresolvedExecution(campaign.campaign_id)) handled += 1;
       if (await this.maybePublish(campaign.campaign_id)) handled += 1;
     }
@@ -834,6 +835,57 @@ export class Reconciler {
     )
       return null;
     return "suppressed-terminal-job";
+  }
+
+  /**
+   * Resume Job observation when the last observe receipted a non-terminal
+   * state and the next observe was never written. A Space restart can leave
+   * that gap, after which leftover I/O keeps the launch looking like SCHEDULING.
+   */
+  private async continueJobObservation(campaignId: string): Promise<boolean> {
+    const actions = await this.projection.campaignActions(campaignId);
+    let wrote = false;
+    for (const launch of actions) {
+      if (launch.action_kind !== "job.launch" || launch.receipt_body === null) continue;
+      if (launch.observed_state?.startsWith("suppressed-")) continue;
+      const resourceId = launch.resource_id;
+      if (!resourceId) continue;
+      const observes = actions.filter((action) => {
+        if (action.action_kind !== "job.observe") return false;
+        const intent = JSON.parse(action.intent_body) as ActionIntent;
+        return (
+          intent.payload.launch_action_id === launch.action_id ||
+          action.target === resourceId
+        );
+      });
+      if (observes.some((action) => action.receipt_body === null)) continue;
+      if (observes.some((action) => jobStateIsTerminal(action.observed_state)))
+        continue;
+      const latest = observes
+        .filter((action) => action.receipt_body !== null)
+        .sort((left, right) => left.generation - right.generation)
+        .at(-1);
+      const source = latest ?? launch;
+      const sourceIntent = JSON.parse(source.intent_body) as ActionIntent;
+      await this.service.writeAction(
+        this.service.actionIntent(
+          campaignId,
+          "job.observe",
+          resourceId,
+          (latest?.generation ?? -1) + 1,
+          {
+            ...sourceIntent.payload,
+            resource_id: resourceId,
+            launch_action_id: launch.action_id,
+            not_before: new Date(
+              Date.parse(source.created_at) + this.options.observation_interval_ms,
+            ).toISOString(),
+          },
+        ),
+      );
+      wrote = true;
+    }
+    return wrote;
   }
 
   /**
