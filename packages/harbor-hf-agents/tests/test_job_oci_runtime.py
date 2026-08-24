@@ -689,6 +689,52 @@ def test_preflight_requires_every_tool(
         IsolatedOciRuntime.preflight()
 
 
+@pytest.mark.parametrize("version", ["5.3.0", "5.4.0"])
+def test_preflight_accepts_proot_with_statx_support(
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+) -> None:
+    monkeypatch.setattr(
+        runtime,
+        "_run_preflight_command",
+        lambda _arguments, _label: subprocess.CompletedProcess(
+            args=["proot", "--version"],
+            returncode=0,
+            stdout=f"PRoot v{version}\n".encode(),
+            stderr=b"",
+        ),
+    )
+
+    runtime._require_supported_proot()
+
+
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        (b"PRoot v5.1.107\n", "proot 5.3.0 or newer is required; found 5.1.107"),
+        (b"unexpected output\n", "unknown version"),
+    ],
+)
+def test_preflight_rejects_unsupported_proot(
+    monkeypatch: pytest.MonkeyPatch,
+    output: bytes,
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        runtime,
+        "_run_preflight_command",
+        lambda _arguments, _label: subprocess.CompletedProcess(
+            args=["proot", "--version"],
+            returncode=0,
+            stdout=output,
+            stderr=b"",
+        ),
+    )
+
+    with pytest.raises(OciRuntimeUnavailableError, match=message):
+        runtime._require_supported_proot()
+
+
 def test_preflight_rejects_task_uid_in_account_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -724,7 +770,16 @@ def test_preflight_classifies_security_probe_failure(
 ) -> None:
     _mock_preflight_until_capabilities(monkeypatch)
     monkeypatch.setattr(runtime, "_effective_capabilities", lambda _pid: 0)
-    monkeypatch.setattr(runtime, "_run_preflight_command", lambda _args, _label: None)
+    monkeypatch.setattr(
+        runtime,
+        "_run_preflight_command",
+        lambda arguments, _label: subprocess.CompletedProcess(
+            args=arguments,
+            returncode=0,
+            stdout=b"PRoot v5.4.0\n",
+            stderr=b"",
+        ),
+    )
 
     def fail_probe() -> None:
         raise OciRuntimeUnavailableError("probe could read root secret")

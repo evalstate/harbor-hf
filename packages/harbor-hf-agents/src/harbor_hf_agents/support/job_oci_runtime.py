@@ -74,6 +74,8 @@ _TASK_UID = 60_000
 _TASK_GID = 60_000
 _CAP_SYS_PTRACE = 19
 _PROCESS_CLEANUP_SECONDS = 10.0
+_MINIMUM_PROOT_VERSION = (5, 3, 0)
+_PROOT_VERSION = re.compile(rb"\bv([0-9]+)\.([0-9]+)\.([0-9]+)\b")
 _PREFLIGHT_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
@@ -230,7 +232,10 @@ def _run_checked(
     return result
 
 
-def _run_preflight_command(arguments: list[str], label: str) -> None:
+def _run_preflight_command(
+    arguments: list[str],
+    label: str,
+) -> subprocess.CompletedProcess[bytes]:
     try:
         result = subprocess.run(
             arguments,
@@ -246,6 +251,21 @@ def _run_preflight_command(arguments: list[str], label: str) -> None:
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
         raise OciRuntimeUnavailableError(f"{label} preflight failed: {detail}")
+    return result
+
+
+def _require_supported_proot() -> None:
+    result = _run_preflight_command(["proot", "--version"], "proot")
+    match = _PROOT_VERSION.search(result.stdout + result.stderr)
+    if match is None:
+        raise OciRuntimeUnavailableError("proot preflight returned an unknown version")
+    version = tuple(int(part) for part in match.groups())
+    if version < _MINIMUM_PROOT_VERSION:
+        required = ".".join(str(part) for part in _MINIMUM_PROOT_VERSION)
+        current = ".".join(str(part) for part in version)
+        raise OciRuntimeUnavailableError(
+            f"proot {required} or newer is required; found {current}"
+        )
 
 
 def _setpriv_arguments(arguments: list[str]) -> list[str]:
@@ -1464,8 +1484,8 @@ class IsolatedOciRuntime:
             raise OciRuntimeUnavailableError(
                 "trusted worker must not have effective CAP_SYS_PTRACE"
             )
+        _require_supported_proot()
         for arguments, label in (
-            (["proot", "--version"], "proot"),
             (["setpriv", "--version"], "setpriv"),
             (["skopeo", "--version"], "skopeo"),
             (["umoci", "--version"], "umoci"),

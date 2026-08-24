@@ -12,6 +12,9 @@ uses PRoot only to present that rootfs and emulate the task image user.
 `setpriv` launches every task command as real UID/GID 60000 with no supplementary
 groups, capabilities, or privilege escalation. The task remains that dedicated
 unprivileged host UID even when it sees container UID 0.
+The image builds PRoot 5.4 from its checksummed upstream source because Debian
+Bookworm's PRoot 5.1 cannot translate the `statx` calls used by Ubuntu 24.04
+package tools. Worker preflight rejects PRoot versions older than 5.3.
 
 The host kernel boundary is Unix UID separation, empty supplementary groups,
 an empty capability bounding set, and `no_new_privs`. PRoot is not treated as a
