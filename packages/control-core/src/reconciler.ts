@@ -268,24 +268,30 @@ export class Reconciler {
       handled += 1;
     }
     const pending = await this.projection.pendingActions(10_000);
+    const launchCandidates = pending.filter(
+      (candidate) => candidate.action_kind === "job.launch",
+    );
     const ordinary = pending.filter((intent) => intent.action_kind !== "job.launch");
     const due = ordinary.filter((intent) => {
       const notBefore = intent.payload.not_before;
       return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
     });
     let ordinaryHandled = 0;
-    const ordinaryLimit = Math.max(1, this.options.batch_size - 1);
+    const ordinaryLimit =
+      launchCandidates.length > 0
+        ? Math.max(1, Math.floor(this.options.batch_size / 2))
+        : this.options.batch_size;
     for (const intent of due.slice(0, ordinaryLimit)) {
       await this.handle(intent);
       handled += 1;
       ordinaryHandled += 1;
     }
     const remaining = Math.max(1, this.options.batch_size - ordinaryHandled);
-    for (const intent of (
-      await this.fairJobLaunches(
-        pending.filter((candidate) => candidate.action_kind === "job.launch"),
-      )
-    ).slice(0, remaining)) {
+    const admitted: ActionIntent[] = [];
+    for (const intent of (await this.fairJobLaunches(launchCandidates)).slice(
+      0,
+      remaining,
+    )) {
       if (
         (await this.launchCancellationRequested(intent)) &&
         (await this.projection.actionDispatch(intent.action_id))
@@ -296,9 +302,16 @@ export class Reconciler {
       }
       const admission = await this.service.admitJobLaunch(intent);
       if (admission.status !== "admitted") continue;
-      await this.handle(intent);
-      handled += 1;
+      admitted.push(intent);
     }
+    const launchResults = await Promise.allSettled(
+      admitted.map((intent) => this.handle(intent)),
+    );
+    const rejectedLaunch = launchResults.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (rejectedLaunch) throw rejectedLaunch.reason;
+    handled += admitted.length;
     const activeRuns = await this.projection.activeRuns();
     for (const run of activeRuns) {
       if (run.cancellation_requested) await this.continueCancellation(run.run_id);

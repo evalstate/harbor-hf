@@ -371,6 +371,47 @@ describe("control service", () => {
     });
   });
 
+  it("launches an admitted Job batch concurrently", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    await control.service.submit(submission, "concurrent-job-launch-key", operator);
+    const noop = new NoopActions();
+    let activeLaunches = 0;
+    let maxActiveLaunches = 0;
+    const external: ExternalActionPort = {
+      execute: async (
+        intent: ActionIntent,
+        context?: ExternalActionContext,
+      ): Promise<ExternalActionResult> => {
+        if (intent.action_kind !== "job.launch") return noop.execute(intent, context);
+        activeLaunches += 1;
+        maxActiveLaunches = Math.max(maxActiveLaunches, activeLaunches);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-${intent.target}`,
+          };
+        } finally {
+          activeLaunches -= 1;
+        }
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await reconciler.tick();
+    await reconciler.tick();
+
+    expect(maxActiveLaunches).toBe(2);
+  });
+
   it("keeps an idempotency key bound to the first run even when the combo slug would change", async () => {
     const control = await createTestControl();
     controls.push(control);
