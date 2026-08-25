@@ -213,7 +213,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     const diagnostic = record(diagnosticProfile.spec);
 
     expect(replacementProfile.record_id).toBe("profile-5af4753cfb6424d423a1b094");
-    expect(diagnosticProfile.record_id).toBe("profile-33493358910f6777756ec6e1");
+    expect(diagnosticProfile.record_id).toBe("profile-6982d9cf30421d14a797f079");
     const immutableIds = new Map(
       (await loadBuiltInProfiles("profiles")).map((item) => [
         item.profile.name,
@@ -224,7 +224,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "sha256:15fcab15f5421b879944b48489e4fe865fb8d572b06f3dd18c17c776fd4a928d",
     );
     expect(immutableIds.get("tb21-diagnostic-1")).toBe(
-      "sha256:5449048484a7935645e25802c3ac548d5baff77a3e3eab48eef4db0041e45a2a",
+      "sha256:bbcb2400144383cf5fb7f7e0633a4a8888b616d15a49b3eae9af6d9f6436123e",
     );
     expect(replacement).toEqual({
       ...canary,
@@ -235,6 +235,12 @@ describe("Terminal-Bench 2.1 profiles", () => {
       max_run_ceiling_microusd: 300_000_000,
       publication_role: "diagnostic",
     });
+    expect(diagnostic.reservation_microusd).toBe(55_000);
+    expect(
+      Number(diagnostic.reservation_microusd) * 89 +
+        Number(diagnostic.preparation_reservation_microusd) *
+          Number(diagnostic.max_preparation_attempts),
+    ).toBe(5_095_000);
     for (const [spec, maximum] of [
       [replacement, 180_000_000],
       [diagnostic, 300_000_000],
