@@ -31,6 +31,45 @@ describe("Reconciler start", () => {
     await reconciler.stop();
   });
 
+  it("starts the sync cadence after initialization", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+    const control = await createTestControl();
+    controls.push(control);
+    await control.service.submit(
+      {
+        benchmark: "control-smoke",
+        model: "control-smoke",
+        harness: "control-smoke",
+        deployment: "hf-cpu-smoke",
+        launch_policy: "control-smoke",
+        ceiling_microusd: 0,
+        confirmed: true,
+      },
+      "post-initialization-sync-cadence",
+      { subject: "operator", role: "operator" },
+    );
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      {
+        interval_ms: 2_000,
+        sync_interval_ms: 30_000,
+        observation_interval_ms: 0,
+        batch_size: 16,
+      },
+    );
+    const sync = vi.spyOn(control.service, "syncProjection");
+    vi.setSystemTime(new Date("2026-08-24T00:05:00.000Z"));
+
+    reconciler.start();
+    await reconciler.stop();
+
+    expect(sync).not.toHaveBeenCalled();
+  });
+
   it("keeps Bucket sync on its own deterministic cadence", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
@@ -50,7 +89,12 @@ describe("Reconciler start", () => {
       { subject: "operator", role: "operator" },
     );
     const activeRuns = await control.projection.activeRuns();
-    vi.spyOn(control.projection, "activeRuns").mockResolvedValue(activeRuns);
+    const activeRun = activeRuns[0];
+    if (!activeRun) throw new Error("expected an active test run");
+    vi.spyOn(control.projection, "activeRuns").mockResolvedValue([
+      activeRun,
+      { ...activeRun, run_id: "run-secondary" },
+    ]);
     const reconciler = new Reconciler(
       control.service,
       control.projection,
@@ -81,6 +125,7 @@ describe("Reconciler start", () => {
     vi.setSystemTime(new Date("2026-08-24T00:01:00.000Z"));
     await reconciler.tick();
     expect(sync).toHaveBeenCalledTimes(2);
+    expect(sync).toHaveBeenLastCalledWith("control/schema=v1/runs/run-secondary/tasks");
   });
 
   it("does not rescan every historical record while idle", async () => {

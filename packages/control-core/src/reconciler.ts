@@ -205,6 +205,7 @@ export class Reconciler {
   private running = false;
   private currentRun: Promise<void> | null = null;
   private lastProjectionSyncAt: number;
+  private projectionSyncCursor = 0;
 
   constructor(
     private readonly service: ControlService,
@@ -226,6 +227,8 @@ export class Reconciler {
    */
   start(signal?: AbortSignal, onError?: (error: unknown) => void): void {
     if (this.timer) return;
+    // Construction precedes the startup rebuild in the hosted runtime.
+    this.lastProjectionSyncAt = Date.now();
     const run = () => {
       if (this.running) return;
       this.running = true;
@@ -253,13 +256,10 @@ export class Reconciler {
 
   async tick(): Promise<number> {
     let handled = 0;
+    const syncRunIds = (await this.projection.activeRuns()).map((run) => run.run_id);
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
-    const activeRunIds = (await this.projection.activeRuns()).map((run) => run.run_id);
-    if (
-      activeRunIds.length > 0 &&
-      Date.now() - this.lastProjectionSyncAt >= syncInterval
-    )
-      handled += await this.syncProjection(activeRunIds);
+    if (syncRunIds.length > 0 && Date.now() - this.lastProjectionSyncAt >= syncInterval)
+      handled += await this.syncProjection(syncRunIds);
     for (const { intent, receipt } of await this.projection.unadvancedActions(
       this.options.batch_size,
     )) {
@@ -299,7 +299,8 @@ export class Reconciler {
       await this.handle(intent);
       handled += 1;
     }
-    for (const run of await this.projection.activeRuns()) {
+    const activeRuns = await this.projection.activeRuns();
+    for (const run of activeRuns) {
       if (run.cancellation_requested) await this.continueCancellation(run.run_id);
       if (await this.continueJobObservation(run.run_id)) handled += 1;
       if (await this.maybePublish(run.run_id)) handled += 1;
@@ -308,13 +309,16 @@ export class Reconciler {
   }
 
   private async syncProjection(activeRunIds: readonly string[]): Promise<number> {
-    let ingested = 0;
     // Workers can add only attempt-receipt control records, so task prefixes avoid
     // rescanning every historical control record during each action tick.
-    for (const runId of activeRunIds)
-      ingested += await this.service.syncProjection(
-        `control/schema=v1/runs/${runId}/tasks`,
-      );
+    const ordered = [...activeRunIds].sort();
+    const index = this.projectionSyncCursor % ordered.length;
+    const runId = ordered[index];
+    if (!runId) return 0;
+    this.projectionSyncCursor = (index + 1) % ordered.length;
+    const ingested = await this.service.syncProjection(
+      `control/schema=v1/runs/${runId}/tasks`,
+    );
     this.lastProjectionSyncAt = Date.now();
     return ingested;
   }
