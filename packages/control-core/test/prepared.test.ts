@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   ActionIntent,
   ProfileObject,
@@ -5,21 +8,18 @@ import type {
 } from "@harbor-hf/contracts";
 import { canonicalJson, deterministicId, sha256 } from "@harbor-hf/contracts";
 import {
+  type ControlService,
   FilesystemObjectStore,
   Projection,
-  type ControlService,
 } from "@harbor-hf/control-core";
 import { preparedProfiles } from "@harbor-hf/test-fixtures";
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ResultPublisher } from "../src/publication.js";
 import {
   type ExternalActionPort,
   type ExternalActionResult,
   Reconciler,
 } from "../src/reconciler.js";
-import { ResultPublisher } from "../src/publication.js";
 import { ControlService as Service } from "../src/service.js";
 
 const controls: Array<{
@@ -321,6 +321,43 @@ describe("prepared Harbor jobs", () => {
       trial_lock_digest: `sha256:${"c".repeat(64)}`,
     });
     expect(prepared?.harbor_lock_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
+  it("persists preparations for independent Runs concurrently", async () => {
+    const { service } = await setup();
+    const first = await run(service, "parallel-preparation-first");
+    const second = await run(service, "parallel-preparation-second");
+    const firstTask = first.lock.tasks[0];
+    const secondTask = second.lock.tasks[0];
+    if (!firstTask || !secondTask) throw new Error("run task is missing");
+    const create = service.store.create.bind(service.store);
+    let activeCreates = 0;
+    let maxActiveCreates = 0;
+    vi.spyOn(service.store, "create").mockImplementation(async (key, bytes) => {
+      activeCreates += 1;
+      maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return await create(key, bytes);
+      } finally {
+        activeCreates -= 1;
+      }
+    });
+
+    await Promise.all([
+      service.submitPreparedJob(
+        first.runId,
+        first.launch.action_id,
+        trialPayload(firstTask.input_digest),
+      ),
+      service.submitPreparedJob(
+        second.runId,
+        second.launch.action_id,
+        trialPayload(secondTask.input_digest),
+      ),
+    ]);
+
+    expect(maxActiveCreates).toBe(2);
   });
 
   it("runs preparation before it launches benchmark execution", async () => {

@@ -7,15 +7,13 @@ import type {
   AttemptReceipt,
   BenchmarkProfileSpec,
   BudgetEvent,
-  RunActionV1,
-  RunLock,
-  RunRequest,
-  RunSubmissionV1,
   CapacityProfileObject,
   CapacityProfileSpec,
   DeploymentProfileSpec,
   HarborHFControlRecordV1,
   HarnessProfileSpec,
+  JobAdmissionGrant,
+  JobCapacityRelease,
   LaunchPolicySpec,
   ModelProfileSpec,
   PreparedJob,
@@ -25,8 +23,10 @@ import type {
   PublicationReceipt,
   PublicationSupersession,
   ResolvedProfile,
-  JobAdmissionGrant,
-  JobCapacityRelease,
+  RunActionV1,
+  RunLock,
+  RunRequest,
+  RunSubmissionV1,
   TaskCancellation,
   TaskExhaustion,
   TerminalSelection,
@@ -36,10 +36,10 @@ import {
   controlRecordPath,
   deterministicId,
   sha256,
-  validateRunAction,
-  validateRunSubmission,
   validateControlRecord,
   validatePreparedJobSubmission,
+  validateRunAction,
+  validateRunSubmission,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
 import {
@@ -53,6 +53,11 @@ import {
   verifyWorkerEvidence,
 } from "./evidence.js";
 import {
+  decideJobAdmission,
+  type JobAdmissionDecision,
+  type JobLimitingFactor,
+} from "./job-admission.js";
+import {
   type LoadedProfile,
   ProfileResolutionError,
   ProfileResolver,
@@ -62,11 +67,6 @@ import {
 } from "./profiles.js";
 import type { Projection } from "./projection.js";
 import { runIdentity, runtimeKind, runUnique } from "./run-id.js";
-import {
-  decideJobAdmission,
-  type JobAdmissionDecision,
-  type JobLimitingFactor,
-} from "./job-admission.js";
 import {
   createJson,
   ImmutableConflictError,
@@ -337,12 +337,11 @@ export function infrastructureSealReplaceable(terminalOutcome: string | null): b
 
 export class ControlService {
   readonly resolver: ProfileResolver;
-  private appendQueue: Promise<void> = Promise.resolve();
+  private projectionQueue: Promise<void> = Promise.resolve();
   private budgetQueue: Promise<void> = Promise.resolve();
   private retryAdmissionQueue: Promise<void> = Promise.resolve();
   private readonly runMutationQueues = new Map<string, Promise<void>>();
   private submitQueue: Promise<void> = Promise.resolve();
-  private preparationQueue: Promise<void> = Promise.resolve();
   private jobAdmissionQueue: Promise<void> = Promise.resolve();
   private capacityUpdateQueue: Promise<void> = Promise.resolve();
   private capacityProfileAlias: string | null = null;
@@ -576,17 +575,6 @@ export class ControlService {
   async append<T extends HarborHFControlRecordV1>(
     record: T,
   ): Promise<{ created: boolean; key: string; digest: string }> {
-    const operation = this.appendQueue.then(() => this.appendSerialized(record));
-    this.appendQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
-  }
-
-  private async appendSerialized<T extends HarborHFControlRecordV1>(
-    record: T,
-  ): Promise<{ created: boolean; key: string; digest: string }> {
     validateControlRecord<T>(record);
     if (record.kind === "attempt.receipt" && record.actor.role !== "migration") {
       try {
@@ -604,31 +592,40 @@ export class ControlService {
     }
     const key = controlRecordPath(record);
     const result = await createJson(this.store, key, record);
-    const projected = await this.projection.objectDigest(key);
-    if (projected && projected !== result.digest)
-      throw new IdempotencyConflictError(`projection digest conflict at ${key}`);
-    if (!projected) {
-      const event = await this.projection.ingest(
-        key,
-        result.digest,
-        result.source_identity,
-        record,
-      );
-      this.events.publish(event);
-      if (record.kind === "profile.object" || record.kind === "profile.promotion")
-        await this.refreshProfileResolver();
-    }
-    return { ...result, key };
+    // Remote immutable writes may overlap. SQLite projection updates remain
+    // serialized so independent Runs do not wait on each other's network I/O.
+    const operation = this.projectionQueue.then(async () => {
+      const projected = await this.projection.objectDigest(key);
+      if (projected && projected !== result.digest)
+        throw new IdempotencyConflictError(`projection digest conflict at ${key}`);
+      if (!projected) {
+        const event = await this.projection.ingest(
+          key,
+          result.digest,
+          result.source_identity,
+          record,
+        );
+        this.events.publish(event);
+        if (record.kind === "profile.object" || record.kind === "profile.promotion")
+          await this.refreshProfileResolver();
+      }
+      return { ...result, key };
+    });
+    this.projectionQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   async syncProjection(prefix?: string): Promise<number> {
-    const operation = this.appendQueue.then(async () => {
+    const operation = this.projectionQueue.then(async () => {
       const events = await this.projection.sync(this.store, prefix);
       for (const event of events) this.events.publish(event);
       if (events.length > 0) await this.refreshProfileResolver();
       return events.length;
     });
-    this.appendQueue = operation.then(
+    this.projectionQueue = operation.then(
       () => undefined,
       () => undefined,
     );
@@ -694,14 +691,9 @@ export class ControlService {
     launchActionId: string,
     raw: unknown,
   ): Promise<PreparedJobSubmissionResult> {
-    const operation = this.preparationQueue.then(() =>
+    return this.withRunMutationAdmission(runId, () =>
       this.submitPreparedJobSerialized(runId, launchActionId, raw),
     );
-    this.preparationQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
   }
 
   private async assertPreparationAction(
