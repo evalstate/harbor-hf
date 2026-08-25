@@ -1,4 +1,3 @@
-import inspect
 import json
 import re
 import shlex
@@ -37,34 +36,6 @@ from harbor_hf_agents.support.provider_outcome import validate_pi_terminal_outpu
 _CURRENT_PI_PACKAGE = "@earendil-works/pi-coding-agent"
 _LEGACY_PI_PACKAGE = "@mariozechner/pi-coding-agent"
 _PI_PACKAGE_RENAME_VERSION = Version("0.74.0")
-
-
-def _materialize_pi_models_json() -> None:
-    """Create Pi's runtime models file without retaining scoped route values."""
-    import json
-    import os
-    from pathlib import Path
-
-    source = Path("/logs/agent/pi.models.template.json")
-    destination = Path.home() / ".pi" / "agent" / "models.json"
-    value = json.loads(source.read_text(encoding="utf-8"))
-    for provider in value["providers"].values():
-        base_url = provider["baseUrl"]
-        if base_url.startswith("${") and base_url.endswith("}"):
-            env_name = base_url[2:-1]
-        elif base_url.startswith("$"):
-            env_name = base_url[1:]
-        else:
-            continue
-        resolved = os.environ.get(env_name)
-        if not resolved:
-            raise RuntimeError(f"required Pi model environment {env_name} is missing")
-        provider["baseUrl"] = resolved
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    destination.chmod(0o600)
 
 
 def pi_jsonl_to_atif_trajectory(  # noqa: C901 -- parser branches
@@ -382,9 +353,41 @@ class PiAgent(IsolatedProviderAgent):
 
     @staticmethod
     def _materialize_models_command() -> str:
-        body = inspect.getsource(_materialize_pi_models_json)
-        script = body + "\n_materialize_pi_models_json()\n"
-        return "python3 -c " + shlex.quote(script)
+        """Build Pi's runtime model file using its guaranteed Node runtime."""
+        script = """
+const fs = require("node:fs");
+const path = require("node:path");
+
+const source = "/logs/agent/pi.models.template.json";
+const home = process.env.HOME;
+if (!home) {
+  throw new Error("HOME is required to materialize Pi models");
+}
+const destination = path.join(home, ".pi", "agent", "models.json");
+const value = JSON.parse(fs.readFileSync(source, "utf8"));
+for (const provider of Object.values(value.providers)) {
+  const baseUrl = provider.baseUrl;
+  let environmentName = null;
+  if (baseUrl.startsWith("${") && baseUrl.endsWith("}")) {
+    environmentName = baseUrl.slice(2, -1);
+  } else if (baseUrl.startsWith("$")) {
+    environmentName = baseUrl.slice(1);
+  }
+  if (environmentName === null) {
+    continue;
+  }
+  const resolved = process.env[environmentName];
+  if (!resolved) {
+    throw new Error(`required Pi model environment ${environmentName} is missing`);
+  }
+  provider.baseUrl = resolved;
+}
+fs.mkdirSync(path.dirname(destination), { recursive: true });
+fs.writeFileSync(destination, `${JSON.stringify(value, null, 2)}\\n`);
+fs.chmodSync(destination, 0o600);
+""".strip()
+        node_command = "node -e " + shlex.quote(script)
+        return "bash -lc " + shlex.quote(f". ~/.nvm/nvm.sh; {node_command}")
 
     @override
     @with_prompt_template
