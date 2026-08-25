@@ -288,6 +288,15 @@ export class Reconciler {
       newlyAdmittedRuns.add(intent.run_id);
       handled += 1;
     }
+    const pendingBeforeAdvancement = await this.projection.pendingActions(10_000);
+    const preparationLaunches = pendingBeforeAdvancement.filter(
+      (intent) =>
+        intent.action_kind === "job.launch" && intent.target === "run-preparation",
+    );
+    handled += await this.handleJobLaunches(
+      preparationLaunches,
+      this.options.batch_size,
+    );
     for (const { intent, receipt } of await this.projection.unadvancedActions(
       this.options.batch_size,
     )) {
@@ -299,6 +308,7 @@ export class Reconciler {
     const launchCandidates = pending.filter(
       (candidate) =>
         candidate.action_kind === "job.launch" &&
+        candidate.target !== "run-preparation" &&
         !newlyAdmittedRuns.has(candidate.run_id),
     );
     const ordinary = pending.filter((intent) => intent.action_kind !== "job.launch");
@@ -319,10 +329,25 @@ export class Reconciler {
       ordinaryHandled += 1;
     }
     const remaining = Math.max(1, this.options.batch_size - ordinaryHandled);
+    handled += await this.handleJobLaunches(launchCandidates, remaining);
+    const activeRuns = await this.projection.activeRuns();
+    for (const run of activeRuns) {
+      if (run.cancellation_requested) await this.continueCancellation(run.run_id);
+      if (await this.continueJobObservation(run.run_id)) handled += 1;
+      if (await this.maybePublish(run.run_id)) handled += 1;
+    }
+    return handled;
+  }
+
+  private async handleJobLaunches(
+    launchCandidates: ActionIntent[],
+    limit: number,
+  ): Promise<number> {
+    let handled = 0;
     const admitted: ActionIntent[] = [];
     for (const intent of (await this.fairJobLaunches(launchCandidates)).slice(
       0,
-      remaining,
+      limit,
     )) {
       if (
         (await this.launchCancellationRequested(intent)) &&
@@ -343,14 +368,7 @@ export class Reconciler {
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     if (rejectedLaunch) throw rejectedLaunch.reason;
-    handled += admitted.length;
-    const activeRuns = await this.projection.activeRuns();
-    for (const run of activeRuns) {
-      if (run.cancellation_requested) await this.continueCancellation(run.run_id);
-      if (await this.continueJobObservation(run.run_id)) handled += 1;
-      if (await this.maybePublish(run.run_id)) handled += 1;
-    }
-    return handled;
+    return handled + admitted.length;
   }
 
   private async syncProjection(activeRunIds: readonly string[]): Promise<number> {

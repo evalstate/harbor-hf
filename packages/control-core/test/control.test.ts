@@ -546,7 +546,7 @@ describe("control service", () => {
     });
   });
 
-  it("admits new runs before recovering historical advancement", async () => {
+  it("launches preparation before recovering historical advancement", async () => {
     const control = await createTestControl();
     controls.push(control);
     const historical = await control.service.submit(
@@ -566,6 +566,15 @@ describe("control service", () => {
       "current-admission-key",
       operator,
     );
+    await control.service.writeAction(
+      control.service.actionIntent(current.run_id, "job.launch", "run-preparation", 0, {
+        worker_role: "preparation",
+        task_ids: ["task-001"],
+        hardware: "cpu-basic",
+        max_jobs: 1,
+        reservation_microusd: 0,
+      }),
+    );
     const markAdvanced = control.service.markAdvanced.bind(control.service);
     vi.spyOn(control.service, "markAdvanced").mockImplementation(
       async (intent, receipt) => {
@@ -574,20 +583,34 @@ describe("control service", () => {
         return markAdvanced(intent, receipt);
       },
     );
+    const external = new NoopActions();
+    const execute = vi.spyOn(external, "execute");
     const reconciler = new Reconciler(
       control.service,
       control.projection,
-      new NoopActions(),
+      external,
       new ResultPublisher(control.store, control.projection, control.service),
       { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
 
     await expect(reconciler.tick()).rejects.toThrow("historical advancement failed");
 
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action_kind: "job.launch",
+        run_id: current.run_id,
+        target: "run-preparation",
+      }),
+      { adoption_only: true },
+    );
     const launches = (await control.projection.runActions(current.run_id)).filter(
       (action) => action.action_kind === "job.launch",
     );
-    expect(launches).toHaveLength(1);
+    const preparationLaunch = launches.find(
+      (action) =>
+        (JSON.parse(action.intent_body) as ActionIntent).target === "run-preparation",
+    );
+    expect(preparationLaunch?.receipt_body).not.toBeNull();
   });
 
   it("copies locked inference limits into the worker launch", async () => {
