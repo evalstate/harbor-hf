@@ -293,6 +293,8 @@ export interface SystemView {
 
 export class ProjectionIntegrityError extends Error {}
 
+const REBUILD_READ_CONCURRENCY = 16;
+
 function body(value: unknown): string {
   return canonicalJson(value).trimEnd();
 }
@@ -333,6 +335,18 @@ async function verifyAttemptEvidence(
   if (record.actor.subject === "harbor-hf-control")
     await verifyEvidenceReference(store, record.evidence_path, record.evidence_digest);
   else await verifyWorkerEvidence(store, record);
+}
+
+async function readRebuildObjects(
+  store: ImmutableObjectStore,
+  entries: readonly ObjectEntry[],
+): Promise<Uint8Array[]> {
+  const objects: Uint8Array[] = [];
+  for (let offset = 0; offset < entries.length; offset += REBUILD_READ_CONCURRENCY) {
+    const batch = entries.slice(offset, offset + REBUILD_READ_CONCURRENCY);
+    objects.push(...(await Promise.all(batch.map((entry) => store.read(entry.key)))));
+  }
+  return objects;
 }
 
 function validateObjectEntry(entry: ObjectEntry): void {
@@ -864,18 +878,24 @@ export class Projection {
       const entries = [...(await store.list(prefix))].sort((left, right) =>
         left.key.localeCompare(right.key),
       );
-      await this.clear();
       const seen = new Set<string>();
-      const supersessions: Array<{
-        entry: VerifiedObjectEntry;
-        record: PublicationSupersession;
-      }> = [];
       for (const entry of entries) {
         validateObjectEntry(entry);
         if (seen.has(entry.key))
           throw new ProjectionIntegrityError(`duplicate object listing: ${entry.key}`);
         seen.add(entry.key);
-        const bytes = await store.read(entry.key);
+      }
+      // Fetch immutable objects concurrently, then apply them in deterministic key order.
+      const objects = await readRebuildObjects(store, entries);
+      await this.clear();
+      const supersessions: Array<{
+        entry: VerifiedObjectEntry;
+        record: PublicationSupersession;
+      }> = [];
+      for (const [index, entry] of entries.entries()) {
+        const bytes = objects[index];
+        if (!bytes)
+          throw new ProjectionIntegrityError(`missing prefetched object: ${entry.key}`);
         const verified = verifiedEntry(bytes, entry);
         const record = parseRecord(bytes, verified);
         await verifyAttemptEvidence(store, record);

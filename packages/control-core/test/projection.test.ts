@@ -61,7 +61,46 @@ class ReadCountingStore implements ImmutableObjectStore {
   }
 }
 
+class ConcurrentReadStore implements ImmutableObjectStore {
+  activeReads = 0;
+  maxActiveReads = 0;
+
+  constructor(private readonly source: ImmutableObjectStore) {}
+
+  list(prefix: string): Promise<readonly ObjectEntry[]> {
+    return this.source.list(prefix);
+  }
+
+  async read(key: string): Promise<Uint8Array> {
+    this.activeReads += 1;
+    this.maxActiveReads = Math.max(this.maxActiveReads, this.activeReads);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return await this.source.read(key);
+    } finally {
+      this.activeReads -= 1;
+    }
+  }
+
+  create(key: string, bytes: Uint8Array) {
+    return this.source.create(key, bytes);
+  }
+}
+
 describe("projection replay", () => {
+  it("prefetches rebuild objects with bounded concurrency", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const store = new ConcurrentReadStore(control.store);
+    const projection = await Projection.open(`${control.root}/concurrent.sqlite`);
+
+    await projection.rebuild(store);
+
+    expect(store.maxActiveReads).toBeGreaterThan(1);
+    expect(store.maxActiveReads).toBeLessThanOrEqual(16);
+    await projection.close();
+  });
+
   it("is independent of Bucket listing order", async () => {
     const control = await createTestControl();
     controls.push(control);
