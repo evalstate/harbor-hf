@@ -320,7 +320,6 @@ function endpointStatus(raw: unknown): {
 
 export class HuggingFaceActions implements ExternalActionPort {
   private readonly endpointsUrl: string;
-  private pendingJobList: ReturnType<typeof listJobs> | null = null;
 
   constructor(private readonly config: AdapterConfig) {
     if (config.inferenceToken && config.inferenceToken === config.accessToken)
@@ -329,17 +328,19 @@ export class HuggingFaceActions implements ExternalActionPort {
       config.endpointsUrl ?? "https://api.endpoints.huggingface.cloud/v2";
   }
 
-  private listCurrentJobs(): ReturnType<typeof listJobs> {
-    if (this.pendingJobList) return this.pendingJobList;
-    const operation = listJobs({
+  private listJobsForAction(actionId: string): ReturnType<typeof listJobs> {
+    return listJobs({
       namespace: this.config.namespace,
       accessToken: this.config.accessToken,
       ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
-    }).finally(() => {
-      if (this.pendingJobList === operation) this.pendingJobList = null;
+      fetch: (input, init) => {
+        const url = new URL(
+          typeof input === "string" || input instanceof URL ? input : input.url,
+        );
+        url.searchParams.append("label", `harbor_hf_action_id=${actionId}`);
+        return fetch(url, init);
+      },
     });
-    this.pendingJobList = operation;
-    return operation;
   }
 
   async execute(
@@ -405,7 +406,7 @@ export class HuggingFaceActions implements ExternalActionPort {
     if (!this.config.controlUrl)
       throw new Error("Job launch requires the control service URL");
     const spec = expectedJobSpec(intent, this.config.controlUrl);
-    const jobs = await this.listCurrentJobs();
+    const jobs = await this.listJobsForAction(intent.action_id);
     const matches = jobs.filter(
       (job) => job.labels?.harbor_hf_action_id === intent.action_id,
     );

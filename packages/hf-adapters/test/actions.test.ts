@@ -248,7 +248,7 @@ describe("HuggingFaceActions", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("shares one adoption listing across concurrent launches", async () => {
+  it("filters concurrent adoption lookups by deterministic action label", async () => {
     const second: ActionIntent = {
       ...base,
       record_id: "action-test-0002",
@@ -260,37 +260,37 @@ describe("HuggingFaceActions", () => {
         task_ids: ["task-two"],
       },
     };
-    let listRequests = 0;
-    const fetchMock = vi.fn(
-      async (_url: string | URL | Request, init?: RequestInit) => {
-        if (!init?.method) {
-          listRequests += 1;
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          return new Response("[]", {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        const request = JSON.parse(String(init.body)) as {
-          labels: Record<string, string>;
-          environment: Record<string, string>;
-          secrets: Record<string, string>;
-        };
-        const intent =
-          request.labels.harbor_hf_action_id === base.action_id ? base : second;
-        return new Response(
-          JSON.stringify(
-            apiJob(intent, {
-              id: `job-${intent.target}`,
-              environment: request.environment,
-              labels: request.labels,
-              secrets: Object.keys(request.secrets),
-            }),
-          ),
-          { status: 200, headers: { "Content-Type": "application/json" } },
+    const listRequestLabels: Array<string | null> = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (!init?.method) {
+        const requestUrl = new URL(
+          typeof url === "string" || url instanceof URL ? url : url.url,
         );
-      },
-    );
+        listRequestLabels.push(requestUrl.searchParams.get("label"));
+        return new Response("[]", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const request = JSON.parse(String(init.body)) as {
+        labels: Record<string, string>;
+        environment: Record<string, string>;
+        secrets: Record<string, string>;
+      };
+      const intent =
+        request.labels.harbor_hf_action_id === base.action_id ? base : second;
+      return new Response(
+        JSON.stringify(
+          apiJob(intent, {
+            id: `job-${intent.target}`,
+            environment: request.environment,
+            labels: request.labels,
+            secrets: Object.keys(request.secrets),
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
     vi.stubGlobal("fetch", fetchMock);
     const adapter = new HuggingFaceActions({
       namespace: "example",
@@ -304,8 +304,11 @@ describe("HuggingFaceActions", () => {
       expect.objectContaining({ outcome: "created", resource_id: "job-task-one" }),
       expect.objectContaining({ outcome: "created", resource_id: "job-task-two" }),
     ]);
-    expect(listRequests).toBe(1);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(listRequestLabels.sort()).toEqual([
+      `harbor_hf_action_id=${base.action_id}`,
+      `harbor_hf_action_id=${second.action_id}`,
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("launches preparation Jobs with an encrypted preparation-only capability", async () => {
