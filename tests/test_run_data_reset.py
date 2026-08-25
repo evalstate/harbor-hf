@@ -25,13 +25,17 @@ from harbor_hf.run_data_reset import (
     StaleInventoryError,
     UnknownBucketPathError,
     apply_reset,
+    apply_targeted_reset,
     build_inventory,
     classify_key,
     dry_run_manifest,
     list_inventory,
+    list_targeted_inventory,
     main,
     read_manifest,
     run_dry_run,
+    run_targeted_dry_run,
+    target_run_prefixes,
     validate_prefixes,
     write_manifest,
 )
@@ -71,7 +75,6 @@ class FakeHfApi:
         token: str | bool | None = None,
     ) -> Iterable[BucketFile | BucketFolder]:
         assert bucket_id == "example-org/artifact-bucket"
-        assert prefix is None
         assert recursive is True
         assert token is None
         self.list_calls += 1
@@ -85,6 +88,8 @@ class FakeHfApi:
             self.list_mutations[self.list_calls]()
         entries = []
         for key, size in sorted(self.files.items()):
+            if prefix is not None and not key.startswith(prefix):
+                continue
             values: dict[str, object] = {"type": "file", "path": key, "size": size}
             if self.expose_xet_hash:
                 values["xet_hash"] = hashlib.sha256(
@@ -209,6 +214,195 @@ def test_prefix_sets_are_disjoint_and_reject_overlaps() -> None:
         validate_prefixes(("results/", "results/schema=v1/"), ())
     with pytest.raises(PrefixConfigurationError, match="canonical"):
         validate_prefixes(("absolute",), ("deleted/",))
+
+
+def test_targeted_reset_deletes_only_selected_run_trees(tmp_path: Path) -> None:
+    selected_run = "run-selected"
+    files = {
+        f"control/schema=v1/runs/{selected_run}/request.json": 11,
+        f"evidence/schema=v1/runs/{selected_run}/chunk.json": 12,
+        "control/schema=v1/runs/run-retained/request.json": 13,
+        "evidence/schema=v1/runs/run-retained/chunk.json": 14,
+        "control/schema=v1/profiles/objects/model/profile.json": 15,
+    }
+    api = FakeHfApi(files)
+    dry_path = tmp_path / "targeted-dry-run.json"
+
+    dry_run = run_targeted_dry_run(
+        api=api,
+        bucket_id="example-org/artifact-bucket",
+        run_ids=[selected_run],
+        manifest_path=dry_path,
+        clock=_clock,
+        sleep=_no_sleep,
+    )
+
+    assert dry_run["target_run_count"] == 1
+    assert dry_run["delete_count"] == 2
+    assert selected_run not in dry_path.read_text()
+    verified = apply_targeted_reset(
+        api=api,
+        bucket_id="example-org/artifact-bucket",
+        run_ids=[selected_run],
+        confirmed=True,
+        expected_delete_digest=cast(str, dry_run["delete_key_digest"]),
+        dry_run_manifest_path=dry_path,
+        verification_manifest_path=tmp_path / "targeted-verification.json",
+        clock=_clock,
+        sleep=_no_sleep,
+    )
+
+    assert verified["deleted_count"] == 2
+    assert verified["remaining_delete_count"] == 0
+    assert set(api.files) == {
+        "control/schema=v1/runs/run-retained/request.json",
+        "evidence/schema=v1/runs/run-retained/chunk.json",
+        "control/schema=v1/profiles/objects/model/profile.json",
+    }
+
+
+def test_targeted_listing_retries_and_wraps_invalid_requests() -> None:
+    run_id = "run-selected"
+    api = FakeHfApi({f"control/schema=v1/runs/{run_id}/request.json": 11})
+    api.transient_list_failures = 1
+
+    inventory = list_targeted_inventory(
+        api,
+        "example-org/artifact-bucket",
+        [run_id],
+        sleep=_no_sleep,
+    )
+
+    assert len(inventory.deleted) == 1
+    assert api.list_calls == 3
+    api.invalid_listing = True
+    with pytest.raises(BucketInventoryError, match="targeted Bucket identifier"):
+        list_targeted_inventory(
+            api,
+            "example-org/artifact-bucket",
+            [run_id],
+            sleep=_no_sleep,
+        )
+
+
+def test_targeted_reset_recovers_a_partial_delete(tmp_path: Path) -> None:
+    run_id = "run-selected"
+    files = {
+        f"control/schema=v1/runs/{run_id}/request.json": 11,
+        f"control/schema=v1/runs/{run_id}/lock.json": 12,
+    }
+    api = FakeHfApi(files)
+    dry_path = tmp_path / "targeted-dry-run.json"
+    dry_run = run_targeted_dry_run(
+        api=api,
+        bucket_id="example-org/artifact-bucket",
+        run_ids=[run_id],
+        manifest_path=dry_path,
+        clock=_clock,
+        sleep=_no_sleep,
+    )
+    api.transient_partial_failures = 1
+
+    verified = apply_targeted_reset(
+        api=api,
+        bucket_id="example-org/artifact-bucket",
+        run_ids=[run_id],
+        confirmed=True,
+        expected_delete_digest=cast(str, dry_run["delete_key_digest"]),
+        dry_run_manifest_path=dry_path,
+        verification_manifest_path=tmp_path / "targeted-verification.json",
+        batch_size=2,
+        clock=_clock,
+        sleep=_no_sleep,
+    )
+
+    assert verified["deleted_count"] == 2
+    assert not api.files
+    assert len(api.batch_calls) == 2
+
+
+def test_targeted_reset_rejects_stale_digest_and_failed_delete(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-selected"
+    key = f"control/schema=v1/runs/{run_id}/request.json"
+    api = FakeHfApi({key: 11})
+    dry_path = tmp_path / "targeted-dry-run.json"
+    dry_run = run_targeted_dry_run(
+        api=api,
+        bucket_id="example-org/artifact-bucket",
+        run_ids=[run_id],
+        manifest_path=dry_path,
+        clock=_clock,
+        sleep=_no_sleep,
+    )
+    with pytest.raises(StaleInventoryError, match="targeted delete digest"):
+        apply_targeted_reset(
+            api=api,
+            bucket_id="example-org/artifact-bucket",
+            run_ids=[run_id],
+            confirmed=True,
+            expected_delete_digest=f"sha256:{'0' * 64}",
+            dry_run_manifest_path=dry_path,
+            verification_manifest_path=tmp_path / "targeted-verification.json",
+            clock=_clock,
+            sleep=_no_sleep,
+        )
+
+    api.skip_deletes = True
+    with pytest.raises(ResetVerificationError, match="selected Run objects"):
+        apply_targeted_reset(
+            api=api,
+            bucket_id="example-org/artifact-bucket",
+            run_ids=[run_id],
+            confirmed=True,
+            expected_delete_digest=cast(str, dry_run["delete_key_digest"]),
+            dry_run_manifest_path=dry_path,
+            verification_manifest_path=tmp_path / "targeted-verification.json",
+            clock=_clock,
+            sleep=_no_sleep,
+        )
+
+
+def test_targeted_reset_wraps_invalid_delete_request(tmp_path: Path) -> None:
+    run_id = "run-selected"
+    api = FakeHfApi({f"control/schema=v1/runs/{run_id}/request.json": 11})
+    dry_path = tmp_path / "targeted-dry-run.json"
+    dry_run = run_targeted_dry_run(
+        api=api,
+        bucket_id="example-org/artifact-bucket",
+        run_ids=[run_id],
+        manifest_path=dry_path,
+        clock=_clock,
+        sleep=_no_sleep,
+    )
+    api.invalid_batch = True
+
+    with pytest.raises(BucketDeleteError, match="targeted delete batch"):
+        apply_targeted_reset(
+            api=api,
+            bucket_id="example-org/artifact-bucket",
+            run_ids=[run_id],
+            confirmed=True,
+            expected_delete_digest=cast(str, dry_run["delete_key_digest"]),
+            dry_run_manifest_path=dry_path,
+            verification_manifest_path=tmp_path / "targeted-verification.json",
+            clock=_clock,
+            sleep=_no_sleep,
+        )
+
+
+@pytest.mark.parametrize(
+    "run_ids",
+    [
+        [],
+        ["run-duplicate", "run-duplicate"],
+        ["invalid/run"],
+    ],
+)
+def test_targeted_reset_rejects_invalid_run_ids(run_ids: list[str]) -> None:
+    with pytest.raises(PrefixConfigurationError):
+        target_run_prefixes(run_ids)
 
 
 @pytest.mark.parametrize(

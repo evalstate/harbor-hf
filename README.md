@@ -187,6 +187,21 @@ The final verification manifest stays local.
 uv run python -m json.tool run-data-reset-verification.json
 ```
 
+For an approved targeted recovery, repeat `--run-id` to inventory and delete
+only those Runs' current control and evidence trees. The manifest stores
+digests of the selected IDs and prefixes instead of the IDs themselves:
+
+```bash
+uv run python scripts/reset_run_data.py \
+  --bucket "<namespace>/<artifact-bucket>" \
+  --run-id "<failed-run-1>" \
+  --run-id "<failed-run-2>" \
+  --manifest targeted-run-reset-dry-run.json
+```
+
+Apply the reviewed targeted manifest with the same `--run-id` arguments plus
+the standard `--apply`, confirmation, digest, and verification options.
+
 ## Migrate preserved profiles during Run-native cutover
 
 The one-time profile migration inventories only
