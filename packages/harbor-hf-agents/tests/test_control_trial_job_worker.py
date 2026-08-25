@@ -445,7 +445,10 @@ def test_harbor_run_config_uses_one_adhoc_task(
             ("policy", False),
         ),
         (
-            {"exception_info": {"exception_type": "TerminalProviderError"}},
+            {
+                "exception_info": {"exception_type": "TerminalProviderError"},
+                "agent_execution": {"started_at": "2026-08-25T00:00:00Z"},
+            },
             "",
             False,
             ("agent", False),
@@ -460,10 +463,32 @@ def test_harbor_run_config_uses_one_adhoc_task(
         (None, "AgentAuthenticationError", False, ("policy", False)),
         (None, "", True, ("benchmark_timeout", False)),
         (
-            {"exception_info": {"exception_type": "VerifierOutputParseError"}},
+            {
+                "exception_info": {"exception_type": "VerifierOutputParseError"},
+                "agent_execution": {"started_at": "2026-08-25T00:00:00Z"},
+            },
             "",
             False,
             ("verifier", False),
+        ),
+        (
+            {
+                "exception_info": {"exception_type": "NetworkConnectionError"},
+                "agent_setup": {"started_at": "2026-08-25T00:00:00Z"},
+                "agent_execution": None,
+            },
+            "",
+            False,
+            ("infrastructure", True),
+        ),
+        (
+            {
+                "exception_info": {"exception_type": "RuntimeError"},
+                "agent_execution": {"started_at": "2026-08-25T00:00:00Z"},
+            },
+            "",
+            False,
+            ("agent", False),
         ),
         (
             {
@@ -489,6 +514,24 @@ def test_computes_conservative_token_cost(monkeypatch: pytest.MonkeyPatch) -> No
     result = {"agent_result": {"n_input_tokens": 1_000_000, "n_output_tokens": 500_000}}
 
     assert worker._cost_microusd(config, result) == 200_000
+
+
+def test_provider_usage_overrides_untrusted_agent_token_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(monkeypatch)
+    result = {"agent_result": {"n_input_tokens": 1, "n_output_tokens": 1}}
+    usage = worker.InferenceUsage(
+        requests=2,
+        input_tokens=1_000_000,
+        output_tokens=500_000,
+    )
+
+    assert worker._metrics(result, usage) == {
+        "input_tokens": 1_000_000.0,
+        "output_tokens": 500_000.0,
+    }
+    assert worker._cost_microusd(config, result, usage) == 200_000
 
 
 def test_streams_command_output_and_kills_a_hung_process(
@@ -596,6 +639,10 @@ def test_runs_harbor_exactly_once(
         ),
         (
             worker.JobEnvironmentPreflightError("dedicated task UID unavailable"),
+            ("infrastructure", True),
+        ),
+        (
+            worker.InferenceUsageError("invalid provider usage"),
             ("infrastructure", True),
         ),
     ],

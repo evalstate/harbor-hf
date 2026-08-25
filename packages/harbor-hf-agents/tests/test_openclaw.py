@@ -207,6 +207,27 @@ def test_factory_openclaw_default_install_timeout_when_override_unset(
     assert agent._install_exec_timeout_sec == int(OPENCLAW_AGENT_SETUP_TIMEOUT_SEC)
 
 
+@pytest.mark.asyncio
+async def test_install_bounds_root_command_by_agent_setup_timeout(
+    tmp_path: Path,
+) -> None:
+    agent = OpenClawAgent(
+        logs_dir=tmp_path,
+        model_name="openai/gpt-4.1",
+        override_setup_timeout_sec=123.0,
+    )
+    agent.exec_as_root = AsyncMock()
+    agent.exec_as_agent = AsyncMock()
+
+    await agent.install(AsyncMock())
+
+    assert agent.exec_as_root.await_args.kwargs["timeout_sec"] == 123
+    assert all(
+        call.kwargs["timeout_sec"] == 123
+        for call in agent.exec_as_agent.await_args_list
+    )
+
+
 def test_factory_leaves_explicit_setup_timeout_unchanged(tmp_path: Path) -> None:
     cfg = AgentConfig(
         import_path="harbor_hf_agents.openclaw.agent:OpenClawAgent",

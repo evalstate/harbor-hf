@@ -646,6 +646,7 @@ class OpenClawAgent(IsolatedProviderAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
+        timeout = self._install_exec_timeout_sec
         root_pkgs = "curl ca-certificates passwd util-linux"
         await self.exec_as_root(
             environment,
@@ -654,8 +655,8 @@ class OpenClawAgent(IsolatedProviderAgent):
                 + root_pkgs
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
+            timeout_sec=timeout,
         )
-        timeout = self._install_exec_timeout_sec
         await self.exec_as_agent(
             environment,
             command=(

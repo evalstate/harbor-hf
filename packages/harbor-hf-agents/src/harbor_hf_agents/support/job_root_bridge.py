@@ -37,6 +37,8 @@ _TOKEN_PATH = Path("/run/harbor-hf-inference.token")
 _ROUTE_PATH = Path("/run/harbor-hf-inference.json")
 _HANDLE_PATH = Path("/run/harbor-hf-inference-bridge.json")
 _LOG_PATH = Path("/run/harbor-hf-inference-bridge.log")
+_USAGE_PATH = Path("/run/harbor-hf-inference-usage.json")
+_USAGE_TEMP_PATH = Path("/run/harbor-hf-inference-usage.json.tmp")
 
 
 def _required(name: str) -> str:
@@ -57,6 +59,7 @@ def _bridge_environment(token_path: Path, allowed_path: str) -> dict[str, str]:
         "HARBOR_HF_INFERENCE_TOKEN_FILE": str(token_path),
         "HARBOR_HF_INFERENCE_LOCAL_PORT": str(_LOCAL_PORT),
         "HARBOR_HF_INFERENCE_ALLOWED_PATH": allowed_path,
+        "HARBOR_HF_INFERENCE_USAGE_FILE": str(_USAGE_PATH),
     }
     environment.update({name: _required(name) for name in _BRIDGE_SETTING_NAMES})
     return environment
@@ -100,7 +103,14 @@ def _wait_ready(process: subprocess.Popen[bytes]) -> None:
 
 
 def _validate_runtime_paths() -> None:
-    for path in (_TOKEN_PATH, _ROUTE_PATH, _HANDLE_PATH, _LOG_PATH):
+    for path in (
+        _TOKEN_PATH,
+        _ROUTE_PATH,
+        _HANDLE_PATH,
+        _LOG_PATH,
+        _USAGE_PATH,
+        _USAGE_TEMP_PATH,
+    ):
         try:
             metadata = path.lstat()
         except FileNotFoundError:
@@ -114,6 +124,8 @@ def _stop_previous_bridge() -> None:
         _stop_job_root_bridge()
     _ROUTE_PATH.unlink(missing_ok=True)
     _TOKEN_PATH.unlink(missing_ok=True)
+    _USAGE_PATH.unlink(missing_ok=True)
+    _USAGE_TEMP_PATH.unlink(missing_ok=True)
 
 
 def main() -> None:

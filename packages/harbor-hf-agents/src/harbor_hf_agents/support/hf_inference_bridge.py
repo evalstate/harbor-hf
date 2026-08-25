@@ -13,6 +13,7 @@ import signal
 import stat
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -33,7 +34,21 @@ _JOB_BRIDGE_HANDLE = Path("/run/harbor-hf-inference-bridge.json")
 _JOB_BRIDGE_ROUTE = Path("/run/harbor-hf-inference.json")
 _JOB_BRIDGE_LOG = Path("/run/harbor-hf-inference-bridge.log")
 _JOB_BRIDGE_TOKEN = Path("/run/harbor-hf-inference.token")
+_JOB_BRIDGE_USAGE = Path("/run/harbor-hf-inference-usage.json")
 _JOB_BRIDGE_STOP_SECONDS = 10
+
+
+@dataclass(frozen=True)
+class InferenceUsage:
+    """Trusted token totals recorded by the root-owned Job bridge."""
+
+    requests: int
+    input_tokens: int
+    output_tokens: int
+
+
+class InferenceUsageError(RuntimeError):
+    """Raised when trusted Job bridge usage is malformed or insecure."""
 
 
 def _upstream_request_path(upstream_path: str, request_path: str) -> str:
@@ -41,6 +56,75 @@ def _upstream_request_path(upstream_path: str, request_path: str) -> str:
     if base_path.endswith("/v1"):
         base_path = base_path[:-3]
     return f"{base_path}{request_path}"
+
+
+def _usage_pair(value: object) -> tuple[int, int] | None:
+    if not isinstance(value, dict):
+        return None
+    mapping = cast("dict[object, object]", value)
+    if "prompt_tokens" in mapping and "completion_tokens" in mapping:
+        input_tokens = mapping["prompt_tokens"]
+        output_tokens = mapping["completion_tokens"]
+    elif "input_tokens" in mapping and "output_tokens" in mapping:
+        input_tokens = mapping["input_tokens"]
+        output_tokens = mapping["output_tokens"]
+    else:
+        return None
+    if (
+        isinstance(input_tokens, bool)
+        or not isinstance(input_tokens, int)
+        or input_tokens < 0
+        or isinstance(output_tokens, bool)
+        or not isinstance(output_tokens, int)
+        or output_tokens < 0
+    ):
+        return None
+    return input_tokens, output_tokens
+
+
+def _payload_usage(value: object) -> tuple[int, int] | None:
+    if not isinstance(value, dict):
+        return None
+    mapping = cast("dict[object, object]", value)
+    if "usage" in mapping:
+        usage = _usage_pair(mapping["usage"])
+        if usage is not None:
+            return usage
+    if "response" in mapping and isinstance(mapping["response"], dict):
+        response = cast("dict[object, object]", mapping["response"])
+        if "usage" in response:
+            return _usage_pair(response["usage"])
+    return None
+
+
+def _response_usage(response_body: bytes) -> tuple[int, int] | None:
+    """Extract final token usage from JSON or an OpenAI-compatible SSE body."""
+    import json
+
+    try:
+        payload = json.loads(response_body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+    usage = _payload_usage(payload)
+    if usage is not None:
+        return usage
+
+    final_usage = None
+    for raw_line in response_body.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(b"data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == b"[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        candidate = _payload_usage(payload)
+        if candidate is not None:
+            final_usage = candidate
+    return final_usage
 
 
 def _run_hf_inference_bridge() -> None:  # noqa: C901 -- isolated bridge parser
@@ -74,13 +158,55 @@ def _run_hf_inference_bridge() -> None:  # noqa: C901 -- isolated bridge parser
     max_concurrency = int(os.environ["HARBOR_HF_INFERENCE_MAX_CONCURRENCY"])
     timeout_seconds = int(os.environ["HARBOR_HF_INFERENCE_TIMEOUT_SECONDS"])
     max_output_tokens = int(os.environ["HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS"])
+    usage_path = os.environ["HARBOR_HF_INFERENCE_USAGE_FILE"]
     max_response_bytes = min(64 * 1024 * 1024, 1024 * 1024 + max_output_tokens * 1024)
     local_api_key = "harbor-local-inference-bridge"
     counter_lock = threading.Lock()
+    usage_lock = threading.Lock()
     request_count = 0
+    usage_requests = 0
+    input_tokens = 0
+    output_tokens = 0
     header_timeout_seconds = 10
     body_timeout_seconds = 30
     socket_timeout_seconds = 30
+
+    def write_usage() -> None:
+        payload = (
+            json.dumps(
+                {
+                    "schema_version": "v1",
+                    "requests": usage_requests,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
+        temporary_path = f"{usage_path}.tmp"
+        descriptor = os.open(
+            temporary_path,
+            os.O_CREAT | os.O_NOFOLLOW | os.O_TRUNC | os.O_WRONLY,
+            0o600,
+        )
+        try:
+            os.write(descriptor, payload)
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary_path, usage_path)
+
+    def record_usage(usage: tuple[int, int]) -> None:
+        nonlocal usage_requests, input_tokens, output_tokens
+        with usage_lock:
+            usage_requests += 1
+            input_tokens += usage[0]
+            output_tokens += usage[1]
+            write_usage()
+
+    write_usage()
 
     class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         daemon_threads = True
@@ -202,6 +328,23 @@ def _run_hf_inference_bridge() -> None:  # noqa: C901 -- isolated bridge parser
                     else "max_tokens"
                 )
                 request_body[field] = max_output_tokens
+            if (
+                allowed_path == "/v1/chat/completions"
+                and "stream" in request_body
+                and request_body["stream"] is True
+            ):
+                if "stream_options" in request_body and not isinstance(
+                    request_body["stream_options"], dict
+                ):
+                    self.send_error(400)
+                    return
+                stream_options = (
+                    dict(request_body["stream_options"])
+                    if "stream_options" in request_body
+                    else {}
+                )
+                stream_options["include_usage"] = True
+                request_body["stream_options"] = stream_options
             body = json.dumps(
                 request_body,
                 separators=(",", ":"),
@@ -232,6 +375,10 @@ def _run_hf_inference_bridge() -> None:  # noqa: C901 -- isolated bridge parser
                     response_body.extend(chunk)
                     if len(response_body) > max_response_bytes:
                         raise OverflowError("inference bridge response limit exceeded")
+                if 200 <= response.status < 300:
+                    usage = _response_usage(bytes(response_body))
+                    if usage is not None:
+                        record_usage(usage)
                 self.connection.settimeout(socket_timeout_seconds)
                 self.send_response(response.status)
                 for name, value in response.getheaders():
@@ -280,9 +427,24 @@ def _run_hf_inference_bridge() -> None:  # noqa: C901 -- isolated bridge parser
 
 
 def _bridge_script() -> str:
+    usage_pair = inspect.getsource(_usage_pair)
+    payload_usage = inspect.getsource(_payload_usage)
+    response_usage = inspect.getsource(_response_usage)
     path_helper = inspect.getsource(_upstream_request_path)
     body = inspect.getsource(_run_hf_inference_bridge)
-    return path_helper + "\n" + body + "\n_run_hf_inference_bridge()\n"
+    return (
+        "from typing import cast\n\n"
+        + usage_pair
+        + "\n"
+        + payload_usage
+        + "\n"
+        + response_usage
+        + "\n"
+        + path_helper
+        + "\n"
+        + body
+        + "\n_run_hf_inference_bridge()\n"
+    )
 
 
 def _bridge_command() -> str:
@@ -294,6 +456,8 @@ def _bridge_command() -> str:
         'kill "$old_pid" 2>/dev/null || true; '
         "rm -f /tmp/harbor-hf-inference-bridge.pid; fi; "
         "rm -f /tmp/harbor-hf-inference-bridge.ready; "
+        "rm -f /tmp/harbor-hf-inference-usage.json "
+        "/tmp/harbor-hf-inference-usage.json.tmp; "
         f"nohup python3 -c {shlex.quote(script)} "
         ">/tmp/harbor-hf-inference-bridge.log 2>&1 & "
         "pid=$!; printf '%s\\n' \"$pid\" "
@@ -361,6 +525,48 @@ def _read_job_bridge_handle() -> tuple[int, int]:
     ):
         raise RuntimeError("Job inference bridge handle is invalid")
     return pid, start_time
+
+
+def read_job_inference_usage() -> InferenceUsage | None:
+    """Read root-owned provider usage after the Job bridge has stopped."""
+    try:
+        metadata = _JOB_BRIDGE_USAGE.lstat()
+    except FileNotFoundError:
+        return None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise InferenceUsageError("Job inference usage is not root-owned mode 0600")
+    descriptor = os.open(_JOB_BRIDGE_USAGE, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        with os.fdopen(descriptor, encoding="utf-8", closefd=False) as handle:
+            value = json.load(handle)
+    finally:
+        os.close(descriptor)
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "requests",
+        "input_tokens",
+        "output_tokens",
+    }:
+        raise InferenceUsageError("Job inference usage is invalid")
+    numbers = (value["requests"], value["input_tokens"], value["output_tokens"])
+    if (
+        value["schema_version"] != "v1"
+        or any(
+            isinstance(number, bool) or not isinstance(number, int)
+            for number in numbers
+        )
+        or any(number < 0 for number in numbers)
+    ):
+        raise InferenceUsageError("Job inference usage is invalid")
+    return InferenceUsage(
+        requests=value["requests"],
+        input_tokens=value["input_tokens"],
+        output_tokens=value["output_tokens"],
+    )
 
 
 def _stop_job_root_bridge() -> None:
@@ -498,6 +704,7 @@ async def prepare_hf_inference_bridge(
             "HARBOR_HF_INFERENCE_MAX_CONCURRENCY": str(concurrency_limit),
             "HARBOR_HF_INFERENCE_TIMEOUT_SECONDS": str(timeout_limit),
             "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS": str(output_limit),
+            "HARBOR_HF_INFERENCE_USAGE_FILE": ("/tmp/harbor-hf-inference-usage.json"),
         },
     )
     env[base_url_key] = f"http://127.0.0.1:{local_port}/v1"
@@ -573,6 +780,11 @@ async def stop_hf_inference_bridge(
                         _JOB_BRIDGE_LOG,
                         "/logs/agent/hf-inference-bridge.log",
                     )
+                if _JOB_BRIDGE_USAGE.is_file():
+                    await environment.upload_file(
+                        _JOB_BRIDGE_USAGE,
+                        "/logs/agent/hf-inference-usage.json",
+                    )
             finally:
                 _JOB_BRIDGE_LOG.unlink(missing_ok=True)
                 _JOB_BRIDGE_TOKEN.unlink(missing_ok=True)
@@ -588,7 +800,11 @@ async def stop_hf_inference_bridge(
                 "if [ -f /tmp/harbor-hf-inference-bridge.log ]; then "
                 "install -m 0640 -o root -g harbor-agent "
                 "/tmp/harbor-hf-inference-bridge.log "
-                "/logs/agent/hf-inference-bridge.log; fi"
+                "/logs/agent/hf-inference-bridge.log; fi; "
+                "if [ -f /tmp/harbor-hf-inference-usage.json ]; then "
+                "install -m 0640 -o root -g harbor-agent "
+                "/tmp/harbor-hf-inference-usage.json "
+                "/logs/agent/hf-inference-usage.json; fi"
             ),
         )
     finally:

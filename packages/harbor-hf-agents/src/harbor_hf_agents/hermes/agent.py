@@ -45,6 +45,9 @@ _NATIVE_PROVIDERS: dict[str, tuple[str | None, list[str]]] = {
     "minimax-cn": ("minimax-cn", ["MINIMAX_CN_API_KEY"]),
 }
 _HERMES_COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
+_NODE_ARCHIVE_SHA256 = (
+    "982aa24dd8be4c889c6a8ab337ddff3b0896645b20f4239356e80552c16277ee"
+)
 
 
 class _HermesConfigModel(BaseModel):
@@ -181,9 +184,15 @@ class HermesAgent(IsolatedProviderAgent):
                 "apt-get update && apt-get install -y --no-install-recommends "
                 "curl git libatomic1 passwd ripgrep tar util-linux xz-utils && "
                 "mkdir -p /opt/harbor-hf-node && "
-                "curl -fsSL "
+                "curl --fail --location --silent --show-error "
+                "--retry 5 --retry-delay 2 --retry-all-errors "
                 "https://nodejs.org/dist/v26.7.0/node-v26.7.0-linux-x64.tar.xz "
-                "| tar -xJ -C /opt/harbor-hf-node --strip-components=1 && "
+                "--output /tmp/node-v26.7.0-linux-x64.tar.xz && "
+                f"echo '{_NODE_ARCHIVE_SHA256}  "
+                "/tmp/node-v26.7.0-linux-x64.tar.xz' "
+                "| sha256sum --check --strict && "
+                "tar -xJf /tmp/node-v26.7.0-linux-x64.tar.xz "
+                "-C /opt/harbor-hf-node --strip-components=1 && "
                 "node --version && npm --version"
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
@@ -198,7 +207,9 @@ class HermesAgent(IsolatedProviderAgent):
                 'mkdir -p "$HERMES_HOME" "$HERMES_HOME/sessions" '
                 '"$HERMES_HOME/skills" "$HERMES_HOME/memories" '
                 '"$HOME/.local/bin"; '
-                f"curl -fsSL {shlex.quote(installer_url)} | "
+                "curl --fail --location --silent --show-error "
+                "--retry 5 --retry-delay 2 --retry-all-errors "
+                f"{shlex.quote(installer_url)} | "
                 "bash -s -- --skip-setup --skip-browser --skip-computer-use "
                 "--hermes-home /tmp/hermes --dir /tmp/hermes/hermes-agent "
                 f"{revision_flag} || true; "
