@@ -546,6 +546,50 @@ describe("control service", () => {
     });
   });
 
+  it("admits new runs before recovering historical advancement", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const historical = await control.service.submit(
+      submission,
+      "historical-advancement-key",
+      operator,
+    );
+    const historicalRow = await control.projection.action(historical.action_id);
+    if (!historicalRow) throw new Error("historical admission action is missing");
+    const historicalIntent = JSON.parse(historicalRow.intent_body) as ActionIntent;
+    await control.service.receipt(historicalIntent, {
+      outcome: "completed",
+      observed_state: "admitted",
+    });
+    const current = await control.service.submit(
+      submission,
+      "current-admission-key",
+      operator,
+    );
+    const markAdvanced = control.service.markAdvanced.bind(control.service);
+    vi.spyOn(control.service, "markAdvanced").mockImplementation(
+      async (intent, receipt) => {
+        if (intent.action_id === historical.action_id)
+          throw new Error("historical advancement failed");
+        return markAdvanced(intent, receipt);
+      },
+    );
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await expect(reconciler.tick()).rejects.toThrow("historical advancement failed");
+
+    const launches = (await control.projection.runActions(current.run_id)).filter(
+      (action) => action.action_kind === "job.launch",
+    );
+    expect(launches).toHaveLength(1);
+  });
+
   it("copies locked inference limits into the worker launch", async () => {
     const control = await createTestControl(1, 1, 0, true, "required");
     controls.push(control);

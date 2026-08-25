@@ -276,6 +276,18 @@ export class Reconciler {
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
     if (syncRunIds.length > 0 && Date.now() - this.lastProjectionSyncAt >= syncInterval)
       handled += await this.syncProjection(syncRunIds);
+    // Admission materializes preparation or execution Jobs. Process it before
+    // historical receipt advancement so an observation backlog cannot starve new runs.
+    const admissions = (await this.projection.pendingActions(10_000)).filter(
+      (intent) => intent.action_kind === "run.admit",
+    );
+    const newlyAdmittedRuns = new Set<string>();
+    for (const intent of admissions.slice(0, this.options.batch_size)) {
+      if (await this.projection.hasRunAction(intent.run_id, "run.cancel")) continue;
+      await this.handle(intent);
+      newlyAdmittedRuns.add(intent.run_id);
+      handled += 1;
+    }
     for (const { intent, receipt } of await this.projection.unadvancedActions(
       this.options.batch_size,
     )) {
@@ -285,7 +297,9 @@ export class Reconciler {
     }
     const pending = await this.projection.pendingActions(10_000);
     const launchCandidates = pending.filter(
-      (candidate) => candidate.action_kind === "job.launch",
+      (candidate) =>
+        candidate.action_kind === "job.launch" &&
+        !newlyAdmittedRuns.has(candidate.run_id),
     );
     const ordinary = pending.filter((intent) => intent.action_kind !== "job.launch");
     const due = ordinaryActionOrder(
