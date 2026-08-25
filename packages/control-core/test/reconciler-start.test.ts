@@ -128,6 +128,68 @@ describe("Reconciler start", () => {
     expect(sync).toHaveBeenLastCalledWith("control/schema=v1/runs/run-secondary/tasks");
   });
 
+  it("dispatches queued preparation before scheduled Bucket sync", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+    const control = await createTestControl();
+    controls.push(control);
+    const run = await control.service.submit(
+      {
+        benchmark: "control-smoke",
+        model: "control-smoke",
+        harness: "control-smoke",
+        deployment: "hf-cpu-smoke",
+        launch_policy: "control-smoke",
+        ceiling_microusd: 0,
+        confirmed: true,
+      },
+      "launch-before-sync",
+      { subject: "operator", role: "operator" },
+    );
+    const order: string[] = [];
+    const external = new NoopActions();
+    vi.spyOn(external, "execute").mockImplementation(async (intent) => {
+      if (intent.action_kind === "job.launch" && intent.target === "run-preparation")
+        order.push("launch");
+      return {
+        outcome: "created",
+        observed_state: "SCHEDULING",
+        resource_id: `job-${intent.target}`,
+      };
+    });
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      {
+        interval_ms: 2_000,
+        sync_interval_ms: 30_000,
+        observation_interval_ms: 0,
+        batch_size: 16,
+      },
+    );
+    vi.spyOn(control.service, "syncProjection").mockImplementation(async () => {
+      order.push("sync");
+      return 0;
+    });
+    await reconciler.tick();
+    await control.service.writeAction(
+      control.service.actionIntent(run.run_id, "job.launch", "run-preparation", 99, {
+        worker_role: "preparation",
+        task_ids: ["task-001"],
+        hardware: "cpu-basic",
+        max_jobs: 1,
+        reservation_microusd: 0,
+      }),
+    );
+    vi.setSystemTime(new Date("2026-08-24T00:00:30.000Z"));
+
+    await reconciler.tick();
+
+    expect(order.slice(0, 2)).toEqual(["launch", "sync"]);
+  });
+
   it("does not rescan every historical record while idle", async () => {
     const control = await createTestControl();
     controls.push(control);

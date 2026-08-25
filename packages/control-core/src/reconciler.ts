@@ -274,10 +274,8 @@ export class Reconciler {
     let handled = 0;
     const syncRunIds = (await this.projection.activeRuns()).map((run) => run.run_id);
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
-    if (syncRunIds.length > 0 && Date.now() - this.lastProjectionSyncAt >= syncInterval)
-      handled += await this.syncProjection(syncRunIds);
     // Admission materializes preparation or execution Jobs. Process it before
-    // historical receipt advancement so an observation backlog cannot starve new runs.
+    // historical receipt advancement or Bucket I/O so neither can starve new runs.
     const admissions = (await this.projection.pendingActions(10_000)).filter(
       (intent) => intent.action_kind === "run.admit",
     );
@@ -297,6 +295,8 @@ export class Reconciler {
       preparationLaunches,
       this.options.batch_size,
     );
+    if (syncRunIds.length > 0 && Date.now() - this.lastProjectionSyncAt >= syncInterval)
+      handled += await this.syncProjection(syncRunIds);
     for (const { intent, receipt } of await this.projection.unadvancedActions(
       this.options.batch_size,
     )) {
