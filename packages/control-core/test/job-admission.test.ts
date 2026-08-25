@@ -1,7 +1,7 @@
 import type { ActionIntent, CapacityProfileSpec } from "@harbor-hf/contracts";
 import { describe, expect, it } from "vitest";
 import { decideJobAdmission, type JobAdmissionState } from "../src/job-admission.js";
-import { fairJobLaunchOrder } from "../src/reconciler.js";
+import { fairJobLaunchOrder, ordinaryActionOrder } from "../src/reconciler.js";
 
 const capacity: CapacityProfileSpec = {
   namespace: "test",
@@ -50,6 +50,27 @@ describe("Job admission", () => {
         (intent) => `${intent.run_id}:${intent.payload.task_id}`,
       ),
     ).toEqual(["run-b:task-1", "run-a:task-1", "run-b:task-2", "run-a:task-2"]);
+  });
+
+  it("prioritizes cancellation and admission over observation work", () => {
+    const observed = {
+      ...launch("run-a", "observed", "2026-08-22T00:00:00.000Z"),
+      action_kind: "job.observe",
+    } satisfies ActionIntent;
+    const admitted = {
+      ...launch("run-b", "admitted", "2026-08-22T00:00:01.000Z"),
+      action_kind: "run.admit",
+    } satisfies ActionIntent;
+    const cancelled = {
+      ...launch("run-c", "cancelled", "2026-08-22T00:00:02.000Z"),
+      action_kind: "run.cancel",
+    } satisfies ActionIntent;
+
+    expect(
+      ordinaryActionOrder([observed, admitted, cancelled]).map(
+        (intent) => intent.action_kind,
+      ),
+    ).toEqual(["run.cancel", "run.admit", "job.observe"]);
   });
 
   it("admits one physical Job within every limit", () => {

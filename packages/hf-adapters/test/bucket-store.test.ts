@@ -16,7 +16,9 @@ import { HuggingFaceBucketStore } from "../src/bucket-store.js";
 
 const token = ["hf", "not-a-real-credential"].join("_");
 
-function store(options: { retryDelaysMs?: readonly number[] } = {}) {
+function store(
+  options: { retryDelaysMs?: readonly number[]; listTimeoutMs?: number } = {},
+) {
   return new HuggingFaceBucketStore({
     bucketId: "example/control",
     accessToken: token,
@@ -149,7 +151,34 @@ describe("HuggingFaceBucketStore", () => {
     expect(entries).toHaveLength(12);
     expect(hub.downloadFile).not.toHaveBeenCalled();
     expect(hub.listFiles).toHaveBeenCalledWith(
-      expect.objectContaining({ expand: true }),
+      expect.objectContaining({ expand: true, fetch: expect.any(Function) }),
+    );
+  });
+
+  it("retries transient Bucket listing failures", async () => {
+    hub.listFiles
+      .mockImplementationOnce(async function* () {
+        yield* [];
+        throw new TypeError("fetch failed");
+      })
+      .mockImplementationOnce(async function* () {
+        yield {
+          type: "file",
+          path: "control/v1/object.json",
+          size: 1,
+          xetHash: "a".repeat(64),
+        };
+      });
+
+    await expect(
+      store({ retryDelaysMs: [0] }).list("control/v1"),
+    ).resolves.toHaveLength(1);
+    expect(hub.listFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects invalid Bucket list timeouts", () => {
+    expect(() => store({ listTimeoutMs: 0 })).toThrow(
+      "Bucket list timeout must be a positive integer",
     );
   });
 

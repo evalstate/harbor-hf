@@ -200,6 +200,22 @@ export function fairJobLaunchOrder(
   return output;
 }
 
+export function ordinaryActionOrder(intents: readonly ActionIntent[]): ActionIntent[] {
+  const priority = (intent: ActionIntent): number => {
+    if (intent.action_kind === "run.cancel") return 0;
+    if (intent.action_kind === "run.admit") return 1;
+    if (intent.action_kind === "job.cancel") return 2;
+    if (intent.action_kind === "job.observe") return 4;
+    return 3;
+  };
+  return [...intents].sort(
+    (left, right) =>
+      priority(left) - priority(right) ||
+      left.created_at.localeCompare(right.created_at) ||
+      left.action_id.localeCompare(right.action_id),
+  );
+}
+
 export class Reconciler {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -272,10 +288,12 @@ export class Reconciler {
       (candidate) => candidate.action_kind === "job.launch",
     );
     const ordinary = pending.filter((intent) => intent.action_kind !== "job.launch");
-    const due = ordinary.filter((intent) => {
-      const notBefore = intent.payload.not_before;
-      return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
-    });
+    const due = ordinaryActionOrder(
+      ordinary.filter((intent) => {
+        const notBefore = intent.payload.not_before;
+        return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
+      }),
+    );
     let ordinaryHandled = 0;
     const ordinaryLimit =
       launchCandidates.length > 0
