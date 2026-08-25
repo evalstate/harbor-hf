@@ -274,8 +274,8 @@ export class Reconciler {
     let handled = 0;
     const syncRunIds = (await this.projection.activeRuns()).map((run) => run.run_id);
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
-    // Admission materializes preparation or execution Jobs. Process it before
-    // historical receipt advancement or Bucket I/O so neither can starve new runs.
+    // Admit runs and dispatch queued Jobs before historical advancement or
+    // Bucket I/O so slow projection work cannot starve physical execution.
     const admissions = (await this.projection.pendingActions(10_000)).filter(
       (intent) => intent.action_kind === "run.admit",
     );
@@ -287,14 +287,12 @@ export class Reconciler {
       handled += 1;
     }
     const pendingBeforeAdvancement = await this.projection.pendingActions(10_000);
-    const preparationLaunches = pendingBeforeAdvancement.filter(
+    const queuedLaunches = pendingBeforeAdvancement.filter(
       (intent) =>
-        intent.action_kind === "job.launch" && intent.target === "run-preparation",
+        intent.action_kind === "job.launch" &&
+        (intent.target === "run-preparation" || !newlyAdmittedRuns.has(intent.run_id)),
     );
-    handled += await this.handleJobLaunches(
-      preparationLaunches,
-      this.options.batch_size,
-    );
+    handled += await this.handleJobLaunches(queuedLaunches, this.options.batch_size);
     if (syncRunIds.length > 0 && Date.now() - this.lastProjectionSyncAt >= syncInterval)
       handled += await this.syncProjection(syncRunIds);
     for (const { intent, receipt } of await this.projection.unadvancedActions(

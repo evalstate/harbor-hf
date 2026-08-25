@@ -31,9 +31,10 @@ import { runIdentity, runUnique } from "../src/run-id.js";
 import { ControlService, executionReservationCategory } from "../src/service.js";
 
 const controls: TestControl[] = [];
-afterEach(async () =>
-  Promise.all(controls.splice(0).map((control) => control.close())),
-);
+afterEach(async () => {
+  vi.useRealTimers();
+  await Promise.all(controls.splice(0).map((control) => control.close()));
+});
 
 const submission = {
   benchmark: "control-smoke",
@@ -2140,6 +2141,8 @@ describe("control service", () => {
   });
 
   it("does not cancel a remote Job that is already in ERROR", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
     const control = await createTestControl();
     controls.push(control);
     const result = await control.service.submit(
@@ -2173,7 +2176,7 @@ describe("control service", () => {
       new ResultPublisher(control.store, control.projection, control.service),
       {
         interval_ms: 100,
-        observation_interval_ms: 0,
+        observation_interval_ms: 60_000,
         batch_size: 16,
         dispatch_adoption_delay_ms: 0,
       },
@@ -2186,6 +2189,7 @@ describe("control service", () => {
       "cancel-error-job-action",
       operator,
     );
+    vi.advanceTimersByTime(60_000);
 
     await settle(reconciler, 12);
 
@@ -2311,6 +2315,7 @@ describe("control service", () => {
       "requeue-broken-observe-key",
       operator,
     );
+    let failObservation = true;
     const external: ExternalActionPort = {
       execute: async (intent): Promise<ExternalActionResult> => {
         if (intent.action_kind === "job.launch")
@@ -2318,6 +2323,12 @@ describe("control service", () => {
             outcome: "created",
             observed_state: "SCHEDULING",
             resource_id: "job-broken-observe-chain",
+          };
+        if (intent.action_kind === "job.observe" && failObservation)
+          return {
+            outcome: "failed",
+            observed_state: "UNKNOWN",
+            error_code: "temporary-observation-failure",
           };
         if (intent.action_kind === "job.observe")
           return {
@@ -2346,6 +2357,7 @@ describe("control service", () => {
       );
     }
     expect(observe).toBeDefined();
+    failObservation = false;
     await control.service.receipt(JSON.parse(observe?.intent_body ?? "null"), {
       outcome: "completed",
       observed_state: "SCHEDULING",

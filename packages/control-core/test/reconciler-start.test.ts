@@ -128,7 +128,7 @@ describe("Reconciler start", () => {
     expect(sync).toHaveBeenLastCalledWith("control/schema=v1/runs/run-secondary/tasks");
   });
 
-  it("dispatches queued preparation before scheduled Bucket sync", async () => {
+  it("dispatches queued Jobs before scheduled Bucket sync", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
     const control = await createTestControl();
@@ -149,8 +149,7 @@ describe("Reconciler start", () => {
     const order: string[] = [];
     const external = new NoopActions();
     vi.spyOn(external, "execute").mockImplementation(async (intent) => {
-      if (intent.action_kind === "job.launch" && intent.target === "run-preparation")
-        order.push("launch");
+      if (intent.action_kind === "job.launch") order.push("launch");
       return {
         outcome: "created",
         observed_state: "SCHEDULING",
@@ -174,8 +173,9 @@ describe("Reconciler start", () => {
       return 0;
     });
     await reconciler.tick();
+    order.length = 0;
     await control.service.writeAction(
-      control.service.actionIntent(run.run_id, "job.launch", "run-preparation", 99, {
+      control.service.actionIntent(run.run_id, "job.launch", "control-smoke-task", 99, {
         worker_role: "preparation",
         task_ids: ["task-001"],
         hardware: "cpu-basic",
@@ -187,7 +187,7 @@ describe("Reconciler start", () => {
 
     await reconciler.tick();
 
-    expect(order.slice(0, 2)).toEqual(["launch", "sync"]);
+    expect(order.slice(0, 3)).toEqual(["launch", "launch", "sync"]);
   });
 
   it("does not rescan every historical record while idle", async () => {

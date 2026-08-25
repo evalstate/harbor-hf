@@ -40,7 +40,8 @@ separate verifier images and uploads a canonical evidence manifest for
 failures; the controller alone decides whether to launch a replacement Job.
 Worker control requests retry transient HTTP failures with capped backoff for
 the locked Job timeout, so in-flight preparation and evidence writes can
-survive a control projection rebuild.
+survive a control projection rebuild. Reconciliation dispatches queued Jobs
+before scheduled Bucket syncs so remote projection latency does not block work.
 
 The CLI submits the same lock through promoted profile aliases:
 
