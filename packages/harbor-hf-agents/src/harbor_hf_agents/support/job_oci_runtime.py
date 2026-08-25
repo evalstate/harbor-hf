@@ -34,6 +34,8 @@ _INDEX_MEDIA_TYPES = frozenset(
         "application/vnd.oci.image.index.v1+json",
     }
 )
+_OCI_IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+_OCI_REF_NAME_ANNOTATION = "org.opencontainers.image.ref.name"
 _GZIP_LAYER_MEDIA_TYPES = frozenset(
     {
         "application/vnd.docker.image.rootfs.diff.tar.gzip",
@@ -72,6 +74,8 @@ _TASK_UID = 60_000
 _TASK_GID = 60_000
 _CAP_SYS_PTRACE = 19
 _PROCESS_CLEANUP_SECONDS = 10.0
+_MINIMUM_PROOT_VERSION = (5, 3, 0)
+_PROOT_VERSION = re.compile(rb"\bv([0-9]+)\.([0-9]+)\.([0-9]+)\b")
 _PREFLIGHT_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
@@ -228,7 +232,10 @@ def _run_checked(
     return result
 
 
-def _run_preflight_command(arguments: list[str], label: str) -> None:
+def _run_preflight_command(
+    arguments: list[str],
+    label: str,
+) -> subprocess.CompletedProcess[bytes]:
     try:
         result = subprocess.run(
             arguments,
@@ -244,6 +251,21 @@ def _run_preflight_command(arguments: list[str], label: str) -> None:
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
         raise OciRuntimeUnavailableError(f"{label} preflight failed: {detail}")
+    return result
+
+
+def _require_supported_proot() -> None:
+    result = _run_preflight_command(["proot", "--version"], "proot")
+    match = _PROOT_VERSION.search(result.stdout + result.stderr)
+    if match is None:
+        raise OciRuntimeUnavailableError("proot preflight returned an unknown version")
+    version = tuple(int(part) for part in match.groups())
+    if version < _MINIMUM_PROOT_VERSION:
+        required = ".".join(str(part) for part in _MINIMUM_PROOT_VERSION)
+        current = ".".join(str(part) for part in version)
+        raise OciRuntimeUnavailableError(
+            f"proot {required} or newer is required; found {current}"
+        )
 
 
 def _setpriv_arguments(arguments: list[str]) -> list[str]:
@@ -279,6 +301,24 @@ def _docker_reference(image: str) -> str:
     if registry == "docker.io" and "/" not in repository:
         repository = f"library/{repository}"
     return f"docker://{registry}/{repository}@{digest}"
+
+
+def _skopeo_copy_arguments(
+    auth_file: Path,
+    source: str,
+    image_layout: Path,
+) -> list[str]:
+    """Build a copy command that always produces an OCI-compliant manifest."""
+    return [
+        "skopeo",
+        "copy",
+        "--authfile",
+        str(auth_file),
+        "--format",
+        "oci",
+        source,
+        f"oci:{image_layout}:task",
+    ]
 
 
 def _platform_architecture() -> str:
@@ -474,6 +514,79 @@ def _validate_blob(image_layout: Path, descriptor: _BlobDescriptor) -> Path:
     ):
         raise OciImageIntegrityError("copied task image blob failed validation")
     return blob
+
+
+def _is_named_task_manifest(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    descriptor = cast(dict[str, object], value)
+    annotations = _optional(descriptor, "annotations")
+    return (
+        isinstance(annotations, dict)
+        and _optional(
+            cast(dict[str, object], annotations),
+            _OCI_REF_NAME_ANNOTATION,
+        )
+        == "task"
+    )
+
+
+def _read_image_bytes(path: Path, message: str) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise OciImageIntegrityError(message) from error
+
+
+def _validate_copied_oci_manifest(
+    image_layout: Path,
+    expected: _ImageManifest,
+    expected_config: dict[str, object],
+    limits: ImageLimits,
+) -> _ImageManifest:
+    """Verify Skopeo's OCI conversion retains locked layers and config meaning."""
+    raw_index = _read_image_bytes(
+        image_layout / "index.json",
+        "copied task image index is missing",
+    )
+    index = _manifest_object(raw_index, "copied task image index")
+    if _optional(index, "schemaVersion") != 2:
+        raise OciImageIntegrityError("copied task image index has an invalid schema")
+    values = _optional(index, "manifests")
+    if not isinstance(values, list):
+        raise OciImageIntegrityError("copied task image index has no manifests")
+    matches = [
+        cast(dict[str, object], value)
+        for value in values
+        if _is_named_task_manifest(value)
+    ]
+    if len(matches) != 1:
+        raise OciImageIntegrityError(
+            "copied task image must contain exactly one named manifest"
+        )
+    descriptor_value = matches[0]
+    if _optional(descriptor_value, "mediaType") != _OCI_IMAGE_MANIFEST_MEDIA_TYPE:
+        raise OciImageIntegrityError(
+            "copied task image reference is not an OCI image manifest"
+        )
+    descriptor = _blob_descriptor(descriptor_value, "copied manifest")
+    manifest_blob = _validate_blob(image_layout, descriptor)
+    raw_manifest = _read_image_bytes(
+        manifest_blob,
+        "copied task image manifest cannot be read",
+    )
+    copied = _image_manifest(raw_manifest, descriptor.digest, limits)
+    if copied.layers != expected.layers:
+        raise OciImageIntegrityError("copied task image manifest layers changed")
+    config_blob = _validate_blob(image_layout, copied.config)
+    raw_config = _read_image_bytes(
+        config_blob,
+        "copied task image config cannot be read",
+    )
+    copied_config = _manifest_object(raw_config, "copied task image config")
+    if copied_config != expected_config:
+        raise OciImageIntegrityError("copied task image config changed")
+    return copied
 
 
 def _scan_tar_stream(
@@ -1371,8 +1484,8 @@ class IsolatedOciRuntime:
             raise OciRuntimeUnavailableError(
                 "trusted worker must not have effective CAP_SYS_PTRACE"
             )
+        _require_supported_proot()
         for arguments, label in (
-            (["proot", "--version"], "proot"),
             (["setpriv", "--version"], "setpriv"),
             (["skopeo", "--version"], "skopeo"),
             (["umoci", "--version"], "umoci"),
@@ -1427,6 +1540,21 @@ class IsolatedOciRuntime:
             manifest_digest,
             self.image_limits,
         )
+        source_config = _manifest_object(
+            _run_checked(
+                [
+                    "skopeo",
+                    "inspect",
+                    "--authfile",
+                    str(auth_file),
+                    "--config",
+                    source,
+                ],
+                environment=self._environment,
+                label="selected task image config inspection",
+            ).stdout,
+            "selected task image config",
+        )
         # Skopeo can need both its final blobs and temporary transfer space.
         _require_free_space(
             self.workspace,
@@ -1435,28 +1563,19 @@ class IsolatedOciRuntime:
         )
         image_layout = self.workspace / "image"
         _run_checked(
-            [
-                "skopeo",
-                "copy",
-                "--authfile",
-                str(auth_file),
-                "--preserve-digests",
-                source,
-                f"oci:{image_layout}:task",
-            ],
+            _skopeo_copy_arguments(auth_file, source, image_layout),
             environment=self._environment,
             label="task image copy",
         )
-        _validate_blob(
+        copied_manifest = _validate_copied_oci_manifest(
             image_layout,
-            _BlobDescriptor(
-                digest=manifest_digest,
-                size=len(selected_raw),
-            ),
+            manifest,
+            source_config,
+            self.image_limits,
         )
         archive_stats = _inspect_image_layout(
             image_layout,
-            manifest,
+            copied_manifest,
             self.image_limits,
         )
         with _reserved_extraction_space(self.workspace, archive_stats):
@@ -1567,6 +1686,8 @@ class IsolatedOciRuntime:
             label="task working directory",
             max_depth=self.transfer_limits.max_path_depth,
         )
+        # OCI images often link resolv.conf into /run, which is empty here.
+        # PRoot dereferences this guest bind path and exposes the Job's resolver.
         arguments = [
             "proot",
             "-r",
@@ -1575,6 +1696,8 @@ class IsolatedOciRuntime:
             working_directory,
             "-i",
             f"{account.uid}:{account.gid}",
+            "-b",
+            "/etc/resolv.conf:/etc/resolv.conf",
             "-b",
             "/proc:/proc",
         ]

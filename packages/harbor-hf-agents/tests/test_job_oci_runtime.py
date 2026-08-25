@@ -62,11 +62,12 @@ def _image_layout(
     tmp_path: Path,
     layer: bytes,
     limits: ImageLimits,
+    *,
+    config: bytes = b"{}",
 ) -> tuple[Path, runtime._ImageManifest]:
     image_layout = tmp_path / "image"
     blobs = image_layout / "blobs" / "sha256"
     blobs.mkdir(parents=True)
-    config = b"{}"
     config_digest = f"sha256:{hashlib.sha256(config).hexdigest()}"
     layer_digest = f"sha256:{hashlib.sha256(layer).hexdigest()}"
     (blobs / config_digest.removeprefix("sha256:")).write_bytes(config)
@@ -91,6 +92,26 @@ def _image_layout(
         separators=(",", ":"),
     ).encode()
     manifest_digest = f"sha256:{hashlib.sha256(raw_manifest).hexdigest()}"
+    (blobs / manifest_digest.removeprefix("sha256:")).write_bytes(raw_manifest)
+    (image_layout / "index.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": manifest_digest,
+                        "size": len(raw_manifest),
+                        "annotations": {
+                            "org.opencontainers.image.ref.name": "task",
+                        },
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
     return image_layout, runtime._image_manifest(
         raw_manifest,
         manifest_digest,
@@ -201,6 +222,85 @@ def test_manifest_rejects_config_blob_bytes_before_copy() -> None:
 
     with pytest.raises(OciImageIntegrityError, match="compressed blobs"):
         runtime._image_manifest(raw_manifest, digest, _image_limits())
+
+
+def test_copied_layout_preserves_locked_layers_and_config_semantics(
+    tmp_path: Path,
+) -> None:
+    limits = _image_limits()
+    source_config = b'{"architecture":"amd64","os":"linux"}'
+    converted_config = b'{"os":"linux","architecture":"amd64"}'
+    image_layout, copied = _image_layout(
+        tmp_path,
+        _compressed_layer({"file": b"contents"}),
+        limits,
+        config=converted_config,
+    )
+    expected = runtime._ImageManifest(
+        config=runtime._BlobDescriptor(
+            digest=f"sha256:{hashlib.sha256(source_config).hexdigest()}",
+            size=len(source_config),
+        ),
+        layers=copied.layers,
+    )
+
+    assert (
+        runtime._validate_copied_oci_manifest(
+            image_layout,
+            expected,
+            json.loads(source_config),
+            limits,
+        )
+        == copied
+    )
+    assert copied.config != expected.config
+
+    with pytest.raises(OciImageIntegrityError, match="config changed"):
+        runtime._validate_copied_oci_manifest(
+            image_layout,
+            expected,
+            {"architecture": "arm64", "os": "linux"},
+            limits,
+        )
+
+    with pytest.raises(OciImageIntegrityError, match="layers changed"):
+        runtime._validate_copied_oci_manifest(
+            image_layout,
+            runtime._ImageManifest(config=expected.config, layers=()),
+            json.loads(source_config),
+            limits,
+        )
+
+    index = json.loads((image_layout / "index.json").read_text(encoding="utf-8"))
+    index["manifests"][0]["mediaType"] = (
+        "application/vnd.docker.distribution.manifest.v2+json"
+    )
+    (image_layout / "index.json").write_text(
+        json.dumps(index, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    with pytest.raises(OciImageIntegrityError, match="not an OCI image manifest"):
+        runtime._validate_copied_oci_manifest(
+            image_layout,
+            expected,
+            json.loads(source_config),
+            limits,
+        )
+
+
+def test_skopeo_copy_converts_docker_manifests_to_oci(tmp_path: Path) -> None:
+    arguments = runtime._skopeo_copy_arguments(
+        tmp_path / "auth.json",
+        "docker://example.invalid/task@sha256:" + ("a" * 64),
+        tmp_path / "image",
+    )
+
+    assert arguments[0:2] == ["skopeo", "copy"]
+    assert arguments[arguments.index("--format") : arguments.index("--format") + 2] == [
+        "--format",
+        "oci",
+    ]
+    assert "--preserve-digests" not in arguments
 
 
 def test_layer_scan_rejects_expansion_before_extraction(tmp_path: Path) -> None:
@@ -353,7 +453,7 @@ def test_rootfs_limits_reject_bytes_and_entries_before_mapping(tmp_path: Path) -
         )
 
 
-def test_proot_exposes_only_proc_and_safe_devices(tmp_path: Path) -> None:
+def test_proot_exposes_only_dns_proc_and_safe_devices(tmp_path: Path) -> None:
     isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
     try:
         passwd = isolated.rootfs / "etc" / "passwd"
@@ -373,6 +473,7 @@ def test_proot_exposes_only_proc_and_safe_devices(tmp_path: Path) -> None:
 
     serialized = "\n".join(arguments)
     assert arguments[0:3] == ["proot", "-r", str(isolated.rootfs)]
+    assert "/etc/resolv.conf:/etc/resolv.conf" in arguments
     assert "/proc:/proc" in arguments
     assert "/dev/null:/dev/null" in arguments
     assert "/run:/run" not in arguments
@@ -588,6 +689,52 @@ def test_preflight_requires_every_tool(
         IsolatedOciRuntime.preflight()
 
 
+@pytest.mark.parametrize("version", ["5.3.0", "5.4.0"])
+def test_preflight_accepts_proot_with_statx_support(
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+) -> None:
+    monkeypatch.setattr(
+        runtime,
+        "_run_preflight_command",
+        lambda _arguments, _label: subprocess.CompletedProcess(
+            args=["proot", "--version"],
+            returncode=0,
+            stdout=f"PRoot v{version}\n".encode(),
+            stderr=b"",
+        ),
+    )
+
+    runtime._require_supported_proot()
+
+
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        (b"PRoot v5.1.107\n", "proot 5.3.0 or newer is required; found 5.1.107"),
+        (b"unexpected output\n", "unknown version"),
+    ],
+)
+def test_preflight_rejects_unsupported_proot(
+    monkeypatch: pytest.MonkeyPatch,
+    output: bytes,
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        runtime,
+        "_run_preflight_command",
+        lambda _arguments, _label: subprocess.CompletedProcess(
+            args=["proot", "--version"],
+            returncode=0,
+            stdout=output,
+            stderr=b"",
+        ),
+    )
+
+    with pytest.raises(OciRuntimeUnavailableError, match=message):
+        runtime._require_supported_proot()
+
+
 def test_preflight_rejects_task_uid_in_account_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -623,7 +770,16 @@ def test_preflight_classifies_security_probe_failure(
 ) -> None:
     _mock_preflight_until_capabilities(monkeypatch)
     monkeypatch.setattr(runtime, "_effective_capabilities", lambda _pid: 0)
-    monkeypatch.setattr(runtime, "_run_preflight_command", lambda _args, _label: None)
+    monkeypatch.setattr(
+        runtime,
+        "_run_preflight_command",
+        lambda arguments, _label: subprocess.CompletedProcess(
+            args=arguments,
+            returncode=0,
+            stdout=b"PRoot v5.4.0\n",
+            stderr=b"",
+        ),
+    )
 
     def fail_probe() -> None:
         raise OciRuntimeUnavailableError("probe could read root secret")

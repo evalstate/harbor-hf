@@ -349,9 +349,11 @@ class TestPiAgent:
         assert "/scopes/private/" not in json.dumps(template)
         commands = [call.kwargs["command"] for call in mock_env.exec.call_args_list]
         materialize = next(
-            command for command in commands if "_materialize_pi_models_json" in command
+            command for command in commands if "pi.models.template.json" in command
         )
-        assert "import os" in materialize
+        assert "node -e" in materialize
+        assert "python3" not in materialize
+        assert "required Pi model environment" in materialize
         mock_env.upload_file.assert_awaited_once_with(
             temp_dir / "pi.models.template.json",
             "/logs/agent/pi.models.template.json",

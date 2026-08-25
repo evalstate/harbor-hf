@@ -9,9 +9,9 @@ import {
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
-const WORKER_REVISION = "358143c0da70e351d1593b6fc285788da0a3cfe5";
+const WORKER_REVISION = "411ee5f9d7a9e70ed37666fdb84ee176453c04b6";
 const WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:9134a98dcb7df680dff20b0ad3f9d9ce8c7a192de88cc3ac394c63aa775deed3";
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:7afe1cdac0d3208c1a0968cacdf3c95fbcb64f8f604591dd3ebc8d6190d8226e";
 const HARBOR_SOURCE =
   "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
 const PREPARATION_COMMAND = [
@@ -384,6 +384,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "tb21-deepseek-v4-flash-official-5",
       "tb21-deepseek-v4-flash-replacement",
       "tb21-deepseek-v4-flash-diagnostic-1",
+      "tb21-deepseek-v4-flash-diagnostic-2",
       "tb21-deepseek-v4-flash-dsh-providers",
       "tb21-gpt-oss-20b-dsh-providers",
       "tb21-gpt-oss-20b-opencode-providers",
