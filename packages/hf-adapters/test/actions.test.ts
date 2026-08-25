@@ -248,6 +248,66 @@ describe("HuggingFaceActions", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("shares one adoption listing across concurrent launches", async () => {
+    const second: ActionIntent = {
+      ...base,
+      record_id: "action-test-0002",
+      action_id: "action-test-0002",
+      target: "task-two",
+      payload: {
+        ...base.payload,
+        task_id: "task-two",
+        task_ids: ["task-two"],
+      },
+    };
+    let listRequests = 0;
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        if (!init?.method) {
+          listRequests += 1;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return new Response("[]", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const request = JSON.parse(String(init.body)) as {
+          labels: Record<string, string>;
+          environment: Record<string, string>;
+          secrets: Record<string, string>;
+        };
+        const intent =
+          request.labels.harbor_hf_action_id === base.action_id ? base : second;
+        return new Response(
+          JSON.stringify(
+            apiJob(intent, {
+              id: `job-${intent.target}`,
+              environment: request.environment,
+              labels: request.labels,
+              secrets: Object.keys(request.secrets),
+            }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(
+      Promise.all([adapter.execute(base), adapter.execute(second)]),
+    ).resolves.toEqual([
+      expect.objectContaining({ outcome: "created", resource_id: "job-task-one" }),
+      expect.objectContaining({ outcome: "created", resource_id: "job-task-two" }),
+    ]);
+    expect(listRequests).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("launches preparation Jobs with an encrypted preparation-only capability", async () => {
     const preparationIntent: ActionIntent = {
       ...base,

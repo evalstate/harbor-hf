@@ -320,12 +320,26 @@ function endpointStatus(raw: unknown): {
 
 export class HuggingFaceActions implements ExternalActionPort {
   private readonly endpointsUrl: string;
+  private pendingJobList: ReturnType<typeof listJobs> | null = null;
 
   constructor(private readonly config: AdapterConfig) {
     if (config.inferenceToken && config.inferenceToken === config.accessToken)
       throw new Error("control and inference credentials must be distinct");
     this.endpointsUrl =
       config.endpointsUrl ?? "https://api.endpoints.huggingface.cloud/v2";
+  }
+
+  private listCurrentJobs(): ReturnType<typeof listJobs> {
+    if (this.pendingJobList) return this.pendingJobList;
+    const operation = listJobs({
+      namespace: this.config.namespace,
+      accessToken: this.config.accessToken,
+      ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
+    }).finally(() => {
+      if (this.pendingJobList === operation) this.pendingJobList = null;
+    });
+    this.pendingJobList = operation;
+    return operation;
   }
 
   async execute(
@@ -391,11 +405,7 @@ export class HuggingFaceActions implements ExternalActionPort {
     if (!this.config.controlUrl)
       throw new Error("Job launch requires the control service URL");
     const spec = expectedJobSpec(intent, this.config.controlUrl);
-    const jobs = await listJobs({
-      namespace: this.config.namespace,
-      accessToken: this.config.accessToken,
-      ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
-    });
+    const jobs = await this.listCurrentJobs();
     const matches = jobs.filter(
       (job) => job.labels?.harbor_hf_action_id === intent.action_id,
     );
