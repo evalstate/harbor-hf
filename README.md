@@ -38,6 +38,9 @@ only its assigned projection-validated prepared trial, checks its Python-origin
 Harbor lock digest and image binding, and executes Harbor once. It rejects
 separate verifier images and uploads a canonical evidence manifest for
 failures; the controller alone decides whether to launch a replacement Job.
+Worker control requests retry transient HTTP failures with capped backoff for
+the locked Job timeout, so in-flight preparation and evidence writes can
+survive a control projection rebuild.
 
 The CLI submits the same lock through promoted profile aliases:
 

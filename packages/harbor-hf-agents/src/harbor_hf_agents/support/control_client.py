@@ -15,7 +15,7 @@ from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 _RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
-_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0, 8.0)
+_MAX_RETRY_DELAY_SECONDS = 30.0
 _MAX_CONTROL_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
@@ -57,13 +57,17 @@ class ControlClient:
         run_id: str,
         capability: str,
         timeout_seconds: int = 30,
+        retry_timeout_seconds: int,
     ) -> None:
         origin = _https_origin(control_url)
+        if isinstance(retry_timeout_seconds, bool) or retry_timeout_seconds <= 0:
+            raise ControlClientError("control retry timeout must be a positive integer")
         self.origin = origin
         self.run_id = run_id
         self.prefix = f"/api/v1/runs/{quote(run_id, safe='')}"
         self._capability = capability
         self._timeout_seconds = timeout_seconds
+        self._retry_timeout_seconds = retry_timeout_seconds
         self._opener = build_opener(_NoRedirectHandler())
 
     @classmethod
@@ -73,6 +77,9 @@ class ControlClient:
             control_url=_required_environment("HARBOR_HF_CONTROL_URL"),
             run_id=_required_environment("HARBOR_HF_RUN_ID"),
             capability=_required_environment("HARBOR_HF_WORKER_CAPABILITY"),
+            retry_timeout_seconds=_required_positive_integer_environment(
+                "HARBOR_HF_CONTROL_RETRY_TIMEOUT_SECONDS"
+            ),
         )
 
     async def request(
@@ -109,7 +116,9 @@ class ControlClient:
             "Content-Type": "application/json",
             "Idempotency-Key": idempotency_key,
         }
-        for attempt in range(len(_RETRY_DELAYS_SECONDS) + 1):
+        retry_seconds_remaining = float(self._retry_timeout_seconds)
+        retry_count = 0
+        while True:
             request = Request(
                 f"{self.origin}{path}",
                 data=payload,
@@ -132,10 +141,11 @@ class ControlClient:
                 detail = detail_bytes[:4096].decode("utf-8", errors="replace")
                 if len(detail_bytes) > 4096:
                     detail += " [truncated]"
-                if error.code in _RETRYABLE_HTTP_CODES and attempt < len(
-                    _RETRY_DELAYS_SECONDS
-                ):
-                    time.sleep(_RETRY_DELAYS_SECONDS[attempt])
+                retry_delay = _retry_delay(retry_count, retry_seconds_remaining)
+                if error.code in _RETRYABLE_HTTP_CODES and retry_delay is not None:
+                    time.sleep(retry_delay)
+                    retry_seconds_remaining -= retry_delay
+                    retry_count += 1
                     continue
                 error_type = (
                     ControlClientTransientError
@@ -146,13 +156,15 @@ class ControlClient:
                     f"control API returned HTTP {error.code}: {detail}"
                 ) from error
             except (TimeoutError, URLError) as error:
-                if attempt < len(_RETRY_DELAYS_SECONDS):
-                    time.sleep(_RETRY_DELAYS_SECONDS[attempt])
+                retry_delay = _retry_delay(retry_count, retry_seconds_remaining)
+                if retry_delay is not None:
+                    time.sleep(retry_delay)
+                    retry_seconds_remaining -= retry_delay
+                    retry_count += 1
                     continue
                 raise ControlClientTransientError(
                     "control API request failed"
                 ) from error
-        raise AssertionError("control API retry loop did not terminate")
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -214,6 +226,28 @@ def _required_environment(name: str) -> str:
     if not value:
         raise ControlClientError(f"required control worker setting {name} is empty")
     return value
+
+
+def _required_positive_integer_environment(name: str) -> int:
+    """Return a required positive integer worker setting."""
+    value = _required_environment(name)
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ControlClientError(
+            f"required control worker setting {name} must be an integer"
+        ) from error
+    if parsed <= 0:
+        raise ControlClientError(
+            f"required control worker setting {name} must be positive"
+        )
+    return parsed
+
+
+def _retry_delay(retry_count: int, seconds_remaining: float) -> float | None:
+    """Return the next capped retry delay within the locked Job timeout."""
+    delay = min(2.0 ** min(retry_count, 5), _MAX_RETRY_DELAY_SECONDS)
+    return delay if delay <= seconds_remaining else None
 
 
 def _https_origin(value: str) -> str:

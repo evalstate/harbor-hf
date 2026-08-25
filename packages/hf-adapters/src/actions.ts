@@ -110,6 +110,9 @@ function jobEnvironment(
     HARBOR_HF_ACTION_ID: launchActionId(intent),
     HARBOR_HF_TASK_IDS_JSON: JSON.stringify(taskIds),
     HARBOR_HF_CONTROL_URL: controlUrl,
+    HARBOR_HF_CONTROL_RETRY_TIMEOUT_SECONDS: String(
+      numberValue(intent, "timeout_seconds"),
+    ),
     HARBOR_HF_WORKER_ROLE: role,
     HARBOR_HF_JOB_IMAGE: jobImage,
     ...(taskImage ? { HARBOR_HF_TASK_IMAGE: taskImage } : {}),

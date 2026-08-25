@@ -50,6 +50,7 @@ function expectedEnvironment(intent: ActionIntent): Record<string, string> {
     HARBOR_HF_ACTION_ID: actionId,
     HARBOR_HF_TASK_IDS_JSON: JSON.stringify(payload.task_ids),
     HARBOR_HF_CONTROL_URL: "https://control.example",
+    HARBOR_HF_CONTROL_RETRY_TIMEOUT_SECONDS: String(payload.timeout_seconds),
     HARBOR_HF_WORKER_ROLE: String(payload.worker_role ?? "execution"),
     HARBOR_HF_JOB_IMAGE: String(payload.job_image),
     ...(typeof payload.task_image === "string"
@@ -197,6 +198,7 @@ describe("HuggingFaceActions", () => {
           HARBOR_HF_ACTION_ID: base.action_id,
           HARBOR_HF_TASK_IDS_JSON: '["task-one"]',
           HARBOR_HF_CONTROL_URL: "https://control.example",
+          HARBOR_HF_CONTROL_RETRY_TIMEOUT_SECONDS: "60",
           HARBOR_HF_JOB_IMAGE: base.payload.job_image,
           HARBOR_HF_TASK_IMAGE: base.payload.task_image,
           HARBOR_HF_RUN_LOCK_DIGEST: base.payload.run_lock_digest,
