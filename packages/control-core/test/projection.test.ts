@@ -63,7 +63,9 @@ class ReadCountingStore implements ImmutableObjectStore {
 
 class ConcurrentReadStore implements ImmutableObjectStore {
   activeReads = 0;
+  activeEvidenceReads = 0;
   maxActiveReads = 0;
+  maxActiveEvidenceReads = 0;
 
   constructor(private readonly source: ImmutableObjectStore) {}
 
@@ -74,11 +76,20 @@ class ConcurrentReadStore implements ImmutableObjectStore {
   async read(key: string): Promise<Uint8Array> {
     this.activeReads += 1;
     this.maxActiveReads = Math.max(this.maxActiveReads, this.activeReads);
+    const isEvidence = key.startsWith("evidence/");
+    if (isEvidence) {
+      this.activeEvidenceReads += 1;
+      this.maxActiveEvidenceReads = Math.max(
+        this.maxActiveEvidenceReads,
+        this.activeEvidenceReads,
+      );
+    }
     try {
       await new Promise((resolve) => setTimeout(resolve, 1));
       return await this.source.read(key);
     } finally {
       this.activeReads -= 1;
+      if (isEvidence) this.activeEvidenceReads -= 1;
     }
   }
 
@@ -98,6 +109,56 @@ describe("projection replay", () => {
 
     expect(store.maxActiveReads).toBeGreaterThan(1);
     expect(store.maxActiveReads).toBeLessThanOrEqual(16);
+    await projection.close();
+  });
+
+  it("verifies rebuild evidence with bounded concurrency", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    const submitted = await control.service.submit(input, "concurrent-evidence-key", {
+      subject: "operator",
+      role: "operator",
+    });
+    for (const [index, taskId] of ["task-001", "task-002"].entries()) {
+      const launch = control.service.actionIntent(
+        submitted.run_id,
+        "job.launch",
+        taskId,
+        0,
+        {
+          worker_role: "execution",
+          task_id: taskId,
+          task_ids: [taskId],
+        },
+      );
+      await control.service.writeAction(launch);
+      const evidenceBytes = new TextEncoder().encode(`evidence-${taskId}`);
+      const evidenceDigest = sha256(evidenceBytes);
+      const evidencePath = `evidence/test/${evidenceDigest.slice("sha256:".length)}`;
+      await control.store.create(evidencePath, evidenceBytes);
+      await control.service.attempt({
+        run_id: submitted.run_id,
+        task_id: taskId,
+        attempt_id: `attempt-${taskId}`,
+        action_id: launch.action_id,
+        outcome: "complete",
+        replacement_eligible: false,
+        evidence_digest: evidenceDigest,
+        evidence_path: evidencePath,
+        cost_microusd: 0,
+        metrics: {},
+        completed_at: `2026-08-25T12:00:0${index}.000Z`,
+      });
+    }
+    const store = new ConcurrentReadStore(control.store);
+    const projection = await Projection.open(
+      `${control.root}/evidence-concurrent.sqlite`,
+    );
+
+    await projection.rebuild(store);
+
+    expect(store.maxActiveEvidenceReads).toBeGreaterThan(1);
+    expect(store.maxActiveEvidenceReads).toBeLessThanOrEqual(16);
     await projection.close();
   });
 

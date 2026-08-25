@@ -293,7 +293,7 @@ export interface SystemView {
 
 export class ProjectionIntegrityError extends Error {}
 
-const REBUILD_READ_CONCURRENCY = 16;
+const REBUILD_IO_CONCURRENCY = 16;
 
 function body(value: unknown): string {
   return canonicalJson(value).trimEnd();
@@ -342,11 +342,21 @@ async function readRebuildObjects(
   entries: readonly ObjectEntry[],
 ): Promise<Uint8Array[]> {
   const objects: Uint8Array[] = [];
-  for (let offset = 0; offset < entries.length; offset += REBUILD_READ_CONCURRENCY) {
-    const batch = entries.slice(offset, offset + REBUILD_READ_CONCURRENCY);
+  for (let offset = 0; offset < entries.length; offset += REBUILD_IO_CONCURRENCY) {
+    const batch = entries.slice(offset, offset + REBUILD_IO_CONCURRENCY);
     objects.push(...(await Promise.all(batch.map((entry) => store.read(entry.key)))));
   }
   return objects;
+}
+
+async function verifyRebuildEvidence(
+  store: ImmutableObjectStore,
+  records: readonly HarborHFControlRecordV1[],
+): Promise<void> {
+  for (let offset = 0; offset < records.length; offset += REBUILD_IO_CONCURRENCY) {
+    const batch = records.slice(offset, offset + REBUILD_IO_CONCURRENCY);
+    await Promise.all(batch.map((record) => verifyAttemptEvidence(store, record)));
+  }
 }
 
 function validateObjectEntry(entry: ObjectEntry): void {
@@ -888,20 +898,25 @@ export class Projection {
       // Fetch immutable objects concurrently, then apply them in deterministic key order.
       const objects = await readRebuildObjects(store, entries);
       await this.clear();
-      const supersessions: Array<{
-        entry: VerifiedObjectEntry;
-        record: PublicationSupersession;
-      }> = [];
-      for (const [index, entry] of entries.entries()) {
+      const parsed = entries.map((entry, index) => {
         const bytes = objects[index];
         if (!bytes)
           throw new ProjectionIntegrityError(`missing prefetched object: ${entry.key}`);
         const verified = verifiedEntry(bytes, entry);
-        const record = parseRecord(bytes, verified);
-        await verifyAttemptEvidence(store, record);
+        return { entry: verified, record: parseRecord(bytes, verified) };
+      });
+      await verifyRebuildEvidence(
+        store,
+        parsed.map(({ record }) => record),
+      );
+      const supersessions: Array<{
+        entry: VerifiedObjectEntry;
+        record: PublicationSupersession;
+      }> = [];
+      for (const { entry, record } of parsed) {
         if (record.kind === "publication.supersession")
-          supersessions.push({ entry: verified, record });
-        else await this.apply(verified, record);
+          supersessions.push({ entry, record });
+        else await this.apply(entry, record);
       }
       for (const deferred of supersessions)
         await this.apply(deferred.entry, deferred.record);
