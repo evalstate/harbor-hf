@@ -534,6 +534,39 @@ def test_provider_usage_overrides_untrusted_agent_token_counts(
     assert worker._cost_microusd(config, result, usage) == 200_000
 
 
+@pytest.mark.parametrize(
+    ("outcome", "replacement", "usage", "expected"),
+    [
+        (
+            "complete",
+            False,
+            worker.InferenceUsage(requests=0, input_tokens=0, output_tokens=0),
+            ("infrastructure", True),
+        ),
+        (
+            "agent",
+            False,
+            worker.InferenceUsage(requests=1, input_tokens=0, output_tokens=0),
+            ("infrastructure", True),
+        ),
+        (
+            "complete",
+            False,
+            worker.InferenceUsage(requests=1, input_tokens=10, output_tokens=2),
+            ("complete", False),
+        ),
+        ("policy", False, None, ("policy", False)),
+    ],
+)
+def test_missing_provider_usage_is_retryable_infrastructure(
+    outcome: str,
+    replacement: bool,
+    usage: worker.InferenceUsage | None,
+    expected: tuple[str, bool],
+) -> None:
+    assert worker._outcome_with_usage(outcome, replacement, usage) == expected
+
+
 def test_streams_command_output_and_kills_a_hung_process(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

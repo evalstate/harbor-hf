@@ -508,6 +508,21 @@ def _phase_started(result: dict[str, Any], name: str) -> bool:
     )
 
 
+def _outcome_with_usage(
+    outcome: str,
+    replacement_eligible: bool,
+    usage: InferenceUsage | None,
+) -> tuple[str, bool]:
+    """Treat missing trusted provider usage as an infrastructure failure."""
+    if (
+        usage is not None
+        and (usage.requests == 0 or usage.input_tokens == 0)
+        and outcome in {"agent", "complete"}
+    ):
+        return "infrastructure", True
+    return outcome, replacement_eligible
+
+
 def _agent_result(result: dict[str, Any] | None) -> dict[str, Any]:
     if result is None or "agent_result" not in result:
         return {}
@@ -832,6 +847,7 @@ def _submit_attempt(
         output,
         timed_out=timed_out,
     )
+    outcome, replacement = _outcome_with_usage(outcome, replacement, usage)
     metrics = _metrics(result, usage)
     client = _control_client(config.run_id)
     client.request_sync(

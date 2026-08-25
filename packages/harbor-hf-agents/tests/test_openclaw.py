@@ -193,6 +193,76 @@ def test_provider_baseurl_only_gets_models_array(tmp_path: Path) -> None:
     assert cfg["models"]["providers"]["openai"]["models"][0]["id"] == "gpt-4.1"
 
 
+@pytest.mark.asyncio
+async def test_job_route_uses_custom_provider_and_locked_output_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def use_route(_agent, _environment, env, **kwargs):
+        assert kwargs["api"] == "chat-completions"
+        assert kwargs["allowed_model"] == "gpt-4.1"
+        env["OPENAI_BASE_URL"] = "http://127.0.0.1:18080/v1"
+        env["OPENAI_API_KEY"] = "harbor-local-inference-bridge"
+        return True
+
+    monkeypatch.setattr(openclaw_agent, "use_job_inference_route", use_route)
+    monkeypatch.setenv("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS", "32768")
+    environment = SimpleNamespace(
+        capabilities=EnvironmentCapabilities(mounted=True),
+        upload_file=AsyncMock(),
+    )
+    agent = OpenClawAgent(
+        logs_dir=tmp_path,
+        model_name="openai/gpt-4.1",
+        provider_runtime={
+            "api": "chat-completions",
+            "timeout_seconds": 1800,
+            "max_attempts": 1,
+        },
+    )
+    exec_as_agent = AsyncMock()
+    monkeypatch.setattr(agent, "exec_as_agent", exec_as_agent)
+    monkeypatch.setattr(
+        agent,
+        "_copy_openclaw_session_file_to_agent_logs",
+        AsyncMock(),
+    )
+
+    await agent.run("solve it", environment, AgentContext())
+
+    config = json.loads((tmp_path / "openclaw.upload.json").read_text())
+    provider = config["models"]["providers"]["harbor-hf-job"]
+    assert provider["api"] == "openai-completions"
+    assert provider["apiKey"] == "${HARBOR_HF_OPENCLAW_API_KEY}"
+    assert provider["baseUrl"] == "${HARBOR_HF_OPENCLAW_BASE_URL}"
+    assert provider["models"] == [
+        {
+            "id": "gpt-4.1",
+            "name": "gpt-4.1",
+            "maxTokens": 32768,
+            "params": {"maxRetries": 0, "timeoutMs": 1_800_000},
+        }
+    ]
+    run_call = next(
+        call
+        for call in exec_as_agent.await_args_list
+        if "openclaw agent --local"
+        in (call.kwargs["command"] if "command" in call.kwargs else call.args[1])
+    )
+    run_command = (
+        run_call.kwargs["command"] if "command" in run_call.kwargs else run_call.args[1]
+    )
+    assert "--model harbor-hf-job/gpt-4.1" in run_command
+    assert (
+        run_call.kwargs["env"]["HARBOR_HF_OPENCLAW_API_KEY"]
+        == "harbor-local-inference-bridge"
+    )
+    assert (
+        run_call.kwargs["env"]["HARBOR_HF_OPENCLAW_BASE_URL"]
+        == "http://127.0.0.1:18080/v1"
+    )
+
+
 def test_factory_openclaw_default_install_timeout_when_override_unset(
     tmp_path: Path,
 ) -> None:

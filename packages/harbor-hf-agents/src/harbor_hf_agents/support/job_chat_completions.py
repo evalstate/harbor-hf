@@ -29,6 +29,22 @@ def allowed_model_id(model_name: str | None) -> str:
     return model_name.split("/", 1)[1]
 
 
+def inference_max_output_tokens() -> int:
+    """Return the positive output-token limit locked for this execution Job."""
+    name = "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS"
+    try:
+        raw = os.environ[name]
+    except KeyError as error:
+        raise RuntimeError(f"{name} is required for Job inference") from error
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be a positive integer") from error
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return value
+
+
 class JobChatCompletionsAgent(IsolatedProviderAgent):
     """Inject the locked Job Chat Completions route into an installed agent."""
 

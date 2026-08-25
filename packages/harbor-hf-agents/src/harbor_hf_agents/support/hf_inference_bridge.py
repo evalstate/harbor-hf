@@ -198,12 +198,13 @@ def _run_hf_inference_bridge() -> None:  # noqa: C901 -- isolated bridge parser
             os.close(descriptor)
         os.replace(temporary_path, usage_path)
 
-    def record_usage(usage: tuple[int, int]) -> None:
+    def record_response(usage: tuple[int, int] | None) -> None:
         nonlocal usage_requests, input_tokens, output_tokens
         with usage_lock:
             usage_requests += 1
-            input_tokens += usage[0]
-            output_tokens += usage[1]
+            if usage is not None:
+                input_tokens += usage[0]
+                output_tokens += usage[1]
             write_usage()
 
     write_usage()
@@ -377,8 +378,7 @@ def _run_hf_inference_bridge() -> None:  # noqa: C901 -- isolated bridge parser
                         raise OverflowError("inference bridge response limit exceeded")
                 if 200 <= response.status < 300:
                     usage = _response_usage(bytes(response_body))
-                    if usage is not None:
-                        record_usage(usage)
+                    record_response(usage)
                 self.connection.settimeout(socket_timeout_seconds)
                 self.send_response(response.status)
                 for name, value in response.getheaders():
