@@ -254,8 +254,12 @@ export class Reconciler {
   async tick(): Promise<number> {
     let handled = 0;
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
-    if (Date.now() - this.lastProjectionSyncAt >= syncInterval)
-      handled += await this.syncProjection();
+    const activeRunIds = (await this.projection.activeRuns()).map((run) => run.run_id);
+    if (
+      activeRunIds.length > 0 &&
+      Date.now() - this.lastProjectionSyncAt >= syncInterval
+    )
+      handled += await this.syncProjection(activeRunIds);
     for (const { intent, receipt } of await this.projection.unadvancedActions(
       this.options.batch_size,
     )) {
@@ -303,8 +307,14 @@ export class Reconciler {
     return handled;
   }
 
-  private async syncProjection(): Promise<number> {
-    const ingested = await this.service.syncProjection();
+  private async syncProjection(activeRunIds: readonly string[]): Promise<number> {
+    let ingested = 0;
+    // Workers can add only attempt-receipt control records, so task prefixes avoid
+    // rescanning every historical control record during each action tick.
+    for (const runId of activeRunIds)
+      ingested += await this.service.syncProjection(
+        `control/schema=v1/runs/${runId}/tasks`,
+      );
     this.lastProjectionSyncAt = Date.now();
     return ingested;
   }

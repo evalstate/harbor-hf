@@ -641,6 +641,7 @@ describe("control service", () => {
             }
           : new NoopActions().execute(intent),
     };
+    const syncProjection = vi.spyOn(control.service, "syncProjection");
     const reconciler = new Reconciler(
       control.service,
       control.projection,
@@ -654,6 +655,10 @@ describe("control service", () => {
       },
     );
     await settle(reconciler);
+    expect(syncProjection).toHaveBeenCalledWith(
+      `control/schema=v1/runs/${result.run_id}/tasks`,
+    );
+    expect(syncProjection).not.toHaveBeenCalledWith();
     expect(await control.projection.runAttempts(result.run_id)).toMatchObject([
       { attempt_id: attempt.attempt_id, outcome: "complete" },
     ]);

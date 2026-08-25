@@ -36,6 +36,21 @@ describe("Reconciler start", () => {
     vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
     const control = await createTestControl();
     controls.push(control);
+    const run = await control.service.submit(
+      {
+        benchmark: "control-smoke",
+        model: "control-smoke",
+        harness: "control-smoke",
+        deployment: "hf-cpu-smoke",
+        launch_policy: "control-smoke",
+        ceiling_microusd: 0,
+        confirmed: true,
+      },
+      "sync-cadence-run",
+      { subject: "operator", role: "operator" },
+    );
+    const activeRuns = await control.projection.activeRuns();
+    vi.spyOn(control.projection, "activeRuns").mockResolvedValue(activeRuns);
     const reconciler = new Reconciler(
       control.service,
       control.projection,
@@ -58,6 +73,7 @@ describe("Reconciler start", () => {
     vi.setSystemTime(new Date("2026-08-24T00:00:30.000Z"));
     await reconciler.tick();
     expect(sync).toHaveBeenCalledTimes(1);
+    expect(sync).toHaveBeenLastCalledWith(`control/schema=v1/runs/${run.run_id}/tasks`);
 
     vi.setSystemTime(new Date("2026-08-24T00:00:59.999Z"));
     await reconciler.tick();
@@ -65,5 +81,27 @@ describe("Reconciler start", () => {
     vi.setSystemTime(new Date("2026-08-24T00:01:00.000Z"));
     await reconciler.tick();
     expect(sync).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not rescan every historical record while idle", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      {
+        interval_ms: 2_000,
+        sync_interval_ms: 0,
+        observation_interval_ms: 0,
+        batch_size: 16,
+      },
+    );
+    const sync = vi.spyOn(control.service, "syncProjection");
+
+    await reconciler.tick();
+
+    expect(sync).not.toHaveBeenCalled();
   });
 });
