@@ -45,7 +45,8 @@ before scheduled Bucket syncs so remote projection latency does not block work.
 It also yields between bounded Run batches so web requests remain responsive.
 Projection rebuilds yield after bounded local database batches, and integrity
 verification loads historical Job evidence in one indexed query instead of
-scanning it once per release.
+scanning it once per release. Bucket reads retry bounded transient Hub transport
+and HTTP failures during rebuilds.
 The validated result catalog is warmed in memory and reused until publication or
 supersession metadata changes instead of being rebuilt for every page request.
 

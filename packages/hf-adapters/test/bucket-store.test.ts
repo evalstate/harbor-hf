@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImmutableConflictError } from "@harbor-hf/control-core";
+import { HubApiError } from "@huggingface/hub";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hub = vi.hoisted(() => ({
   downloadFile: vi.fn(),
@@ -196,6 +197,19 @@ describe("HuggingFaceBucketStore", () => {
     expect(hub.downloadFile).toHaveBeenCalledTimes(3);
   });
 
+  it("retries transient Hub API download failures", async () => {
+    hub.downloadFile
+      .mockRejectedValueOnce(
+        new HubApiError("https://huggingface.co/buckets/example", 504),
+      )
+      .mockResolvedValueOnce(new Blob(["payload"]));
+
+    await expect(
+      store({ retryDelaysMs: [0] }).read("control/v1/object.json"),
+    ).resolves.toEqual(new TextEncoder().encode("payload"));
+    expect(hub.downloadFile).toHaveBeenCalledTimes(2);
+  });
+
   it("retries transient failures while materializing a lazy Blob", async () => {
     hub.downloadFile
       .mockResolvedValueOnce({
@@ -216,7 +230,14 @@ describe("HuggingFaceBucketStore", () => {
   });
 
   it("does not retry non-transient download failures", async () => {
-    hub.downloadFile.mockRejectedValue(new Error("authorization failed"));
+    hub.downloadFile.mockRejectedValue(
+      new HubApiError(
+        "https://huggingface.co/buckets/example",
+        403,
+        undefined,
+        "authorization failed",
+      ),
+    );
 
     await expect(
       store({ retryDelaysMs: [0, 0] }).read("control/v1/object.json"),

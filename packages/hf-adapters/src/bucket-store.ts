@@ -1,16 +1,17 @@
+import { sha256 } from "@harbor-hf/contracts";
+import {
+  type CreateResult,
+  ImmutableConflictError,
+  type ImmutableObjectStore,
+  type ObjectEntry,
+} from "@harbor-hf/control-core";
 import {
   downloadFile,
+  HubApiError,
   type ListFileEntry,
   listFiles,
   uploadFile,
 } from "@huggingface/hub";
-import { sha256 } from "@harbor-hf/contracts";
-import {
-  type CreateResult,
-  type ImmutableObjectStore,
-  ImmutableConflictError,
-  type ObjectEntry,
-} from "@harbor-hf/control-core";
 
 const defaultRetryDelaysMs = [250, 1_000, 3_000] as const;
 const defaultListTimeoutMs = 30_000;
@@ -25,6 +26,11 @@ export interface HuggingFaceBucketStoreOptions {
 
 function transientDownloadError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  if (
+    error instanceof HubApiError &&
+    [408, 429, 500, 502, 503, 504].includes(error.statusCode)
+  )
+    return true;
   if (
     error.name === "TypeError" &&
     (error.message === "fetch failed" || error.message === "terminated")
