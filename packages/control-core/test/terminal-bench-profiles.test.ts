@@ -9,9 +9,9 @@ import {
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
-const WORKER_REVISION = "dd53f45bde78be145e779061041a67b1804f30d8";
+const WORKER_REVISION = "09ea6187c6c38743173de106fa71e377e8216f20";
 const WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:a1076b8e8994e9ce7db7b609c6cc58a6e4721da23b916b3fad27e5adb2ccf44e";
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:3e2f7eba47c52d5e6914de65834175120532869bcefcee112b8b1ed0576de436";
 const HARBOR_SOURCE =
   "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
 const PREPARATION_COMMAND = [
