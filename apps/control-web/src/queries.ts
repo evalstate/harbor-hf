@@ -1,16 +1,17 @@
-import { useQuery, useQueryClient, type QueryKey } from "@tanstack/react-query";
+import { type QueryKey, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type {
   AuditResponse,
-  Run,
-  RunList,
   Capacity,
   EndpointList,
   JobList,
   Leaderboard,
+  NamespaceCapacity,
   ProfileList,
   ResultDetail,
   ResultList,
+  Run,
+  RunList,
   SessionResponse,
   SystemResponse,
   TaskDetail,
@@ -21,6 +22,7 @@ import { ApiError, request } from "./api";
 export const keys = {
   session: ["session"] as const,
   system: ["system"] as const,
+  infrastructureCapacity: ["infrastructure-capacity"] as const,
   runs: ["runs"] as const,
   run: (id: string) => ["run", id] as const,
   capacity: (id: string) => ["capacity", id] as const,
@@ -58,7 +60,9 @@ export interface ControlEvent {
 }
 
 export type LiveStatus = "connected" | "reconnecting" | "offline" | "stale";
-export const SSE_INVALIDATION_DEBOUNCE_MS = 1_000;
+// Control records arrive in bursts while Jobs are active. One bounded refresh
+// window keeps collection queries current without continuously refetching them.
+export const SSE_INVALIDATION_DEBOUNCE_MS = 5_000;
 
 export interface LiveState {
   status: LiveStatus;
@@ -112,6 +116,14 @@ export const useSystem = () =>
     queryFn: () => request<SystemResponse>("/api/v1/system"),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
+  });
+export const useInfrastructureCapacity = () =>
+  useQuery({
+    queryKey: keys.infrastructureCapacity,
+    queryFn: () => request<NamespaceCapacity>("/api/v1/capacity"),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+    staleTime: 5_000,
   });
 export const useRuns = (cursor?: string) =>
   useQuery({
@@ -300,7 +312,8 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
   const taskId = stringData(event, "task_id");
   if (event.type.startsWith("profile.")) {
     affected.push(keys.profiles);
-    if (stringData(event, "profile_kind") === "capacity") affected.push(["capacity"]);
+    if (stringData(event, "profile_kind") === "capacity")
+      affected.push(keys.infrastructureCapacity, ["capacity"]);
   }
   if (event.type === "publication.receipt")
     affected.push(keys.results, keys.leaderboard);
@@ -323,14 +336,14 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
     }
   }
   if (event.type.startsWith("job.")) {
-    affected.push(keys.jobs);
+    affected.push(keys.jobs, keys.infrastructureCapacity);
     affected.push(runId ? keys.runJobs(runId) : ["run-jobs"]);
   }
   if (event.type.startsWith("action.")) {
     const actionKind = stringData(event, "action_kind") ?? "";
     if (actionKind.startsWith("endpoint.")) affected.push(keys.endpoints);
     else if (actionKind.startsWith("job.")) {
-      affected.push(keys.jobs);
+      affected.push(keys.jobs, keys.infrastructureCapacity);
       affected.push(runId ? keys.runJobs(runId) : ["run-jobs"]);
     } else {
       affected.push(keys.jobs, keys.endpoints);

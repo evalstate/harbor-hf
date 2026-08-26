@@ -31,9 +31,10 @@ import { runIdentity, runUnique } from "../src/run-id.js";
 import { ControlService, executionReservationCategory } from "../src/service.js";
 
 const controls: TestControl[] = [];
-afterEach(async () =>
-  Promise.all(controls.splice(0).map((control) => control.close())),
-);
+afterEach(async () => {
+  vi.useRealTimers();
+  await Promise.all(controls.splice(0).map((control) => control.close()));
+});
 
 const submission = {
   benchmark: "control-smoke",
@@ -183,6 +184,25 @@ describe("control service", () => {
       start_burst: 8,
       profile_id: first.profile_id,
     });
+    await expect(control.service.namespaceCapacityView()).resolves.toMatchObject({
+      max_active_jobs: 8,
+      active_jobs: 0,
+      available_jobs: 8,
+      queued_jobs: 0,
+      observed_running_jobs: 0,
+      observed_scheduling_jobs: 0,
+      reserved_without_active_observation: 0,
+      start_tokens: 8,
+      runs: [],
+      hardware: [
+        {
+          hardware: "cpu-basic",
+          max_active_jobs: 8,
+          active_jobs: 0,
+          available_jobs: 8,
+        },
+      ],
+    });
 
     const second = await control.service.setMaxActiveJobs(8, "capacity-eight");
     expect(second.profile_id).toBe(first.profile_id);
@@ -266,6 +286,19 @@ describe("control service", () => {
       capacity_profile_id: lowered.profile_id,
       tokens_remaining: 0,
     });
+    await expect(control.service.namespaceCapacityView()).resolves.toMatchObject({
+      active_jobs: 1,
+      available_jobs: 0,
+      reserved_without_active_observation: 1,
+      runs: [
+        {
+          run_id: result.run_id,
+          max_active_jobs: 1,
+          active_jobs: 1,
+          available_jobs: 0,
+        },
+      ],
+    });
 
     const rebuilt = await Projection.open(`${control.root}/lower-capacity.sqlite`);
     await expect(rebuilt.rebuild(control.store)).resolves.toBeUndefined();
@@ -274,6 +307,83 @@ describe("control service", () => {
       tokens_remaining: 0,
     });
     await rebuilt.close();
+  });
+
+  it("counts an active Job by its latest observed state", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await configureCapacity(control, {
+      maximum: 1,
+      hardwareMaximum: 1,
+      burst: 1,
+    });
+    const run = await control.service.submit(
+      { ...submission, start_paused: true },
+      "active-job-latest-observation",
+      operator,
+    );
+    const resourceId = "job-latest-active-observation";
+    const launch = control.service.actionIntent(
+      run.run_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_id: "task-001",
+        task_ids: ["task-001"],
+        hardware: "cpu-basic",
+        max_jobs: 1,
+      },
+      undefined,
+      "2026-08-22T01:00:00.000Z",
+    );
+    await expect(control.service.admitJobLaunch(launch)).resolves.toMatchObject({
+      status: "admitted",
+    });
+    const launchReceipt = await control.service.receipt(launch, {
+      outcome: "created",
+      observed_state: "SCHEDULING",
+      resource_id: resourceId,
+    });
+    await control.service.markAdvanced(launch, launchReceipt);
+
+    const observation = control.service.actionIntent(
+      run.run_id,
+      "job.observe",
+      resourceId,
+      0,
+      {
+        resource_id: resourceId,
+        launch_action_id: launch.action_id,
+      },
+      undefined,
+      "2026-08-22T01:00:10.000Z",
+    );
+    await control.service.writeAction(observation);
+    const observationReceipt = await control.service.receipt(observation, {
+      outcome: "completed",
+      observed_state: "RUNNING",
+      resource_id: resourceId,
+    });
+    await control.service.markAdvanced(observation, observationReceipt);
+
+    expect(await control.projection.jobs()).toMatchObject([
+      {
+        action_id: observation.action_id,
+        launch_action_id: launch.action_id,
+        observed_state: "RUNNING",
+      },
+    ]);
+    expect(await control.projection.activeJobObservedStateCounts("test")).toEqual({
+      RUNNING: 1,
+    });
+    await expect(control.service.namespaceCapacityView()).resolves.toMatchObject({
+      active_jobs: 1,
+      observed_running_jobs: 1,
+      observed_scheduling_jobs: 0,
+      reserved_without_active_observation: 0,
+    });
   });
 
   it("applies provider request reservations per Run", async () => {
@@ -369,6 +479,47 @@ describe("control service", () => {
       run_outcome: "complete",
       strict_pass_count: null,
     });
+  });
+
+  it("launches an admitted Job batch concurrently", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    await control.service.submit(submission, "concurrent-job-launch-key", operator);
+    const noop = new NoopActions();
+    let activeLaunches = 0;
+    let maxActiveLaunches = 0;
+    const external: ExternalActionPort = {
+      execute: async (
+        intent: ActionIntent,
+        context?: ExternalActionContext,
+      ): Promise<ExternalActionResult> => {
+        if (intent.action_kind !== "job.launch") return noop.execute(intent, context);
+        activeLaunches += 1;
+        maxActiveLaunches = Math.max(maxActiveLaunches, activeLaunches);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-${intent.target}`,
+          };
+        } finally {
+          activeLaunches -= 1;
+        }
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await reconciler.tick();
+    await reconciler.tick();
+
+    expect(maxActiveLaunches).toBe(2);
   });
 
   it("keeps an idempotency key bound to the first run even when the combo slug would change", async () => {
@@ -505,6 +656,170 @@ describe("control service", () => {
     });
   });
 
+  it("launches preparation before recovering historical advancement", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const historical = await control.service.submit(
+      submission,
+      "historical-advancement-key",
+      operator,
+    );
+    const historicalRow = await control.projection.action(historical.action_id);
+    if (!historicalRow) throw new Error("historical admission action is missing");
+    const historicalIntent = JSON.parse(historicalRow.intent_body) as ActionIntent;
+    await control.service.receipt(historicalIntent, {
+      outcome: "completed",
+      observed_state: "admitted",
+    });
+    const current = await control.service.submit(
+      submission,
+      "current-admission-key",
+      operator,
+    );
+    await control.service.writeAction(
+      control.service.actionIntent(current.run_id, "job.launch", "run-preparation", 0, {
+        worker_role: "preparation",
+        task_ids: ["task-001"],
+        hardware: "cpu-basic",
+        max_jobs: 1,
+        reservation_microusd: 0,
+      }),
+    );
+    const markAdvanced = control.service.markAdvanced.bind(control.service);
+    vi.spyOn(control.service, "markAdvanced").mockImplementation(
+      async (intent, receipt) => {
+        if (intent.action_id === historical.action_id)
+          throw new Error("historical advancement failed");
+        return markAdvanced(intent, receipt);
+      },
+    );
+    const external = new NoopActions();
+    const execute = vi.spyOn(external, "execute");
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await expect(reconciler.tick()).rejects.toThrow("historical advancement failed");
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action_kind: "job.launch",
+        run_id: current.run_id,
+        target: "run-preparation",
+      }),
+      { adoption_only: true },
+    );
+    const launches = (await control.projection.runActions(current.run_id)).filter(
+      (action) => action.action_kind === "job.launch",
+    );
+    const preparationLaunch = launches.find(
+      (action) =>
+        (JSON.parse(action.intent_body) as ActionIntent).target === "run-preparation",
+    );
+    expect(preparationLaunch?.receipt_body).not.toBeNull();
+  });
+
+  it("continues observations after a Job launch transport failure", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await configureCapacity(control);
+    const first = await control.service.submit(
+      submission,
+      "launch-failure-first",
+      operator,
+    );
+    const second = await control.service.submit(
+      submission,
+      "launch-failure-second",
+      operator,
+    );
+    const observedRuns: string[] = [];
+    const noop = new NoopActions();
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          if (intent.run_id === first.run_id)
+            throw new TypeError("transient launch failure");
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-${intent.run_id}`,
+          };
+        }
+        if (intent.action_kind === "job.observe")
+          throw new Error("individual Job observation was not expected");
+        return noop.execute(intent);
+      },
+      observeJobs: async (intents): Promise<readonly ExternalActionResult[]> =>
+        intents.map((intent) => {
+          observedRuns.push(intent.run_id);
+          return {
+            outcome: "completed",
+            observed_state: "COMPLETED",
+            resource_id: intent.target,
+          };
+        }),
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await reconciler.tick();
+
+    await expect(reconciler.tick()).rejects.toThrow("transient launch failure");
+
+    expect(observedRuns).toContain(second.run_id);
+    expect(
+      (await control.projection.runActions(second.run_id)).find(
+        (action) =>
+          action.action_kind === "job.observe" && action.observed_state === "COMPLETED",
+      ),
+    ).toBeDefined();
+  });
+
+  it("reports the per-Run Job limit as the capacity constraint", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    await configureCapacity(control, {
+      maximum: 4,
+      hardwareMaximum: 4,
+      burst: 4,
+    });
+    const run = await control.service.submit(
+      submission,
+      "run-capacity-limiting-factor",
+      operator,
+    );
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await reconciler.tick();
+    const launches = (await control.projection.pendingActions()).filter(
+      (intent) => intent.action_kind === "job.launch",
+    );
+    const admissionStatuses: string[] = [];
+    for (const launch of launches)
+      admissionStatuses.push((await control.service.admitJobLaunch(launch)).status);
+    expect(admissionStatuses).toEqual(["admitted", "deferred"]);
+
+    await expect(control.service.jobCapacityView(run.run_id)).resolves.toMatchObject({
+      run_active: 1,
+      run_limit: 1,
+      limiting_factor: "run_job_capacity",
+    });
+  });
+
   it("copies locked inference limits into the worker launch", async () => {
     const control = await createTestControl(1, 1, 0, true, "required");
     controls.push(control);
@@ -560,109 +875,121 @@ describe("control service", () => {
     }
   });
 
-  it("discovers a durable worker receipt after a missed callback", async () => {
-    const control = await createTestControl();
-    controls.push(control);
-    const result = await control.service.submit(
-      submission,
-      "missed-worker-callback-key",
-      operator,
-    );
-    const admissionRow = await control.projection.action(result.action_id);
-    if (!admissionRow) throw new Error("admission action is missing");
-    const admission = JSON.parse(admissionRow.intent_body) as ActionIntent;
-    const admissionReceipt = await control.service.receipt(admission, {
-      outcome: "completed",
-      observed_state: "admitted",
-    });
-    await control.service.markAdvanced(admission, admissionReceipt);
-    const launch = control.service.actionIntent(
-      result.run_id,
-      "job.launch",
-      "task-001",
-      0,
-      {
-        task_id: "task-001",
-        task_ids: ["task-001"],
-        max_infrastructure_attempts: 1,
-        success_without_worker_receipt: false,
-      },
-    );
-    await control.service.writeAction(launch);
-    const launchReceipt = await control.service.receipt(launch, {
-      outcome: "created",
-      observed_state: "RUNNING",
-      resource_id: "job-one",
-    });
-    await control.service.markAdvanced(launch, launchReceipt);
-    await control.service.writeAction(
-      control.service.actionIntent(result.run_id, "job.observe", "job-one", 0, {
-        ...launch.payload,
+  it.each([
+    ["completed successfully", true, "STOPPED"],
+    ["errored", false, "ERROR"],
+  ] as const)(
+    "target-syncs a durable worker receipt after a Job that %s",
+    async (_label, successWithoutWorkerReceipt, terminalState) => {
+      const control = await createTestControl();
+      controls.push(control);
+      const result = await control.service.submit(
+        submission,
+        "missed-worker-callback-key",
+        operator,
+      );
+      const admissionRow = await control.projection.action(result.action_id);
+      if (!admissionRow) throw new Error("admission action is missing");
+      const admission = JSON.parse(admissionRow.intent_body) as ActionIntent;
+      const admissionReceipt = await control.service.receipt(admission, {
+        outcome: "completed",
+        observed_state: "admitted",
+      });
+      await control.service.markAdvanced(admission, admissionReceipt);
+      const launch = control.service.actionIntent(
+        result.run_id,
+        "job.launch",
+        "task-001",
+        0,
+        {
+          task_id: "task-001",
+          task_ids: ["task-001"],
+          max_infrastructure_attempts: 1,
+          success_without_worker_receipt: successWithoutWorkerReceipt,
+        },
+      );
+      await control.service.writeAction(launch);
+      const launchReceipt = await control.service.receipt(launch, {
+        outcome: "created",
+        observed_state: "RUNNING",
         resource_id: "job-one",
-        launch_action_id: launch.action_id,
-        not_before: "2026-08-16T00:00:00.000Z",
-      }),
-    );
-    const evidence = await putWorkerEvidence(
-      control,
-      result.run_id,
-      launch.action_id,
-      "task-001",
-      "missed-callback-evidence",
-    );
-    const attempt: AttemptReceipt = {
-      schema_version: "v1",
-      kind: "attempt.receipt",
-      record_id: deterministicId("attempt-receipt", "missed-callback-attempt"),
-      created_at: "2026-08-16T00:00:01.000Z",
-      actor: { subject: "trusted-worker", role: "service" },
-      run_id: result.run_id,
-      task_id: "task-001",
-      attempt_id: "missed-callback-attempt",
-      action_id: launch.action_id,
-      outcome: "complete",
-      replacement_eligible: false,
-      ...evidence,
-      cost_microusd: 0,
-      metrics: { reward: 1 },
-    };
-    await control.store.create(
-      controlRecordPath(attempt),
-      new TextEncoder().encode(canonicalJson(attempt)),
-    );
-    expect(await control.projection.attemptById(attempt.attempt_id)).toBeNull();
-    const external: ExternalActionPort = {
-      execute: async (intent): Promise<ExternalActionResult> =>
-        intent.action_kind === "job.observe"
-          ? {
-              outcome: "completed",
-              observed_state: "STOPPED",
-              resource_id: "job-one",
-            }
-          : new NoopActions().execute(intent),
-    };
-    const reconciler = new Reconciler(
-      control.service,
-      control.projection,
-      external,
-      new ResultPublisher(control.store, control.projection, control.service),
-      {
-        interval_ms: 100,
-        sync_interval_ms: 0,
-        observation_interval_ms: 0,
-        batch_size: 16,
-      },
-    );
-    await settle(reconciler);
-    expect(await control.projection.runAttempts(result.run_id)).toMatchObject([
-      { attempt_id: attempt.attempt_id, outcome: "complete" },
-    ]);
-    expect(await control.projection.run(result.run_id)).toMatchObject({
-      status: "completed",
-      terminal_tasks: 1,
-      publication_status: "published",
-    });
-  });
+      });
+      await control.service.markAdvanced(launch, launchReceipt);
+      await control.service.writeAction(
+        control.service.actionIntent(result.run_id, "job.observe", "job-one", 0, {
+          ...launch.payload,
+          resource_id: "job-one",
+          launch_action_id: launch.action_id,
+          not_before: "2026-08-16T00:00:00.000Z",
+        }),
+      );
+      const evidence = await putWorkerEvidence(
+        control,
+        result.run_id,
+        launch.action_id,
+        "task-001",
+        "missed-callback-evidence",
+      );
+      const attempt: AttemptReceipt = {
+        schema_version: "v1",
+        kind: "attempt.receipt",
+        record_id: deterministicId("attempt-receipt", "missed-callback-attempt"),
+        created_at: "2026-08-16T00:00:01.000Z",
+        actor: { subject: "trusted-worker", role: "service" },
+        run_id: result.run_id,
+        task_id: "task-001",
+        attempt_id: "missed-callback-attempt",
+        action_id: launch.action_id,
+        outcome: "complete",
+        replacement_eligible: false,
+        ...evidence,
+        cost_microusd: 0,
+        metrics: { reward: 1 },
+      };
+      await control.store.create(
+        controlRecordPath(attempt),
+        new TextEncoder().encode(canonicalJson(attempt)),
+      );
+      expect(await control.projection.attemptById(attempt.attempt_id)).toBeNull();
+      const external: ExternalActionPort = {
+        execute: async (intent): Promise<ExternalActionResult> =>
+          intent.action_kind === "job.observe"
+            ? {
+                outcome: "completed",
+                observed_state: terminalState,
+                resource_id: "job-one",
+              }
+            : new NoopActions().execute(intent),
+      };
+      const syncProjection = vi.spyOn(control.service, "syncProjection");
+      const reconciler = new Reconciler(
+        control.service,
+        control.projection,
+        external,
+        new ResultPublisher(control.store, control.projection, control.service),
+        {
+          interval_ms: 100,
+          sync_interval_ms: 60_000,
+          observation_interval_ms: 0,
+          worker_receipt_grace_ms: 0,
+          batch_size: 16,
+        },
+      );
+      await settle(reconciler);
+      expect(syncProjection).toHaveBeenCalledWith(
+        `control/schema=v1/runs/${result.run_id}/tasks`,
+      );
+      expect(syncProjection).not.toHaveBeenCalledWith();
+      expect(await control.projection.runAttempts(result.run_id)).toMatchObject([
+        { attempt_id: attempt.attempt_id, outcome: "complete" },
+      ]);
+      expect(await control.projection.run(result.run_id)).toMatchObject({
+        status: "completed",
+        terminal_tasks: 1,
+        publication_status: "published",
+      });
+    },
+  );
 
   it("adopts durable action records while a projection catches up", async () => {
     const control = await createTestControl();
@@ -835,6 +1162,110 @@ describe("control service", () => {
         operator,
       ),
     ).rejects.toThrow("idempotency key belongs to a different pause action");
+  });
+
+  it("does not let suppressed launches block launchable work in the same batch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await configureCapacity(control);
+    const cancelledRun = await control.service.submit(
+      submission,
+      "concurrent-suppression-cancelled",
+      operator,
+    );
+    const activeRun = await control.service.submit(
+      submission,
+      "concurrent-suppression-active",
+      operator,
+    );
+    const delayedRun = await control.service.submit(
+      submission,
+      "concurrent-suppression-delayed",
+      operator,
+    );
+    let activeLaunchStarted: (() => void) | undefined;
+    const activeLaunch = new Promise<void>((resolve) => {
+      activeLaunchStarted = resolve;
+    });
+    const noop = new NoopActions();
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch" && intent.run_id === activeRun.run_id) {
+          activeLaunchStarted?.();
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: "job-active-concurrent-suppression",
+          };
+        }
+        return noop.execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await reconciler.tick();
+    await control.service.runAction(
+      cancelledRun.run_id,
+      { action: "cancel", confirmed: true },
+      "concurrent-suppression-cancel",
+      operator,
+    );
+    const originalReceipt = control.service.receipt.bind(control.service);
+    let cancellationReceiptStarted: (() => void) | undefined;
+    const cancellationReceipt = new Promise<void>((resolve) => {
+      cancellationReceiptStarted = resolve;
+    });
+    let releaseCancellationReceipt: (() => void) | undefined;
+    const cancellationReceiptRelease = new Promise<void>((resolve) => {
+      releaseCancellationReceipt = resolve;
+    });
+    const originalAdmission = control.service.admitJobLaunch.bind(control.service);
+    let delayedAdmissionStarted: (() => void) | undefined;
+    const delayedAdmission = new Promise<void>((resolve) => {
+      delayedAdmissionStarted = resolve;
+    });
+    let releaseDelayedAdmission: (() => void) | undefined;
+    const delayedAdmissionRelease = new Promise<void>((resolve) => {
+      releaseDelayedAdmission = resolve;
+    });
+    vi.spyOn(control.service, "admitJobLaunch").mockImplementation(async (intent) => {
+      if (intent.run_id === delayedRun.run_id) {
+        delayedAdmissionStarted?.();
+        await delayedAdmissionRelease;
+      }
+      return originalAdmission(intent);
+    });
+    vi.spyOn(control.service, "receipt").mockImplementation(async (intent, result) => {
+      if (
+        intent.action_kind === "job.launch" &&
+        intent.run_id === cancelledRun.run_id
+      ) {
+        cancellationReceiptStarted?.();
+        await cancellationReceiptRelease;
+      }
+      return originalReceipt(intent, result);
+    });
+
+    const tick = reconciler.tick();
+    await cancellationReceipt;
+    await delayedAdmission;
+    await activeLaunch;
+    releaseCancellationReceipt?.();
+    releaseDelayedAdmission?.();
+    await tick;
+
+    expect(
+      (await control.projection.runActions(cancelledRun.run_id)).find(
+        (action) =>
+          action.action_kind === "job.launch" &&
+          action.observed_state === "suppressed-cancelled",
+      ),
+    ).toBeDefined();
   });
 
   it("probes colliding Run action generations without merging idempotency keys", async () => {
@@ -2027,6 +2458,8 @@ describe("control service", () => {
   });
 
   it("does not cancel a remote Job that is already in ERROR", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
     const control = await createTestControl();
     controls.push(control);
     const result = await control.service.submit(
@@ -2060,7 +2493,7 @@ describe("control service", () => {
       new ResultPublisher(control.store, control.projection, control.service),
       {
         interval_ms: 100,
-        observation_interval_ms: 0,
+        observation_interval_ms: 60_000,
         batch_size: 16,
         dispatch_adoption_delay_ms: 0,
       },
@@ -2073,6 +2506,7 @@ describe("control service", () => {
       "cancel-error-job-action",
       operator,
     );
+    vi.advanceTimersByTime(60_000);
 
     await settle(reconciler, 12);
 
@@ -2198,6 +2632,7 @@ describe("control service", () => {
       "requeue-broken-observe-key",
       operator,
     );
+    let failObservation = true;
     const external: ExternalActionPort = {
       execute: async (intent): Promise<ExternalActionResult> => {
         if (intent.action_kind === "job.launch")
@@ -2205,6 +2640,12 @@ describe("control service", () => {
             outcome: "created",
             observed_state: "SCHEDULING",
             resource_id: "job-broken-observe-chain",
+          };
+        if (intent.action_kind === "job.observe" && failObservation)
+          return {
+            outcome: "failed",
+            observed_state: "UNKNOWN",
+            error_code: "temporary-observation-failure",
           };
         if (intent.action_kind === "job.observe")
           return {
@@ -2233,6 +2674,7 @@ describe("control service", () => {
       );
     }
     expect(observe).toBeDefined();
+    failObservation = false;
     await control.service.receipt(JSON.parse(observe?.intent_body ?? "null"), {
       outcome: "completed",
       observed_state: "SCHEDULING",

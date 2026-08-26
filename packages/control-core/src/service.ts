@@ -7,15 +7,13 @@ import type {
   AttemptReceipt,
   BenchmarkProfileSpec,
   BudgetEvent,
-  RunActionV1,
-  RunLock,
-  RunRequest,
-  RunSubmissionV1,
   CapacityProfileObject,
   CapacityProfileSpec,
   DeploymentProfileSpec,
   HarborHFControlRecordV1,
   HarnessProfileSpec,
+  JobAdmissionGrant,
+  JobCapacityRelease,
   LaunchPolicySpec,
   ModelProfileSpec,
   PreparedJob,
@@ -25,8 +23,10 @@ import type {
   PublicationReceipt,
   PublicationSupersession,
   ResolvedProfile,
-  JobAdmissionGrant,
-  JobCapacityRelease,
+  RunActionV1,
+  RunLock,
+  RunRequest,
+  RunSubmissionV1,
   TaskCancellation,
   TaskExhaustion,
   TerminalSelection,
@@ -36,10 +36,10 @@ import {
   controlRecordPath,
   deterministicId,
   sha256,
-  validateRunAction,
-  validateRunSubmission,
   validateControlRecord,
   validatePreparedJobSubmission,
+  validateRunAction,
+  validateRunSubmission,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
 import {
@@ -53,6 +53,11 @@ import {
   verifyWorkerEvidence,
 } from "./evidence.js";
 import {
+  decideJobAdmission,
+  type JobAdmissionDecision,
+  type JobLimitingFactor,
+} from "./job-admission.js";
+import {
   type LoadedProfile,
   ProfileResolutionError,
   ProfileResolver,
@@ -62,11 +67,6 @@ import {
 } from "./profiles.js";
 import type { Projection } from "./projection.js";
 import { runIdentity, runtimeKind, runUnique } from "./run-id.js";
-import {
-  decideJobAdmission,
-  type JobAdmissionDecision,
-  type JobLimitingFactor,
-} from "./job-admission.js";
 import {
   createJson,
   ImmutableConflictError,
@@ -147,6 +147,35 @@ export interface JobCapacityView {
   not_before: string | null;
 }
 
+export interface NamespaceCapacityView {
+  alias: string | null;
+  configured: boolean;
+  profile_id: string | null;
+  max_active_jobs: number | null;
+  active_jobs: number;
+  available_jobs: number | null;
+  queued_jobs: number;
+  observed_running_jobs: number;
+  observed_scheduling_jobs: number;
+  reserved_without_active_observation: number;
+  start_tokens: number | null;
+  start_burst: number | null;
+  start_refill_tokens: number | null;
+  start_refill_period_seconds: number | null;
+  runs: Array<{
+    run_id: string;
+    max_active_jobs: number;
+    active_jobs: number;
+    available_jobs: number;
+  }>;
+  hardware: Array<{
+    hardware: string;
+    max_active_jobs: number;
+    active_jobs: number;
+    available_jobs: number;
+  }>;
+}
+
 interface RunActionIdempotency {
   key_digest: string;
   payload_digest: string;
@@ -156,6 +185,26 @@ export class ControlNotReadyError extends Error {}
 export class ConfirmationRequiredError extends Error {}
 export class IdempotencyConflictError extends Error {}
 export class PolicyError extends Error {}
+
+function refilledStartTokens(
+  capacity: CapacityProfileSpec,
+  latest: JobAdmissionGrant | null,
+  now: Date,
+): { tokens: number; not_before: string | null } {
+  const cursor = latest ? Date.parse(latest.refill_cursor_at) : now.getTime();
+  const periodMs = capacity.start_refill_period_seconds * 1000;
+  const periods = Math.max(0, Math.floor((now.getTime() - cursor) / periodMs));
+  const tokens = Math.min(
+    capacity.start_burst,
+    (latest?.tokens_remaining ?? capacity.start_burst) +
+      periods * capacity.start_refill_tokens,
+  );
+  return {
+    tokens,
+    not_before: tokens < 1 ? new Date(cursor + periodMs).toISOString() : null,
+  };
+}
+
 function serviceActor(): Actor {
   return { subject: "harbor-hf-control", role: "service" };
 }
@@ -337,12 +386,11 @@ export function infrastructureSealReplaceable(terminalOutcome: string | null): b
 
 export class ControlService {
   readonly resolver: ProfileResolver;
-  private appendQueue: Promise<void> = Promise.resolve();
+  private projectionQueue: Promise<void> = Promise.resolve();
   private budgetQueue: Promise<void> = Promise.resolve();
   private retryAdmissionQueue: Promise<void> = Promise.resolve();
   private readonly runMutationQueues = new Map<string, Promise<void>>();
   private submitQueue: Promise<void> = Promise.resolve();
-  private preparationQueue: Promise<void> = Promise.resolve();
   private jobAdmissionQueue: Promise<void> = Promise.resolve();
   private capacityUpdateQueue: Promise<void> = Promise.resolve();
   private capacityProfileAlias: string | null = null;
@@ -421,6 +469,55 @@ export class ControlService {
         ? selected.spec.start_refill_period_seconds
         : null,
       profile_id: selected ? selected.profile_id : null,
+    };
+  }
+
+  async namespaceCapacityView(): Promise<NamespaceCapacityView> {
+    const policy = this.namespaceCapacityPolicy();
+    const capacity = this.capacityProfileOrNull();
+    const [active, runUsage, latest, queuedJobs, observedStates] = await Promise.all([
+      this.projection.activeJobAdmissions(this.namespace),
+      this.projection.activeJobAdmissionRunUsage(this.namespace),
+      this.projection.latestJobAdmission(this.namespace),
+      this.projection.pendingActionCount("job.launch"),
+      this.projection.activeJobObservedStateCounts(this.namespace),
+    ]);
+    let startTokens: number | null = null;
+    if (capacity)
+      startTokens = refilledStartTokens(capacity.spec, latest, this.clock.now()).tokens;
+    const running = observedStates.RUNNING ?? 0;
+    const scheduling = observedStates.SCHEDULING ?? 0;
+    return {
+      ...policy,
+      active_jobs: active.length,
+      available_jobs:
+        policy.max_active_jobs === null
+          ? null
+          : Math.max(0, policy.max_active_jobs - active.length),
+      queued_jobs: queuedJobs,
+      observed_running_jobs: running,
+      observed_scheduling_jobs: scheduling,
+      reserved_without_active_observation: Math.max(
+        0,
+        active.length - running - scheduling,
+      ),
+      start_tokens: startTokens,
+      runs: runUsage.map((run) => ({
+        ...run,
+        available_jobs: Math.max(0, run.max_active_jobs - run.active_jobs),
+      })),
+      hardware:
+        capacity?.spec.hardware_limits.map((limit) => {
+          const activeJobs = active.filter(
+            (grant) => grant.hardware === limit.hardware,
+          ).length;
+          return {
+            hardware: limit.hardware,
+            max_active_jobs: limit.max_active_jobs,
+            active_jobs: activeJobs,
+            available_jobs: Math.max(0, limit.max_active_jobs - activeJobs),
+          };
+        }) ?? [],
     };
   }
 
@@ -576,17 +673,6 @@ export class ControlService {
   async append<T extends HarborHFControlRecordV1>(
     record: T,
   ): Promise<{ created: boolean; key: string; digest: string }> {
-    const operation = this.appendQueue.then(() => this.appendSerialized(record));
-    this.appendQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
-  }
-
-  private async appendSerialized<T extends HarborHFControlRecordV1>(
-    record: T,
-  ): Promise<{ created: boolean; key: string; digest: string }> {
     validateControlRecord<T>(record);
     if (record.kind === "attempt.receipt" && record.actor.role !== "migration") {
       try {
@@ -604,31 +690,40 @@ export class ControlService {
     }
     const key = controlRecordPath(record);
     const result = await createJson(this.store, key, record);
-    const projected = await this.projection.objectDigest(key);
-    if (projected && projected !== result.digest)
-      throw new IdempotencyConflictError(`projection digest conflict at ${key}`);
-    if (!projected) {
-      const event = await this.projection.ingest(
-        key,
-        result.digest,
-        result.source_identity,
-        record,
-      );
-      this.events.publish(event);
-      if (record.kind === "profile.object" || record.kind === "profile.promotion")
-        await this.refreshProfileResolver();
-    }
-    return { ...result, key };
+    // Remote immutable writes may overlap. SQLite projection updates remain
+    // serialized so independent Runs do not wait on each other's network I/O.
+    const operation = this.projectionQueue.then(async () => {
+      const projected = await this.projection.objectDigest(key);
+      if (projected && projected !== result.digest)
+        throw new IdempotencyConflictError(`projection digest conflict at ${key}`);
+      if (!projected) {
+        const event = await this.projection.ingest(
+          key,
+          result.digest,
+          result.source_identity,
+          record,
+        );
+        this.events.publish(event);
+        if (record.kind === "profile.object" || record.kind === "profile.promotion")
+          await this.refreshProfileResolver();
+      }
+      return { ...result, key };
+    });
+    this.projectionQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
-  async syncProjection(): Promise<number> {
-    const operation = this.appendQueue.then(async () => {
-      const events = await this.projection.sync(this.store);
+  async syncProjection(prefix?: string): Promise<number> {
+    const operation = this.projectionQueue.then(async () => {
+      const events = await this.projection.sync(this.store, prefix);
       for (const event of events) this.events.publish(event);
       if (events.length > 0) await this.refreshProfileResolver();
       return events.length;
     });
-    this.appendQueue = operation.then(
+    this.projectionQueue = operation.then(
       () => undefined,
       () => undefined,
     );
@@ -694,14 +789,9 @@ export class ControlService {
     launchActionId: string,
     raw: unknown,
   ): Promise<PreparedJobSubmissionResult> {
-    const operation = this.preparationQueue.then(() =>
+    return this.withRunMutationAdmission(runId, () =>
       this.submitPreparedJobSerialized(runId, launchActionId, raw),
     );
-    this.preparationQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
   }
 
   private async assertPreparationAction(
@@ -1132,20 +1222,9 @@ export class ControlService {
     let startTokens: number | null = null;
     let notBefore: string | null = null;
     if (capacity) {
-      const cursor = latest
-        ? Date.parse(latest.refill_cursor_at)
-        : this.clock.now().getTime();
-      const periodMs = capacity.spec.start_refill_period_seconds * 1000;
-      const periods = Math.max(
-        0,
-        Math.floor((this.clock.now().getTime() - cursor) / periodMs),
-      );
-      startTokens = Math.min(
-        capacity.spec.start_burst,
-        (latest?.tokens_remaining ?? capacity.spec.start_burst) +
-          periods * capacity.spec.start_refill_tokens,
-      );
-      if (startTokens < 1) notBefore = new Date(cursor + periodMs).toISOString();
+      const startRate = refilledStartTokens(capacity.spec, latest, this.clock.now());
+      startTokens = startRate.tokens;
+      notBefore = startRate.not_before;
     }
     let limitingFactor: JobCapacityView["limiting_factor"] = null;
     const globallyCancelled = (await this.projection.runActions(runId)).some(
@@ -1156,7 +1235,7 @@ export class ControlService {
       },
     );
     if (globallyCancelled) limitingFactor = "run_cancelled";
-    else if (runActive.length >= runLimit) limitingFactor = "namespace_job_capacity";
+    else if (runActive.length >= runLimit) limitingFactor = "run_job_capacity";
     else if (capacity && active.length >= capacity.spec.max_active_jobs)
       limitingFactor = "namespace_job_capacity";
     else if (hardwareLimit !== null && hardwareActive >= hardwareLimit)

@@ -54,6 +54,39 @@ function system(writeMode: "disabled" | "enabled" = "enabled") {
   };
 }
 
+function infrastructureCapacity() {
+  return {
+    alias: "current",
+    configured: true,
+    profile_id: "sha256:capacity",
+    max_active_jobs: 128,
+    active_jobs: 112,
+    available_jobs: 16,
+    queued_jobs: 64,
+    observed_running_jobs: 26,
+    observed_scheduling_jobs: 4,
+    reserved_without_active_observation: 82,
+    start_tokens: 128,
+    start_burst: 128,
+    start_refill_tokens: 128,
+    start_refill_period_seconds: 10,
+    runs: Array.from({ length: 7 }, (_, index) => ({
+      run_id: `run-${index + 1}`,
+      max_active_jobs: 16,
+      active_jobs: 16,
+      available_jobs: 0,
+    })),
+    hardware: [
+      {
+        hardware: "cpu-basic",
+        max_active_jobs: 128,
+        active_jobs: 112,
+        available_jobs: 16,
+      },
+    ],
+  };
+}
+
 function launchProfiles() {
   const createdAt = "2026-08-16T00:00:00.000Z";
   const approved = (alias: string, kind: string, spec: Record<string, unknown>) => ({
@@ -165,6 +198,7 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session("visible-user"));
         if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/capacity")) return json(infrastructureCapacity());
         if (path.includes("/runs")) return json({ items: [], next_cursor: null });
         if (path.includes("/endpoints")) return json({ items: [], next_cursor: null });
         throw new Error(`unexpected request: ${path}`);
@@ -186,6 +220,7 @@ describe("control web", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const path = String(input);
         if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/capacity")) return json(infrastructureCapacity());
         if (path.includes("/runs")) return json({ items: [], next_cursor: null });
         if (path.includes("/endpoints")) return json({ items: [], next_cursor: null });
         throw new Error(`unexpected request: ${path}`);
@@ -229,6 +264,7 @@ describe("control web", () => {
         const path = String(input);
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system("enabled"));
+        if (path.endsWith("/api/v1/capacity")) return json(infrastructureCapacity());
         if (path.includes("/endpoints")) return json({ items: [], next_cursor: null });
         if (path.includes("/runs"))
           return json({
@@ -268,6 +304,15 @@ describe("control web", () => {
     expect(screen.getByText("Observed spend (USD)")).toBeInTheDocument();
     expect(screen.getByText("Runs, oldest to newest")).toBeInTheDocument();
     expect(screen.getByText(formatMoney(50_000))).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Job infrastructure" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("112/128")).toBeInTheDocument();
+    expect(screen.getByText("Per-run reservations (7)")).toBeInTheDocument();
+    expect(screen.getAllByText("16/16 reserved, 0 available")).toHaveLength(7);
+    expect(
+      screen.getByText(/82 reserved slots do not currently have/i),
+    ).toBeInTheDocument();
   });
 
   it("disables mutation controls when deployment writes are disabled", async () => {
@@ -608,6 +653,60 @@ describe("control web", () => {
     expect(screen.getByText(formatMoney(1_000_000))).toBeInTheDocument();
   });
 
+  it("distinguishes queued launches from suppressed Jobs", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/jobs"))
+          return json({
+            items: [
+              {
+                action_id: "action-job-queued",
+                run_id: "run-job-1",
+                action_kind: "job.launch",
+                generation: 1,
+                target: "task-1",
+                outcome: null,
+                observed_state: null,
+                resource_id: null,
+                inspect_url: null,
+                created_at: "2026-08-18T00:00:00.000Z",
+                cost_microusd: 0,
+                assigned_tasks: 1,
+              },
+              {
+                action_id: "action-job-suppressed",
+                run_id: "run-job-1",
+                action_kind: "job.launch",
+                generation: 1,
+                target: "task-2",
+                outcome: "completed",
+                observed_state: "suppressed-cancelled",
+                resource_id: null,
+                inspect_url: null,
+                created_at: "2026-08-18T00:00:01.000Z",
+                cost_microusd: 0,
+                assigned_tasks: 1,
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+
+    renderApp("/jobs");
+
+    expect((await screen.findAllByText("Queued")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Not created")).toBeInTheDocument();
+    expect(screen.getByText("Suppressed Cancelled")).toBeInTheDocument();
+    expect(screen.queryByText("Pending")).not.toBeInTheDocument();
+  });
+
   it("shows run request errors instead of a false not-found state", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
@@ -906,7 +1005,7 @@ describe("control web", () => {
     expect(screen.getByText("Timed out").className).toContain("amber");
     expect(screen.getByText("Job capacity")).toBeInTheDocument();
     expect(await screen.findByText("Namespace Job Capacity")).toBeInTheDocument();
-    expect(screen.getByText("3/8 active")).toBeInTheDocument();
+    expect(screen.getByText(/3\/8 reserved, 5 available/)).toBeInTheDocument();
   });
 
   it("queues eligible infrastructure retries from a finished run", async () => {

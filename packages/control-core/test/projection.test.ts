@@ -1,3 +1,4 @@
+import { setImmediate as scheduleImmediate } from "node:timers";
 import type { AttemptReceipt } from "@harbor-hf/contracts";
 import { canonicalJson, deterministicId, sha256 } from "@harbor-hf/contracts";
 import { NoopActions } from "@harbor-hf/hf-adapters";
@@ -43,11 +44,13 @@ class ListingStore implements ImmutableObjectStore {
 }
 
 class ReadCountingStore implements ImmutableObjectStore {
+  readonly listedPrefixes: string[] = [];
   readonly readKeys: string[] = [];
 
   constructor(private readonly source: ImmutableObjectStore) {}
 
   list(prefix: string): Promise<readonly ObjectEntry[]> {
+    this.listedPrefixes.push(prefix);
     return this.source.list(prefix);
   }
 
@@ -61,7 +64,221 @@ class ReadCountingStore implements ImmutableObjectStore {
   }
 }
 
+class RebuildCatchupStore implements ImmutableObjectStore {
+  runListCount = 0;
+
+  constructor(
+    private readonly source: ImmutableObjectStore,
+    private readonly afterFirstListing: () => Promise<void>,
+  ) {}
+
+  async list(prefix: string): Promise<readonly ObjectEntry[]> {
+    const entries = await this.source.list(prefix);
+    if (prefix === "control/schema=v1/runs/") {
+      this.runListCount += 1;
+      if (this.runListCount === 1) await this.afterFirstListing();
+    }
+    return entries;
+  }
+
+  read(key: string): Promise<Uint8Array> {
+    return this.source.read(key);
+  }
+
+  create(key: string, bytes: Uint8Array) {
+    return this.source.create(key, bytes);
+  }
+}
+
+class ConcurrentReadStore implements ImmutableObjectStore {
+  activeReads = 0;
+  activeEvidenceReads = 0;
+  maxActiveReads = 0;
+  maxActiveEvidenceReads = 0;
+
+  constructor(private readonly source: ImmutableObjectStore) {}
+
+  list(prefix: string): Promise<readonly ObjectEntry[]> {
+    return this.source.list(prefix);
+  }
+
+  async read(key: string): Promise<Uint8Array> {
+    this.activeReads += 1;
+    this.maxActiveReads = Math.max(this.maxActiveReads, this.activeReads);
+    const isEvidence = key.startsWith("evidence/");
+    if (isEvidence) {
+      this.activeEvidenceReads += 1;
+      this.maxActiveEvidenceReads = Math.max(
+        this.maxActiveEvidenceReads,
+        this.activeEvidenceReads,
+      );
+    }
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return await this.source.read(key);
+    } finally {
+      this.activeReads -= 1;
+      if (isEvidence) this.activeEvidenceReads -= 1;
+    }
+  }
+
+  create(key: string, bytes: Uint8Array) {
+    return this.source.create(key, bytes);
+  }
+}
+
 describe("projection replay", () => {
+  it("reads only Run-native control trees by default", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const legacyKey = "control/schema=v1/campaigns/legacy-record.json";
+    await control.store.create(legacyKey, new TextEncoder().encode("not-json"));
+    const store = new ReadCountingStore(control.store);
+    const projection = await Projection.open(`${control.root}/run-native.sqlite`);
+
+    await projection.rebuild(store);
+    await projection.sync(store);
+
+    expect(store.listedPrefixes).toEqual([
+      "control/schema=v1/migrations/",
+      "control/schema=v1/operators/",
+      "control/schema=v1/profiles/",
+      "control/schema=v1/runs/",
+      "control/schema=v1/migrations/",
+      "control/schema=v1/operators/",
+      "control/schema=v1/profiles/",
+      "control/schema=v1/runs/",
+      "control/schema=v1/migrations/",
+      "control/schema=v1/operators/",
+      "control/schema=v1/profiles/",
+      "control/schema=v1/runs/",
+    ]);
+    expect(store.readKeys).not.toContain(legacyKey);
+    expect(projection.system()).toMatchObject({ ready: true, integrity_error: null });
+    await projection.close();
+  });
+
+  it("catches up records written during a projection rebuild", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const record = {
+      schema_version: "v1",
+      kind: "operator.acl",
+      record_id: "rebuild-catchup",
+      created_at: "2026-08-26T10:00:00.000Z",
+      actor: { subject: "projection-test", role: "migration" },
+      operators: ["operator"],
+      readers: [],
+    } as const;
+    const key = `control/schema=v1/operators/${record.record_id}.json`;
+    const store = new RebuildCatchupStore(control.store, async () => {
+      await control.store.create(key, new TextEncoder().encode(canonicalJson(record)));
+    });
+    const projection = await Projection.open(`${control.root}/catchup.sqlite`);
+
+    await projection.rebuild(store);
+
+    expect(store.runListCount).toBe(3);
+    expect(await projection.objectDigest(key)).not.toBeNull();
+    expect(await projection.latestAcl()).toMatchObject({
+      record_id: record.record_id,
+    });
+    await projection.close();
+  });
+
+  it("prefetches rebuild objects with bounded concurrency", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const store = new ConcurrentReadStore(control.store);
+    const projection = await Projection.open(`${control.root}/concurrent.sqlite`);
+
+    await projection.rebuild(store);
+
+    expect(store.maxActiveReads).toBeGreaterThan(1);
+    expect(store.maxActiveReads).toBeLessThanOrEqual(16);
+    await projection.close();
+  });
+
+  it("yields to the event loop while applying a projection rebuild", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    for (let index = 0; index < 64; index += 1) {
+      const record = {
+        schema_version: "v1",
+        kind: "operator.acl",
+        record_id: `rebuild-yield-${index}`,
+        created_at: `2026-08-24T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        actor: { subject: "projection-test", role: "migration" },
+        operators: ["operator"],
+        readers: [],
+      } as const;
+      await control.store.create(
+        `control/schema=v1/operators/${record.record_id}.json`,
+        new TextEncoder().encode(canonicalJson(record)),
+      );
+    }
+    const projection = await Projection.open(`${control.root}/yield.sqlite`);
+    let heartbeatObserved = false;
+    scheduleImmediate(() => {
+      heartbeatObserved = true;
+    });
+
+    await projection.rebuild(control.store);
+
+    expect(heartbeatObserved).toBe(true);
+    await projection.close();
+  });
+
+  it("verifies rebuild evidence with bounded concurrency", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    const submitted = await control.service.submit(input, "concurrent-evidence-key", {
+      subject: "operator",
+      role: "operator",
+    });
+    for (const [index, taskId] of ["task-001", "task-002"].entries()) {
+      const launch = control.service.actionIntent(
+        submitted.run_id,
+        "job.launch",
+        taskId,
+        0,
+        {
+          worker_role: "execution",
+          task_id: taskId,
+          task_ids: [taskId],
+        },
+      );
+      await control.service.writeAction(launch);
+      const evidenceBytes = new TextEncoder().encode(`evidence-${taskId}`);
+      const evidenceDigest = sha256(evidenceBytes);
+      const evidencePath = `evidence/test/${evidenceDigest.slice("sha256:".length)}`;
+      await control.store.create(evidencePath, evidenceBytes);
+      await control.service.attempt({
+        run_id: submitted.run_id,
+        task_id: taskId,
+        attempt_id: `attempt-${taskId}`,
+        action_id: launch.action_id,
+        outcome: "complete",
+        replacement_eligible: false,
+        evidence_digest: evidenceDigest,
+        evidence_path: evidencePath,
+        cost_microusd: 0,
+        metrics: {},
+        completed_at: `2026-08-25T12:00:0${index}.000Z`,
+      });
+    }
+    const store = new ConcurrentReadStore(control.store);
+    const projection = await Projection.open(
+      `${control.root}/evidence-concurrent.sqlite`,
+    );
+
+    await projection.rebuild(store);
+
+    expect(store.maxActiveEvidenceReads).toBeGreaterThan(1);
+    expect(store.maxActiveEvidenceReads).toBeLessThanOrEqual(16);
+    await projection.close();
+  });
+
   it("is independent of Bucket listing order", async () => {
     const control = await createTestControl();
     controls.push(control);
@@ -175,7 +392,7 @@ describe("projection replay", () => {
       operators: ["operator"],
       readers: [],
     } as const;
-    const firstKey = "control/schema=v1/auth/operator-acl-first.json";
+    const firstKey = "control/schema=v1/operators/operator-acl-first.json";
     const firstBytes = new TextEncoder().encode(canonicalJson(first));
     await control.store.create(firstKey, firstBytes);
     const rebuildKeys = (await control.store.list("control/schema=v1")).map(
@@ -198,7 +415,7 @@ describe("projection replay", () => {
       created_at: "2026-08-24T00:00:01.000Z",
       readers: ["reader"],
     } as const;
-    const secondKey = "control/schema=v1/auth/operator-acl-second.json";
+    const secondKey = "control/schema=v1/operators/operator-acl-second.json";
     const secondBytes = new TextEncoder().encode(canonicalJson(second));
     await control.store.create(secondKey, secondBytes);
 
@@ -281,7 +498,7 @@ describe("projection replay", () => {
       operators: ["operator"],
       readers: [],
     } as const;
-    const firstKey = `control/schema=v1/auth/${first.record_id}.json`;
+    const firstKey = `control/schema=v1/operators/${first.record_id}.json`;
     const firstBytes = new TextEncoder().encode(canonicalJson(first));
     await control.store.create(firstKey, firstBytes);
     const identity = (changed: boolean) => `xet:${(changed ? "b" : "a").repeat(64)}`;

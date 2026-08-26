@@ -1,4 +1,4 @@
-import { buildApp } from "./app.js";
+import { buildApp, warmResultItems } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createRuntime } from "./runtime.js";
 
@@ -30,6 +30,12 @@ try {
   // rebuild of the live store now exceeds that window.
   await app.listen({ host: "0.0.0.0", port: config.port });
   await runtime.initialize();
+  void warmResultItems(runtime).catch((error: unknown) => {
+    app.log.warn(
+      { error_name: error instanceof Error ? error.name : "Error" },
+      "result catalog cache warm failed",
+    );
+  });
   runtime.start((error) => {
     app.log.error({ err: errorDetails(error) }, "reconciler tick failed");
   });

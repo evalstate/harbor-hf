@@ -34,6 +34,7 @@ import { createRuntime, type Runtime } from "../src/runtime.js";
 const roots: string[] = [];
 const runtimes: Runtime[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
   await Promise.all(
@@ -925,7 +926,22 @@ describe("control API", () => {
       alias: "capacity-test",
       configured: true,
       max_active_jobs: 1,
+      active_jobs: 0,
+      available_jobs: 1,
+      queued_jobs: 0,
+      observed_running_jobs: 0,
+      observed_scheduling_jobs: 0,
+      reserved_without_active_observation: 0,
       start_burst: 1,
+      runs: [],
+      hardware: [
+        {
+          hardware: "cpu-upgrade",
+          max_active_jobs: 1,
+          active_jobs: 0,
+          available_jobs: 1,
+        },
+      ],
     });
 
     const updated = await app.inject({
@@ -1876,8 +1892,23 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("ignores invalid result catalogs that no current publication references", async () => {
+    const { runtime, app } = await setup();
+    await runtime.store.create(
+      "results/schema=v1/catalog/retired-invalid.json",
+      new TextEncoder().encode(canonicalJson({ retired: true })),
+    );
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/results" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ items: [], next_cursor: null });
+    await app.close();
+  });
+
   it("serves validated imported result catalogs", async () => {
     const { runtime, app } = await setup();
+    const monotonicNow = vi.spyOn(performance, "now").mockReturnValue(0);
     const catalog = {
       schema_version: "v1",
       kind: "result.catalog",
@@ -1904,11 +1935,21 @@ describe("control API", () => {
         },
       ],
     };
+    const listObjects = vi.spyOn(runtime.store, "list");
+    const initial = await app.inject({ method: "GET", url: "/api/v1/results" });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toEqual({ items: [], next_cursor: null });
+    expect(listObjects).toHaveBeenCalledTimes(1);
+
     await runtime.store.create(
       "results/schema=v1/catalog/imports/catalog-import-one.json",
       new TextEncoder().encode(canonicalJson(catalog)),
     );
+    const stillCached = await app.inject({ method: "GET", url: "/api/v1/results" });
+    expect(stillCached.json()).toEqual({ items: [], next_cursor: null });
+    expect(listObjects).toHaveBeenCalledTimes(1);
 
+    monotonicNow.mockReturnValue(runtime.config.sync_interval_ms);
     const response = await app.inject({ method: "GET", url: "/api/v1/results" });
 
     expect(response.statusCode).toBe(200);
@@ -1941,6 +1982,23 @@ describe("control API", () => {
     });
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toMatchObject({ publication_id: "publication-one" });
+    expect(listObjects).toHaveBeenCalledTimes(2);
+
+    await runtime.projection.db
+      .insertInto("publications")
+      .values({
+        publication_id: "publication-cache-invalidation",
+        run_id: "run-cache-invalidation",
+        status: "published",
+        catalog_digest: null,
+        body: "{}",
+        created_at: "2026-08-16T00:00:01Z",
+      })
+      .execute();
+    expect(
+      (await app.inject({ method: "GET", url: "/api/v1/results" })).statusCode,
+    ).toBe(200);
+    expect(listObjects).toHaveBeenCalledTimes(3);
     await app.close();
   });
 

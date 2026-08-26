@@ -4,6 +4,8 @@ export type SessionResponse =
   paths["/api/v1/auth/session"]["get"]["responses"][200]["content"]["application/json"];
 export type SystemResponse =
   paths["/api/v1/system"]["get"]["responses"][200]["content"]["application/json"];
+export type NamespaceCapacity =
+  paths["/api/v1/capacity"]["get"]["responses"][200]["content"]["application/json"];
 export type RunList =
   paths["/api/v1/runs"]["get"]["responses"][200]["content"]["application/json"];
 export type Run =

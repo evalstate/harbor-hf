@@ -8,6 +8,7 @@ import os
 import platform
 import pwd
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -288,19 +289,151 @@ def test_copied_layout_preserves_locked_layers_and_config_semantics(
         )
 
 
-def test_skopeo_copy_converts_docker_manifests_to_oci(tmp_path: Path) -> None:
-    arguments = runtime._skopeo_copy_arguments(
+def test_skopeo_uses_one_remote_copy_before_local_oci_conversion(
+    tmp_path: Path,
+) -> None:
+    source = runtime._skopeo_source_copy_arguments(
         tmp_path / "auth.json",
         "docker://example.invalid/task@sha256:" + ("a" * 64),
+        tmp_path / "source",
+    )
+    conversion = runtime._skopeo_oci_copy_arguments(
+        tmp_path / "auth.json",
+        tmp_path / "source",
         tmp_path / "image",
     )
 
-    assert arguments[0:2] == ["skopeo", "copy"]
-    assert arguments[arguments.index("--format") : arguments.index("--format") + 2] == [
-        "--format",
-        "oci",
+    assert source[0:2] == ["skopeo", "copy"]
+    assert source[-1] == f"dir:{tmp_path / 'source'}"
+    assert "--format" not in source
+    assert conversion[0:2] == ["skopeo", "copy"]
+    format_index = conversion.index("--format")
+    assert conversion[format_index : format_index + 2] == ["--format", "oci"]
+    assert conversion[-2:] == [
+        f"dir:{tmp_path / 'source'}",
+        f"oci:{tmp_path / 'image'}:task",
     ]
-    assert "--preserve-digests" not in arguments
+
+
+def test_remote_copy_stops_after_bounded_directory_growth(tmp_path: Path) -> None:
+    destination = tmp_path / "source"
+    destination.mkdir()
+    script = (
+        "import pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_bytes(b'x' * 4096); time.sleep(10)"
+    )
+
+    with pytest.raises(OciImageIntegrityError, match="bounded compressed byte"):
+        runtime._run_checked_with_directory_limit(
+            [sys.executable, "-c", script, str(destination / "blob")],
+            environment=dict(os.environ),
+            label="test copy",
+            directory=destination,
+            max_bytes=1024,
+        )
+
+
+def test_remote_copy_concurrently_drains_and_bounds_both_streams(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "source"
+    destination.mkdir()
+    retained = 16 * 1024
+    monkeypatch.setattr(runtime, "_MAX_COMMAND_OUTPUT_BYTES", retained)
+    script = """
+import os
+import sys
+import time
+
+size = int(sys.argv[1])
+remaining = {1: size, 2: size}
+values = {1: b"o", 2: b"e"}
+for descriptor in remaining:
+    os.set_blocking(descriptor, False)
+deadline = time.monotonic() + 5
+while any(remaining.values()):
+    progressed = False
+    for descriptor in (1, 2):
+        count = remaining[descriptor]
+        if count == 0:
+            continue
+        try:
+            written = os.write(
+                descriptor,
+                values[descriptor] * min(count, 64 * 1024),
+            )
+        except BlockingIOError:
+            continue
+        remaining[descriptor] -= written
+        progressed = True
+    if not progressed:
+        if time.monotonic() >= deadline:
+            raise SystemExit(86)
+        time.sleep(0.001)
+"""
+
+    result = runtime._run_checked_with_directory_limit(
+        [sys.executable, "-c", script, str(512 * 1024)],
+        environment=dict(os.environ),
+        label="test copy",
+        directory=destination,
+        max_bytes=1,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == b"o" * retained + runtime._OUTPUT_TRUNCATION_NOTICE
+    assert result.stderr == b"e" * retained + runtime._OUTPUT_TRUNCATION_NOTICE
+
+
+def test_copied_concrete_manifest_needs_no_remote_inspection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = {"architecture": "arm64", "os": "linux"}
+    raw_config = json.dumps(config, separators=(",", ":")).encode()
+    config_digest = f"sha256:{hashlib.sha256(raw_config).hexdigest()}"
+    raw_manifest = json.dumps(
+        {
+            "schemaVersion": 2,
+            "config": {
+                "digest": config_digest,
+                "size": len(raw_config),
+            },
+            "layers": [],
+        },
+        separators=(",", ":"),
+    ).encode()
+    manifest_digest = f"sha256:{hashlib.sha256(raw_manifest).hexdigest()}"
+    labels: list[str] = []
+
+    def fake_run(
+        arguments: list[str],
+        *,
+        environment: dict[str, str],
+        label: str,
+    ) -> subprocess.CompletedProcess[bytes]:
+        del environment
+        labels.append(label)
+        output = raw_config if "--config" in arguments else raw_manifest
+        return subprocess.CompletedProcess(arguments, 0, output, b"")
+
+    monkeypatch.setattr(runtime, "_run_checked", fake_run)
+
+    manifest, copied_config = runtime._copied_source_image(
+        tmp_path / "source",
+        f"example.invalid/task@{manifest_digest}",
+        tmp_path / "auth.json",
+        {},
+        _image_limits(),
+    )
+
+    assert manifest.config.digest == config_digest
+    assert copied_config == config
+    assert labels == [
+        "local task image manifest inspection",
+        "local task image config inspection",
+    ]
 
 
 def test_layer_scan_rejects_expansion_before_extraction(tmp_path: Path) -> None:
@@ -453,7 +586,7 @@ def test_rootfs_limits_reject_bytes_and_entries_before_mapping(tmp_path: Path) -
         )
 
 
-def test_proot_exposes_only_dns_proc_and_safe_devices(tmp_path: Path) -> None:
+def test_proot_exposes_only_dns_proc_and_required_devices(tmp_path: Path) -> None:
     isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
     try:
         passwd = isolated.rootfs / "etc" / "passwd"
@@ -475,6 +608,7 @@ def test_proot_exposes_only_dns_proc_and_safe_devices(tmp_path: Path) -> None:
     assert arguments[0:3] == ["proot", "-r", str(isolated.rootfs)]
     assert "/etc/resolv.conf:/etc/resolv.conf" in arguments
     assert "/proc:/proc" in arguments
+    assert "/dev/pts:/dev/pts" in arguments
     assert "/dev/null:/dev/null" in arguments
     assert "/run:/run" not in arguments
     assert "/tmp:/tmp" not in arguments
@@ -484,6 +618,24 @@ def test_proot_exposes_only_dns_proc_and_safe_devices(tmp_path: Path) -> None:
     assert arguments[arguments.index("-i") : arguments.index("-i") + 2] == ["-i", "0:0"]
     assert "/usr/bin/env" in arguments
     assert "VISIBLE=yes" in arguments
+
+
+def test_guest_runtime_paths_create_devpts_mountpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime.os, "chown", lambda *_args: None)
+    rootfs = tmp_path / "rootfs"
+    for executable in ("bin/bash", "usr/bin/env"):
+        path = rootfs / executable
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    runtime._prepare_guest_runtime_paths(rootfs)
+
+    assert (rootfs / "dev" / "pts").is_dir()
+    assert (rootfs / "dev" / "ptmx").readlink() == Path("pts/ptmx")
 
 
 @pytest.mark.parametrize(
@@ -607,7 +759,7 @@ def test_setpriv_launcher_removes_every_task_privilege() -> None:
     ]
 
 
-def test_uid_freeze_waits_until_proc_reports_stopped(
+def test_uid_freeze_waits_until_proc_reports_quiescent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_reads = 0
@@ -618,12 +770,48 @@ def test_uid_freeze_waits_until_proc_reports_stopped(
         return state_reads > 1
 
     monkeypatch.setattr(runtime, "_task_process_ids", lambda: {123})
-    monkeypatch.setattr(runtime, "_task_process_is_stopped", process_state)
+    monkeypatch.setattr(runtime, "_task_process_is_quiescent", process_state)
     monkeypatch.setattr(os, "kill", lambda _pid, _signal: None)
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     assert runtime._stop_task_processes_until_stable() == {123}
     assert state_reads >= 4
+
+
+@pytest.mark.parametrize(
+    "state", ["T (stopped)", "t (tracing stop)", "Z (zombie)", "X (dead)"]
+)
+def test_task_process_quiescence_accepts_nonexecuting_states(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    monkeypatch.setattr(runtime, "_status_values", lambda _pid: {"State": state})
+
+    assert runtime._task_process_is_quiescent(123)
+
+
+@pytest.mark.parametrize("state", ["R (running)", "S (sleeping)", "D (disk sleep)"])
+def test_task_process_quiescence_rejects_executable_states(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    monkeypatch.setattr(runtime, "_status_values", lambda _pid: {"State": state})
+
+    assert not runtime._task_process_is_quiescent(123)
+
+
+def test_task_cleanup_accepts_zombie_after_sigkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(runtime, "_stop_task_processes_until_stable", lambda: {123})
+    monkeypatch.setattr(runtime, "_task_process_ids", lambda: {123})
+    monkeypatch.setattr(runtime, "_task_process_is_dead", lambda _pid: True)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    runtime._kill_task_processes()
+
+    assert signals == [(123, signal.SIGKILL)]
 
 
 def test_upload_rechecks_task_parents_after_uid_freeze(

@@ -54,6 +54,7 @@ def test_retries_transient_control_http_errors(
         control_url="https://control.invalid",
         run_id="run-1",
         capability="capability",
+        retry_timeout_seconds=15,
     )
     client._opener = SimpleNamespace(open=urlopen)
 
@@ -65,6 +66,46 @@ def test_retries_transient_control_http_errors(
     assert sleeps == [1.0]
     assert requests[-1].get_header("X-harbor-hf-worker-capability") == "capability"
     assert requests[-1].get_header("Authorization") is None
+
+
+def test_retries_until_the_configured_control_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses: list[object] = [
+        HTTPError(
+            "https://control.invalid/api/v1/runs/run-1",
+            503,
+            "unavailable",
+            {},
+            io.BytesIO(b"control runtime is initializing"),
+        )
+        for _ in range(5)
+    ]
+    responses.append(_Response({"status": "ok"}))
+    sleeps: list[float] = []
+
+    def urlopen(_request: Request, **_kwargs: object) -> object:
+        response = responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    monkeypatch.setattr(control_client.time, "sleep", sleeps.append)
+    client = control_client.ControlClient(
+        control_url="https://control.invalid",
+        run_id="run-1",
+        capability="capability",
+        retry_timeout_seconds=31,
+    )
+    client._opener = SimpleNamespace(open=urlopen)
+
+    assert client.request_sync(
+        "POST",
+        "/api/v1/runs/run-1/prepared-job",
+        idempotency_key="prepare-task",
+        body={"phase": "trial"},
+    ) == {"status": "ok"}
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0]
 
 
 @pytest.mark.parametrize(
@@ -110,6 +151,7 @@ def test_rejects_non_origin_control_urls(url: str) -> None:
             control_url=url,
             run_id="run-1",
             capability="capability",
+            retry_timeout_seconds=15,
         )
 
 

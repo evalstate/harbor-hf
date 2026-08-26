@@ -322,6 +322,7 @@ also present in the service access list.
 The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. Dashboard harnesses that speak Chat Completions (OpenCode, Qwen Code, mini-swe-agent, Pi, Kimi Code, Hermes, OpenHands, OpenClaw, FX, and DeepSeek Harness) call the inference bridge inside their physical trial Job. The Job receives only the dedicated inference credential required by its immutable deployment profile. Codex and Claude Code stay off that route because they need a native API the router path cannot preserve. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
 
 Console tables keep their headers visible while scrolling and provide a text filter under every column. Filters apply to the loaded page; clear them together with **Clear filters**. Run detail loads the complete logical benchmark task list in one request. Task detail shows every attempt's `job.launch` action and projected HF Job status, while marking the one valid selected result. Preparation uses one trusted Job for the Run. Execution launches one physical Job for each logical trial attempt, so an infrastructure replacement adds another Job for the same task.
+Launch-policy execution reservations apply to each physical trial Job. Preparation reservations apply to each permitted preparation attempt.
 
 The trusted, digest-pinned deployment Job image is the worker boundary. The
 digest-pinned benchmark image remains task data and never supplies the physical
@@ -330,6 +331,22 @@ only its assigned projection-validated prepared trial, checks its Python-origin
 Harbor lock digest and image binding, and executes Harbor once. It rejects
 separate verifier images and uploads a canonical evidence manifest for
 failures; the controller alone decides whether to launch a replacement Job.
+Worker control requests retry transient HTTP failures with capped backoff for
+the locked Job timeout, so in-flight preparation and evidence writes can
+survive a control projection rebuild. Reconciliation dispatches queued Jobs
+before scheduled Bucket syncs so remote projection latency does not block work.
+It polls active Job states from a short-lived, single-flight namespace cache,
+yields while recording each batch, then pushes changes to the web application.
+It also yields between bounded Run batches so web requests remain responsive.
+Projection rebuilds yield after bounded local database batches, and integrity
+verification loads historical Job evidence in one indexed query instead of
+scanning it once per release. Bucket reads retry bounded transient Hub transport
+and HTTP failures during rebuilds. Before accepting writes, a rebuilt projection
+also catches up records created after its initial Bucket listing.
+The validated result catalog is warmed in memory. Publication or supersession
+metadata invalidates it immediately; otherwise the service fingerprints Bucket
+catalog metadata at the configured sync interval and rebuilds only when that
+metadata changes.
 
 The CLI submits the same lock through promoted profile aliases:
 
@@ -372,7 +389,7 @@ harbor-hf audit
 harbor-hf capacity
 ```
 
-The shared namespace Job cap limits how many physical Jobs can run at once across runs. It defaults to 16. Update it through the control API without changing a locked run's per-run `max_jobs`. The idempotency key is durable: the same key and payload adopt the first update, while a different payload conflicts.
+The shared namespace Job cap limits how many physical Jobs can run at once across runs. It defaults to 16. Update it through the control API without changing a locked run's per-run `max_jobs`. The Overview shows reserved, available, queued, and last-observed Running or Scheduling Jobs, plus usage for each hardware limit. The idempotency key is durable: the same key and payload adopt the first update, while a different payload conflicts.
 
 ```bash
 curl -X POST "$HARBOR_HF_CONTROL_URL/api/v1/capacity" \
@@ -401,7 +418,7 @@ harbor-hf run retry-infrastructure <run-id> \
 
 The run page has the same control: **Retry infrastructure failures**. It only queues replacement Jobs for eligible infrastructure outcomes, including an infrastructure seal that should not have closed the logical task. Scored misses and other sealed outcomes stay sealed. A retry is a Job on the existing run. The run list does not add a second row. Each replacement receipt names the `job.launch` action that produced it.
 
-If a trial Job ends without a valid result, the control service records an infrastructure attempt and may launch one replacement Job for that task. The deployment profile's `max_infrastructure_attempts`, per-Run `max_jobs`, namespace Job capacity, start-rate policy, and cost ceiling bound replacements. A failed reconciliation cycle writes a structured error log and retries on the next cycle instead of stalling silently.
+If a trial Job ends without a valid result for a reason other than its locked timeout, the control service records an infrastructure attempt and may launch one replacement Job for that task. A timed-out Harbor process with no result seals `benchmark_timeout` without replacement. The deployment profile's `max_infrastructure_attempts`, per-Run `max_jobs`, namespace Job capacity, start-rate policy, and cost ceiling bound replacements. A failed reconciliation cycle writes a structured error log and retries on the next cycle instead of stalling silently.
 
 Pausing stops preparation and execution dispatch without discarding terminal Job evidence. A resume task limit selects the first unresolved tasks in locked order and carries that selection through preparation into execution. Resume preserves the failed Job as `prior_attempt`, and bulk infrastructure retry adopts one durable ordered command when the same idempotency key is replayed. Actual receipts remain durable if observed spend crosses the ceiling; the Run becomes budget-exceeded and cannot reserve more work or publish.
 
@@ -425,7 +442,7 @@ Publication is independent of execution. A publication retry rebuilds determinis
 - A prepared execution Job starts from the reviewed digest-pinned worker image, not the benchmark image. The root worker verifies and unpacks the locked benchmark OCI image, strips privilege-bearing filesystem metadata, and maps the rootfs to one dedicated high host UID/GID.
 - The self-contained worker image includes pinned Python, Harbor, and Harbor-HF agent code. `setpriv` gives every task, agent, and shared verifier command real UID/GID 60000, empty supplementary groups, no capabilities, and `no_new_privs`. PRoot supplies only the unpacked filesystem view and fake task-image user identity. It is not the security boundary.
 - Preflight requires `git`, `proot`, `setpriv`, `skopeo`, and `umoci`, an unused task UID/GID, no effective `CAP_SYS_PTRACE`, and successful root-file and root-process-environment denial probes. Unsupported isolation is replacement-eligible infrastructure.
-- Only the root-owned bridge can read `HF_INFERENCE_TOKEN`. Task processes receive a loopback inference URL, and the bridge enforces the locked model, request size, output token, and concurrency limits.
+- Only the root-owned bridge can read `HF_INFERENCE_TOKEN`. Task processes receive a loopback inference URL, provider-specific credential aliases, and the locked output-token limit. The bridge enforces the locked model, request size, output token, and concurrency limits, then records root-owned provider request and token totals. A harness that completes without positive trusted provider usage is replacement-eligible infrastructure, not a sealed semantic result.
 - The worker repeatedly enumerates the dedicated UID, stops every matching process until the set is stable, kills all of them, and verifies none remain. This includes processes that call `setsid` or fork during cleanup. Root-owned direct file copies reject traversal, links, and special files while enforcing total-byte, per-file-byte, entry-count, and path-depth limits.
 - A terminal logical task cannot run again. Infrastructure repair creates a new physical attempt only for the failed task.
 - Endpoint cleanup is complete only after a pause record reports zero ready replicas.
@@ -435,8 +452,10 @@ Publication is independent of execution. A publication retry rebuilds determinis
 
 The one-time reset tool deletes only reviewed Run-derived Bucket prefixes and
 fails on every unknown path. It preserves benchmark bundles, profiles,
-promotions, capacity policy, operator ACLs, and migration records. The default
-mode only writes a local, secret-free manifest:
+promotions, capacity policy, operator ACLs, and migration records. Normal
+control startup does not require this destructive reset: the Run-native
+projection ignores retired control trees while their objects remain in the
+Bucket. The default reset mode only writes a local, secret-free manifest:
 
 ```bash
 uv run python scripts/reset_run_data.py \
@@ -473,6 +492,21 @@ The final verification manifest stays local.
 ```bash
 uv run python -m json.tool run-data-reset-verification.json
 ```
+
+For an approved targeted recovery, repeat `--run-id` to inventory and delete
+only those Runs' current control and evidence trees. The manifest stores
+digests of the selected IDs and prefixes instead of the IDs themselves:
+
+```bash
+uv run python scripts/reset_run_data.py \
+  --bucket "<namespace>/<artifact-bucket>" \
+  --run-id "<failed-run-1>" \
+  --run-id "<failed-run-2>" \
+  --manifest targeted-run-reset-dry-run.json
+```
+
+Apply the reviewed targeted manifest with the same `--run-id` arguments plus
+the standard `--apply`, confirmation, digest, and verification options.
 
 ## Migrate preserved profiles during Run-native cutover
 

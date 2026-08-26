@@ -34,10 +34,14 @@ def test_starts_host_bridge_with_only_required_settings(
     route = tmp_path / "route.json"
     handle = tmp_path / "handle.json"
     log = tmp_path / "bridge.log"
+    usage = tmp_path / "usage.json"
+    usage_temp = tmp_path / "usage.json.tmp"
     monkeypatch.setattr(job_root_bridge, "_TOKEN_PATH", token)
     monkeypatch.setattr(job_root_bridge, "_ROUTE_PATH", route)
     monkeypatch.setattr(job_root_bridge, "_HANDLE_PATH", handle)
     monkeypatch.setattr(job_root_bridge, "_LOG_PATH", log)
+    monkeypatch.setattr(job_root_bridge, "_USAGE_PATH", usage)
+    monkeypatch.setattr(job_root_bridge, "_USAGE_TEMP_PATH", usage_temp)
     monkeypatch.setattr(job_root_bridge.os, "geteuid", lambda: 0)
     monkeypatch.setattr(job_root_bridge, "_process_start_time", lambda _pid: 123)
     monkeypatch.setattr(job_root_bridge, "_wait_ready", lambda _process: None)
@@ -90,6 +94,7 @@ def test_starts_host_bridge_with_only_required_settings(
         "HARBOR_HF_INFERENCE_TOKEN_FILE",
         "HARBOR_HF_INFERENCE_LOCAL_PORT",
         "HARBOR_HF_INFERENCE_ALLOWED_PATH",
+        "HARBOR_HF_INFERENCE_USAGE_FILE",
         "HARBOR_HF_INFERENCE_UPSTREAM",
         "HARBOR_HF_INFERENCE_ALLOWED_MODEL",
         "HARBOR_HF_INFERENCE_MAX_REQUESTS",

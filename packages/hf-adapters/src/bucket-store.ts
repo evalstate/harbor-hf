@@ -1,33 +1,42 @@
+import { sha256 } from "@harbor-hf/contracts";
+import {
+  type CreateResult,
+  ImmutableConflictError,
+  type ImmutableObjectStore,
+  type ObjectEntry,
+} from "@harbor-hf/control-core";
 import {
   downloadFile,
+  HubApiError,
   type ListFileEntry,
   listFiles,
   uploadFile,
 } from "@huggingface/hub";
-import { sha256 } from "@harbor-hf/contracts";
-import {
-  type CreateResult,
-  type ImmutableObjectStore,
-  ImmutableConflictError,
-  type ObjectEntry,
-} from "@harbor-hf/control-core";
 
 const defaultRetryDelaysMs = [250, 1_000, 3_000] as const;
+const defaultListTimeoutMs = 30_000;
 const xetHashPattern = /^[0-9a-f]{64}$/i;
 
 export interface HuggingFaceBucketStoreOptions {
   bucketId: string;
   accessToken: string;
   retryDelaysMs?: readonly number[];
+  listTimeoutMs?: number;
 }
 
 function transientDownloadError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (
+    error instanceof HubApiError &&
+    [408, 429, 500, 502, 503, 504].includes(error.statusCode)
+  )
+    return true;
+  if (
     error.name === "TypeError" &&
     (error.message === "fetch failed" || error.message === "terminated")
   )
     return true;
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
   const code = (error as NodeJS.ErrnoException).code;
   if (
     code === "ECONNRESET" ||
@@ -60,33 +69,49 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
   private readonly repo: { type: "bucket"; name: string };
   private readonly credentials: { accessToken: string };
   private readonly retryDelaysMs: readonly number[];
+  private readonly listTimeoutMs: number;
   private readonly cache = new Map<string, Uint8Array>();
+  private readonly sourceIdentities = new Map<string, string>();
   private queue: Promise<void> = Promise.resolve();
 
   constructor(options: HuggingFaceBucketStoreOptions) {
     this.repo = { type: "bucket", name: options.bucketId };
     this.credentials = { accessToken: options.accessToken };
     this.retryDelaysMs = options.retryDelaysMs ?? defaultRetryDelaysMs;
+    this.listTimeoutMs = options.listTimeoutMs ?? defaultListTimeoutMs;
+    if (!Number.isSafeInteger(this.listTimeoutMs) || this.listTimeoutMs <= 0)
+      throw new Error("Bucket list timeout must be a positive integer");
   }
 
   async list(prefix: string): Promise<readonly ObjectEntry[]> {
-    const files: ObjectEntry[] = [];
-    for await (const entry of listFiles({
-      repo: this.repo,
-      path: prefix,
-      recursive: true,
-      expand: true,
-      ...this.credentials,
-    })) {
-      if (entry.type === "file")
-        files.push({
-          key: entry.path,
-          size: entry.size,
-          source_identity: sourceIdentity(entry),
-        });
-    }
+    const files = await this.listEntriesWithRetry(prefix, true);
+    this.observeSourceIdentities(files);
     files.sort((left, right) => left.key.localeCompare(right.key));
     return files;
+  }
+
+  private observeSourceIdentities(entries: readonly ObjectEntry[]): void {
+    for (const entry of entries) {
+      const previous = this.sourceIdentities.get(entry.key);
+      if (previous !== undefined && previous !== entry.source_identity)
+        this.cache.delete(entry.key);
+      this.sourceIdentities.set(entry.key, entry.source_identity);
+    }
+  }
+
+  private async listEntriesWithRetry(
+    key: string,
+    recursive: boolean,
+  ): Promise<ObjectEntry[]> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.listEntries(key, recursive);
+      } catch (error) {
+        const delay = this.retryDelaysMs[attempt];
+        if (delay === undefined || !transientDownloadError(error)) throw error;
+        await sleep(delay);
+      }
+    }
   }
 
   async read(key: string): Promise<Uint8Array> {
@@ -164,25 +189,36 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
   }
 
   private async objectMetadata(key: string): Promise<ObjectEntry> {
+    const entries = await this.listEntriesWithRetry(key, false);
+    this.observeSourceIdentities(entries);
+    const entry = entries[0];
+    if (entries.length !== 1 || !entry)
+      throw new Error(`Bucket object metadata is unavailable or ambiguous: ${key}`);
+    return entry;
+  }
+
+  private async listEntries(key: string, recursive: boolean): Promise<ObjectEntry[]> {
     const entries: ObjectEntry[] = [];
     for await (const entry of listFiles({
       repo: this.repo,
       path: key,
-      recursive: false,
+      recursive,
       expand: true,
+      fetch: (input, init) =>
+        fetch(input, {
+          ...init,
+          signal: AbortSignal.timeout(this.listTimeoutMs),
+        }),
       ...this.credentials,
     })) {
-      if (entry.type === "file" && entry.path === key)
+      if (entry.type === "file" && (recursive || entry.path === key))
         entries.push({
           key: entry.path,
           size: entry.size,
           source_identity: sourceIdentity(entry),
         });
     }
-    const entry = entries[0];
-    if (entries.length !== 1 || !entry)
-      throw new Error(`Bucket object metadata is unavailable or ambiguous: ${key}`);
-    return entry;
+    return entries;
   }
 
   private async stableSourceIdentity(key: string, digest: string): Promise<string> {

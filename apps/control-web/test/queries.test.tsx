@@ -6,12 +6,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   affectedQueryKeys,
   collectPagedItems,
-  SSE_INVALIDATION_DEBOUNCE_MS,
   keys,
+  SSE_INVALIDATION_DEBOUNCE_MS,
   useAllProfiles,
-  useRunJobs,
   useJobs,
   useLiveUpdates,
+  useRunJobs,
   useTasks,
 } from "../src/queries";
 
@@ -101,6 +101,7 @@ describe("live query updates", () => {
       data: { profile_kind: "capacity", alias: "current" },
     });
     expect(affected).toContainEqual(["capacity"]);
+    expect(affected).toContainEqual(keys.infrastructureCapacity);
     expect(affected).toContainEqual(keys.profiles);
   });
 
@@ -111,6 +112,7 @@ describe("live query updates", () => {
       data: { run_id: "run-1", action_id: "action-1" },
     });
     expect(affected).toContainEqual(keys.capacity("run-1"));
+    expect(affected).toContainEqual(keys.infrastructureCapacity);
     expect(affected).toContainEqual(keys.run("run-1"));
     expect(affected).not.toContainEqual(keys.session);
   });
@@ -312,7 +314,7 @@ describe("live query updates", () => {
         });
     });
     expect(invalidate).not.toHaveBeenCalled();
-    act(() => vi.advanceTimersByTime(999));
+    act(() => vi.advanceTimersByTime(SSE_INVALIDATION_DEBOUNCE_MS - 1));
     expect(invalidate).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(1));
 

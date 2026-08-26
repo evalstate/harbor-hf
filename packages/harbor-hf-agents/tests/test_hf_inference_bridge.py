@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import socket
 import subprocess
 import sys
-import textwrap
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from harbor_hf_agents.support.hf_inference_bridge import (
+    _bridge_script,
+    _response_usage,
     _run_hf_inference_bridge,
     _upstream_request_path,
     is_hf_inference_url,
@@ -64,13 +67,11 @@ def test_upstream_request_path_has_one_api_version(
     assert _upstream_request_path(upstream_path, request_path) == expected
 
 
-def test_embedded_bridge_runs_without_module_globals() -> None:
+def test_embedded_bridge_runs_without_module_globals(tmp_path: Path) -> None:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-    script = textwrap.dedent(inspect.getsource(_upstream_request_path))
-    script += "\n" + textwrap.dedent(inspect.getsource(_run_hf_inference_bridge))
-    script += "\n_run_hf_inference_bridge()\n"
+    script = _bridge_script()
     env = {
         **os.environ,
         "HARBOR_HF_INFERENCE_UPSTREAM": "https://router.huggingface.co/v1",
@@ -82,6 +83,7 @@ def test_embedded_bridge_runs_without_module_globals() -> None:
         "HARBOR_HF_INFERENCE_MAX_CONCURRENCY": "1",
         "HARBOR_HF_INFERENCE_TIMEOUT_SECONDS": "10",
         "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS": "64",
+        "HARBOR_HF_INFERENCE_USAGE_FILE": str(tmp_path / "usage.json"),
     }
     process = subprocess.Popen(
         [sys.executable, "-c", script],
@@ -114,6 +116,42 @@ def test_embedded_bridge_runs_without_module_globals() -> None:
     finally:
         process.terminate()
         process.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            json.dumps(
+                {"usage": {"prompt_tokens": 12, "completion_tokens": 3}}
+            ).encode(),
+            (12, 3),
+        ),
+        (
+            (
+                b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                b'data: {"choices":[],"usage":{"prompt_tokens":21,'
+                b'"completion_tokens":5}}\n\ndata: [DONE]\n\n'
+            ),
+            (21, 5),
+        ),
+        (
+            (
+                b"event: response.completed\n"
+                b'data: {"type":"response.completed","response":{"usage":'
+                b'{"input_tokens":34,"output_tokens":8}}}\n\n'
+            ),
+            (34, 8),
+        ),
+        (b'{"usage":{"prompt_tokens":true,"completion_tokens":3}}', None),
+        (b"data: [DONE]\n\n", None),
+    ],
+)
+def test_extracts_trusted_provider_usage(
+    body: bytes,
+    expected: tuple[int, int] | None,
+) -> None:
+    assert _response_usage(body) == expected
 
 
 _LIMITS = {
@@ -207,6 +245,7 @@ async def test_bridge_isolates_inference_token_from_agent_environment() -> None:
         "HARBOR_HF_INFERENCE_MAX_CONCURRENCY": "4",
         "HARBOR_HF_INFERENCE_TIMEOUT_SECONDS": "1800",
         "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS": "32768",
+        "HARBOR_HF_INFERENCE_USAGE_FILE": ("/tmp/harbor-hf-inference-usage.json"),
     }
     assert len(agent.agent_calls) == 1
     assert "harbor-hf-inference.token" in agent.agent_calls[0][1]

@@ -54,6 +54,7 @@ async def test_job_route_injects_loopback_env(
     assert run_call.kwargs["env"]["OPENAI_BASE_URL"] == "http://127.0.0.1:18080/v1"
     assert run_call.kwargs["env"]["OPENAI_API_BASE"] == "http://127.0.0.1:18080/v1"
     assert run_call.kwargs["env"]["MSWEA_API_KEY"] == "harbor-local-inference-bridge"
+    assert run_call.kwargs["env"]["OPENAI_API_KEY"] == "harbor-local-inference-bridge"
 
 
 @pytest.mark.asyncio

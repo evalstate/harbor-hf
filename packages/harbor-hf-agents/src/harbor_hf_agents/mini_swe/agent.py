@@ -30,3 +30,6 @@ class MiniSweAgent(JobChatCompletionsAgent, HarborMiniSweAgent):
 
     def extend_route_env(self, env: dict[str, str]) -> None:
         env["OPENAI_API_BASE"] = env["OPENAI_BASE_URL"]
+        # mini-swe-agent 2.4.6 passes provider credentials to LiteLLM, which
+        # requires the provider-standard key even though Harbor reads MSWEA_API_KEY.
+        env["OPENAI_API_KEY"] = env["MSWEA_API_KEY"]

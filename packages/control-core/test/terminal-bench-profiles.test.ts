@@ -9,9 +9,9 @@ import {
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
-const WORKER_REVISION = "411ee5f9d7a9e70ed37666fdb84ee176453c04b6";
+const WORKER_REVISION = "dd53f45bde78be145e779061041a67b1804f30d8";
 const WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:7afe1cdac0d3208c1a0968cacdf3c95fbcb64f8f604591dd3ebc8d6190d8226e";
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:a1076b8e8994e9ce7db7b609c6cc58a6e4721da23b916b3fad27e5adb2ccf44e";
 const HARBOR_SOURCE =
   "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
 const PREPARATION_COMMAND = [
@@ -106,6 +106,52 @@ describe("Terminal-Bench 2.1 profiles", () => {
     expect(harness.reasoning_effort).toBe("high");
     expect(kwargs.version).toBe("0.84.2");
     expect(kwargs.thinking).toBe("high");
+  });
+
+  it("lock the DeepInfra model, Pi harness, and deployment", async () => {
+    const model = record(
+      (await profile("model", "deepseek-v4-flash-0731-deepinfra")).spec,
+    );
+    const harness = record(
+      (await profile("harness", "pi-0-84-2-high-deepseek-v4-flash-0731-deepinfra"))
+        .spec,
+    );
+    const deployment = record(
+      (await profile("deployment", "tb21-deepseek-v4-flash-deepinfra-diagnostic-1"))
+        .spec,
+    );
+    const harborAgent = record(harness.harbor_agent);
+    const kwargs = record(harborAgent.kwargs);
+    const modelsJson = record(kwargs.models_json);
+    const providers = record(modelsJson.providers);
+    const openai = record(providers.openai);
+    const configuredModel = record((openai.models as unknown[])[0]);
+    const cost = record(configuredModel.cost);
+    const trialJob = record(deployment.trial_job_template);
+
+    expect(model.model_id).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
+    expect(model.harbor_model_name).toBe(
+      "openai/deepseek-ai/DeepSeek-V4-Flash-0731:deepinfra",
+    );
+    expect(harborAgent.model_name).toBe(model.harbor_model_name);
+    expect(configuredModel.id).toBe("deepseek-ai/DeepSeek-V4-Flash-0731:deepinfra");
+    expect(cost).toEqual({
+      input: 0.08,
+      output: 0.18,
+      cacheRead: 0.016,
+      cacheWrite: 0.08,
+    });
+    expect(deployment.models).toEqual(["deepseek-v4-flash-0731-deepinfra"]);
+    expect(deployment.harnesses).toEqual([
+      "pi-0-84-2-high-deepseek-v4-flash-0731-deepinfra",
+    ]);
+    expect(deployment.inference_provider).toBe("deepinfra");
+    expect(deployment.input_price_microusd_per_million_tokens).toBe(80_000);
+    expect(deployment.output_price_microusd_per_million_tokens).toBe(180_000);
+    expect(trialJob.inference_model).toBe(
+      "deepseek-ai/DeepSeek-V4-Flash-0731:deepinfra",
+    );
+    expect(trialJob.max_jobs).toBe(16);
   });
 
   it("derive the replacement and diagnostic task sets from locked profiles", async () => {
@@ -213,7 +259,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     const diagnostic = record(diagnosticProfile.spec);
 
     expect(replacementProfile.record_id).toBe("profile-5af4753cfb6424d423a1b094");
-    expect(diagnosticProfile.record_id).toBe("profile-33493358910f6777756ec6e1");
+    expect(diagnosticProfile.record_id).toBe("profile-6982d9cf30421d14a797f079");
     const immutableIds = new Map(
       (await loadBuiltInProfiles("profiles")).map((item) => [
         item.profile.name,
@@ -224,7 +270,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "sha256:15fcab15f5421b879944b48489e4fe865fb8d572b06f3dd18c17c776fd4a928d",
     );
     expect(immutableIds.get("tb21-diagnostic-1")).toBe(
-      "sha256:5449048484a7935645e25802c3ac548d5baff77a3e3eab48eef4db0041e45a2a",
+      "sha256:bbcb2400144383cf5fb7f7e0633a4a8888b616d15a49b3eae9af6d9f6436123e",
     );
     expect(replacement).toEqual({
       ...canary,
@@ -235,6 +281,12 @@ describe("Terminal-Bench 2.1 profiles", () => {
       max_run_ceiling_microusd: 300_000_000,
       publication_role: "diagnostic",
     });
+    expect(diagnostic.reservation_microusd).toBe(55_000);
+    expect(
+      Number(diagnostic.reservation_microusd) * 89 +
+        Number(diagnostic.preparation_reservation_microusd) *
+          Number(diagnostic.max_preparation_attempts),
+    ).toBe(5_095_000);
     for (const [spec, maximum] of [
       [replacement, 180_000_000],
       [diagnostic, 300_000_000],
@@ -344,6 +396,9 @@ describe("Terminal-Bench 2.1 profiles", () => {
       if (name === "hermes" || name === "openhands") {
         expect(harborAgent.override_setup_timeout_sec).toBe(1800);
       }
+      if (name === "openclaw") {
+        expect(harborAgent.override_setup_timeout_sec).toBe(1200);
+      }
     }
   });
 
@@ -385,6 +440,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "tb21-deepseek-v4-flash-replacement",
       "tb21-deepseek-v4-flash-diagnostic-1",
       "tb21-deepseek-v4-flash-diagnostic-2",
+      "tb21-deepseek-v4-flash-deepinfra-diagnostic-1",
       "tb21-deepseek-v4-flash-dsh-providers",
       "tb21-gpt-oss-20b-dsh-providers",
       "tb21-gpt-oss-20b-opencode-providers",

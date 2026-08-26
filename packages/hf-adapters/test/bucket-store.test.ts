@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImmutableConflictError } from "@harbor-hf/control-core";
+import { HubApiError } from "@huggingface/hub";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hub = vi.hoisted(() => ({
   downloadFile: vi.fn(),
@@ -16,7 +17,9 @@ import { HuggingFaceBucketStore } from "../src/bucket-store.js";
 
 const token = ["hf", "not-a-real-credential"].join("_");
 
-function store(options: { retryDelaysMs?: readonly number[] } = {}) {
+function store(
+  options: { retryDelaysMs?: readonly number[]; listTimeoutMs?: number } = {},
+) {
   return new HuggingFaceBucketStore({
     bucketId: "example/control",
     accessToken: token,
@@ -149,7 +152,66 @@ describe("HuggingFaceBucketStore", () => {
     expect(entries).toHaveLength(12);
     expect(hub.downloadFile).not.toHaveBeenCalled();
     expect(hub.listFiles).toHaveBeenCalledWith(
-      expect.objectContaining({ expand: true }),
+      expect.objectContaining({ expand: true, fetch: expect.any(Function) }),
+    );
+  });
+
+  it("invalidates cached bytes when listed source identity changes", async () => {
+    const bucket = store();
+    let identity = "a";
+    hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
+      yield {
+        type: "file",
+        path: `${path}/object.json`,
+        size: 3,
+        xetHash: identity.repeat(64),
+      };
+    });
+    hub.downloadFile
+      .mockResolvedValueOnce(new Blob(["old"]))
+      .mockResolvedValueOnce(new Blob(["new"]));
+
+    await bucket.list("control/v1");
+    await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
+      new TextEncoder().encode("old"),
+    );
+    await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
+      new TextEncoder().encode("old"),
+    );
+    expect(hub.downloadFile).toHaveBeenCalledTimes(1);
+
+    identity = "b";
+    await bucket.list("control/v1");
+    await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
+      new TextEncoder().encode("new"),
+    );
+    expect(hub.downloadFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries transient Bucket listing failures", async () => {
+    hub.listFiles
+      .mockImplementationOnce(async function* () {
+        yield* [];
+        throw new TypeError("fetch failed");
+      })
+      .mockImplementationOnce(async function* () {
+        yield {
+          type: "file",
+          path: "control/v1/object.json",
+          size: 1,
+          xetHash: "a".repeat(64),
+        };
+      });
+
+    await expect(
+      store({ retryDelaysMs: [0] }).list("control/v1"),
+    ).resolves.toHaveLength(1);
+    expect(hub.listFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects invalid Bucket list timeouts", () => {
+    expect(() => store({ listTimeoutMs: 0 })).toThrow(
+      "Bucket list timeout must be a positive integer",
     );
   });
 
@@ -165,6 +227,19 @@ describe("HuggingFaceBucketStore", () => {
       store({ retryDelaysMs: [0, 0] }).read("control/v1/object.json"),
     ).resolves.toEqual(new TextEncoder().encode("payload"));
     expect(hub.downloadFile).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries transient Hub API download failures", async () => {
+    hub.downloadFile
+      .mockRejectedValueOnce(
+        new HubApiError("https://huggingface.co/buckets/example", 504),
+      )
+      .mockResolvedValueOnce(new Blob(["payload"]));
+
+    await expect(
+      store({ retryDelaysMs: [0] }).read("control/v1/object.json"),
+    ).resolves.toEqual(new TextEncoder().encode("payload"));
+    expect(hub.downloadFile).toHaveBeenCalledTimes(2);
   });
 
   it("retries transient failures while materializing a lazy Blob", async () => {
@@ -187,7 +262,14 @@ describe("HuggingFaceBucketStore", () => {
   });
 
   it("does not retry non-transient download failures", async () => {
-    hub.downloadFile.mockRejectedValue(new Error("authorization failed"));
+    hub.downloadFile.mockRejectedValue(
+      new HubApiError(
+        "https://huggingface.co/buckets/example",
+        403,
+        undefined,
+        "authorization failed",
+      ),
+    );
 
     await expect(
       store({ retryDelaysMs: [0, 0] }).read("control/v1/object.json"),

@@ -1,8 +1,7 @@
 rules:
   py.mutation-required:
     disabled: true
-    reason: Mutation testing remains an optional manual diagnostic; Slophammer checks apply the checked-in baseline.
-
+    reason: Mutation testing runs manually and as a required package publication preflight.
 python:
   coverage:
     threshold: 85

@@ -29,12 +29,17 @@ from harbor_hf_agents.support.hf_inference_bridge import (
     prepare_hf_inference_bridge,
 )
 from harbor_hf_agents.support.isolated_user import IsolatedProviderAgent
+from harbor_hf_agents.support.job_chat_completions import (
+    inference_max_output_tokens,
+)
 from harbor_hf_agents.support.job_inference_route import (
     use_job_inference_route,
     with_job_inference_bridge_cleanup,
 )
 
-OPENCLAW_AGENT_SETUP_TIMEOUT_SEC = 1200.0
+_JOB_PROVIDER = "harbor-hf-job"
+_JOB_API_KEY_ENV = "HARBOR_HF_OPENCLAW_API_KEY"
+_JOB_BASE_URL_ENV = "HARBOR_HF_OPENCLAW_BASE_URL"
 
 
 def openclaw_session_jsonl_to_atif_steps(  # noqa: C901 -- parser branches
@@ -489,7 +494,6 @@ class OpenClawAgent(IsolatedProviderAgent):
         provider_runtime: dict[str, Any] | None = None,
         **kwargs: Any,  # noqa: ANN401 -- Harbor API
     ) -> None:
-        override_setup_timeout_sec = kwargs.pop("override_setup_timeout_sec", None)
         if not openclaw_node_version or any(
             char.isspace() for char in openclaw_node_version
         ):
@@ -504,9 +508,6 @@ class OpenClawAgent(IsolatedProviderAgent):
             self._failover_retries = int(raw_fr)
             if self._failover_retries < 0:
                 raise ValueError("failover_retries must be non-negative")
-        self._install_exec_timeout_sec = int(
-            override_setup_timeout_sec or OPENCLAW_AGENT_SETUP_TIMEOUT_SEC
-        )
         super().__init__(*args, **kwargs)
         self._openclaw_config: dict[str, Any] = openclaw_config or {}
         self._provider_runtime = self._validate_provider_runtime(provider_runtime)
@@ -655,7 +656,6 @@ class OpenClawAgent(IsolatedProviderAgent):
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
-        timeout = self._install_exec_timeout_sec
         await self.exec_as_agent(
             environment,
             command=(
@@ -667,7 +667,6 @@ class OpenClawAgent(IsolatedProviderAgent):
                 "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh "
                 "| bash"
             ),
-            timeout_sec=timeout,
         )
         await self.exec_as_agent(
             environment,
@@ -675,12 +674,10 @@ class OpenClawAgent(IsolatedProviderAgent):
                 'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}" && . "$NVM_DIR/nvm.sh" && '
                 f"nvm install {shlex.quote(self._node_version)}"
             ),
-            timeout_sec=timeout,
         )
         await self.exec_as_agent(
             environment,
             command=self._node_command("node -v && npm -v"),
-            timeout_sec=timeout,
         )
         version_spec = f"@{self._version}" if self._version else "@latest"
         oc_pkg = shlex.quote(f"openclaw{version_spec}")
@@ -691,12 +688,10 @@ class OpenClawAgent(IsolatedProviderAgent):
                 "--fetch-retries=5 --fetch-retry-mintimeout=20000 "
                 "--fetch-retry-maxtimeout=120000"
             ),
-            timeout_sec=timeout,
         )
         await self.exec_as_agent(
             environment,
             command=self._node_command("openclaw --version"),
-            timeout_sec=timeout,
         )
 
     @staticmethod
@@ -777,8 +772,14 @@ class OpenClawAgent(IsolatedProviderAgent):
             model_id = self.model_name.split("/", 1)[1]
             prov_cfg["models"] = [{"id": model_id, "name": model_id}]
 
-    def _apply_provider_runtime(self, cfg: dict[str, Any]) -> None:
-        provider = self._model_provider()
+    def _apply_provider_runtime(
+        self,
+        cfg: dict[str, Any],
+        *,
+        provider: str | None = None,
+        model_id: str | None = None,
+    ) -> None:
+        provider = provider or self._model_provider()
         if provider is None:
             raise ValueError("OpenClaw provider is missing")
         models = cfg.setdefault("models", {})
@@ -794,7 +795,9 @@ class OpenClawAgent(IsolatedProviderAgent):
         provider_config["timeoutSeconds"] = math.ceil(
             self._provider_runtime["timeout_seconds"]
         )
-        model_id = self.model_name.split("/", 1)[1] if self.model_name else ""
+        model_id = model_id or (
+            self.model_name.split("/", 1)[1] if self.model_name else ""
+        )
         catalog = provider_config.get("models")
         if catalog is None:
             catalog = []
@@ -819,6 +822,30 @@ class OpenClawAgent(IsolatedProviderAgent):
                 "timeoutMs": int(self._provider_runtime["timeout_seconds"] * 1000),
             }
         )
+
+    @staticmethod
+    def _apply_job_provider(
+        cfg: dict[str, Any],
+        *,
+        model_id: str,
+        max_output_tokens: int,
+    ) -> None:
+        """Register the locked loopback route as a custom OpenClaw provider."""
+        models = cfg.setdefault("models", {})
+        models["mode"] = "merge"
+        providers = models.setdefault("providers", {})
+        providers[_JOB_PROVIDER] = {
+            "api": "openai-completions",
+            "apiKey": f"${{{_JOB_API_KEY_ENV}}}",
+            "baseUrl": f"${{{_JOB_BASE_URL_ENV}}}",
+            "models": [
+                {
+                    "id": model_id,
+                    "name": model_id,
+                    "maxTokens": max_output_tokens,
+                }
+            ],
+        }
 
     def _build_full_openclaw_config(self) -> dict[str, Any]:
         """Full "openclaw.json" content: setup baseline + task/job overlays."""
@@ -863,6 +890,26 @@ class OpenClawAgent(IsolatedProviderAgent):
             cooldowns = auth.setdefault("cooldowns", {})
             cooldowns["rateLimitedProfileRotations"] = self._failover_retries
 
+        return cfg
+
+    def _build_job_openclaw_config(
+        self,
+        *,
+        model_id: str,
+        max_output_tokens: int,
+    ) -> dict[str, Any]:
+        """Add the locked loopback provider to the ordinary OpenClaw config."""
+        cfg = self._build_full_openclaw_config()
+        self._apply_job_provider(
+            cfg,
+            model_id=model_id,
+            max_output_tokens=max_output_tokens,
+        )
+        self._apply_provider_runtime(
+            cfg,
+            provider=_JOB_PROVIDER,
+            model_id=model_id,
+        )
         return cfg
 
     def _trajectory_from_envelope_with_steps(
@@ -1162,7 +1209,22 @@ class OpenClawAgent(IsolatedProviderAgent):
                     "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS"
                 ),
             )
-        await self._run_prepared(instruction, environment, context, env)
+        job_model_id = model if bridged else None
+        max_output_tokens = inference_max_output_tokens() if bridged else None
+        if bridged:
+            env[_JOB_API_KEY_ENV] = env[f"{prefix}_API_KEY"]
+            env[_JOB_BASE_URL_ENV] = env[f"{prefix}_BASE_URL"]
+        await self._run_prepared(
+            instruction,
+            environment,
+            context,
+            env,
+            runtime_model_name=(
+                f"{_JOB_PROVIDER}/{model}" if bridged else self.model_name
+            ),
+            job_model_id=job_model_id,
+            max_output_tokens=max_output_tokens,
+        )
 
     async def _run_prepared(
         self,
@@ -1170,20 +1232,29 @@ class OpenClawAgent(IsolatedProviderAgent):
         environment: BaseEnvironment,
         context: AgentContext,
         env: dict[str, str],
+        *,
+        runtime_model_name: str | None = None,
+        job_model_id: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
         del context
         escaped_instruction = shlex.quote(instruction)
-        model_name = self.model_name
+        model_name = runtime_model_name or self.model_name
         if not model_name:
             raise ValueError("OpenClaw model name is missing")
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         upload_path = self.logs_dir / self._UPLOAD_CONFIG_FILENAME
-        upload_path.write_text(
-            json.dumps(
-                self._build_full_openclaw_config(),
-                indent=2,
+        if job_model_id is None:
+            runtime_config = self._build_full_openclaw_config()
+        else:
+            if max_output_tokens is None:
+                raise ValueError("OpenClaw Job provider requires an output-token limit")
+            runtime_config = self._build_job_openclaw_config(
+                model_id=job_model_id,
+                max_output_tokens=max_output_tokens,
             )
-            + "\n",
+        upload_path.write_text(
+            json.dumps(runtime_config, indent=2) + "\n",
             encoding="utf-8",
         )
 

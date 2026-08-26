@@ -45,8 +45,11 @@ than one process would create competing reconcilers and violate the single
 writer rule.
 
 The Bucket is the permanent record. SQLite contains only indexes and derived
-views. Deleting the local database and replaying Bucket records must restore the
-same run states and next actions.
+views. Deleting the local database and replaying current Run-native control
+records must restore the same run states and next actions. The projection lists
+only the `migrations`, `operators`, `profiles`, and `runs` record trees. Retired
+control trees remain immutable evidence in the Bucket, but normal startup and
+sync do not read or reinterpret them.
 
 ## Source layout
 
@@ -134,7 +137,11 @@ worker without effective `CAP_SYS_PTRACE`, and an unused dedicated UID/GID. A
 probe running with the final task identity must have empty capability fields,
 `no_new_privs`, and no access to the worker's `/proc/<pid>/environ` or a
 root-owned mode-0600 file. A missing runtime feature or failed denial probe is
-a replacement-eligible infrastructure failure. There is no namespace or
+a replacement-eligible infrastructure failure. A Harbor process that exits
+without its required trial result is replacement-eligible only when the worker
+did not terminate it at the locked timeout. A timed-out Harbor process with no
+result seals `benchmark_timeout` and does not permit replacement. Other
+evidence-integrity failures remain non-retryable. There is no namespace or
 same-UID fallback.
 
 Deployment profiles contain Hugging Face infrastructure and safety limits. They

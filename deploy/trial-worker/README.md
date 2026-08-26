@@ -19,9 +19,10 @@ package tools. Worker preflight rejects PRoot versions older than 5.3.
 The host kernel boundary is Unix UID separation, empty supplementary groups,
 an empty capability bounding set, and `no_new_privs`. PRoot is not treated as a
 security boundary. The task sees host `/proc` metadata so normal tools work,
-but preflight proves that its UID cannot read the root worker environment or a
-root-owned probe file. Host `/run`, `/tmp`, worker files, capabilities, and
-token files are not bound into the task rootfs.
+plus `/dev/pts` for interactive agent pseudoterminals, but preflight proves
+that its UID cannot read the root worker environment or a root-owned probe
+file. Host `/run`, `/tmp`, worker files, capabilities, and token files are not
+bound into the task rootfs.
 
 The image contains pinned Python 3.12, the pinned Harbor commit, and the local
 `harbor-hf-agents` package. Preparation and execution profiles can therefore

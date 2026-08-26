@@ -157,6 +157,7 @@ def test_trial_submission_includes_python_origin_lock_digest() -> None:
             "agent": {
                 "import_path": "example.agent:Agent",
                 "model_name": "openai/example/model:provider",
+                "override_setup_timeout_sec": 1200,
                 "kwargs": {},
             },
             "skills": [],
@@ -201,6 +202,11 @@ def test_trial_submission_includes_python_origin_lock_digest() -> None:
     )
 
     assert body["trial_lock_digest"] == worker.digest_json(body["trial_lock"])
+    assert body["agent_setup_timeout_seconds"] == 1200
+    assert (
+        body["trial_lock"]["environment"]["kwargs"]["control_max_command_seconds"]
+        == 1200
+    )
 
 
 def test_keeps_digest_pinned_images_unchanged() -> None:

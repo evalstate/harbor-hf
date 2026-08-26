@@ -16,6 +16,9 @@ import {
 } from "@huggingface/hub";
 import { jobHardwareCostMicrousd } from "./job-cost.js";
 
+const JOB_LIST_CACHE_MS = 5_000;
+const ACTIVE_JOB_STATES = ["RUNNING", "SCHEDULING"] as const;
+
 interface AdapterConfig {
   namespace: string;
   accessToken: string;
@@ -110,6 +113,9 @@ function jobEnvironment(
     HARBOR_HF_ACTION_ID: launchActionId(intent),
     HARBOR_HF_TASK_IDS_JSON: JSON.stringify(taskIds),
     HARBOR_HF_CONTROL_URL: controlUrl,
+    HARBOR_HF_CONTROL_RETRY_TIMEOUT_SECONDS: String(
+      numberValue(intent, "timeout_seconds"),
+    ),
     HARBOR_HF_WORKER_ROLE: role,
     HARBOR_HF_JOB_IMAGE: jobImage,
     ...(taskImage ? { HARBOR_HF_TASK_IMAGE: taskImage } : {}),
@@ -318,14 +324,133 @@ function endpointStatus(raw: unknown): {
   return { state, ready_replicas: ready };
 }
 
+function nextJobPage(link: string | null, hubUrl: string): string | null {
+  const match = link?.match(/<([^>]+)>;\s*rel="next"/);
+  if (!match?.[1]) return null;
+  const next = new URL(match[1]);
+  if (next.origin !== new URL(hubUrl).origin)
+    throw new Error("Job pagination crossed the configured Hub origin");
+  return next.toString();
+}
+
 export class HuggingFaceActions implements ExternalActionPort {
   private readonly endpointsUrl: string;
+  private jobsSnapshot: readonly ApiJob[] | null = null;
+  private jobsSnapshotExpiresAt = 0;
+  private jobsSnapshotInFlight: Promise<readonly ApiJob[]> | null = null;
 
   constructor(private readonly config: AdapterConfig) {
     if (config.inferenceToken && config.inferenceToken === config.accessToken)
       throw new Error("control and inference credentials must be distinct");
     this.endpointsUrl =
       config.endpointsUrl ?? "https://api.endpoints.huggingface.cloud/v2";
+  }
+
+  private listJobsForAction(actionId: string): ReturnType<typeof listJobs> {
+    return listJobs({
+      namespace: this.config.namespace,
+      accessToken: this.config.accessToken,
+      ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
+      fetch: (input, init) => {
+        const url = new URL(
+          typeof input === "string" || input instanceof URL ? input : input.url,
+        );
+        url.searchParams.append("label", `harbor_hf_action_id=${actionId}`);
+        return fetch(url, init);
+      },
+    });
+  }
+
+  async observeJobs(
+    intents: readonly ActionIntent[],
+  ): Promise<readonly ExternalActionResult[]> {
+    if (intents.length === 0) return [];
+    if (!this.config.controlUrl)
+      throw new Error("Job observation requires the control service URL");
+    if (intents.some((intent) => intent.action_kind !== "job.observe"))
+      throw new Error("Job observation batch contains a non-observation action");
+    let jobs: readonly ApiJob[];
+    try {
+      jobs = await this.listJobsSnapshot();
+    } catch (error) {
+      return intents.map(() => ({
+        outcome: "failed",
+        observed_state: "ERROR",
+        error_code: cleanFailure(error),
+      }));
+    }
+    const jobsById = new Map(jobs.map((job) => [job.id, job]));
+    return Promise.all(
+      intents.map(async (intent) => {
+        const remoteId = stringValue(intent, "resource_id");
+        try {
+          const job =
+            jobsById.get(remoteId) ??
+            (await getJob({
+              namespace: this.config.namespace,
+              jobId: remoteId,
+              accessToken: this.config.accessToken,
+              ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
+            }));
+          return this.jobObservation(intent, job);
+        } catch (error) {
+          return {
+            outcome: "failed",
+            observed_state: "ERROR",
+            error_code: cleanFailure(error),
+          };
+        }
+      }),
+    );
+  }
+
+  private async listJobsSnapshot(): Promise<readonly ApiJob[]> {
+    if (this.jobsSnapshot && Date.now() < this.jobsSnapshotExpiresAt)
+      return this.jobsSnapshot;
+    if (this.jobsSnapshotInFlight) return await this.jobsSnapshotInFlight;
+    const operation = this.listActiveJobs();
+    this.jobsSnapshotInFlight = operation;
+    try {
+      const jobs = await operation;
+      this.jobsSnapshot = jobs;
+      this.jobsSnapshotExpiresAt = Date.now() + JOB_LIST_CACHE_MS;
+      return jobs;
+    } finally {
+      if (this.jobsSnapshotInFlight === operation) this.jobsSnapshotInFlight = null;
+    }
+  }
+
+  private async listActiveJobs(): Promise<readonly ApiJob[]> {
+    const hubUrl = this.config.hubUrl ?? "https://huggingface.co";
+    const jobs: ApiJob[] = [];
+    const seenPages = new Set<string>();
+    let pageUrl: string | null = null;
+    do {
+      let followingPage: string | null = null;
+      const page = await listJobs({
+        namespace: this.config.namespace,
+        accessToken: this.config.accessToken,
+        ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
+        fetch: async (input, init) => {
+          const url = new URL(
+            pageUrl ??
+              (typeof input === "string" || input instanceof URL ? input : input.url),
+          );
+          if (!pageUrl)
+            for (const state of ACTIVE_JOB_STATES)
+              url.searchParams.append("stage", state);
+          if (seenPages.has(url.toString()))
+            throw new Error("Job pagination contains a cycle");
+          seenPages.add(url.toString());
+          const response = await fetch(url, init);
+          followingPage = nextJobPage(response.headers.get("link"), hubUrl);
+          return response;
+        },
+      });
+      jobs.push(...page);
+      pageUrl = followingPage;
+    } while (pageUrl);
+    return jobs;
   }
 
   async execute(
@@ -391,11 +516,7 @@ export class HuggingFaceActions implements ExternalActionPort {
     if (!this.config.controlUrl)
       throw new Error("Job launch requires the control service URL");
     const spec = expectedJobSpec(intent, this.config.controlUrl);
-    const jobs = await listJobs({
-      namespace: this.config.namespace,
-      accessToken: this.config.accessToken,
-      ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
-    });
+    const jobs = await this.listJobsForAction(intent.action_id);
     const matches = jobs.filter(
       (job) => job.labels?.harbor_hf_action_id === intent.action_id,
     );
@@ -499,6 +620,12 @@ export class HuggingFaceActions implements ExternalActionPort {
       accessToken: this.config.accessToken,
       ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
     });
+    return this.jobObservation(intent, job);
+  }
+
+  private jobObservation(intent: ActionIntent, job: ApiJob): ExternalActionResult {
+    if (!this.config.controlUrl)
+      throw new Error("Job observation requires the control service URL");
     verifyJobSpec(intent, job, this.config.controlUrl);
     const hourly = payloadHourlyCost(intent);
     return {

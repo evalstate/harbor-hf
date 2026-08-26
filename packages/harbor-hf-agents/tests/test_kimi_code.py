@@ -37,6 +37,7 @@ async def test_job_route_injects_loopback_env(
         return True
 
     monkeypatch.setattr(_ROUTE, use_route)
+    monkeypatch.setenv("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS", "32768")
     agent = KimiCodeAgent(
         logs_dir=temp_dir,
         model_name="openai/openai/gpt-oss-20b:together",
@@ -54,6 +55,7 @@ async def test_job_route_injects_loopback_env(
         run_call.kwargs["env"]["KIMI_MODEL_API_KEY"] == "harbor-local-inference-bridge"
     )
     assert run_call.kwargs["env"]["KIMI_MODEL_NAME"] == "openai/gpt-oss-20b:together"
+    assert run_call.kwargs["env"]["KIMI_MODEL_MAX_COMPLETION_TOKENS"] == "32768"
 
 
 @pytest.mark.asyncio

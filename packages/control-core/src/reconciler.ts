@@ -1,10 +1,11 @@
+import { setImmediate as scheduleImmediate } from "node:timers";
 import type {
   ActionIntent,
   ActionReceipt,
   AttemptReceipt,
-  RunLock,
   DeploymentProfileSpec,
   EndpointResource,
+  RunLock,
 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
@@ -49,6 +50,9 @@ export interface ExternalActionPort {
     intent: ActionIntent,
     context?: ExternalActionContext,
   ): Promise<ExternalActionResult>;
+  observeJobs?(
+    intents: readonly ActionIntent[],
+  ): Promise<readonly ExternalActionResult[]>;
 }
 
 export interface ReconcilerOptions {
@@ -200,11 +204,58 @@ export function fairJobLaunchOrder(
   return output;
 }
 
+export function ordinaryActionOrder(intents: readonly ActionIntent[]): ActionIntent[] {
+  const priority = (intent: ActionIntent): number => {
+    if (intent.action_kind === "run.cancel") return 0;
+    if (intent.action_kind === "run.admit") return 1;
+    if (intent.action_kind === "job.cancel") return 2;
+    return 3;
+  };
+  return [...intents].sort(
+    (left, right) =>
+      priority(left) - priority(right) ||
+      left.created_at.localeCompare(right.created_at) ||
+      left.action_id.localeCompare(right.action_id),
+  );
+}
+
+export function rotatingBatch<T>(
+  items: readonly T[],
+  cursor: number,
+  limit: number,
+): { items: T[]; nextCursor: number } {
+  if (items.length === 0) return { items: [], nextCursor: 0 };
+  const start = cursor % items.length;
+  const size = Math.min(limit, items.length);
+  const ordered = [...items.slice(start), ...items.slice(0, start)];
+  return {
+    items: ordered.slice(0, size),
+    nextCursor: (start + size) % items.length,
+  };
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => scheduleImmediate(resolve));
+}
+
+interface JobLaunchBatch {
+  handled: number;
+  failures: unknown[];
+  consideredActionIds: Set<string>;
+}
+
+interface ActionBatch {
+  handled: number;
+  failures: unknown[];
+}
+
 export class Reconciler {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private currentRun: Promise<void> | null = null;
   private lastProjectionSyncAt: number;
+  private projectionSyncCursor = 0;
+  private activeRunCursor = 0;
 
   constructor(
     private readonly service: ControlService,
@@ -226,6 +277,8 @@ export class Reconciler {
    */
   start(signal?: AbortSignal, onError?: (error: unknown) => void): void {
     if (this.timer) return;
+    // Construction precedes the startup rebuild in the hosted runtime.
+    this.lastProjectionSyncAt = Date.now();
     const run = () => {
       if (this.running) return;
       this.running = true;
@@ -253,58 +306,249 @@ export class Reconciler {
 
   async tick(): Promise<number> {
     let handled = 0;
+    const failures: unknown[] = [];
+    const activeRuns = await this.projection.activeRuns();
+    const syncRunIds = activeRuns.map((run) => run.run_id);
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
-    if (Date.now() - this.lastProjectionSyncAt >= syncInterval)
-      handled += await this.syncProjection();
+    // Admit runs and dispatch queued Jobs before historical advancement or
+    // Bucket I/O so slow projection work cannot starve physical execution.
+    const admissions = (await this.projection.pendingActions(10_000)).filter(
+      (intent) => intent.action_kind === "run.admit",
+    );
+    const newlyAdmittedRuns = new Set<string>();
+    for (const intent of admissions.slice(0, this.options.batch_size)) {
+      if (await this.projection.hasRunAction(intent.run_id, "run.cancel")) continue;
+      await this.handle(intent);
+      newlyAdmittedRuns.add(intent.run_id);
+      handled += 1;
+    }
+    const pendingBeforeAdvancement = await this.projection.pendingActions(10_000);
+    const queuedLaunches = pendingBeforeAdvancement.filter(
+      (intent) =>
+        intent.action_kind === "job.launch" &&
+        (intent.target === "run-preparation" || !newlyAdmittedRuns.has(intent.run_id)),
+    );
+    const initialLaunchBatch = await this.handleJobLaunches(
+      queuedLaunches,
+      this.options.batch_size,
+    );
+    handled += initialLaunchBatch.handled;
+    failures.push(...initialLaunchBatch.failures);
+    // The reconciler shares one Node.js process with the API. Yield between
+    // bounded phases so queued HTTP requests are not delayed by a full tick.
+    await yieldToEventLoop();
+    if (
+      syncRunIds.length > 0 &&
+      Date.now() - this.lastProjectionSyncAt >= syncInterval
+    ) {
+      try {
+        handled += await this.syncProjection(syncRunIds);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
     for (const { intent, receipt } of await this.projection.unadvancedActions(
       this.options.batch_size,
     )) {
-      await this.advance(intent, receipt);
-      await this.service.markAdvanced(intent, receipt);
-      handled += 1;
+      try {
+        await this.advance(intent, receipt);
+        await this.service.markAdvanced(intent, receipt);
+        handled += 1;
+      } catch (error) {
+        failures.push(error);
+      }
     }
+    await yieldToEventLoop();
     const pending = await this.projection.pendingActions(10_000);
-    const ordinary = pending.filter((intent) => intent.action_kind !== "job.launch");
-    const due = ordinary.filter((intent) => {
+    const dueNow = (intent: ActionIntent): boolean => {
       const notBefore = intent.payload.not_before;
       return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
-    });
+    };
+    const observationCandidates = fairJobLaunchOrder(
+      pending.filter(
+        (intent) => intent.action_kind === "job.observe" && dueNow(intent),
+      ),
+      null,
+    );
+    const observationBatch = await this.handleJobObservations(
+      observationCandidates,
+      this.options.batch_size,
+    );
+    handled += observationBatch.handled;
+    failures.push(...observationBatch.failures);
+    const launchCandidates = pending.filter(
+      (candidate) =>
+        candidate.action_kind === "job.launch" &&
+        candidate.target !== "run-preparation" &&
+        !newlyAdmittedRuns.has(candidate.run_id) &&
+        !initialLaunchBatch.consideredActionIds.has(candidate.action_id),
+    );
+    const ordinary = pending.filter(
+      (intent) =>
+        intent.action_kind !== "job.launch" && intent.action_kind !== "job.observe",
+    );
+    const due = ordinaryActionOrder(ordinary.filter(dueNow));
     let ordinaryHandled = 0;
-    const ordinaryLimit = Math.max(1, this.options.batch_size - 1);
+    const ordinaryLimit =
+      launchCandidates.length > 0
+        ? Math.max(1, Math.floor(this.options.batch_size / 2))
+        : this.options.batch_size;
     for (const intent of due.slice(0, ordinaryLimit)) {
-      await this.handle(intent);
-      handled += 1;
-      ordinaryHandled += 1;
-    }
-    const remaining = Math.max(1, this.options.batch_size - ordinaryHandled);
-    for (const intent of (
-      await this.fairJobLaunches(
-        pending.filter((candidate) => candidate.action_kind === "job.launch"),
-      )
-    ).slice(0, remaining)) {
-      if (
-        (await this.launchCancellationRequested(intent)) &&
-        (await this.projection.actionDispatch(intent.action_id))
-      ) {
+      try {
         await this.handle(intent);
         handled += 1;
-        continue;
+        ordinaryHandled += 1;
+      } catch (error) {
+        failures.push(error);
       }
-      const admission = await this.service.admitJobLaunch(intent);
-      if (admission.status !== "admitted") continue;
-      await this.handle(intent);
-      handled += 1;
     }
-    for (const run of await this.projection.activeRuns()) {
-      if (run.cancellation_requested) await this.continueCancellation(run.run_id);
-      if (await this.continueJobObservation(run.run_id)) handled += 1;
-      if (await this.maybePublish(run.run_id)) handled += 1;
+    const remaining = Math.max(1, this.options.batch_size - ordinaryHandled);
+    const laterLaunchBatch = await this.handleJobLaunches(launchCandidates, remaining);
+    handled += laterLaunchBatch.handled;
+    failures.push(...laterLaunchBatch.failures);
+    await yieldToEventLoop();
+    const activeRunBatch = rotatingBatch(
+      activeRuns,
+      this.activeRunCursor,
+      this.options.batch_size,
+    );
+    this.activeRunCursor = activeRunBatch.nextCursor;
+    for (const run of activeRunBatch.items) {
+      try {
+        if (run.cancellation_requested) await this.continueCancellation(run.run_id);
+        if (await this.continueJobObservation(run.run_id)) handled += 1;
+        if (await this.maybePublish(run.run_id)) handled += 1;
+      } catch (error) {
+        failures.push(error);
+      }
+      await yieldToEventLoop();
     }
+    if (failures.length > 0) throw failures[0];
     return handled;
   }
 
-  private async syncProjection(): Promise<number> {
-    const ingested = await this.service.syncProjection();
+  private async handleJobObservations(
+    observationCandidates: ActionIntent[],
+    limit: number,
+  ): Promise<ActionBatch> {
+    let handled = 0;
+    const failures: unknown[] = [];
+    const candidates = observationCandidates.slice(0, limit);
+    let results: readonly ExternalActionResult[];
+    try {
+      if (this.external.observeJobs)
+        results = await this.external.observeJobs(candidates);
+      else {
+        const settled = await Promise.allSettled(
+          candidates.map((intent) => this.external.execute(intent)),
+        );
+        results = settled.map((result) => {
+          if (result.status === "fulfilled") return result.value;
+          failures.push(result.reason);
+          return { outcome: "failed", observed_state: "ERROR" };
+        });
+      }
+    } catch (error) {
+      return { handled, failures: [error] };
+    }
+    if (results.length !== candidates.length)
+      return {
+        handled,
+        failures: [new PolicyError("Job observation batch result count is invalid")],
+      };
+    // Fetch observation states together, then serialize their durable effects.
+    for (const [index, result] of results.entries()) {
+      const intent = candidates[index];
+      if (!intent) {
+        failures.push(new PolicyError("Job observation batch result is unbound"));
+        continue;
+      }
+      handled += 1;
+      if (result.outcome !== "failed") {
+        try {
+          const receipt = await this.service.receipt(intent, result);
+          await this.advance(intent, receipt);
+          await this.service.markAdvanced(intent, receipt);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      await yieldToEventLoop();
+    }
+    return { handled, failures };
+  }
+
+  private async handleJobLaunches(
+    launchCandidates: ActionIntent[],
+    limit: number,
+  ): Promise<JobLaunchBatch> {
+    let handled = 0;
+    const failures: unknown[] = [];
+    let candidates: ActionIntent[];
+    try {
+      candidates = (await this.fairJobLaunches(launchCandidates)).slice(0, limit);
+    } catch (error) {
+      return {
+        handled,
+        failures: [error],
+        consideredActionIds: new Set<string>(),
+      };
+    }
+    const consideredActionIds = new Set(candidates.map((intent) => intent.action_id));
+    const cancellationChecks = await Promise.allSettled(
+      candidates.map(async (intent) => ({
+        intent,
+        cancelled: await this.launchCancellationRequested(intent),
+      })),
+    );
+    const ready: ActionIntent[] = [];
+    const launchable: ActionIntent[] = [];
+    for (const check of cancellationChecks) {
+      if (check.status === "rejected") {
+        failures.push(check.reason);
+      } else if (check.value.cancelled) {
+        ready.push(check.value.intent);
+      } else {
+        launchable.push(check.value.intent);
+      }
+    }
+    // Admission remains serialized because grants form one capacity-token chain.
+    // Start each Job as soon as its grant lands while the next grant is written.
+    const launchResults = await Promise.allSettled([
+      ...ready.map(async (intent) => {
+        await this.handle(intent);
+        return 1;
+      }),
+      ...launchable.map(async (intent) => {
+        const admission = await this.service.admitJobLaunch(intent);
+        if (
+          admission.status === "rejected" &&
+          admission.limiting_factor === "run_cancelled"
+        )
+          return 1;
+        if (admission.status !== "admitted") return 0;
+        await this.handle(intent);
+        return 1;
+      }),
+    ]);
+    for (const result of launchResults) {
+      if (result.status === "fulfilled") handled += result.value;
+      else failures.push(result.reason);
+    }
+    return { handled, failures, consideredActionIds };
+  }
+
+  private async syncProjection(activeRunIds: readonly string[]): Promise<number> {
+    // Workers can add only attempt-receipt control records, so task prefixes avoid
+    // rescanning every historical control record during each action tick.
+    const ordered = [...activeRunIds].sort();
+    const index = this.projectionSyncCursor % ordered.length;
+    const runId = ordered[index];
+    if (!runId) return 0;
+    this.projectionSyncCursor = (index + 1) % ordered.length;
+    const ingested = await this.service.syncProjection(
+      `control/schema=v1/runs/${runId}/tasks`,
+    );
     this.lastProjectionSyncAt = Date.now();
     return ingested;
   }
@@ -962,6 +1206,10 @@ export class Reconciler {
         await this.service.writeAction(next);
         return;
       }
+      if (!workerAttemptsPresent)
+        await this.service.syncProjection(
+          `control/schema=v1/runs/${intent.run_id}/tasks`,
+        );
       await this.completeTasksFromJob(
         intent,
         receipt,
@@ -969,6 +1217,10 @@ export class Reconciler {
       );
       return;
     }
+    if (!(await this.allWorkerAttemptsPresent(intent)))
+      await this.service.syncProjection(
+        `control/schema=v1/runs/${intent.run_id}/tasks`,
+      );
     await this.completeTasksFromJob(intent, receipt, "infrastructure");
   }
 

@@ -50,6 +50,7 @@ function expectedEnvironment(intent: ActionIntent): Record<string, string> {
     HARBOR_HF_ACTION_ID: actionId,
     HARBOR_HF_TASK_IDS_JSON: JSON.stringify(payload.task_ids),
     HARBOR_HF_CONTROL_URL: "https://control.example",
+    HARBOR_HF_CONTROL_RETRY_TIMEOUT_SECONDS: String(payload.timeout_seconds),
     HARBOR_HF_WORKER_ROLE: String(payload.worker_role ?? "execution"),
     HARBOR_HF_JOB_IMAGE: String(payload.job_image),
     ...(typeof payload.task_image === "string"
@@ -197,6 +198,7 @@ describe("HuggingFaceActions", () => {
           HARBOR_HF_ACTION_ID: base.action_id,
           HARBOR_HF_TASK_IDS_JSON: '["task-one"]',
           HARBOR_HF_CONTROL_URL: "https://control.example",
+          HARBOR_HF_CONTROL_RETRY_TIMEOUT_SECONDS: "60",
           HARBOR_HF_JOB_IMAGE: base.payload.job_image,
           HARBOR_HF_TASK_IMAGE: base.payload.task_image,
           HARBOR_HF_RUN_LOCK_DIGEST: base.payload.run_lock_digest,
@@ -246,6 +248,69 @@ describe("HuggingFaceActions", () => {
       resource_id: "job-2",
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("filters concurrent adoption lookups by deterministic action label", async () => {
+    const second: ActionIntent = {
+      ...base,
+      record_id: "action-test-0002",
+      action_id: "action-test-0002",
+      target: "task-two",
+      payload: {
+        ...base.payload,
+        task_id: "task-two",
+        task_ids: ["task-two"],
+      },
+    };
+    const listRequestLabels: Array<string | null> = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (!init?.method) {
+        const requestUrl = new URL(
+          typeof url === "string" || url instanceof URL ? url : url.url,
+        );
+        listRequestLabels.push(requestUrl.searchParams.get("label"));
+        return new Response("[]", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const request = JSON.parse(String(init.body)) as {
+        labels: Record<string, string>;
+        environment: Record<string, string>;
+        secrets: Record<string, string>;
+      };
+      const intent =
+        request.labels.harbor_hf_action_id === base.action_id ? base : second;
+      return new Response(
+        JSON.stringify(
+          apiJob(intent, {
+            id: `job-${intent.target}`,
+            environment: request.environment,
+            labels: request.labels,
+            secrets: Object.keys(request.secrets),
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(
+      Promise.all([adapter.execute(base), adapter.execute(second)]),
+    ).resolves.toEqual([
+      expect.objectContaining({ outcome: "created", resource_id: "job-task-one" }),
+      expect.objectContaining({ outcome: "created", resource_id: "job-task-two" }),
+    ]);
+    expect(listRequestLabels.sort()).toEqual([
+      `harbor_hf_action_id=${base.action_id}`,
+      `harbor_hf_action_id=${second.action_id}`,
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("launches preparation Jobs with an encrypted preparation-only capability", async () => {
@@ -810,6 +875,137 @@ describe("HuggingFaceActions", () => {
       active_hourly_cost_microusd: 10_000,
       cost_microusd: 10_000,
     });
+  });
+
+  it("caches and paginates batched Job observations by namespace", async () => {
+    const first: ActionIntent = {
+      ...base,
+      action_kind: "job.observe",
+      target: "job-one",
+      payload: {
+        ...base.payload,
+        resource_id: "job-one",
+        launch_action_id: base.action_id,
+        active_hourly_cost_microusd: 10_000,
+      },
+    };
+    const second: ActionIntent = {
+      ...first,
+      record_id: "action-observe-0002",
+      action_id: "action-observe-0002",
+      target: "job-two",
+      payload: {
+        ...first.payload,
+        resource_id: "job-two",
+        launch_action_id: "action-launch-0002",
+        task_id: "task-two",
+        task_ids: ["task-two"],
+      },
+    };
+    const finished = {
+      startedAt: "2026-08-21T12:00:00Z",
+      finishedAt: "2026-08-21T13:00:00Z",
+      status: { stage: "COMPLETED", failureCount: 0 },
+    };
+    const requestedUrls: URL[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL ? input : input.url,
+      );
+      requestedUrls.push(url);
+      if (url.searchParams.has("cursor"))
+        return new Response(
+          JSON.stringify([apiJob(second, { ...finished, id: "job-two" })]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      return new Response(
+        JSON.stringify([apiJob(first, { ...finished, id: "job-one" })]),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            Link: '<https://huggingface.co/api/jobs/example?cursor=next>; rel="next"',
+          },
+        },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      controlUrl: "https://control.example",
+    });
+
+    const [batch, cached] = await Promise.all([
+      adapter.observeJobs([first, second]),
+      adapter.observeJobs([first]),
+    ]);
+    expect(batch).toMatchObject([
+      {
+        observed_state: "COMPLETED",
+        resource_id: "job-one",
+        cost_microusd: 10_000,
+      },
+      {
+        observed_state: "COMPLETED",
+        resource_id: "job-two",
+        cost_microusd: 10_000,
+      },
+    ]);
+    expect(cached).toMatchObject([
+      { observed_state: "COMPLETED", resource_id: "job-one" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestedUrls[0]?.searchParams.getAll("stage")).toEqual([
+      "RUNNING",
+      "SCHEDULING",
+    ]);
+  });
+
+  it("inspects a terminal Job absent from the active namespace snapshot", async () => {
+    const intent: ActionIntent = {
+      ...base,
+      action_kind: "job.observe",
+      target: "job-one",
+      payload: {
+        ...base.payload,
+        resource_id: "job-one",
+        launch_action_id: base.action_id,
+        active_hourly_cost_microusd: 10_000,
+      },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL ? input : input.url,
+      );
+      if (url.pathname === "/api/jobs/example")
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      return new Response(
+        JSON.stringify(
+          apiJob(intent, {
+            id: "job-one",
+            startedAt: "2026-08-21T12:00:00Z",
+            finishedAt: "2026-08-21T13:00:00Z",
+            status: { stage: "COMPLETED", failureCount: 0 },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.observeJobs([intent])).resolves.toMatchObject([
+      { observed_state: "COMPLETED", resource_id: "job-one" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("observes replicas when a pause response omits their state", async () => {

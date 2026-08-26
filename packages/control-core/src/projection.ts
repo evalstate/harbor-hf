@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
+import { setImmediate as scheduleImmediate } from "node:timers";
 import type {
   ActionAdvanced,
   ActionDispatch,
@@ -8,17 +9,17 @@ import type {
   ActionReceipt,
   AttemptReceipt,
   BudgetEvent,
-  RunLock,
-  RunRequest,
   EndpointResource,
   HarborHFControlRecordV1,
+  JobAdmissionGrant,
+  JobCapacityRelease,
   OperatorAcl,
   ProfileObject,
   ProfilePromotion,
   PublicationReceipt,
   PublicationSupersession,
-  JobAdmissionGrant,
-  JobCapacityRelease,
+  RunLock,
+  RunRequest,
   TaskCancellation,
   TaskExhaustion,
   TerminalSelection,
@@ -293,6 +294,19 @@ export interface SystemView {
 
 export class ProjectionIntegrityError extends Error {}
 
+const REBUILD_IO_CONCURRENCY = 16;
+const PROJECTION_APPLY_BATCH_SIZE = 64;
+const RUN_NATIVE_CONTROL_PREFIXES = [
+  "control/schema=v1/migrations/",
+  "control/schema=v1/operators/",
+  "control/schema=v1/profiles/",
+  "control/schema=v1/runs/",
+] as const;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => scheduleImmediate(resolve));
+}
+
 function body(value: unknown): string {
   return canonicalJson(value).trimEnd();
 }
@@ -333,6 +347,36 @@ async function verifyAttemptEvidence(
   if (record.actor.subject === "harbor-hf-control")
     await verifyEvidenceReference(store, record.evidence_path, record.evidence_digest);
   else await verifyWorkerEvidence(store, record);
+}
+
+async function listProjectionEntries(
+  store: ImmutableObjectStore,
+  prefix?: string,
+): Promise<ObjectEntry[]> {
+  const prefixes = prefix ? [prefix] : RUN_NATIVE_CONTROL_PREFIXES;
+  return (await Promise.all(prefixes.map((value) => store.list(value)))).flat();
+}
+
+async function readRebuildObjects(
+  store: ImmutableObjectStore,
+  entries: readonly ObjectEntry[],
+): Promise<Uint8Array[]> {
+  const objects: Uint8Array[] = [];
+  for (let offset = 0; offset < entries.length; offset += REBUILD_IO_CONCURRENCY) {
+    const batch = entries.slice(offset, offset + REBUILD_IO_CONCURRENCY);
+    objects.push(...(await Promise.all(batch.map((entry) => store.read(entry.key)))));
+  }
+  return objects;
+}
+
+async function verifyRebuildEvidence(
+  store: ImmutableObjectStore,
+  records: readonly HarborHFControlRecordV1[],
+): Promise<void> {
+  for (let offset = 0; offset < records.length; offset += REBUILD_IO_CONCURRENCY) {
+    const batch = records.slice(offset, offset + REBUILD_IO_CONCURRENCY);
+    await Promise.all(batch.map((record) => verifyAttemptEvidence(store, record)));
+  }
 }
 
 function validateObjectEntry(entry: ObjectEntry): void {
@@ -821,6 +865,9 @@ export class Projection {
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("body", "text", (column) => column.notNull())
       .execute();
+    await sql`CREATE INDEX IF NOT EXISTS objects_kind_record_idx ON objects(kind, record_id)`.execute(
+      this.db,
+    );
     await sql`CREATE INDEX IF NOT EXISTS actions_run_idx ON actions(run_id, created_at)`.execute(
       this.db,
     );
@@ -873,10 +920,7 @@ export class Projection {
     }
   }
 
-  async rebuild(
-    store: ImmutableObjectStore,
-    prefix = "control/schema=v1",
-  ): Promise<void> {
+  async rebuild(store: ImmutableObjectStore, prefix?: string): Promise<void> {
     // Local row order is rebuilt from immutable objects. A new epoch makes
     // clients with a prior cursor replay instead of skipping an object.
     this.eventEpoch = randomUUID();
@@ -887,40 +931,60 @@ export class Projection {
       integrity_error: null,
     };
     try {
-      const entries = [...(await store.list(prefix))].sort((left, right) =>
+      const entries = (await listProjectionEntries(store, prefix)).sort((left, right) =>
         left.key.localeCompare(right.key),
       );
-      await this.clear();
       const seen = new Set<string>();
-      const supersessions: Array<{
-        entry: VerifiedObjectEntry;
-        record: PublicationSupersession;
-      }> = [];
       for (const entry of entries) {
         validateObjectEntry(entry);
         if (seen.has(entry.key))
           throw new ProjectionIntegrityError(`duplicate object listing: ${entry.key}`);
         seen.add(entry.key);
-        const bytes = await store.read(entry.key);
+      }
+      // Fetch immutable objects concurrently, then apply them in deterministic key order.
+      const objects = await readRebuildObjects(store, entries);
+      await this.clear();
+      const parsed = entries.map((entry, index) => {
+        const bytes = objects[index];
+        if (!bytes)
+          throw new ProjectionIntegrityError(`missing prefetched object: ${entry.key}`);
         const verified = verifiedEntry(bytes, entry);
-        const record = parseRecord(bytes, verified);
-        await verifyAttemptEvidence(store, record);
+        return { entry: verified, record: parseRecord(bytes, verified) };
+      });
+      await verifyRebuildEvidence(
+        store,
+        parsed.map(({ record }) => record),
+      );
+      const supersessions: Array<{
+        entry: VerifiedObjectEntry;
+        record: PublicationSupersession;
+      }> = [];
+      for (const [index, { entry, record }] of parsed.entries()) {
+        if (index > 0 && index % PROJECTION_APPLY_BATCH_SIZE === 0)
+          await yieldToEventLoop();
         if (record.kind === "publication.supersession")
-          supersessions.push({ entry: verified, record });
-        else await this.apply(verified, record);
+          supersessions.push({ entry, record });
+        else await this.apply(entry, record);
       }
       for (const deferred of supersessions)
         await this.apply(deferred.entry, deferred.record);
       await this.verifyInvariants();
+      const rebuiltAt = new Date().toISOString();
       this.state = {
         ready: true,
         rebuilding: false,
         object_count: entries.length,
-        last_rebuild_at: new Date().toISOString(),
-        last_sync_at: new Date().toISOString(),
+        last_rebuild_at: rebuiltAt,
+        last_sync_at: rebuiltAt,
         event_cursor: await this.latestEventCursor(),
         integrity_error: null,
       };
+      // A replacement control process can replay while the previous process is
+      // still finishing writes. Catch up until a complete listing adds nothing
+      // so startup never writes from a stale admission-chain head.
+      while ((await this.sync(store, prefix)).length > 0) {
+        await yieldToEventLoop();
+      }
     } catch (error) {
       await this.clear();
       this.state = {
@@ -934,12 +998,9 @@ export class Projection {
     }
   }
 
-  async sync(
-    store: ImmutableObjectStore,
-    prefix = "control/schema=v1",
-  ): Promise<ControlEvent[]> {
+  async sync(store: ImmutableObjectStore, prefix?: string): Promise<ControlEvent[]> {
     try {
-      const entries = [...(await store.list(prefix))].sort((left, right) =>
+      const entries = (await listProjectionEntries(store, prefix)).sort((left, right) =>
         left.key.localeCompare(right.key),
       );
       const seen = new Set<string>();
@@ -948,7 +1009,9 @@ export class Projection {
         record: PublicationSupersession;
       }> = [];
       const ingested: ControlEvent[] = [];
-      for (const entry of entries) {
+      for (const [index, entry] of entries.entries()) {
+        if (index > 0 && index % PROJECTION_APPLY_BATCH_SIZE === 0)
+          await yieldToEventLoop();
         validateObjectEntry(entry);
         if (seen.has(entry.key))
           throw new ProjectionIntegrityError(`duplicate object listing: ${entry.key}`);
@@ -1774,7 +1837,12 @@ export class Projection {
       .selectFrom("actions")
       .selectAll()
       .where("action_kind", "in", [...hardwareActionKinds])
+      .orderBy("created_at", "desc")
+      .orderBy("action_id", "desc")
       .execute();
+    const hardwareActionsById = new Map(
+      hardwareActions.map((action) => [action.action_id, action]),
+    );
     const launchRuns = new Map(
       hardwareActions
         .filter((action) => action.action_kind === "job.launch")
@@ -1791,13 +1859,18 @@ export class Projection {
       .selectFrom("job_capacity_releases")
       .selectAll()
       .execute();
+    const receiptObjects = new Map(
+      (
+        await this.db
+          .selectFrom("objects")
+          .select(["record_id", "body"])
+          .where("kind", "=", "action.receipt")
+          .execute()
+      ).map((receipt) => [receipt.record_id, receipt]),
+    );
     for (const release of releases) {
-      const evidence = await this.db
-        .selectFrom("objects")
-        .select(["kind", "body"])
-        .where("record_id", "=", release.evidence_record_id)
-        .executeTakeFirst();
-      if (evidence?.kind !== "action.receipt")
+      const evidence = receiptObjects.get(release.evidence_record_id);
+      if (!evidence)
         throw new ProjectionIntegrityError(
           `Job capacity release evidence is missing: ${release.action_id}`,
         );
@@ -1842,11 +1915,7 @@ export class Projection {
           `Job terminal release proof is invalid: ${release.action_id}`,
         );
       else {
-        const evidenceAction = await this.db
-          .selectFrom("actions")
-          .select(["action_kind", "intent_body"])
-          .where("action_id", "=", receipt.action_id)
-          .executeTakeFirst();
+        const evidenceAction = hardwareActionsById.get(receipt.action_id);
         const evidenceIntent = evidenceAction
           ? (JSON.parse(evidenceAction.intent_body) as ActionIntent)
           : null;
@@ -1908,7 +1977,11 @@ export class Projection {
       if (!budgetState.has(runId))
         throw new ProjectionIntegrityError(`attempt references missing run: ${runId}`);
     }
-    const hardwareByRun = await this.hardwareObservedByRun();
+    const hardwareByRun = new Map<string, number>();
+    for (const row of this.collapseHardwareRows(hardwareActions)) {
+      const current = hardwareByRun.get(row.run_id) ?? 0;
+      hardwareByRun.set(row.run_id, current + receiptCostMicrousd(row));
+    }
     for (const runId of hardwareByRun.keys()) {
       if (!budgetState.has(runId))
         throw new ProjectionIntegrityError(
@@ -1947,6 +2020,16 @@ export class Projection {
       .limit(limit)
       .execute();
     return rows.map((row) => JSON.parse(row.intent_body) as ActionIntent);
+  }
+
+  async pendingActionCount(actionKind: ActionIntent["action_kind"]): Promise<number> {
+    const row = await this.db
+      .selectFrom("actions")
+      .select(sql<number>`count(*)`.as("count"))
+      .where("action_kind", "=", actionKind)
+      .where("receipt_body", "is", null)
+      .executeTakeFirstOrThrow();
+    return row.count;
   }
 
   async unadvancedActions(
@@ -2034,6 +2117,45 @@ export class Projection {
       .orderBy("job_admissions.action_id")
       .execute();
     return rows.map((row) => JSON.parse(row.body) as JobAdmissionGrant);
+  }
+
+  async activeJobAdmissionRunUsage(
+    namespace: string,
+  ): Promise<Array<{ run_id: string; active_jobs: number; max_active_jobs: number }>> {
+    const rows = await this.db
+      .selectFrom("job_admissions")
+      .innerJoin("actions", "actions.action_id", "job_admissions.action_id")
+      .leftJoin(
+        "job_capacity_releases",
+        "job_capacity_releases.action_id",
+        "job_admissions.action_id",
+      )
+      .select([
+        "job_admissions.run_id",
+        sql<number>`count(*)`.as("active_jobs"),
+        sql<
+          number | null
+        >`min(json_extract(actions.intent_body, '$.payload.max_jobs'))`.as("minimum"),
+        sql<
+          number | null
+        >`max(json_extract(actions.intent_body, '$.payload.max_jobs'))`.as("maximum"),
+      ])
+      .where("job_admissions.namespace", "=", namespace)
+      .where("job_capacity_releases.action_id", "is", null)
+      .groupBy("job_admissions.run_id")
+      .orderBy("job_admissions.run_id")
+      .execute();
+    return rows.map((row) => {
+      if (row.minimum === null || row.minimum !== row.maximum)
+        throw new ProjectionIntegrityError(
+          `active Job admissions disagree on the Run limit: ${row.run_id}`,
+        );
+      return {
+        run_id: row.run_id,
+        active_jobs: row.active_jobs,
+        max_active_jobs: row.minimum,
+      };
+    });
   }
 
   async latestJobAdmission(namespace: string): Promise<JobAdmissionGrant | null> {
@@ -2650,22 +2772,6 @@ export class Projection {
     return [...latest.values()];
   }
 
-  private async hardwareObservedByRun(): Promise<Map<string, number>> {
-    const rows = await this.db
-      .selectFrom("actions")
-      .selectAll()
-      .where("action_kind", "in", [...hardwareActionKinds])
-      .orderBy("created_at", "desc")
-      .orderBy("action_id", "desc")
-      .execute();
-    const sums = new Map<string, number>();
-    for (const row of this.collapseHardwareRows(rows)) {
-      const current = sums.get(row.run_id) ?? 0;
-      sums.set(row.run_id, current + receiptCostMicrousd(row));
-    }
-    return sums;
-  }
-
   private async hardwareObservedMicrousd(runId: string): Promise<number> {
     const rows = await this.db
       .selectFrom("actions")
@@ -2711,6 +2817,27 @@ export class Projection {
     ).execute();
     return rows.map(
       ({ assigned_task_ids_body: _taskIds, is_replacement: _retry, ...row }) => row,
+    );
+  }
+
+  async activeJobObservedStateCounts(
+    namespace: string,
+  ): Promise<Record<string, number>> {
+    const rows = await this.db
+      .selectFrom("job_admissions")
+      .innerJoin("jobs", "jobs.launch_action_id", "job_admissions.action_id")
+      .leftJoin(
+        "job_capacity_releases",
+        "job_capacity_releases.action_id",
+        "job_admissions.action_id",
+      )
+      .select(["observed_state", sql<number>`count(*)`.as("count")])
+      .where("job_admissions.namespace", "=", namespace)
+      .where("job_capacity_releases.action_id", "is", null)
+      .groupBy("observed_state")
+      .execute();
+    return Object.fromEntries(
+      rows.map((row) => [row.observed_state ?? "UNOBSERVED", row.count]),
     );
   }
 

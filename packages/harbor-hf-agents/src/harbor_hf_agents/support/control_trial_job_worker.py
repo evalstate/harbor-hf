@@ -41,6 +41,11 @@ from harbor_hf_agents.support.control_job_environment import (
     ControlJobEnvironment,
     JobEnvironmentPreflightError,
 )
+from harbor_hf_agents.support.hf_inference_bridge import (
+    InferenceUsage,
+    InferenceUsageError,
+    read_job_inference_usage,
+)
 from harbor_hf_agents.support.provider_outcome import (
     ProviderPolicyError,
     TerminalProviderError,
@@ -127,6 +132,14 @@ class PreparedDataError(RuntimeError):
 
 class WorkerEvidenceError(RuntimeError):
     """Raised when task-controlled evidence violates worker limits or integrity."""
+
+
+class MissingHarborResultError(RuntimeError):
+    """Raised when Harbor exits without its required trial result."""
+
+    def __init__(self, message: str, *, timed_out: bool = False) -> None:
+        super().__init__(message)
+        self.timed_out = timed_out
 
 
 @dataclass(frozen=True)
@@ -531,19 +544,47 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
         detail = ""
     if name in {"AgentTimeoutError", "VerifierTimeoutError"}:
         return "benchmark_timeout", False
-    if name in _ENVIRONMENT_SETUP_ERRORS or name == TransientProviderError.__name__:
-        return "infrastructure", True
     if name == ProviderPolicyError.__name__ or name in _POLICY_FAILURES:
         return "policy", False
     if name == TerminalProviderError.__name__:
         return "agent", False
     if "policy_rejected" in detail:
         return "policy", False
+    if (
+        name in _ENVIRONMENT_SETUP_ERRORS
+        or name == TransientProviderError.__name__
+        or not _phase_started(result, "agent_execution")
+    ):
+        return "infrastructure", True
     if "Verifier" in name or "Reward" in name:
         return "verifier", False
     if "Refusal" in name:
         return "refusal", False
     return "agent", False
+
+
+def _phase_started(result: dict[str, Any], name: str) -> bool:
+    value = result[name] if name in result else None  # noqa: SIM401 -- repository style requires direct dictionary access
+    return (
+        isinstance(value, dict)
+        and "started_at" in value
+        and value["started_at"] is not None
+    )
+
+
+def _outcome_with_usage(
+    outcome: str,
+    replacement_eligible: bool,
+    usage: InferenceUsage | None,
+) -> tuple[str, bool]:
+    """Treat missing trusted provider usage as an infrastructure failure."""
+    if (
+        usage is not None
+        and (usage.requests == 0 or usage.input_tokens == 0)
+        and outcome in {"agent", "complete"}
+    ):
+        return "infrastructure", True
+    return outcome, replacement_eligible
 
 
 def _agent_result(result: dict[str, Any] | None) -> dict[str, Any]:
@@ -558,7 +599,10 @@ def _token_count(agent: dict[str, Any], name: str) -> int:
     return int(value) if value is not None else 0
 
 
-def _metrics(result: dict[str, Any] | None) -> dict[str, float]:
+def _metrics(
+    result: dict[str, Any] | None,
+    usage: InferenceUsage | None = None,
+) -> dict[str, float]:
     if result is None:
         return {}
     metrics: dict[str, float] = {}
@@ -573,16 +617,38 @@ def _metrics(result: dict[str, Any] | None) -> dict[str, float]:
             if isinstance(value, (int, float)) and math.isfinite(float(value)):
                 metrics[name] = float(value)
     agent = _agent_result(result)
-    metrics["input_tokens"] = float(_token_count(agent, "n_input_tokens"))
-    metrics["output_tokens"] = float(_token_count(agent, "n_output_tokens"))
+    metrics["input_tokens"] = float(
+        usage.input_tokens
+        if usage is not None
+        else _token_count(agent, "n_input_tokens")
+    )
+    metrics["output_tokens"] = float(
+        usage.output_tokens
+        if usage is not None
+        else _token_count(agent, "n_output_tokens")
+    )
     return metrics
 
 
-def _cost_microusd(config: WorkerConfig, result: dict[str, Any] | None) -> int:
+def _cost_microusd(
+    config: WorkerConfig,
+    result: dict[str, Any] | None,
+    usage: InferenceUsage | None = None,
+) -> int:
     agent = _agent_result(result)
+    input_tokens = (
+        usage.input_tokens
+        if usage is not None
+        else _token_count(agent, "n_input_tokens")
+    )
+    output_tokens = (
+        usage.output_tokens
+        if usage is not None
+        else _token_count(agent, "n_output_tokens")
+    )
     return math.ceil(
-        _token_count(agent, "n_input_tokens") * config.input_price / 1_000_000
-        + _token_count(agent, "n_output_tokens") * config.output_price / 1_000_000
+        input_tokens * config.input_price / 1_000_000
+        + output_tokens * config.output_price / 1_000_000
     )
 
 
@@ -839,12 +905,14 @@ def _submit_attempt(
     outcome_override: tuple[str, bool] | None = None,
 ) -> None:
     task = config.task
+    usage = read_job_inference_usage()
     outcome, replacement = outcome_override or _exception_outcome(
         result,
         output,
         timed_out=timed_out,
     )
-    metrics = _metrics(result)
+    outcome, replacement = _outcome_with_usage(outcome, replacement, usage)
+    metrics = _metrics(result, usage)
     client = _control_client(config.run_id)
     client.request_sync(
         "POST",
@@ -855,7 +923,7 @@ def _submit_attempt(
             "replacement_eligible": replacement,
             "evidence_digest": evidence_digest,
             "evidence_path": evidence_path,
-            "cost_microusd": _cost_microusd(config, result),
+            "cost_microusd": _cost_microusd(config, result, usage),
             "metrics": metrics,
             "completed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "confirmed": True,
@@ -896,7 +964,18 @@ def _submit_failure_attempt(
 
 def _worker_failure_outcome(error: BaseException) -> tuple[str, bool]:
     """Classify only typed transient failures as replacement-eligible."""
-    if isinstance(error, (ControlClientTransientError, JobEnvironmentPreflightError)):
+    if isinstance(error, MissingHarborResultError):
+        if error.timed_out:
+            return "benchmark_timeout", False
+        return "infrastructure", True
+    if isinstance(
+        error,
+        (
+            ControlClientTransientError,
+            InferenceUsageError,
+            JobEnvironmentPreflightError,
+        ),
+    ):
         return "infrastructure", True
     if isinstance(error, ProviderPolicyError):
         return "policy", False
@@ -1133,7 +1212,10 @@ def _run_harbor(
     )
     result_path = _result_path(root, task)
     if result_path is None:
-        raise WorkerEvidenceError("Harbor did not write a trial result")
+        raise MissingHarborResultError(
+            "Harbor did not write a trial result",
+            timed_out=timed_out,
+        )
     return output, timed_out, result_path
 
 

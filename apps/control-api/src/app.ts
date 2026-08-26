@@ -40,8 +40,6 @@ import {
   acceptedSchema,
   attemptAcceptedSchema,
   auditSchema,
-  runListSchema,
-  runViewSchema,
   capacitySchema,
   endpointSchema,
   evidenceAcceptedSchema,
@@ -51,8 +49,11 @@ import {
   leaderboardSchema,
   namespaceCapacityPolicySchema,
   namespaceCapacityUpdateSchema,
+  namespaceCapacityViewSchema,
   profileSchema,
   publicationSchema,
+  runListSchema,
+  runViewSchema,
   sessionSchema,
   systemSchema,
   taskDetailSchema,
@@ -381,10 +382,54 @@ async function publicationObjectsMatch(
   return true;
 }
 
-async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]> {
-  const publications = await runtime.projection.publications();
+type ResultItem = Record<string, unknown>;
+type ResultCatalogObjects = Awaited<ReturnType<Runtime["store"]["list"]>>;
+type ResultPublications = Awaited<ReturnType<Runtime["projection"]["publications"]>>;
+type ResultSupersessions = Awaited<
+  ReturnType<Runtime["projection"]["publicationSupersessions"]>
+>;
+
+interface ResultItemsCache {
+  fingerprint: string | null;
+  projectionFingerprint: string | null;
+  catalogCheckedAt: number;
+  value: ResultItem[] | null;
+  inFlight: {
+    projectionFingerprint: string;
+    token: object;
+    promise: Promise<ResultItem[]>;
+  } | null;
+}
+
+const resultItemsCaches = new WeakMap<Runtime, ResultItemsCache>();
+
+function resultItemsCache(runtime: Runtime): ResultItemsCache {
+  const existing = resultItemsCaches.get(runtime);
+  if (existing) return existing;
+  const created: ResultItemsCache = {
+    fingerprint: null,
+    projectionFingerprint: null,
+    catalogCheckedAt: Number.NEGATIVE_INFINITY,
+    value: null,
+    inFlight: null,
+  };
+  resultItemsCaches.set(runtime, created);
+  return created;
+}
+
+async function loadResultItems(
+  runtime: Runtime,
+  publications: ResultPublications,
+  supersessions: ResultSupersessions,
+  catalogs: ResultCatalogObjects,
+): Promise<ResultItem[]> {
   const projectedById = new Map(
     publications.map((publication) => [publication.publication_id, publication]),
+  );
+  const projectedCatalogDigests = new Set(
+    publications
+      .filter((publication) => publication.status === "published")
+      .map((publication) => publication.catalog_digest),
   );
   const byId = new Map<string, Record<string, unknown>>(
     publications
@@ -400,15 +445,20 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
         },
       ]),
   );
-  const catalogs = await runtime.store.list("results/schema=v1/catalog");
   for (const object of catalogs) {
     if (!object.key.endsWith(".json")) continue;
     const bytes = await runtime.store.read(object.key);
     if (bytes.byteLength !== object.size)
       throw new Error(`Result catalog size mismatch at ${object.key}`);
     const digest = sha256(bytes);
-    const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    const catalog = validateResultCatalog<HarborHFResultCatalogV1>(parsed);
+    let catalog: HarborHFResultCatalogV1;
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      catalog = validateResultCatalog<HarborHFResultCatalogV1>(parsed);
+    } catch (error) {
+      if (projectedCatalogDigests.has(digest)) throw error;
+      continue;
+    }
     for (const entry of catalog.entries) {
       const projected = projectedById.get(entry.publication_id);
       if (!projected) {
@@ -461,7 +511,7 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
       });
     }
   }
-  for (const supersession of await runtime.projection.publicationSupersessions()) {
+  for (const supersession of supersessions) {
     const previous = byId.get(supersession.superseded_publication_id);
     if (!previous) continue;
     previous.status = "superseded";
@@ -515,6 +565,61 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
     Object.assign(item, summary);
   }
   return [...byId.values()];
+}
+
+async function resultItems(runtime: Runtime): Promise<ResultItem[]> {
+  const [publications, supersessions] = await Promise.all([
+    runtime.projection.publications(),
+    runtime.projection.publicationSupersessions(),
+  ]);
+  const projectionFingerprint = sha256(canonicalJson({ publications, supersessions }));
+  const cache = resultItemsCache(runtime);
+  if (
+    cache.value &&
+    cache.projectionFingerprint === projectionFingerprint &&
+    performance.now() - cache.catalogCheckedAt < runtime.config.sync_interval_ms
+  )
+    return cache.value;
+  if (cache.inFlight?.projectionFingerprint === projectionFingerprint)
+    return cache.inFlight.promise;
+
+  const token = {};
+  const promise = (async () => {
+    const catalogs = (await runtime.store.list("results/schema=v1/catalog"))
+      .filter((object) => object.key.endsWith(".json"))
+      .map(({ key, size, source_identity }) => ({ key, size, source_identity }))
+      .sort((left, right) => left.key.localeCompare(right.key));
+    const fingerprint = sha256(canonicalJson({ projectionFingerprint, catalogs }));
+    const current = resultItemsCache(runtime);
+    if (current.value && current.fingerprint === fingerprint) {
+      if (current.inFlight?.token === token) {
+        current.projectionFingerprint = projectionFingerprint;
+        current.catalogCheckedAt = performance.now();
+      }
+      return current.value;
+    }
+    const items = await loadResultItems(runtime, publications, supersessions, catalogs);
+    if (current.inFlight?.token === token) {
+      current.fingerprint = fingerprint;
+      current.projectionFingerprint = projectionFingerprint;
+      current.catalogCheckedAt = performance.now();
+      current.value = items;
+    }
+    return items;
+  })().finally(() => {
+    const current = resultItemsCache(runtime);
+    if (current.inFlight?.token === token) current.inFlight = null;
+  });
+  cache.inFlight = { projectionFingerprint, token, promise };
+  return promise;
+}
+
+/**
+ * Populate the result catalog cache before the first Results request.
+ * Bucket catalog metadata is rechecked at the configured sync cadence.
+ */
+export async function warmResultItems(runtime: Runtime): Promise<void> {
+  await resultItems(runtime);
 }
 
 interface ResultQuery {
@@ -1065,10 +1170,10 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     {
       schema: {
         tags: ["system"],
-        response: { 200: namespaceCapacityPolicySchema },
+        response: { 200: namespaceCapacityViewSchema },
       },
     },
-    async () => runtime.service.namespaceCapacityPolicy(),
+    async () => runtime.service.namespaceCapacityView(),
   );
 
   app.post(

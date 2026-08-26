@@ -21,14 +21,20 @@ from huggingface_hub.errors import HfHubHTTPError
 LOGGER = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "harbor-hf/run-data-reset/v2"
+TARGETED_SCHEMA_VERSION = "harbor-hf/targeted-run-data-reset/v1"
 DEFAULT_DRY_RUN_MANIFEST = Path("run-data-reset-dry-run.json")
 DEFAULT_VERIFICATION_MANIFEST = Path("run-data-reset-verification.json")
 DELETE_BATCH_SIZE = 100
 MAX_REMOTE_ATTEMPTS = 3
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _XET_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CONTENT_IDENTITY_PATTERN = re.compile(r"^(?:sha256|xet):[0-9a-f]{64}$")
 _TRANSIENT_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+TARGET_RUN_ROOTS = (
+    "control/schema=v1/runs/",
+    "evidence/schema=v1/runs/",
+)
 
 # These are the only durable Bucket trees that survive a Run-data reset.
 PRESERVE_PREFIXES = (
@@ -398,6 +404,204 @@ def run_dry_run(
     return manifest
 
 
+def target_run_prefixes(run_ids: Sequence[str]) -> tuple[str, ...]:
+    """Return exact current-schema Bucket prefixes for selected Runs."""
+    normalized = tuple(sorted(run_ids))
+    if not normalized:
+        raise PrefixConfigurationError("targeted reset requires at least one Run")
+    if len(set(normalized)) != len(normalized):
+        raise PrefixConfigurationError("targeted reset Run IDs must be unique")
+    if any(
+        len(run_id) < 2 or len(run_id) > 160 or _ID_PATTERN.fullmatch(run_id) is None
+        for run_id in normalized
+    ):
+        raise PrefixConfigurationError("targeted reset Run ID is invalid")
+    prefixes = tuple(
+        f"{root}{run_id}/" for root in TARGET_RUN_ROOTS for run_id in normalized
+    )
+    validate_prefixes((), prefixes)
+    return prefixes
+
+
+def list_targeted_inventory(
+    api: BucketResetApi,
+    bucket_id: str,
+    run_ids: Sequence[str],
+    *,
+    sleep: Sleeper = time.sleep,
+) -> ResetInventory:
+    """List only the exact control and evidence trees for selected Runs."""
+    prefixes = target_run_prefixes(run_ids)
+    entries: list[object] = []
+    for prefix in prefixes:
+        for attempt in range(1, MAX_REMOTE_ATTEMPTS + 1):
+            try:
+                entries.extend(
+                    api.list_bucket_tree(
+                        bucket_id,
+                        prefix=prefix,
+                        recursive=True,
+                    )
+                )
+                break
+            except ValueError as error:
+                raise BucketInventoryError(
+                    "targeted Bucket identifier or listing request is invalid"
+                ) from error
+            except (HfHubHTTPError, httpx.TransportError) as error:
+                if not _is_transient(error) or attempt == MAX_REMOTE_ATTEMPTS:
+                    raise BucketInventoryError(
+                        "complete targeted Bucket listing failed"
+                    ) from error
+                LOGGER.warning(
+                    "transient targeted Bucket listing failure; retrying attempt=%d",
+                    attempt + 1,
+                )
+                sleep(_retry_delay(attempt))
+    inventory = build_inventory(
+        entries,
+        preserve_prefixes=(),
+        delete_prefixes=prefixes,
+    )
+    _require_known_inventory(inventory)
+    return inventory
+
+
+def targeted_dry_run_manifest(
+    inventory: ResetInventory,
+    run_ids: Sequence[str],
+    *,
+    created_at: datetime,
+) -> dict[str, object]:
+    """Create a secret-free manifest for selected Run trees."""
+    return {
+        "schema_version": TARGETED_SCHEMA_VERSION,
+        "mode": "dry-run",
+        "created_at": _utc_timestamp(created_at),
+        "target_run_count": len(tuple(run_ids)),
+        "target_run_digest": _target_run_digest(run_ids),
+        "target_prefix_digest": _target_prefix_digest(run_ids),
+        "delete_count": len(inventory.deleted),
+        "delete_bytes": inventory.delete_bytes,
+        "delete_key_digest": inventory.delete_key_digest,
+        "unknown_count": len(inventory.unknown),
+        "unknown_key_digest": inventory.unknown_key_digest,
+    }
+
+
+def run_targeted_dry_run(
+    *,
+    api: BucketResetApi,
+    bucket_id: str,
+    run_ids: Sequence[str],
+    manifest_path: Path,
+    clock: Clock = lambda: datetime.now(UTC),
+    sleep: Sleeper = time.sleep,
+) -> dict[str, object]:
+    """Inventory selected Run trees without mutating the Bucket."""
+    inventory = list_targeted_inventory(api, bucket_id, run_ids, sleep=sleep)
+    manifest = targeted_dry_run_manifest(
+        inventory,
+        run_ids,
+        created_at=clock(),
+    )
+    write_manifest(manifest_path, manifest)
+    LOGGER.info(
+        "targeted dry run classified target_run_count=%d delete_count=%d",
+        len(tuple(run_ids)),
+        len(inventory.deleted),
+    )
+    return manifest
+
+
+def apply_targeted_reset(
+    *,
+    api: BucketResetApi,
+    bucket_id: str,
+    run_ids: Sequence[str],
+    confirmed: bool,
+    expected_delete_digest: str | None,
+    verification_manifest_path: Path,
+    dry_run_manifest_path: Path | None = None,
+    batch_size: int = DELETE_BATCH_SIZE,
+    clock: Clock = lambda: datetime.now(UTC),
+    sleep: Sleeper = time.sleep,
+) -> dict[str, object]:
+    """Delete only the reviewed current-schema trees for selected Runs."""
+    expected_digest, manifest_path = _validate_apply_confirmation(
+        confirmed,
+        expected_delete_digest,
+        dry_run_manifest_path,
+        batch_size,
+    )
+    target_run_prefixes(run_ids)
+    preflight = list_targeted_inventory(api, bucket_id, run_ids, sleep=sleep)
+    if preflight.delete_key_digest != expected_digest:
+        raise StaleInventoryError(
+            "targeted delete digest differs from the reviewed dry run"
+        )
+    expected_manifest = read_manifest(manifest_path)
+    _compare_targeted_dry_run_manifest(expected_manifest, preflight, run_ids)
+
+    immediate = list_targeted_inventory(api, bucket_id, run_ids, sleep=sleep)
+    if immediate.deleted != preflight.deleted:
+        raise StaleInventoryError(
+            "targeted Bucket inventory changed immediately before mutation"
+        )
+    for batch in _batches(immediate.deleted, batch_size):
+        _delete_targeted_batch(
+            api=api,
+            bucket_id=bucket_id,
+            run_ids=run_ids,
+            batch=batch,
+            preflight=preflight,
+            sleep=sleep,
+        )
+
+    verified = list_targeted_inventory(api, bucket_id, run_ids, sleep=sleep)
+    if verified.deleted:
+        raise ResetVerificationError(
+            "post-delete verification found selected Run objects"
+        )
+    manifest = targeted_verification_manifest(
+        preflight,
+        verified,
+        run_ids,
+        created_at=clock(),
+    )
+    write_manifest(verification_manifest_path, manifest)
+    LOGGER.info(
+        "targeted reset verified deleted_count=%d target_run_count=%d",
+        len(preflight.deleted),
+        len(tuple(run_ids)),
+    )
+    return manifest
+
+
+def targeted_verification_manifest(
+    preflight: ResetInventory,
+    verified: ResetInventory,
+    run_ids: Sequence[str],
+    *,
+    created_at: datetime,
+) -> dict[str, object]:
+    """Create local verification evidence for selected Run deletion."""
+    return {
+        "schema_version": TARGETED_SCHEMA_VERSION,
+        "mode": "verification",
+        "created_at": _utc_timestamp(created_at),
+        "status": "verified",
+        "target_run_count": len(tuple(run_ids)),
+        "target_run_digest": _target_run_digest(run_ids),
+        "target_prefix_digest": _target_prefix_digest(run_ids),
+        "deleted_count": len(preflight.deleted),
+        "deleted_bytes": preflight.delete_bytes,
+        "preflight_delete_key_digest": preflight.delete_key_digest,
+        "remaining_delete_count": len(verified.deleted),
+        "unknown_count": len(verified.unknown),
+    }
+
+
 def apply_reset(
     *,
     api: BucketResetApi,
@@ -607,6 +811,47 @@ def _compare_dry_run_manifest(
         raise StaleInventoryError("Bucket inventory differs from the dry-run manifest")
 
 
+def _compare_targeted_dry_run_manifest(
+    manifest: dict[str, object],
+    inventory: ResetInventory,
+    run_ids: Sequence[str],
+) -> None:
+    required = {
+        "schema_version",
+        "mode",
+        "created_at",
+        "target_run_count",
+        "target_run_digest",
+        "target_prefix_digest",
+        "delete_count",
+        "delete_bytes",
+        "delete_key_digest",
+        "unknown_count",
+        "unknown_key_digest",
+    }
+    if set(manifest) != required:
+        raise ManifestError(
+            "targeted dry-run manifest fields do not match the reset schema"
+        )
+    if (
+        manifest["schema_version"] != TARGETED_SCHEMA_VERSION
+        or manifest["mode"] != "dry-run"
+        or manifest["unknown_count"] != 0
+    ):
+        raise StaleInventoryError(
+            "targeted dry-run manifest is not an applicable clean plan"
+        )
+    expected = targeted_dry_run_manifest(
+        inventory,
+        run_ids,
+        created_at=_parse_utc_timestamp(manifest["created_at"]),
+    )
+    if manifest != expected:
+        raise StaleInventoryError(
+            "targeted Bucket inventory differs from the dry-run manifest"
+        )
+
+
 def _parse_utc_timestamp(value: object) -> datetime:
     if not isinstance(value, str):
         raise ManifestError("dry-run manifest timestamp is invalid")
@@ -675,6 +920,58 @@ def _delete_batch(
             sleep(_retry_delay(attempt))
 
 
+def _delete_targeted_batch(
+    *,
+    api: BucketResetApi,
+    bucket_id: str,
+    run_ids: Sequence[str],
+    batch: tuple[BucketObject, ...],
+    preflight: ResetInventory,
+    sleep: Sleeper,
+) -> None:
+    remaining = batch
+    for attempt in range(1, MAX_REMOTE_ATTEMPTS + 1):
+        if not remaining:
+            return
+        try:
+            api.batch_bucket_files(
+                bucket_id,
+                delete=[item.key for item in remaining],
+            )
+            return
+        except ValueError as error:
+            raise BucketDeleteError(
+                "a targeted delete batch request was invalid"
+            ) from error
+        except (HfHubHTTPError, httpx.TransportError) as error:
+            observed = list_targeted_inventory(
+                api,
+                bucket_id,
+                run_ids,
+                sleep=sleep,
+            )
+            expected_objects = set(preflight.deleted)
+            if any(item not in expected_objects for item in observed.deleted):
+                raise StaleInventoryError(
+                    "targeted inventory changed during deletion"
+                ) from error
+            observed_keys = {item.key for item in observed.deleted}
+            remaining = tuple(item for item in batch if item.key in observed_keys)
+            if not remaining:
+                return
+            if not _is_transient(error) or attempt == MAX_REMOTE_ATTEMPTS:
+                raise BucketDeleteError(
+                    "a bounded targeted delete batch did not complete"
+                ) from error
+            LOGGER.warning(
+                "transient targeted partial delete failure; "
+                "retrying remaining_count=%d attempt=%d",
+                len(remaining),
+                attempt + 1,
+            )
+            sleep(_retry_delay(attempt))
+
+
 def _require_safe_partial_inventory(
     preflight: ResetInventory,
     observed: ResetInventory,
@@ -720,6 +1017,27 @@ def _retry_delay(attempt: int) -> float:
 def _key_digest(items: Sequence[BucketObject]) -> str:
     keys = [item.key for item in items]
     payload = json.dumps(keys, ensure_ascii=True, separators=(",", ":")).encode()
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _target_run_digest(run_ids: Sequence[str]) -> str:
+    normalized = tuple(sorted(run_ids))
+    target_run_prefixes(normalized)
+    payload = json.dumps(
+        normalized,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _target_prefix_digest(run_ids: Sequence[str]) -> str:
+    prefixes = target_run_prefixes(run_ids)
+    payload = json.dumps(
+        prefixes,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode()
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
@@ -826,6 +1144,12 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_DRY_RUN_MANIFEST,
         help="local dry-run manifest path",
     )
+    parser.add_argument(
+        "--run-id",
+        action="append",
+        default=[],
+        help="delete only this current-schema Run; repeat for multiple Runs",
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--expected-delete-digest")
@@ -845,19 +1169,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     bucket_id = cast(str, arguments.bucket)
     apply = cast(bool, arguments.apply)
+    run_ids = cast(list[str], arguments.run_id)
     try:
         api = cast(BucketResetApi, HfApi())
         if apply:
-            apply_reset(
-                api=api,
-                bucket_id=bucket_id,
-                confirmed=cast(bool, arguments.yes),
-                expected_delete_digest=cast(
-                    str | None, arguments.expected_delete_digest
-                ),
-                dry_run_manifest_path=cast(Path | None, arguments.dry_run_manifest),
-                verification_manifest_path=cast(Path, arguments.verification_manifest),
-            )
+            if run_ids:
+                apply_targeted_reset(
+                    api=api,
+                    bucket_id=bucket_id,
+                    run_ids=run_ids,
+                    confirmed=cast(bool, arguments.yes),
+                    expected_delete_digest=cast(
+                        str | None, arguments.expected_delete_digest
+                    ),
+                    dry_run_manifest_path=cast(Path | None, arguments.dry_run_manifest),
+                    verification_manifest_path=cast(
+                        Path, arguments.verification_manifest
+                    ),
+                )
+            else:
+                apply_reset(
+                    api=api,
+                    bucket_id=bucket_id,
+                    confirmed=cast(bool, arguments.yes),
+                    expected_delete_digest=cast(
+                        str | None, arguments.expected_delete_digest
+                    ),
+                    dry_run_manifest_path=cast(Path | None, arguments.dry_run_manifest),
+                    verification_manifest_path=cast(
+                        Path, arguments.verification_manifest
+                    ),
+                )
         else:
             if (
                 cast(bool, arguments.yes)
@@ -867,11 +1209,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ResetConfirmationError(
                     "apply-only confirmation options require --apply"
                 )
-            run_dry_run(
-                api=api,
-                bucket_id=bucket_id,
-                manifest_path=cast(Path, arguments.manifest),
-            )
+            if run_ids:
+                run_targeted_dry_run(
+                    api=api,
+                    bucket_id=bucket_id,
+                    run_ids=run_ids,
+                    manifest_path=cast(Path, arguments.manifest),
+                )
+            else:
+                run_dry_run(
+                    api=api,
+                    bucket_id=bucket_id,
+                    manifest_path=cast(Path, arguments.manifest),
+                )
     except RunDataResetError as error:
         LOGGER.error("Run-data reset aborted: %s", error)
         return 1

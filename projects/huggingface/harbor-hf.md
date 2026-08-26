@@ -11,7 +11,7 @@ default_branch: main
 
 Status: approved
 Approved at: 2026-08-17T06:48:55Z
-Amended at: 2026-08-23T09:01:00Z
+Amended at: 2026-08-26T12:06:30Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -64,6 +64,8 @@ Installer exact configure-retry amendment approved at: 2026-08-24T15:14:43Z
 Installer replacement configure-retry amendment approved at: 2026-08-24T15:23:28Z
 Installer readiness-polling amendment approved at: 2026-08-24T15:31:07Z
 Slophammer mutation-declaration amendment approved at: 2026-08-24T18:24:12Z
+Failed-Run replacement amendment approved at: 2026-08-25T22:29:22Z
+Admission-integrity repair amendment approved at: 2026-08-26T12:06:30Z
 
 ### Scope
 
@@ -130,6 +132,8 @@ Slophammer mutation-declaration amendment approved at: 2026-08-24T18:24:12Z
 - Remove logical-task pagination from the run detail and fix general control-Space responsiveness as part of the Run-native redesign.
 - Delete every run-derived object from the canonical Bucket, including run locks, actions, tasks, attempts, evidence, publications, normalized results, catalogs, and leaderboard snapshots. Preserve ACLs, profiles, promotions, capacity policy, canonical resources, and credentials.
 - After the redesigned service passes an unpaid control canary and a bounded paid task canary, launch fresh Terminal-Bench 2.1 single-trial runs for the Chat Completions harnesses with explicit launch authorization.
+- Harden worker retries across control-service projection rebuilds, delete only the seven fresh Runs whose final preparation Jobs failed on `control_not_ready`, and launch one replacement Run for each same authorized harness after the hardened path passes its canaries.
+- Repair the single detected Job admission-chain fork by deleting only its orphaned admission object, which has no dispatch, receipt, capacity release, advancement, or remote Job. Preserve its action intent and every other Run record. Add startup projection catch-up, deploy the reviewed revision, and restart the existing control Space.
 
 ### Limits
 
@@ -199,6 +203,8 @@ Slophammer mutation-declaration amendment approved at: 2026-08-24T18:24:12Z
 - The Run-native path has no Sandbox lifecycle and no Campaign compatibility writer, reader, route, field, alias, or UI label. Existing run data is deleted instead of migrated.
 - Replacement Jobs remain limited to explicit infrastructure failures, the locked physical-attempt count, the run ceiling, and the previously approved aggregate ceilings. Semantic, agent, verifier, policy, refusal, cancelled, benchmark-timeout, and scored outcomes remain terminal.
 - Fresh runs start only after the exact deployed revision passes the unpaid control canary and bounded paid task canary. FX, Codex, and Claude Code remain excluded from fresh launch without a separate amendment.
+- The 2026-08-25 failed-Run replacement amendment permits targeted deletion and replacement only for the seven fresh Runs invalidated by `control_not_ready` during the control deployment. Preserve every unrelated Run and retained control object. Keep the same profiles, USD 10.60 per-Run ceiling, USD 74.20 aggregate ceiling, and excluded harnesses. Do not rerun any scored or semantic outcome.
+- The 2026-08-26 admission-integrity repair amendment permits deletion of exactly one orphaned Job admission object and no other object. It adds no compatibility path, persistent resource, credential, Run, retry, or ceiling increase.
 
 ### Remaining gates
 
@@ -294,3 +300,11 @@ No project-scope amendment remains pending. Operational gates still apply:
 - At 2026-08-24T15:23:28Z, approved one replacement exact `install:configure` retry against the same existing installer-test resources, using the unchanged private plan, receipt, source upload, and credential names, with the plan's sealed source revision and the project uv environment's exact sealed Hugging Face CLI version. Do not replace or transfer credentials, create resources, use paid hardware, activate writes, push, or open a pull request. Restore the authorization branch and stop after sanitized success verification or the next sanitized failure.
 - At 2026-08-24T15:31:07Z, approved local implementation, tests, documentation, and commits for visible bounded Space-start and application-readiness polling during installer configuration. Retry only exact reviewed startup states, report sanitized progress, and preserve fail-closed rollback. Do not run hosted installer commands, deploy, activate, spend, push, or open a pull request.
 - At 2026-08-24T18:24:12Z, approved disabling Slophammer's Python mutation-declaration rule with a documented reason and removing its obsolete baseline finding. Keep the manual mutation workflow and local mutation tooling available on demand. Limit work to local configuration, validation, and commits; do not push, deploy, mutate hosted resources, or spend.
+
+### 2026-08-25
+
+- At 2026-08-25T22:29:22Z, approved hardening worker retries across control-service rebuilds, deleting only the seven fresh Run-derived prefixes invalidated when their final preparation Jobs received `control_not_ready`, and launching one replacement Run for each same authorized harness. Existing profiles and ceilings remain unchanged. OpenCode, FX, Codex, and Claude Code remain excluded.
+
+### 2026-08-26
+
+- At 2026-08-26T12:06:30Z, approved removing the old orphaned admission behind the single detected integrity fork, fixing startup replay without backward compatibility, and restarting the existing control Space. The repair deletes only the admission object that never dispatched or created a remote Job and preserves every other durable record.
