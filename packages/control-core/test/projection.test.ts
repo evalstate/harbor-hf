@@ -1,3 +1,4 @@
+import { setImmediate as scheduleImmediate } from "node:timers";
 import type { AttemptReceipt } from "@harbor-hf/contracts";
 import { canonicalJson, deterministicId, sha256 } from "@harbor-hf/contracts";
 import { NoopActions } from "@harbor-hf/hf-adapters";
@@ -137,6 +138,36 @@ describe("projection replay", () => {
 
     expect(store.maxActiveReads).toBeGreaterThan(1);
     expect(store.maxActiveReads).toBeLessThanOrEqual(16);
+    await projection.close();
+  });
+
+  it("yields to the event loop while applying a projection rebuild", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    for (let index = 0; index < 64; index += 1) {
+      const record = {
+        schema_version: "v1",
+        kind: "operator.acl",
+        record_id: `rebuild-yield-${index}`,
+        created_at: `2026-08-24T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        actor: { subject: "projection-test", role: "migration" },
+        operators: ["operator"],
+        readers: [],
+      } as const;
+      await control.store.create(
+        `control/schema=v1/operators/${record.record_id}.json`,
+        new TextEncoder().encode(canonicalJson(record)),
+      );
+    }
+    const projection = await Projection.open(`${control.root}/yield.sqlite`);
+    let heartbeatObserved = false;
+    scheduleImmediate(() => {
+      heartbeatObserved = true;
+    });
+
+    await projection.rebuild(control.store);
+
+    expect(heartbeatObserved).toBe(true);
     await projection.close();
   });
 

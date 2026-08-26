@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
+import { setImmediate as scheduleImmediate } from "node:timers";
 import type {
   ActionAdvanced,
   ActionDispatch,
@@ -294,12 +295,17 @@ export interface SystemView {
 export class ProjectionIntegrityError extends Error {}
 
 const REBUILD_IO_CONCURRENCY = 16;
+const PROJECTION_APPLY_BATCH_SIZE = 64;
 const RUN_NATIVE_CONTROL_PREFIXES = [
   "control/schema=v1/migrations/",
   "control/schema=v1/operators/",
   "control/schema=v1/profiles/",
   "control/schema=v1/runs/",
 ] as const;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => scheduleImmediate(resolve));
+}
 
 function body(value: unknown): string {
   return canonicalJson(value).trimEnd();
@@ -927,7 +933,9 @@ export class Projection {
         entry: VerifiedObjectEntry;
         record: PublicationSupersession;
       }> = [];
-      for (const { entry, record } of parsed) {
+      for (const [index, { entry, record }] of parsed.entries()) {
+        if (index > 0 && index % PROJECTION_APPLY_BATCH_SIZE === 0)
+          await yieldToEventLoop();
         if (record.kind === "publication.supersession")
           supersessions.push({ entry, record });
         else await this.apply(entry, record);
@@ -968,7 +976,9 @@ export class Projection {
         record: PublicationSupersession;
       }> = [];
       const ingested: ControlEvent[] = [];
-      for (const entry of entries) {
+      for (const [index, entry] of entries.entries()) {
+        if (index > 0 && index % PROJECTION_APPLY_BATCH_SIZE === 0)
+          await yieldToEventLoop();
         validateObjectEntry(entry);
         if (seen.has(entry.key))
           throw new ProjectionIntegrityError(`duplicate object listing: ${entry.key}`);
