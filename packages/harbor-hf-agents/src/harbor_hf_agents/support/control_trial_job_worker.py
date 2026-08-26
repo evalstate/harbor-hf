@@ -1112,6 +1112,7 @@ def _run_logged_command(  # noqa: C901 -- bounded streaming state machine
     )
     if process.stdout is None:
         raise RuntimeError("Harbor process output pipe is unavailable")
+    output_stream = process.stdout
     chunks: deque[str] = deque()
     retained_chars = 0
     streamed_chars = 0
@@ -1148,7 +1149,7 @@ def _run_logged_command(  # noqa: C901 -- bounded streaming state machine
         try:
             pending = ""
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            while raw := os.read(process.stdout.fileno(), _LOG_READ_BYTES):
+            while raw := os.read(output_stream.fileno(), _LOG_READ_BYTES):
                 pending += decoder.decode(raw)
                 redacted, pending = _redact_pending_output(
                     pending,
@@ -1187,7 +1188,7 @@ def _run_logged_command(  # noqa: C901 -- bounded streaming state machine
             os.killpg(process.pid, signal.SIGKILL)
         reader.join(timeout=_LOG_DRAIN_SECONDS)
     if reader.is_alive():
-        process.stdout.close()
+        output_stream.close()
         reader.join(timeout=_LOG_DRAIN_SECONDS)
     if reader.is_alive():
         raise RuntimeError("command output reader did not stop")
