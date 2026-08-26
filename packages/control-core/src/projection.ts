@@ -8,17 +8,17 @@ import type {
   ActionReceipt,
   AttemptReceipt,
   BudgetEvent,
-  RunLock,
-  RunRequest,
   EndpointResource,
   HarborHFControlRecordV1,
+  JobAdmissionGrant,
+  JobCapacityRelease,
   OperatorAcl,
   ProfileObject,
   ProfilePromotion,
   PublicationReceipt,
   PublicationSupersession,
-  JobAdmissionGrant,
-  JobCapacityRelease,
+  RunLock,
+  RunRequest,
   TaskCancellation,
   TaskExhaustion,
   TerminalSelection,
@@ -833,6 +833,9 @@ export class Projection {
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("body", "text", (column) => column.notNull())
       .execute();
+    await sql`CREATE INDEX IF NOT EXISTS objects_kind_record_idx ON objects(kind, record_id)`.execute(
+      this.db,
+    );
     await sql`CREATE INDEX IF NOT EXISTS actions_run_idx ON actions(run_id, created_at)`.execute(
       this.db,
     );
@@ -1791,7 +1794,12 @@ export class Projection {
       .selectFrom("actions")
       .selectAll()
       .where("action_kind", "in", [...hardwareActionKinds])
+      .orderBy("created_at", "desc")
+      .orderBy("action_id", "desc")
       .execute();
+    const hardwareActionsById = new Map(
+      hardwareActions.map((action) => [action.action_id, action]),
+    );
     const launchRuns = new Map(
       hardwareActions
         .filter((action) => action.action_kind === "job.launch")
@@ -1808,13 +1816,18 @@ export class Projection {
       .selectFrom("job_capacity_releases")
       .selectAll()
       .execute();
+    const receiptObjects = new Map(
+      (
+        await this.db
+          .selectFrom("objects")
+          .select(["record_id", "body"])
+          .where("kind", "=", "action.receipt")
+          .execute()
+      ).map((receipt) => [receipt.record_id, receipt]),
+    );
     for (const release of releases) {
-      const evidence = await this.db
-        .selectFrom("objects")
-        .select(["kind", "body"])
-        .where("record_id", "=", release.evidence_record_id)
-        .executeTakeFirst();
-      if (evidence?.kind !== "action.receipt")
+      const evidence = receiptObjects.get(release.evidence_record_id);
+      if (!evidence)
         throw new ProjectionIntegrityError(
           `Job capacity release evidence is missing: ${release.action_id}`,
         );
@@ -1859,11 +1872,7 @@ export class Projection {
           `Job terminal release proof is invalid: ${release.action_id}`,
         );
       else {
-        const evidenceAction = await this.db
-          .selectFrom("actions")
-          .select(["action_kind", "intent_body"])
-          .where("action_id", "=", receipt.action_id)
-          .executeTakeFirst();
+        const evidenceAction = hardwareActionsById.get(receipt.action_id);
         const evidenceIntent = evidenceAction
           ? (JSON.parse(evidenceAction.intent_body) as ActionIntent)
           : null;
@@ -1925,7 +1934,11 @@ export class Projection {
       if (!budgetState.has(runId))
         throw new ProjectionIntegrityError(`attempt references missing run: ${runId}`);
     }
-    const hardwareByRun = await this.hardwareObservedByRun();
+    const hardwareByRun = new Map<string, number>();
+    for (const row of this.collapseHardwareRows(hardwareActions)) {
+      const current = hardwareByRun.get(row.run_id) ?? 0;
+      hardwareByRun.set(row.run_id, current + receiptCostMicrousd(row));
+    }
     for (const runId of hardwareByRun.keys()) {
       if (!budgetState.has(runId))
         throw new ProjectionIntegrityError(
@@ -2665,22 +2678,6 @@ export class Projection {
         latest.set(key, row);
     }
     return [...latest.values()];
-  }
-
-  private async hardwareObservedByRun(): Promise<Map<string, number>> {
-    const rows = await this.db
-      .selectFrom("actions")
-      .selectAll()
-      .where("action_kind", "in", [...hardwareActionKinds])
-      .orderBy("created_at", "desc")
-      .orderBy("action_id", "desc")
-      .execute();
-    const sums = new Map<string, number>();
-    for (const row of this.collapseHardwareRows(rows)) {
-      const current = sums.get(row.run_id) ?? 0;
-      sums.set(row.run_id, current + receiptCostMicrousd(row));
-    }
-    return sums;
   }
 
   private async hardwareObservedMicrousd(runId: string): Promise<number> {
