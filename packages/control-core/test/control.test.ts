@@ -1059,6 +1059,11 @@ describe("control service", () => {
       "concurrent-suppression-active",
       operator,
     );
+    const delayedRun = await control.service.submit(
+      submission,
+      "concurrent-suppression-delayed",
+      operator,
+    );
     let activeLaunchStarted: (() => void) | undefined;
     const activeLaunch = new Promise<void>((resolve) => {
       activeLaunchStarted = resolve;
@@ -1100,6 +1105,22 @@ describe("control service", () => {
     const cancellationReceiptRelease = new Promise<void>((resolve) => {
       releaseCancellationReceipt = resolve;
     });
+    const originalAdmission = control.service.admitJobLaunch.bind(control.service);
+    let delayedAdmissionStarted: (() => void) | undefined;
+    const delayedAdmission = new Promise<void>((resolve) => {
+      delayedAdmissionStarted = resolve;
+    });
+    let releaseDelayedAdmission: (() => void) | undefined;
+    const delayedAdmissionRelease = new Promise<void>((resolve) => {
+      releaseDelayedAdmission = resolve;
+    });
+    vi.spyOn(control.service, "admitJobLaunch").mockImplementation(async (intent) => {
+      if (intent.run_id === delayedRun.run_id) {
+        delayedAdmissionStarted?.();
+        await delayedAdmissionRelease;
+      }
+      return originalAdmission(intent);
+    });
     vi.spyOn(control.service, "receipt").mockImplementation(async (intent, result) => {
       if (
         intent.action_kind === "job.launch" &&
@@ -1113,8 +1134,10 @@ describe("control service", () => {
 
     const tick = reconciler.tick();
     await cancellationReceipt;
+    await delayedAdmission;
     await activeLaunch;
     releaseCancellationReceipt?.();
+    releaseDelayedAdmission?.();
     await tick;
 
     expect(

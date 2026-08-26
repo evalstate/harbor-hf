@@ -441,27 +441,26 @@ export class Reconciler {
       }
     }
     // Admission remains serialized because grants form one capacity-token chain.
-    // Suppressed launches skip that chain and advance with admitted work below.
-    for (const intent of launchable) {
-      try {
+    // Start each Job as soon as its grant lands while the next grant is written.
+    const launchResults = await Promise.allSettled([
+      ...ready.map(async (intent) => {
+        await this.handle(intent);
+        return 1;
+      }),
+      ...launchable.map(async (intent) => {
         const admission = await this.service.admitJobLaunch(intent);
         if (
           admission.status === "rejected" &&
           admission.limiting_factor === "run_cancelled"
-        ) {
-          handled += 1;
-          continue;
-        }
-        if (admission.status === "admitted") ready.push(intent);
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    const launchResults = await Promise.allSettled(
-      ready.map((intent) => this.handle(intent)),
-    );
+        )
+          return 1;
+        if (admission.status !== "admitted") return 0;
+        await this.handle(intent);
+        return 1;
+      }),
+    ]);
     for (const result of launchResults) {
-      if (result.status === "fulfilled") handled += 1;
+      if (result.status === "fulfilled") handled += result.value;
       else failures.push(result.reason);
     }
     return { handled, failures, consideredActionIds };
