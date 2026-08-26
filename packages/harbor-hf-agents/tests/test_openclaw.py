@@ -273,6 +273,10 @@ async def test_install_uses_the_prepared_environment_timeout(
 
     await agent.install(AsyncMock())
 
+    assert (
+        "ca-certificates curl passwd python3 util-linux"
+        in agent.exec_as_root.await_args.kwargs["command"]
+    )
     assert "timeout_sec" not in agent.exec_as_root.await_args.kwargs
     assert all(
         "timeout_sec" not in call.kwargs for call in agent.exec_as_agent.await_args_list

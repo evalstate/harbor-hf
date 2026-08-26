@@ -647,7 +647,7 @@ class OpenClawAgent(IsolatedProviderAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        root_pkgs = "curl ca-certificates passwd util-linux"
+        root_pkgs = "ca-certificates curl passwd python3 util-linux"
         await self.exec_as_root(
             environment,
             command=(
