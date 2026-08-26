@@ -24,6 +24,39 @@ function system(writeMode: "disabled" | "canary" | "enabled" = "canary") {
   };
 }
 
+function infrastructureCapacity() {
+  return {
+    alias: "current",
+    configured: true,
+    profile_id: "sha256:capacity",
+    max_active_jobs: 128,
+    active_jobs: 112,
+    available_jobs: 16,
+    queued_jobs: 64,
+    observed_running_jobs: 26,
+    observed_scheduling_jobs: 4,
+    reserved_without_active_observation: 82,
+    start_tokens: 128,
+    start_burst: 128,
+    start_refill_tokens: 128,
+    start_refill_period_seconds: 10,
+    runs: Array.from({ length: 7 }, (_, index) => ({
+      run_id: `run-${index + 1}`,
+      max_active_jobs: 16,
+      active_jobs: 16,
+      available_jobs: 0,
+    })),
+    hardware: [
+      {
+        hardware: "cpu-basic",
+        max_active_jobs: 128,
+        active_jobs: 112,
+        available_jobs: 16,
+      },
+    ],
+  };
+}
+
 test("starts OAuth directly from every guest admin link", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({
@@ -57,11 +90,19 @@ test("shows the operational overview on desktop and mobile", async ({ page }) =>
   await page.route("**/api/v1/endpoints", (route) =>
     route.fulfill({ json: { items: [], next_cursor: null } }),
   );
+  await page.route("**/api/v1/capacity", (route) =>
+    route.fulfill({ json: infrastructureCapacity() }),
+  );
   await page.route("**/api/v1/events", (route) => route.abort());
   await page.goto("/overview");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await expect(page.getByText("All observed endpoints safe")).toBeVisible();
   await expect(page.getByText("test-revision-0123456789abcdef")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Job infrastructure" })).toBeVisible();
+  await expect(page.getByText("112/128", { exact: true })).toBeVisible();
+  await expect(page.getByText("16", { exact: true })).toBeVisible();
+  await expect(page.getByText("Per-run reservations (7)")).toBeVisible();
+  await expect(page.getByText("16/16 reserved, 0 available")).toHaveCount(7);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
   expect(
@@ -317,6 +358,8 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
         run_limit: 16,
         namespace_active: 4,
         namespace_limit: 128,
+        hardware_active: 4,
+        hardware_limit: 128,
         provider_reserved: 4,
         provider_limit: 16,
         start_tokens: 120,

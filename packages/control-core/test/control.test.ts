@@ -184,6 +184,25 @@ describe("control service", () => {
       start_burst: 8,
       profile_id: first.profile_id,
     });
+    await expect(control.service.namespaceCapacityView()).resolves.toMatchObject({
+      max_active_jobs: 8,
+      active_jobs: 0,
+      available_jobs: 8,
+      queued_jobs: 0,
+      observed_running_jobs: 0,
+      observed_scheduling_jobs: 0,
+      reserved_without_active_observation: 0,
+      start_tokens: 8,
+      runs: [],
+      hardware: [
+        {
+          hardware: "cpu-basic",
+          max_active_jobs: 8,
+          active_jobs: 0,
+          available_jobs: 8,
+        },
+      ],
+    });
 
     const second = await control.service.setMaxActiveJobs(8, "capacity-eight");
     expect(second.profile_id).toBe(first.profile_id);
@@ -266,6 +285,19 @@ describe("control service", () => {
     expect(await control.projection.jobAdmission(second.action_id)).toMatchObject({
       capacity_profile_id: lowered.profile_id,
       tokens_remaining: 0,
+    });
+    await expect(control.service.namespaceCapacityView()).resolves.toMatchObject({
+      active_jobs: 1,
+      available_jobs: 0,
+      reserved_without_active_observation: 1,
+      runs: [
+        {
+          run_id: result.run_id,
+          max_active_jobs: 1,
+          active_jobs: 1,
+          available_jobs: 0,
+        },
+      ],
     });
 
     const rebuilt = await Projection.open(`${control.root}/lower-capacity.sqlite`);

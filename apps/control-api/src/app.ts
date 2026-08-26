@@ -50,6 +50,7 @@ import {
   leaderboardSchema,
   namespaceCapacityPolicySchema,
   namespaceCapacityUpdateSchema,
+  namespaceCapacityViewSchema,
   profileSchema,
   publicationSchema,
   runListSchema,
@@ -1153,10 +1154,10 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     {
       schema: {
         tags: ["system"],
-        response: { 200: namespaceCapacityPolicySchema },
+        response: { 200: namespaceCapacityViewSchema },
       },
     },
-    async () => runtime.service.namespaceCapacityPolicy(),
+    async () => runtime.service.namespaceCapacityView(),
   );
 
   app.post(

@@ -6,6 +6,7 @@ import type {
   EndpointList,
   JobList,
   Leaderboard,
+  NamespaceCapacity,
   ProfileList,
   ResultDetail,
   ResultList,
@@ -21,6 +22,7 @@ import { ApiError, request } from "./api";
 export const keys = {
   session: ["session"] as const,
   system: ["system"] as const,
+  infrastructureCapacity: ["infrastructure-capacity"] as const,
   runs: ["runs"] as const,
   run: (id: string) => ["run", id] as const,
   capacity: (id: string) => ["capacity", id] as const,
@@ -114,6 +116,14 @@ export const useSystem = () =>
     queryFn: () => request<SystemResponse>("/api/v1/system"),
     retry: retryTransient,
     retryDelay: queryRetryDelay,
+  });
+export const useInfrastructureCapacity = () =>
+  useQuery({
+    queryKey: keys.infrastructureCapacity,
+    queryFn: () => request<NamespaceCapacity>("/api/v1/capacity"),
+    retry: retryTransient,
+    retryDelay: queryRetryDelay,
+    staleTime: 5_000,
   });
 export const useRuns = (cursor?: string) =>
   useQuery({
@@ -302,7 +312,8 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
   const taskId = stringData(event, "task_id");
   if (event.type.startsWith("profile.")) {
     affected.push(keys.profiles);
-    if (stringData(event, "profile_kind") === "capacity") affected.push(["capacity"]);
+    if (stringData(event, "profile_kind") === "capacity")
+      affected.push(keys.infrastructureCapacity, ["capacity"]);
   }
   if (event.type === "publication.receipt")
     affected.push(keys.results, keys.leaderboard);
@@ -325,14 +336,14 @@ export function affectedQueryKeys(event: ControlEvent): QueryKey[] {
     }
   }
   if (event.type.startsWith("job.")) {
-    affected.push(keys.jobs);
+    affected.push(keys.jobs, keys.infrastructureCapacity);
     affected.push(runId ? keys.runJobs(runId) : ["run-jobs"]);
   }
   if (event.type.startsWith("action.")) {
     const actionKind = stringData(event, "action_kind") ?? "";
     if (actionKind.startsWith("endpoint.")) affected.push(keys.endpoints);
     else if (actionKind.startsWith("job.")) {
-      affected.push(keys.jobs);
+      affected.push(keys.jobs, keys.infrastructureCapacity);
       affected.push(runId ? keys.runJobs(runId) : ["run-jobs"]);
     } else {
       affected.push(keys.jobs, keys.endpoints);

@@ -94,7 +94,7 @@ harbor-hf audit
 harbor-hf capacity
 ```
 
-The shared namespace Job cap limits how many physical Jobs can run at once across runs. It defaults to 16. Update it through the control API without changing a locked run's per-run `max_jobs`. The idempotency key is durable: the same key and payload adopt the first update, while a different payload conflicts.
+The shared namespace Job cap limits how many physical Jobs can run at once across runs. It defaults to 16. Update it through the control API without changing a locked run's per-run `max_jobs`. The Overview shows reserved, available, queued, and last-observed Running or Scheduling Jobs, plus usage for each hardware limit. The idempotency key is durable: the same key and payload adopt the first update, while a different payload conflicts.
 
 ```bash
 curl -X POST "$HARBOR_HF_CONTROL_URL/api/v1/capacity" \

@@ -101,6 +101,7 @@ describe("live query updates", () => {
       data: { profile_kind: "capacity", alias: "current" },
     });
     expect(affected).toContainEqual(["capacity"]);
+    expect(affected).toContainEqual(keys.infrastructureCapacity);
     expect(affected).toContainEqual(keys.profiles);
   });
 
@@ -111,6 +112,7 @@ describe("live query updates", () => {
       data: { run_id: "run-1", action_id: "action-1" },
     });
     expect(affected).toContainEqual(keys.capacity("run-1"));
+    expect(affected).toContainEqual(keys.infrastructureCapacity);
     expect(affected).toContainEqual(keys.run("run-1"));
     expect(affected).not.toContainEqual(keys.session);
   });

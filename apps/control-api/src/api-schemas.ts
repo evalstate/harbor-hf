@@ -76,6 +76,67 @@ export const namespaceCapacityPolicySchema = {
   },
 } as const;
 
+export const namespaceCapacityViewSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "alias",
+    "configured",
+    "max_active_jobs",
+    "active_jobs",
+    "available_jobs",
+    "queued_jobs",
+    "observed_running_jobs",
+    "observed_scheduling_jobs",
+    "reserved_without_active_observation",
+    "start_tokens",
+    "start_burst",
+    "start_refill_tokens",
+    "start_refill_period_seconds",
+    "profile_id",
+    "runs",
+    "hardware",
+  ],
+  properties: {
+    ...namespaceCapacityPolicySchema.properties,
+    active_jobs: integer,
+    available_jobs: nullableInteger,
+    queued_jobs: integer,
+    observed_running_jobs: integer,
+    observed_scheduling_jobs: integer,
+    reserved_without_active_observation: integer,
+    start_tokens: nullableInteger,
+    runs: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["run_id", "max_active_jobs", "active_jobs", "available_jobs"],
+        properties: {
+          run_id: { type: "string" },
+          max_active_jobs: integer,
+          active_jobs: integer,
+          available_jobs: integer,
+        },
+      },
+    },
+    hardware: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["hardware", "max_active_jobs", "active_jobs", "available_jobs"],
+        properties: {
+          hardware: { type: "string" },
+          max_active_jobs: integer,
+          active_jobs: integer,
+          available_jobs: integer,
+        },
+      },
+    },
+  },
+} as const;
+
 export const namespaceCapacityUpdateSchema = {
   type: "object",
   additionalProperties: false,

@@ -357,10 +357,19 @@
                     "alias",
                     "configured",
                     "max_active_jobs",
+                    "active_jobs",
+                    "available_jobs",
+                    "queued_jobs",
+                    "observed_running_jobs",
+                    "observed_scheduling_jobs",
+                    "reserved_without_active_observation",
+                    "start_tokens",
                     "start_burst",
                     "start_refill_tokens",
                     "start_refill_period_seconds",
-                    "profile_id"
+                    "profile_id",
+                    "runs",
+                    "hardware"
                   ],
                   "properties": {
                     "alias": {
@@ -425,6 +434,95 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "active_jobs": {
+                      "type": "integer"
+                    },
+                    "available_jobs": {
+                      "anyOf": [
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "queued_jobs": {
+                      "type": "integer"
+                    },
+                    "observed_running_jobs": {
+                      "type": "integer"
+                    },
+                    "observed_scheduling_jobs": {
+                      "type": "integer"
+                    },
+                    "reserved_without_active_observation": {
+                      "type": "integer"
+                    },
+                    "start_tokens": {
+                      "anyOf": [
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "runs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "run_id",
+                          "max_active_jobs",
+                          "active_jobs",
+                          "available_jobs"
+                        ],
+                        "properties": {
+                          "run_id": {
+                            "type": "string"
+                          },
+                          "max_active_jobs": {
+                            "type": "integer"
+                          },
+                          "active_jobs": {
+                            "type": "integer"
+                          },
+                          "available_jobs": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "hardware": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "hardware",
+                          "max_active_jobs",
+                          "active_jobs",
+                          "available_jobs"
+                        ],
+                        "properties": {
+                          "hardware": {
+                            "type": "string"
+                          },
+                          "max_active_jobs": {
+                            "type": "integer"
+                          },
+                          "active_jobs": {
+                            "type": "integer"
+                          },
+                          "available_jobs": {
+                            "type": "integer"
+                          }
+                        }
+                      }
                     }
                   }
                 }

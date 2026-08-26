@@ -925,7 +925,22 @@ describe("control API", () => {
       alias: "capacity-test",
       configured: true,
       max_active_jobs: 1,
+      active_jobs: 0,
+      available_jobs: 1,
+      queued_jobs: 0,
+      observed_running_jobs: 0,
+      observed_scheduling_jobs: 0,
+      reserved_without_active_observation: 0,
       start_burst: 1,
+      runs: [],
+      hardware: [
+        {
+          hardware: "cpu-upgrade",
+          max_active_jobs: 1,
+          active_jobs: 0,
+          available_jobs: 1,
+        },
+      ],
     });
 
     const updated = await app.inject({

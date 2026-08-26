@@ -326,6 +326,25 @@ export interface paths {
                             start_refill_tokens: number | null;
                             start_refill_period_seconds: number | null;
                             profile_id: string | null;
+                            active_jobs: number;
+                            available_jobs: number | null;
+                            queued_jobs: number;
+                            observed_running_jobs: number;
+                            observed_scheduling_jobs: number;
+                            reserved_without_active_observation: number;
+                            start_tokens: number | null;
+                            runs: {
+                                run_id: string;
+                                max_active_jobs: number;
+                                active_jobs: number;
+                                available_jobs: number;
+                            }[];
+                            hardware: {
+                                hardware: string;
+                                max_active_jobs: number;
+                                active_jobs: number;
+                                available_jobs: number;
+                            }[];
                         };
                     };
                 };

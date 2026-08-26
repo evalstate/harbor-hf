@@ -22,15 +22,16 @@ import { z } from "zod";
 import {
   type AuditResponse,
   actOnRun,
-  type RunAction,
-  type RunList,
-  type RunSubmission,
   type Capacity,
   type EndpointList,
   type JobList,
+  type NamespaceCapacity,
   type ProfileList,
   type ResultDetail,
   type ResultList,
+  type RunAction,
+  type RunList,
+  type RunSubmission,
   submitRun,
   type TaskList,
 } from "./api";
@@ -66,15 +67,16 @@ import {
   keys,
   useAllProfiles,
   useAudit,
-  useRun,
-  useRunJobs,
-  useRuns,
   useCapacity,
   useEndpoints,
+  useInfrastructureCapacity,
   useJobs,
   useProfiles,
   useResult,
   useResults,
+  useRun,
+  useRunJobs,
+  useRuns,
   useSystem,
   useTask,
   useTasks,
@@ -556,10 +558,146 @@ function Stat({
   );
 }
 
+function InfrastructureCapacityCard({
+  capacity,
+  pending,
+  failed,
+}: {
+  capacity: NamespaceCapacity | undefined;
+  pending: boolean;
+  failed: boolean;
+}) {
+  const limit = capacity?.max_active_jobs;
+  const active = capacity?.active_jobs ?? 0;
+  const percent =
+    typeof limit === "number" && limit > 0 ? Math.min(100, (active / limit) * 100) : 0;
+  return (
+    <Card className="mt-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 className="flex items-center gap-2 font-semibold">
+            <Gauge size={18} className="text-cyan-300" aria-hidden="true" />
+            Job infrastructure
+          </h2>
+          <p className="mt-1 text-xs text-slate-500">
+            Control reservations and the latest observed Hugging Face Job states.
+          </p>
+        </div>
+        <Badge status={failed ? "error" : capacity?.configured ? "ready" : "warning"}>
+          {failed
+            ? "Unavailable"
+            : capacity?.configured
+              ? "Configured"
+              : "Unconfigured"}
+        </Badge>
+      </div>
+      {pending && !capacity ? (
+        <p className="mt-6 text-sm text-slate-400">Loading capacity…</p>
+      ) : failed || !capacity ? (
+        <p className="mt-6 text-sm text-red-300">
+          Current infrastructure capacity could not be loaded.
+        </p>
+      ) : (
+        <>
+          <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-500">
+                Reserved slots
+              </p>
+              <p className="mt-1 text-xl font-semibold text-white">
+                {active}/{limit ?? "unconfigured"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-500">
+                Available slots
+              </p>
+              <p className="mt-1 text-xl font-semibold text-emerald-300">
+                {capacity.available_jobs ?? "unconfigured"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-500">
+                Queued launches
+              </p>
+              <p className="mt-1 text-xl font-semibold text-amber-300">
+                {capacity.queued_jobs}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-500">
+                Running on HF
+              </p>
+              <p className="mt-1 text-xl font-semibold text-cyan-300">
+                {capacity.observed_running_jobs}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-500">
+                Scheduling on HF
+              </p>
+              <p className="mt-1 text-xl font-semibold text-cyan-300">
+                {capacity.observed_scheduling_jobs}
+              </p>
+            </div>
+          </div>
+          <div className="mt-5">
+            <Progress label="Reserved namespace capacity" value={percent} />
+          </div>
+          {capacity.runs.length ? (
+            <div className="mt-5">
+              <h3 className="text-sm font-medium text-white">
+                Per-run reservations ({capacity.runs.length})
+              </h3>
+              <ul className="mt-3 grid gap-2 md:grid-cols-2">
+                {capacity.runs.map((run) => (
+                  <li
+                    className="flex items-center justify-between gap-4 rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-3 text-sm"
+                    key={run.run_id}
+                  >
+                    <RunName runId={run.run_id} to={`/runs/${run.run_id}`} />
+                    <span className="shrink-0 text-slate-400">
+                      {run.active_jobs}/{run.max_active_jobs} reserved,{" "}
+                      {run.available_jobs} available
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            {capacity.hardware.map((item) => (
+              <div
+                className="rounded-lg border border-slate-800 bg-slate-950/50 p-4"
+                key={item.hardware}
+              >
+                <p className="font-medium text-white">{humanize(item.hardware)}</p>
+                <p className="mt-1 text-sm text-slate-400">
+                  {item.active_jobs}/{item.max_active_jobs} reserved,{" "}
+                  {item.available_jobs} available
+                </p>
+              </div>
+            ))}
+          </div>
+          <p className="mt-4 text-xs leading-5 text-slate-500">
+            {capacity.reserved_without_active_observation} reserved slots do not
+            currently have a Running or Scheduling observation. Start tokens:{" "}
+            {capacity.start_tokens ?? "unconfigured"}/
+            {capacity.start_burst ?? "unconfigured"}. Refill:{" "}
+            {capacity.start_refill_tokens ?? "unconfigured"} every{" "}
+            {capacity.start_refill_period_seconds ?? "unconfigured"} seconds.
+          </p>
+        </>
+      )}
+    </Card>
+  );
+}
+
 export function OverviewPage() {
   const runs = useRuns();
   const endpoints = useEndpoints();
   const system = useSystem();
+  const capacity = useInfrastructureCapacity();
   const items = runs.data?.items ?? [];
   const active = items.filter((item) => !runIsFinished(item.status)).length;
   const failures = items.filter((item) =>
@@ -614,6 +752,11 @@ export function OverviewPage() {
               hint={hints.overview.unsafeEndpoints}
             />
           </div>
+          <InfrastructureCapacityCard
+            capacity={capacity.data}
+            failed={capacity.isError}
+            pending={capacity.isPending}
+          />
           <div className="mt-6 grid gap-6 xl:grid-cols-[1.4fr_1fr]">
             <Card>
               <h2 className="font-semibold">
@@ -1435,15 +1578,37 @@ export function RunPage() {
           <h2 className="text-base font-semibold text-white">Job capacity</h2>
           <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
             <div>
-              <dt className="text-slate-500">Run</dt>
+              <dt className="text-slate-500">Run slots</dt>
               <dd className="mt-1">
-                {capacity.data.run_active}/{capacity.data.run_limit} active
+                {capacity.data.run_active}/{capacity.data.run_limit} reserved,{" "}
+                {Math.max(0, capacity.data.run_limit - capacity.data.run_active)}{" "}
+                available
               </dd>
             </div>
             <div>
-              <dt className="text-slate-500">Namespace</dt>
+              <dt className="text-slate-500">Namespace slots</dt>
               <dd className="mt-1">
-                {`${capacity.data.namespace_active}/${capacity.data.namespace_limit ?? "unconfigured"} active`}
+                {capacity.data.namespace_active}/
+                {capacity.data.namespace_limit ?? "unconfigured"} reserved
+                {capacity.data.namespace_limit === null
+                  ? ""
+                  : `, ${Math.max(
+                      0,
+                      capacity.data.namespace_limit - capacity.data.namespace_active,
+                    )} available`}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-slate-500">Hardware slots</dt>
+              <dd className="mt-1">
+                {capacity.data.hardware_active}/
+                {capacity.data.hardware_limit ?? "unconfigured"} reserved
+                {capacity.data.hardware_limit === null
+                  ? ""
+                  : `, ${Math.max(
+                      0,
+                      capacity.data.hardware_limit - capacity.data.hardware_active,
+                    )} available`}
               </dd>
             </div>
             <div>

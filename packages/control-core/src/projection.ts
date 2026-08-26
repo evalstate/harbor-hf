@@ -1996,6 +1996,16 @@ export class Projection {
     return rows.map((row) => JSON.parse(row.intent_body) as ActionIntent);
   }
 
+  async pendingActionCount(actionKind: ActionIntent["action_kind"]): Promise<number> {
+    const row = await this.db
+      .selectFrom("actions")
+      .select(sql<number>`count(*)`.as("count"))
+      .where("action_kind", "=", actionKind)
+      .where("receipt_body", "is", null)
+      .executeTakeFirstOrThrow();
+    return row.count;
+  }
+
   async unadvancedActions(
     limit = 32,
   ): Promise<Array<{ intent: ActionIntent; receipt: ActionReceipt }>> {
@@ -2081,6 +2091,45 @@ export class Projection {
       .orderBy("job_admissions.action_id")
       .execute();
     return rows.map((row) => JSON.parse(row.body) as JobAdmissionGrant);
+  }
+
+  async activeJobAdmissionRunUsage(
+    namespace: string,
+  ): Promise<Array<{ run_id: string; active_jobs: number; max_active_jobs: number }>> {
+    const rows = await this.db
+      .selectFrom("job_admissions")
+      .innerJoin("actions", "actions.action_id", "job_admissions.action_id")
+      .leftJoin(
+        "job_capacity_releases",
+        "job_capacity_releases.action_id",
+        "job_admissions.action_id",
+      )
+      .select([
+        "job_admissions.run_id",
+        sql<number>`count(*)`.as("active_jobs"),
+        sql<
+          number | null
+        >`min(json_extract(actions.intent_body, '$.payload.max_jobs'))`.as("minimum"),
+        sql<
+          number | null
+        >`max(json_extract(actions.intent_body, '$.payload.max_jobs'))`.as("maximum"),
+      ])
+      .where("job_admissions.namespace", "=", namespace)
+      .where("job_capacity_releases.action_id", "is", null)
+      .groupBy("job_admissions.run_id")
+      .orderBy("job_admissions.run_id")
+      .execute();
+    return rows.map((row) => {
+      if (row.minimum === null || row.minimum !== row.maximum)
+        throw new ProjectionIntegrityError(
+          `active Job admissions disagree on the Run limit: ${row.run_id}`,
+        );
+      return {
+        run_id: row.run_id,
+        active_jobs: row.active_jobs,
+        max_active_jobs: row.minimum,
+      };
+    });
   }
 
   async latestJobAdmission(namespace: string): Promise<JobAdmissionGrant | null> {
@@ -2742,6 +2791,27 @@ export class Projection {
     ).execute();
     return rows.map(
       ({ assigned_task_ids_body: _taskIds, is_replacement: _retry, ...row }) => row,
+    );
+  }
+
+  async activeJobObservedStateCounts(
+    namespace: string,
+  ): Promise<Record<string, number>> {
+    const rows = await this.db
+      .selectFrom("job_admissions")
+      .innerJoin("jobs", "jobs.action_id", "job_admissions.action_id")
+      .leftJoin(
+        "job_capacity_releases",
+        "job_capacity_releases.action_id",
+        "job_admissions.action_id",
+      )
+      .select(["observed_state", sql<number>`count(*)`.as("count")])
+      .where("job_admissions.namespace", "=", namespace)
+      .where("job_capacity_releases.action_id", "is", null)
+      .groupBy("observed_state")
+      .execute();
+    return Object.fromEntries(
+      rows.map((row) => [row.observed_state ?? "UNOBSERVED", row.count]),
     );
   }
 
