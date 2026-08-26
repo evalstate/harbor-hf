@@ -412,7 +412,6 @@ export class Reconciler {
   ): Promise<JobLaunchBatch> {
     let handled = 0;
     const failures: unknown[] = [];
-    const admitted: ActionIntent[] = [];
     let candidates: ActionIntent[];
     try {
       candidates = (await this.fairJobLaunches(launchCandidates)).slice(0, limit);
@@ -424,29 +423,42 @@ export class Reconciler {
       };
     }
     const consideredActionIds = new Set(candidates.map((intent) => intent.action_id));
-    for (const intent of candidates) {
+    const cancellationChecks = await Promise.allSettled(
+      candidates.map(async (intent) => ({
+        intent,
+        cancelled: await this.launchCancellationRequested(intent),
+      })),
+    );
+    const ready: ActionIntent[] = [];
+    const launchable: ActionIntent[] = [];
+    for (const check of cancellationChecks) {
+      if (check.status === "rejected") {
+        failures.push(check.reason);
+      } else if (check.value.cancelled) {
+        ready.push(check.value.intent);
+      } else {
+        launchable.push(check.value.intent);
+      }
+    }
+    // Admission remains serialized because grants form one capacity-token chain.
+    // Suppressed launches skip that chain and advance with admitted work below.
+    for (const intent of launchable) {
       try {
-        if (await this.launchCancellationRequested(intent)) {
-          await this.handle(intent);
-          handled += 1;
-          continue;
-        }
         const admission = await this.service.admitJobLaunch(intent);
         if (
           admission.status === "rejected" &&
           admission.limiting_factor === "run_cancelled"
         ) {
-          await this.handle(intent);
           handled += 1;
           continue;
         }
-        if (admission.status === "admitted") admitted.push(intent);
+        if (admission.status === "admitted") ready.push(intent);
       } catch (error) {
         failures.push(error);
       }
     }
     const launchResults = await Promise.allSettled(
-      admitted.map((intent) => this.handle(intent)),
+      ready.map((intent) => this.handle(intent)),
     );
     for (const result of launchResults) {
       if (result.status === "fulfilled") handled += 1;

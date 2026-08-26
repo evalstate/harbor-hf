@@ -1045,6 +1045,87 @@ describe("control service", () => {
     ).rejects.toThrow("idempotency key belongs to a different pause action");
   });
 
+  it("does not let suppressed launches block launchable work in the same batch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await configureCapacity(control);
+    const cancelledRun = await control.service.submit(
+      submission,
+      "concurrent-suppression-cancelled",
+      operator,
+    );
+    const activeRun = await control.service.submit(
+      submission,
+      "concurrent-suppression-active",
+      operator,
+    );
+    let activeLaunchStarted: (() => void) | undefined;
+    const activeLaunch = new Promise<void>((resolve) => {
+      activeLaunchStarted = resolve;
+    });
+    const noop = new NoopActions();
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch" && intent.run_id === activeRun.run_id) {
+          activeLaunchStarted?.();
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: "job-active-concurrent-suppression",
+          };
+        }
+        return noop.execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await reconciler.tick();
+    await control.service.runAction(
+      cancelledRun.run_id,
+      { action: "cancel", confirmed: true },
+      "concurrent-suppression-cancel",
+      operator,
+    );
+    const originalReceipt = control.service.receipt.bind(control.service);
+    let cancellationReceiptStarted: (() => void) | undefined;
+    const cancellationReceipt = new Promise<void>((resolve) => {
+      cancellationReceiptStarted = resolve;
+    });
+    let releaseCancellationReceipt: (() => void) | undefined;
+    const cancellationReceiptRelease = new Promise<void>((resolve) => {
+      releaseCancellationReceipt = resolve;
+    });
+    vi.spyOn(control.service, "receipt").mockImplementation(async (intent, result) => {
+      if (
+        intent.action_kind === "job.launch" &&
+        intent.run_id === cancelledRun.run_id
+      ) {
+        cancellationReceiptStarted?.();
+        await cancellationReceiptRelease;
+      }
+      return originalReceipt(intent, result);
+    });
+
+    const tick = reconciler.tick();
+    await cancellationReceipt;
+    await activeLaunch;
+    releaseCancellationReceipt?.();
+    await tick;
+
+    expect(
+      (await control.projection.runActions(cancelledRun.run_id)).find(
+        (action) =>
+          action.action_kind === "job.launch" &&
+          action.observed_state === "suppressed-cancelled",
+      ),
+    ).toBeDefined();
+  });
+
   it("probes colliding Run action generations without merging idempotency keys", async () => {
     const control = await createTestControl();
     controls.push(control);
