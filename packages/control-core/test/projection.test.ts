@@ -64,6 +64,32 @@ class ReadCountingStore implements ImmutableObjectStore {
   }
 }
 
+class RebuildCatchupStore implements ImmutableObjectStore {
+  runListCount = 0;
+
+  constructor(
+    private readonly source: ImmutableObjectStore,
+    private readonly afterFirstListing: () => Promise<void>,
+  ) {}
+
+  async list(prefix: string): Promise<readonly ObjectEntry[]> {
+    const entries = await this.source.list(prefix);
+    if (prefix === "control/schema=v1/runs/") {
+      this.runListCount += 1;
+      if (this.runListCount === 1) await this.afterFirstListing();
+    }
+    return entries;
+  }
+
+  read(key: string): Promise<Uint8Array> {
+    return this.source.read(key);
+  }
+
+  create(key: string, bytes: Uint8Array) {
+    return this.source.create(key, bytes);
+  }
+}
+
 class ConcurrentReadStore implements ImmutableObjectStore {
   activeReads = 0;
   activeEvidenceReads = 0;
@@ -122,9 +148,41 @@ describe("projection replay", () => {
       "control/schema=v1/operators/",
       "control/schema=v1/profiles/",
       "control/schema=v1/runs/",
+      "control/schema=v1/migrations/",
+      "control/schema=v1/operators/",
+      "control/schema=v1/profiles/",
+      "control/schema=v1/runs/",
     ]);
     expect(store.readKeys).not.toContain(legacyKey);
     expect(projection.system()).toMatchObject({ ready: true, integrity_error: null });
+    await projection.close();
+  });
+
+  it("catches up records written during a projection rebuild", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const record = {
+      schema_version: "v1",
+      kind: "operator.acl",
+      record_id: "rebuild-catchup",
+      created_at: "2026-08-26T10:00:00.000Z",
+      actor: { subject: "projection-test", role: "migration" },
+      operators: ["operator"],
+      readers: [],
+    } as const;
+    const key = `control/schema=v1/operators/${record.record_id}.json`;
+    const store = new RebuildCatchupStore(control.store, async () => {
+      await control.store.create(key, new TextEncoder().encode(canonicalJson(record)));
+    });
+    const projection = await Projection.open(`${control.root}/catchup.sqlite`);
+
+    await projection.rebuild(store);
+
+    expect(store.runListCount).toBe(3);
+    expect(await projection.objectDigest(key)).not.toBeNull();
+    expect(await projection.latestAcl()).toMatchObject({
+      record_id: record.record_id,
+    });
     await projection.close();
   });
 

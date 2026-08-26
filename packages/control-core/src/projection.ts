@@ -943,15 +943,22 @@ export class Projection {
       for (const deferred of supersessions)
         await this.apply(deferred.entry, deferred.record);
       await this.verifyInvariants();
+      const rebuiltAt = new Date().toISOString();
       this.state = {
         ready: true,
         rebuilding: false,
         object_count: entries.length,
-        last_rebuild_at: new Date().toISOString(),
-        last_sync_at: new Date().toISOString(),
+        last_rebuild_at: rebuiltAt,
+        last_sync_at: rebuiltAt,
         event_cursor: await this.latestEventCursor(),
         integrity_error: null,
       };
+      // A replacement control process can replay while the previous process is
+      // still finishing writes. Catch up until a complete listing adds nothing
+      // so startup never writes from a stale admission-chain head.
+      while ((await this.sync(store, prefix)).length > 0) {
+        await yieldToEventLoop();
+      }
     } catch (error) {
       await this.clear();
       this.state = {
