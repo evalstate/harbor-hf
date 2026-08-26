@@ -182,7 +182,8 @@ class HermesAgent(IsolatedProviderAgent):
                 "set -euo pipefail; "
                 'export PATH="/opt/harbor-hf-node/bin:$PATH"; '
                 "apt-get update && apt-get install -y --no-install-recommends "
-                "curl git libatomic1 passwd ripgrep tar util-linux xz-utils && "
+                "ca-certificates curl git libatomic1 passwd ripgrep tar "
+                "util-linux xz-utils && "
                 "mkdir -p /opt/harbor-hf-node && "
                 "curl --fail --location --silent --show-error "
                 "--retry 5 --retry-delay 2 --retry-all-errors "

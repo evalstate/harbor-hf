@@ -230,8 +230,8 @@ async def test_job_route_uses_custom_provider_and_locked_output_limit(
     config = json.loads((tmp_path / "openclaw.upload.json").read_text())
     provider = config["models"]["providers"]["harbor-hf-job"]
     assert provider["api"] == "openai-completions"
-    assert provider["apiKey"] == "${HARBOR_HF_OPENCLAW_API_KEY}"
-    assert provider["baseUrl"] == "${HARBOR_HF_OPENCLAW_BASE_URL}"
+    assert provider["apiKey"] == "${OPENCLAW_HARBOR_API_KEY}"
+    assert provider["baseUrl"] == "${OPENCLAW_HARBOR_BASE_URL}"
     assert provider["models"] == [
         {
             "id": "gpt-4.1",
@@ -251,11 +251,11 @@ async def test_job_route_uses_custom_provider_and_locked_output_limit(
     )
     assert "--model harbor-hf-job/gpt-4.1" in run_command
     assert (
-        run_call.kwargs["env"]["HARBOR_HF_OPENCLAW_API_KEY"]
+        run_call.kwargs["env"]["OPENCLAW_HARBOR_API_KEY"]
         == "harbor-local-inference-bridge"
     )
     assert (
-        run_call.kwargs["env"]["HARBOR_HF_OPENCLAW_BASE_URL"]
+        run_call.kwargs["env"]["OPENCLAW_HARBOR_BASE_URL"]
         == "http://127.0.0.1:18080/v1"
     )
 

@@ -38,8 +38,8 @@ from harbor_hf_agents.support.job_inference_route import (
 )
 
 _JOB_PROVIDER = "harbor-hf-job"
-_JOB_API_KEY_ENV = "HARBOR_HF_OPENCLAW_API_KEY"
-_JOB_BASE_URL_ENV = "HARBOR_HF_OPENCLAW_BASE_URL"
+_JOB_API_KEY_ENV = "OPENCLAW_HARBOR_API_KEY"
+_JOB_BASE_URL_ENV = "OPENCLAW_HARBOR_BASE_URL"
 
 
 def openclaw_session_jsonl_to_atif_steps(  # noqa: C901 -- parser branches

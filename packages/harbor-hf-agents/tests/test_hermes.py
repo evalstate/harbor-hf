@@ -306,7 +306,8 @@ class TestHermesInstall:
 
         root_command = agent.exec_as_root.await_args.kwargs["command"]
         assert (
-            "curl git libatomic1 passwd ripgrep tar util-linux xz-utils" in root_command
+            "ca-certificates curl git libatomic1 passwd ripgrep tar util-linux xz-utils"
+            in root_command
         )
         assert "node-v26.7.0-linux-x64.tar.xz" in root_command
         assert "--retry-all-errors" in root_command
