@@ -1210,7 +1210,13 @@ class OpenClawAgent(IsolatedProviderAgent):
                 ),
             )
         job_model_id = model if bridged else None
-        max_output_tokens = inference_max_output_tokens() if bridged else None
+        max_output_tokens = (
+            inference_max_output_tokens(
+                self._get_env("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS")
+            )
+            if bridged
+            else None
+        )
         if bridged:
             env[_JOB_API_KEY_ENV] = env[f"{prefix}_API_KEY"]
             env[_JOB_BASE_URL_ENV] = env[f"{prefix}_BASE_URL"]

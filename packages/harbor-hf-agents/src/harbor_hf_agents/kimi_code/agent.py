@@ -23,4 +23,8 @@ class KimiCodeAgent(JobChatCompletionsAgent, KimiCode):
 
     def extend_route_env(self, env: dict[str, str]) -> None:
         env["KIMI_MODEL_NAME"] = self.allowed_model_id()
-        env["KIMI_MODEL_MAX_COMPLETION_TOKENS"] = str(inference_max_output_tokens())
+        env["KIMI_MODEL_MAX_COMPLETION_TOKENS"] = str(
+            inference_max_output_tokens(
+                self._get_env("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS")
+            )
+        )

@@ -37,11 +37,12 @@ async def test_job_route_injects_loopback_env(
         return True
 
     monkeypatch.setattr(_ROUTE, use_route)
-    monkeypatch.setenv("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS", "32768")
+    monkeypatch.delenv("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS", raising=False)
     agent = KimiCodeAgent(
         logs_dir=temp_dir,
         model_name="openai/openai/gpt-oss-20b:together",
         version="0.38.0",
+        extra_env={"HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS": "32768"},
     )
     mock_env = AsyncMock()
     mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")

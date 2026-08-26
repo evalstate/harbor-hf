@@ -203,7 +203,7 @@ async def test_job_route_uses_custom_provider_and_locked_output_limit(
         return True
 
     monkeypatch.setattr(openclaw_agent, "use_job_inference_route", use_route)
-    monkeypatch.setenv("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS", "32768")
+    monkeypatch.delenv("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS", raising=False)
     environment = SimpleNamespace(
         capabilities=EnvironmentCapabilities(mounted=True),
         upload_file=AsyncMock(),
@@ -216,6 +216,7 @@ async def test_job_route_uses_custom_provider_and_locked_output_limit(
             "timeout_seconds": 1800,
             "max_attempts": 1,
         },
+        extra_env={"HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS": "32768"},
     )
     exec_as_agent = AsyncMock()
     monkeypatch.setattr(agent, "exec_as_agent", exec_as_agent)
