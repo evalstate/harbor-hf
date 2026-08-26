@@ -1517,6 +1517,7 @@ def _prepare_guest_runtime_paths(  # noqa: C901 -- explicit guest path checks
 ) -> None:
     for relative, mode in (
         ("dev", 0o755),
+        ("dev/pts", 0o755),
         ("proc", 0o755),
         ("run", 0o755),
         ("tmp", 0o1777),
@@ -1533,6 +1534,22 @@ def _prepare_guest_runtime_paths(  # noqa: C901 -- explicit guest path checks
                     f"task image /{relative} is not a directory"
                 )
         path.chmod(mode)
+    ptmx = rootfs / "dev/ptmx"
+    try:
+        metadata = ptmx.lstat()
+    except FileNotFoundError:
+        ptmx.symlink_to("pts/ptmx")
+    else:
+        if stat.S_ISREG(metadata.st_mode):
+            ptmx.unlink()
+            ptmx.symlink_to("pts/ptmx")
+        elif not stat.S_ISLNK(metadata.st_mode) or os.readlink(ptmx) not in {
+            "pts/ptmx",
+            "/dev/pts/ptmx",
+        }:
+            raise OciImageIntegrityError(
+                "task image /dev/ptmx cannot receive the devpts binding"
+            )
     for relative in ("dev/null", "dev/zero", "dev/random", "dev/urandom"):
         path = rootfs / relative
         try:
@@ -1811,6 +1828,10 @@ class IsolatedOciRuntime:
             "/etc/resolv.conf:/etc/resolv.conf",
             "-b",
             "/proc:/proc",
+            # Interactive agent runtimes such as OpenHands need a devpts mount
+            # to create their own pseudoterminals inside the isolated Job.
+            "-b",
+            "/dev/pts:/dev/pts",
         ]
         for device in ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"):
             arguments.extend(["-b", f"{device}:{device}"])

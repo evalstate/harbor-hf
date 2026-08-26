@@ -29,6 +29,23 @@ def test_factory_creates_registered_openclaw_codex_agent(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_install_uses_the_prepared_environment_timeout(tmp_path: Path) -> None:
+    agent = OpenClawCodexAgent(
+        logs_dir=tmp_path,
+        model_name="openai/zai-org/GLM-5.2:together",
+    )
+    agent.exec_as_agent = AsyncMock()
+
+    with patch(
+        "harbor_hf_agents.openclaw.agent.OpenClawAgent.install",
+        AsyncMock(),
+    ):
+        await agent.install(AsyncMock())
+
+    assert "timeout_sec" not in agent.exec_as_agent.await_args.kwargs
+
+
+@pytest.mark.asyncio
 async def test_codex_run_applies_prompt_template(tmp_path: Path) -> None:
     template = tmp_path / "prompt.j2"
     template.write_text("wrapped: {{ instruction }}", encoding="utf-8")

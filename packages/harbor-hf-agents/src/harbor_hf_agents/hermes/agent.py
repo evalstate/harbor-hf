@@ -258,6 +258,7 @@ class HermesAgent(IsolatedProviderAgent):
                 "provider": "openai-api",
                 "base_url": custom_base_url,
                 "api_key": custom_api_key,
+                "api_mode": "chat_completions",
             }
             value.pop("provider")
         return yaml.safe_dump(value, default_flow_style=False, sort_keys=True)

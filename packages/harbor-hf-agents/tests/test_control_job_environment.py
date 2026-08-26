@@ -189,6 +189,17 @@ async def test_exec_passes_only_explicit_task_environment(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_rejects_command_timeout_above_prepared_limit(tmp_path: Path) -> None:
+    environment = _environment(tmp_path, timeout=5)
+    await environment.start(force_build=False)
+
+    with pytest.raises(ValueError, match="exceeds the prepared phase limit"):
+        await environment.exec("true", timeout_sec=6)
+
+    assert FakeRuntime.instances[-1].exec_calls == []
+
+
+@pytest.mark.asyncio
 async def test_rejects_control_authority_under_an_alias(tmp_path: Path) -> None:
     environment = _environment(tmp_path)
     await environment.start(force_build=False)

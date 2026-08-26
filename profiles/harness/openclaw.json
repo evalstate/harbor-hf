@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-05c4ec190fb135310214092c",
+  "record_id": "profile-93162007904851f1ff8b639d",
   "created_at": "2026-08-22T00:00:00.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -17,6 +17,7 @@
     "harbor_agent": {
       "import_path": "harbor_hf_agents.openclaw.agent:OpenClawAgent",
       "model_name": "openai/openai/gpt-oss-20b:together",
+      "override_setup_timeout_sec": 1200,
       "kwargs": {
         "version": "2026.7.1-2",
         "openclaw_node_version": "24",

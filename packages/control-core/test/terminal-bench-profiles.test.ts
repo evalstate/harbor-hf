@@ -396,6 +396,9 @@ describe("Terminal-Bench 2.1 profiles", () => {
       if (name === "hermes" || name === "openhands") {
         expect(harborAgent.override_setup_timeout_sec).toBe(1800);
       }
+      if (name === "openclaw") {
+        expect(harborAgent.override_setup_timeout_sec).toBe(1200);
+      }
     }
   });
 

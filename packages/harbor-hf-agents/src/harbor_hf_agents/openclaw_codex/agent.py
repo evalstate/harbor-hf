@@ -310,7 +310,6 @@ class OpenClawCodexAgent(OpenClawAgent):
         await self.exec_as_agent(
             environment,
             command=self._node_command(f"openclaw plugins install {package}"),
-            timeout_sec=self._install_exec_timeout_sec,
         )
 
     @override

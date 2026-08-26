@@ -37,7 +37,6 @@ from harbor_hf_agents.support.job_inference_route import (
     with_job_inference_bridge_cleanup,
 )
 
-OPENCLAW_AGENT_SETUP_TIMEOUT_SEC = 1200.0
 _JOB_PROVIDER = "harbor-hf-job"
 _JOB_API_KEY_ENV = "HARBOR_HF_OPENCLAW_API_KEY"
 _JOB_BASE_URL_ENV = "HARBOR_HF_OPENCLAW_BASE_URL"
@@ -495,7 +494,6 @@ class OpenClawAgent(IsolatedProviderAgent):
         provider_runtime: dict[str, Any] | None = None,
         **kwargs: Any,  # noqa: ANN401 -- Harbor API
     ) -> None:
-        override_setup_timeout_sec = kwargs.pop("override_setup_timeout_sec", None)
         if not openclaw_node_version or any(
             char.isspace() for char in openclaw_node_version
         ):
@@ -510,9 +508,6 @@ class OpenClawAgent(IsolatedProviderAgent):
             self._failover_retries = int(raw_fr)
             if self._failover_retries < 0:
                 raise ValueError("failover_retries must be non-negative")
-        self._install_exec_timeout_sec = int(
-            override_setup_timeout_sec or OPENCLAW_AGENT_SETUP_TIMEOUT_SEC
-        )
         super().__init__(*args, **kwargs)
         self._openclaw_config: dict[str, Any] = openclaw_config or {}
         self._provider_runtime = self._validate_provider_runtime(provider_runtime)
@@ -652,7 +647,6 @@ class OpenClawAgent(IsolatedProviderAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        timeout = self._install_exec_timeout_sec
         root_pkgs = "curl ca-certificates passwd util-linux"
         await self.exec_as_root(
             environment,
@@ -661,7 +655,6 @@ class OpenClawAgent(IsolatedProviderAgent):
                 + root_pkgs
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
-            timeout_sec=timeout,
         )
         await self.exec_as_agent(
             environment,
@@ -674,7 +667,6 @@ class OpenClawAgent(IsolatedProviderAgent):
                 "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh "
                 "| bash"
             ),
-            timeout_sec=timeout,
         )
         await self.exec_as_agent(
             environment,
@@ -682,12 +674,10 @@ class OpenClawAgent(IsolatedProviderAgent):
                 'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}" && . "$NVM_DIR/nvm.sh" && '
                 f"nvm install {shlex.quote(self._node_version)}"
             ),
-            timeout_sec=timeout,
         )
         await self.exec_as_agent(
             environment,
             command=self._node_command("node -v && npm -v"),
-            timeout_sec=timeout,
         )
         version_spec = f"@{self._version}" if self._version else "@latest"
         oc_pkg = shlex.quote(f"openclaw{version_spec}")
@@ -698,12 +688,10 @@ class OpenClawAgent(IsolatedProviderAgent):
                 "--fetch-retries=5 --fetch-retry-mintimeout=20000 "
                 "--fetch-retry-maxtimeout=120000"
             ),
-            timeout_sec=timeout,
         )
         await self.exec_as_agent(
             environment,
             command=self._node_command("openclaw --version"),
-            timeout_sec=timeout,
         )
 
     @staticmethod

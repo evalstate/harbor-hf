@@ -533,7 +533,7 @@ def test_rootfs_limits_reject_bytes_and_entries_before_mapping(tmp_path: Path) -
         )
 
 
-def test_proot_exposes_only_dns_proc_and_safe_devices(tmp_path: Path) -> None:
+def test_proot_exposes_only_dns_proc_and_required_devices(tmp_path: Path) -> None:
     isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
     try:
         passwd = isolated.rootfs / "etc" / "passwd"
@@ -555,6 +555,7 @@ def test_proot_exposes_only_dns_proc_and_safe_devices(tmp_path: Path) -> None:
     assert arguments[0:3] == ["proot", "-r", str(isolated.rootfs)]
     assert "/etc/resolv.conf:/etc/resolv.conf" in arguments
     assert "/proc:/proc" in arguments
+    assert "/dev/pts:/dev/pts" in arguments
     assert "/dev/null:/dev/null" in arguments
     assert "/run:/run" not in arguments
     assert "/tmp:/tmp" not in arguments
@@ -564,6 +565,24 @@ def test_proot_exposes_only_dns_proc_and_safe_devices(tmp_path: Path) -> None:
     assert arguments[arguments.index("-i") : arguments.index("-i") + 2] == ["-i", "0:0"]
     assert "/usr/bin/env" in arguments
     assert "VISIBLE=yes" in arguments
+
+
+def test_guest_runtime_paths_create_devpts_mountpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime.os, "chown", lambda *_args: None)
+    rootfs = tmp_path / "rootfs"
+    for executable in ("bin/bash", "usr/bin/env"):
+        path = rootfs / executable
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    runtime._prepare_guest_runtime_paths(rootfs)
+
+    assert (rootfs / "dev" / "pts").is_dir()
+    assert (rootfs / "dev" / "ptmx").readlink() == Path("pts/ptmx")
 
 
 @pytest.mark.parametrize(

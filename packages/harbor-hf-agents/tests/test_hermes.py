@@ -188,6 +188,7 @@ class TestHermesRunCommands:
             "provider": "openai-api",
             "base_url": "http://127.0.0.1:18080/v1",
             "api_key": "harbor-local-inference-bridge",
+            "api_mode": "chat_completions",
         }
         assert "provider" not in config
 
