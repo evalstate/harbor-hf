@@ -2799,7 +2799,7 @@ export class Projection {
   ): Promise<Record<string, number>> {
     const rows = await this.db
       .selectFrom("job_admissions")
-      .innerJoin("jobs", "jobs.action_id", "job_admissions.action_id")
+      .innerJoin("jobs", "jobs.launch_action_id", "job_admissions.action_id")
       .leftJoin(
         "job_capacity_releases",
         "job_capacity_releases.action_id",

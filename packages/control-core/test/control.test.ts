@@ -299,6 +299,35 @@ describe("control service", () => {
         },
       ],
     });
+    const resourceId = "job-capacity-observation";
+    await control.service.receipt(second, {
+      outcome: "created",
+      observed_state: "SCHEDULING",
+      resource_id: resourceId,
+    });
+    const observation = control.service.actionIntent(
+      result.run_id,
+      "job.observe",
+      resourceId,
+      0,
+      {
+        resource_id: resourceId,
+        launch_action_id: second.action_id,
+      },
+      second.actor,
+      new Date(Date.parse(second.created_at) + 1).toISOString(),
+    );
+    await control.service.writeAction(observation);
+    await control.service.receipt(observation, {
+      outcome: "completed",
+      observed_state: "RUNNING",
+      resource_id: resourceId,
+    });
+    await expect(control.service.namespaceCapacityView()).resolves.toMatchObject({
+      observed_running_jobs: 1,
+      observed_scheduling_jobs: 0,
+      reserved_without_active_observation: 0,
+    });
 
     const rebuilt = await Projection.open(`${control.root}/lower-capacity.sqlite`);
     await expect(rebuilt.rebuild(control.store)).resolves.toBeUndefined();
