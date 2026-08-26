@@ -115,6 +115,7 @@ def test_starts_host_bridge_with_only_required_settings(
         "base_url": "http://127.0.0.1:18080/v1",
         "api_key": "harbor-local-inference-bridge",
         "model": "example/model",
+        "max_output_tokens": 1024,
     }
     assert stat.S_IMODE(route.stat().st_mode) == 0o644
     assert stat.S_IMODE(log.stat().st_mode) == 0o600
@@ -126,3 +127,14 @@ def test_rejects_unknown_api(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(RuntimeError, match="API is invalid"):
         job_root_bridge.main()
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "invalid"])
+def test_rejects_invalid_positive_bridge_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("EXAMPLE_SETTING", value)
+
+    with pytest.raises(RuntimeError, match="empty|invalid"):
+        job_root_bridge._required_positive_int("EXAMPLE_SETTING")

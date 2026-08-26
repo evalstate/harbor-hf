@@ -51,6 +51,18 @@ def _required(name: str) -> str:
     return value
 
 
+def _required_positive_int(name: str) -> int:
+    """Return a required positive integer bridge setting."""
+    raw = _required(name)
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise RuntimeError(f"required Job bridge setting {name} is invalid") from error
+    if value <= 0:
+        raise RuntimeError(f"required Job bridge setting {name} is invalid")
+    return value
+
+
 def _bridge_environment(token_path: Path, allowed_path: str) -> dict[str, str]:
     environment = {
         "HOME": "/root",
@@ -175,6 +187,9 @@ def main() -> None:
                 "base_url": f"http://127.0.0.1:{_LOCAL_PORT}/v1",
                 "api_key": _LOCAL_API_KEY,
                 "model": _required("HARBOR_HF_INFERENCE_ALLOWED_MODEL"),
+                "max_output_tokens": _required_positive_int(
+                    "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS"
+                ),
             },
             0o644,
         )

@@ -117,6 +117,7 @@ async def test_uses_prepared_job_loopback_route() -> None:
         "base_url": "http://127.0.0.1:18080/v1",
         "api_key": "harbor-local-inference-bridge",
         "model": "example/model",
+        "max_output_tokens": 32768,
     }
     env: dict[str, str] = {}
 
@@ -142,6 +143,7 @@ async def test_uses_prepared_job_loopback_route() -> None:
     assert env == {
         "OPENAI_BASE_URL": "http://127.0.0.1:18080/v1",
         "OPENAI_API_KEY": "harbor-local-inference-bridge",
+        "JOB_INFERENCE_MAX_OUTPUT_TOKENS": "32768",
     }
     agent.exec_as_agent.assert_awaited_once()
     command = agent.exec_as_agent.await_args.kwargs["command"]

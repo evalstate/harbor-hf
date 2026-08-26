@@ -200,6 +200,7 @@ async def test_job_route_uses_custom_provider_and_locked_output_limit(
         assert kwargs["allowed_model"] == "gpt-4.1"
         env["OPENAI_BASE_URL"] = "http://127.0.0.1:18080/v1"
         env["OPENAI_API_KEY"] = "harbor-local-inference-bridge"
+        env["JOB_INFERENCE_MAX_OUTPUT_TOKENS"] = "32768"
         return True
 
     monkeypatch.setattr(openclaw_agent, "use_job_inference_route", use_route)
@@ -216,7 +217,6 @@ async def test_job_route_uses_custom_provider_and_locked_output_limit(
             "timeout_seconds": 1800,
             "max_attempts": 1,
         },
-        extra_env={"HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS": "32768"},
     )
     exec_as_agent = AsyncMock()
     monkeypatch.setattr(agent, "exec_as_agent", exec_as_agent)

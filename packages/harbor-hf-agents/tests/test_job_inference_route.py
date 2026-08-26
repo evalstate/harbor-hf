@@ -92,6 +92,7 @@ async def test_job_route_is_read_by_trusted_host_python(
                 "base_url": "http://127.0.0.1:18080/v1",
                 "api_key": "harbor-local-inference-bridge",
                 "model": "locked-model",
+                "max_output_tokens": 32768,
             }
         ),
         encoding="utf-8",
@@ -117,6 +118,7 @@ async def test_job_route_is_read_by_trusted_host_python(
     assert target == {
         "OPENAI_BASE_URL": "http://127.0.0.1:18080/v1",
         "OPENAI_API_KEY": "harbor-local-inference-bridge",
+        "JOB_INFERENCE_MAX_OUTPUT_TOKENS": "32768",
     }
     assert agent.root_commands == []
     assert len(agent.agent_commands) == 1
