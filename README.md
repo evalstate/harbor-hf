@@ -42,6 +42,8 @@ Worker control requests retry transient HTTP failures with capped backoff for
 the locked Job timeout, so in-flight preparation and evidence writes can
 survive a control projection rebuild. Reconciliation dispatches queued Jobs
 before scheduled Bucket syncs so remote projection latency does not block work.
+It polls active Job states from a short-lived, single-flight namespace cache,
+yields while recording each batch, then pushes changes to the web application.
 It also yields between bounded Run batches so web requests remain responsive.
 Projection rebuilds yield after bounded local database batches, and integrity
 verification loads historical Job evidence in one indexed query instead of

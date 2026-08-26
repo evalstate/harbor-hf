@@ -641,16 +641,19 @@ describe("control service", () => {
             resource_id: `job-${intent.run_id}`,
           };
         }
-        if (intent.action_kind === "job.observe") {
+        if (intent.action_kind === "job.observe")
+          throw new Error("individual Job observation was not expected");
+        return noop.execute(intent);
+      },
+      observeJobs: async (intents): Promise<readonly ExternalActionResult[]> =>
+        intents.map((intent) => {
           observedRuns.push(intent.run_id);
           return {
             outcome: "completed",
             observed_state: "COMPLETED",
             resource_id: intent.target,
           };
-        }
-        return noop.execute(intent);
-      },
+        }),
     };
     const reconciler = new Reconciler(
       control.service,

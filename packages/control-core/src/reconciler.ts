@@ -50,6 +50,9 @@ export interface ExternalActionPort {
     intent: ActionIntent,
     context?: ExternalActionContext,
   ): Promise<ExternalActionResult>;
+  observeJobs?(
+    intents: readonly ActionIntent[],
+  ): Promise<readonly ExternalActionResult[]>;
 }
 
 export interface ReconcilerOptions {
@@ -206,7 +209,6 @@ export function ordinaryActionOrder(intents: readonly ActionIntent[]): ActionInt
     if (intent.action_kind === "run.cancel") return 0;
     if (intent.action_kind === "run.admit") return 1;
     if (intent.action_kind === "job.cancel") return 2;
-    if (intent.action_kind === "job.observe") return 4;
     return 3;
   };
   return [...intents].sort(
@@ -240,6 +242,11 @@ interface JobLaunchBatch {
   handled: number;
   failures: unknown[];
   consideredActionIds: Set<string>;
+}
+
+interface ActionBatch {
+  handled: number;
+  failures: unknown[];
 }
 
 export class Reconciler {
@@ -353,6 +360,22 @@ export class Reconciler {
     }
     await yieldToEventLoop();
     const pending = await this.projection.pendingActions(10_000);
+    const dueNow = (intent: ActionIntent): boolean => {
+      const notBefore = intent.payload.not_before;
+      return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
+    };
+    const observationCandidates = fairJobLaunchOrder(
+      pending.filter(
+        (intent) => intent.action_kind === "job.observe" && dueNow(intent),
+      ),
+      null,
+    );
+    const observationBatch = await this.handleJobObservations(
+      observationCandidates,
+      this.options.batch_size,
+    );
+    handled += observationBatch.handled;
+    failures.push(...observationBatch.failures);
     const launchCandidates = pending.filter(
       (candidate) =>
         candidate.action_kind === "job.launch" &&
@@ -360,13 +383,11 @@ export class Reconciler {
         !newlyAdmittedRuns.has(candidate.run_id) &&
         !initialLaunchBatch.consideredActionIds.has(candidate.action_id),
     );
-    const ordinary = pending.filter((intent) => intent.action_kind !== "job.launch");
-    const due = ordinaryActionOrder(
-      ordinary.filter((intent) => {
-        const notBefore = intent.payload.not_before;
-        return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
-      }),
+    const ordinary = pending.filter(
+      (intent) =>
+        intent.action_kind !== "job.launch" && intent.action_kind !== "job.observe",
     );
+    const due = ordinaryActionOrder(ordinary.filter(dueNow));
     let ordinaryHandled = 0;
     const ordinaryLimit =
       launchCandidates.length > 0
@@ -404,6 +425,57 @@ export class Reconciler {
     }
     if (failures.length > 0) throw failures[0];
     return handled;
+  }
+
+  private async handleJobObservations(
+    observationCandidates: ActionIntent[],
+    limit: number,
+  ): Promise<ActionBatch> {
+    let handled = 0;
+    const failures: unknown[] = [];
+    const candidates = observationCandidates.slice(0, limit);
+    let results: readonly ExternalActionResult[];
+    try {
+      if (this.external.observeJobs)
+        results = await this.external.observeJobs(candidates);
+      else {
+        const settled = await Promise.allSettled(
+          candidates.map((intent) => this.external.execute(intent)),
+        );
+        results = settled.map((result) => {
+          if (result.status === "fulfilled") return result.value;
+          failures.push(result.reason);
+          return { outcome: "failed", observed_state: "ERROR" };
+        });
+      }
+    } catch (error) {
+      return { handled, failures: [error] };
+    }
+    if (results.length !== candidates.length)
+      return {
+        handled,
+        failures: [new PolicyError("Job observation batch result count is invalid")],
+      };
+    // Fetch observation states together, then serialize their durable effects.
+    for (const [index, result] of results.entries()) {
+      const intent = candidates[index];
+      if (!intent) {
+        failures.push(new PolicyError("Job observation batch result is unbound"));
+        continue;
+      }
+      handled += 1;
+      if (result.outcome !== "failed") {
+        try {
+          const receipt = await this.service.receipt(intent, result);
+          await this.advance(intent, receipt);
+          await this.service.markAdvanced(intent, receipt);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      await yieldToEventLoop();
+    }
+    return { handled, failures };
   }
 
   private async handleJobLaunches(

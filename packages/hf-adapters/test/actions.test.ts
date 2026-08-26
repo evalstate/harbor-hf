@@ -877,6 +877,137 @@ describe("HuggingFaceActions", () => {
     });
   });
 
+  it("caches and paginates batched Job observations by namespace", async () => {
+    const first: ActionIntent = {
+      ...base,
+      action_kind: "job.observe",
+      target: "job-one",
+      payload: {
+        ...base.payload,
+        resource_id: "job-one",
+        launch_action_id: base.action_id,
+        active_hourly_cost_microusd: 10_000,
+      },
+    };
+    const second: ActionIntent = {
+      ...first,
+      record_id: "action-observe-0002",
+      action_id: "action-observe-0002",
+      target: "job-two",
+      payload: {
+        ...first.payload,
+        resource_id: "job-two",
+        launch_action_id: "action-launch-0002",
+        task_id: "task-two",
+        task_ids: ["task-two"],
+      },
+    };
+    const finished = {
+      startedAt: "2026-08-21T12:00:00Z",
+      finishedAt: "2026-08-21T13:00:00Z",
+      status: { stage: "COMPLETED", failureCount: 0 },
+    };
+    const requestedUrls: URL[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL ? input : input.url,
+      );
+      requestedUrls.push(url);
+      if (url.searchParams.has("cursor"))
+        return new Response(
+          JSON.stringify([apiJob(second, { ...finished, id: "job-two" })]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      return new Response(
+        JSON.stringify([apiJob(first, { ...finished, id: "job-one" })]),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            Link: '<https://huggingface.co/api/jobs/example?cursor=next>; rel="next"',
+          },
+        },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      controlUrl: "https://control.example",
+    });
+
+    const [batch, cached] = await Promise.all([
+      adapter.observeJobs([first, second]),
+      adapter.observeJobs([first]),
+    ]);
+    expect(batch).toMatchObject([
+      {
+        observed_state: "COMPLETED",
+        resource_id: "job-one",
+        cost_microusd: 10_000,
+      },
+      {
+        observed_state: "COMPLETED",
+        resource_id: "job-two",
+        cost_microusd: 10_000,
+      },
+    ]);
+    expect(cached).toMatchObject([
+      { observed_state: "COMPLETED", resource_id: "job-one" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestedUrls[0]?.searchParams.getAll("stage")).toEqual([
+      "RUNNING",
+      "SCHEDULING",
+    ]);
+  });
+
+  it("inspects a terminal Job absent from the active namespace snapshot", async () => {
+    const intent: ActionIntent = {
+      ...base,
+      action_kind: "job.observe",
+      target: "job-one",
+      payload: {
+        ...base.payload,
+        resource_id: "job-one",
+        launch_action_id: base.action_id,
+        active_hourly_cost_microusd: 10_000,
+      },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL ? input : input.url,
+      );
+      if (url.pathname === "/api/jobs/example")
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      return new Response(
+        JSON.stringify(
+          apiJob(intent, {
+            id: "job-one",
+            startedAt: "2026-08-21T12:00:00Z",
+            finishedAt: "2026-08-21T13:00:00Z",
+            status: { stage: "COMPLETED", failureCount: 0 },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.observeJobs([intent])).resolves.toMatchObject([
+      { observed_state: "COMPLETED", resource_id: "job-one" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("observes replicas when a pause response omits their state", async () => {
     let call = 0;
     const fetchMock = vi.fn(async () => {
