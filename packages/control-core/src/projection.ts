@@ -492,6 +492,32 @@ function abandonedExecutionLaunch(
   if (action.action_kind !== "job.launch" || action.receipt_body === null) return false;
   if (action.observed_state?.startsWith("suppressed-")) return false;
   if (launchStillRunning(action, actions)) return false;
+  const terminalGeneration = actions.reduce(
+    (latest, row) => {
+      if (
+        row.action_kind !== "job.observe" ||
+        row.receipt_body === null ||
+        !jobStateIsTerminal(row.observed_state)
+      )
+        return latest;
+      const intent = JSON.parse(row.intent_body) as ActionIntent;
+      return intent.payload.launch_action_id === action.action_id
+        ? Math.max(latest, row.generation)
+        : latest;
+    },
+    action.observed_state && jobStateIsTerminal(action.observed_state) ? -1 : -2,
+  );
+  const pendingObservation = actions.some((row) => {
+    if (row.action_kind !== "job.observe" || row.receipt_body !== null) return false;
+    const intent = JSON.parse(row.intent_body) as ActionIntent;
+    const linked =
+      intent.payload.launch_action_id === action.action_id ||
+      (typeof intent.payload.launch_action_id !== "string" &&
+        action.resource_id !== null &&
+        row.target === action.resource_id);
+    return linked && row.generation > terminalGeneration;
+  });
+  if (pendingObservation) return false;
   const receipt = JSON.parse(action.receipt_body) as ActionReceipt;
   if (receipt.outcome === "failed") return true;
   return jobStateIsTerminal(latestObservedJobState(action, actions));

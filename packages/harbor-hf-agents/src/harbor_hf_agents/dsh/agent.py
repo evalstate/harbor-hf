@@ -309,21 +309,27 @@ class DshAgent(IsolatedProviderAgent):
         return calls
 
     @staticmethod
-    def _integer(value: object) -> int:
-        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    def _token_count(usage: object, key: str) -> int:
+        if not isinstance(usage, dict):
+            return 0
+        payload = cast(dict[str, object], usage)
+        value = payload.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return 0
+        return value
 
-    @staticmethod
-    def _build_metrics(usage: object) -> Metrics | None:
+    @classmethod
+    def _build_metrics(cls, usage: object) -> Metrics | None:
         if not isinstance(usage, dict):
             return None
-        typed = cast(dict[str, Any], usage)
-        input_tokens = DshAgent._integer(typed.get("inputTokens"))
-        cache_read = DshAgent._integer(typed.get("cacheReadTokens"))
-        cache_write = DshAgent._integer(typed.get("cacheWriteTokens"))
-        output_tokens = DshAgent._integer(typed.get("outputTokens"))
-        extra: dict[str, Any] = {
+        input_tokens = cls._token_count(usage, "inputTokens")
+        cache_read = cls._token_count(usage, "cacheReadTokens")
+        cache_write = cls._token_count(usage, "cacheWriteTokens")
+        output_tokens = cls._token_count(usage, "outputTokens")
+        payload = cast(dict[str, object], usage)
+        extra = {
             key: value
-            for key, value in typed.items()
+            for key, value in payload.items()
             if key not in {"inputTokens", "outputTokens", "cacheReadTokens"}
         }
         return Metrics(

@@ -5,12 +5,14 @@ import type {
   RunLock,
   HarborHFLeaderboardSnapshotV1,
   HarborHFResultCatalogV1,
+  PublicationReceipt,
   ResolvedProfile,
 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
   deterministicId,
   sha256,
+  validateControlRecord,
   validateLeaderboardSnapshot,
   validateResultCatalog,
 } from "@harbor-hf/contracts";
@@ -149,6 +151,27 @@ function catalogString(value: string | null, field: string): string {
   return value;
 }
 
+async function requirePublishedReceipt(
+  store: ImmutableObjectStore,
+  entry: CatalogEntry,
+  catalogBytes: Uint8Array,
+): Promise<void> {
+  const receipt = validateControlRecord<PublicationReceipt>(
+    JSON.parse(new TextDecoder().decode(await store.read(entry.result_path))),
+  );
+  if (
+    receipt.kind !== "publication.receipt" ||
+    receipt.publication_state !== "published" ||
+    receipt.publication_id !== entry.publication_id ||
+    receipt.run_id !== entry.run_id ||
+    receipt.catalog_digest !== sha256(catalogBytes)
+  ) {
+    throw new Error(
+      `leaderboard catalog ${entry.publication_id} has no matching published receipt`,
+    );
+  }
+}
+
 export async function encodeLeaderboardSqlite(
   rows: readonly LeaderboardRow[],
 ): Promise<Uint8Array> {
@@ -234,13 +257,13 @@ async function catalogRows(
   const objects = await store.list(CATALOG_PREFIX);
   const rows: LeaderboardRow[] = [];
   for (const object of objects) {
+    const catalogBytes = await store.read(object.key);
     const catalog = validateResultCatalog<HarborHFResultCatalogV1>(
-      JSON.parse(new TextDecoder().decode(await store.read(object.key))),
+      JSON.parse(new TextDecoder().decode(catalogBytes)),
     );
     for (const entry of catalog.entries) {
       if (!leaderboardEligible(entry)) continue;
-      if (entry.run_id === null)
-        throw new Error("eligible catalog entry is missing a run ID");
+      await requirePublishedReceipt(store, entry, catalogBytes);
       const lock = await projection.runLock(entry.run_id);
       if (!lock) throw new Error(`leaderboard catalog ${entry.run_id} has no run lock`);
       const run = await projection.run(entry.run_id);

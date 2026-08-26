@@ -1206,6 +1206,10 @@ export class Reconciler {
         await this.service.writeAction(next);
         return;
       }
+      if (!workerAttemptsPresent)
+        await this.service.syncProjection(
+          `control/schema=v1/runs/${intent.run_id}/tasks`,
+        );
       await this.completeTasksFromJob(
         intent,
         receipt,
@@ -1213,6 +1217,10 @@ export class Reconciler {
       );
       return;
     }
+    if (!(await this.allWorkerAttemptsPresent(intent)))
+      await this.service.syncProjection(
+        `control/schema=v1/runs/${intent.run_id}/tasks`,
+      );
     await this.completeTasksFromJob(intent, receipt, "infrastructure");
   }
 

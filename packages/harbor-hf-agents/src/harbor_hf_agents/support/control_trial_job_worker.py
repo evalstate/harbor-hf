@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import copy
 import json
 import logging
 import math
 import os
 import re
-import selectors
 import signal
 import stat
 import subprocess
 import tarfile
 import tempfile
-import time
+import threading
+from collections import deque
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -58,7 +60,59 @@ _MAX_EVIDENCE_FILE_BYTES = 512 * 1024 * 1024
 _MAX_EVIDENCE_TOTAL_BYTES = 1024 * 1024 * 1024
 _MAX_EVIDENCE_ARCHIVE_BYTES = 1024 * 1024 * 1024
 _MAX_EVIDENCE_ENTRIES = 10_000
+_LOG_READ_BYTES = 8 * 1024
+_LOG_DRAIN_SECONDS = 5
+_MAX_SENSITIVE_OUTPUT_CHARS = 4 * 1024
 _OUTPUT_TRUNCATION_NOTICE = b"\n[harbor-hf: output truncated]\n"
+_SENSITIVE_OUTPUT_ENVIRONMENT = (
+    "HARBOR_HF_WORKER_CAPABILITY",
+    "HF_INFERENCE_TOKEN",
+    "HF_TOKEN",
+)
+_HARBOR_CHILD_ENVIRONMENT = frozenset(
+    {
+        "ALL_PROXY",
+        "CURL_CA_BUNDLE",
+        "HARBOR_HF_ACTION_ID",
+        "HARBOR_HF_CONTROL_URL",
+        "HARBOR_HF_JOB_IMAGE",
+        "HARBOR_HF_MAX_IMAGE_BYTES",
+        "HARBOR_HF_MAX_IMAGE_ENTRIES",
+        "HARBOR_HF_PREPARED_JOB_DIGEST",
+        "HARBOR_HF_RUN_ID",
+        "HARBOR_HF_RUN_LOCK_DIGEST",
+        "HARBOR_HF_TASK_IDS_JSON",
+        "HARBOR_HF_TASK_IMAGE",
+        "HARBOR_HF_WORKER_CAPABILITY",
+        "HARBOR_HF_WORKER_REVISION",
+        "HARBOR_HF_WORKER_ROLE",
+        "HOME",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LD_LIBRARY_PATH",
+        "NO_PROXY",
+        "PATH",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "VIRTUAL_ENV",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+)
 _POLICY_FAILURES = {
     "AgentAuthenticationError",
     "ApiUsageLimitError",
@@ -82,6 +136,10 @@ class WorkerEvidenceError(RuntimeError):
 
 class MissingHarborResultError(RuntimeError):
     """Raised when Harbor exits without its required trial result."""
+
+    def __init__(self, message: str, *, timed_out: bool = False) -> None:
+        super().__init__(message)
+        self.timed_out = timed_out
 
 
 @dataclass(frozen=True)
@@ -453,6 +511,8 @@ def _result_path(root: Path, task: LockedTask) -> Path | None:
         for path in files
         if path.name == "result.json" and path.parent.parent == task_root
     ]
+    if len(matches) > 1:
+        raise WorkerEvidenceError("Harbor wrote multiple trial results")
     return matches[0] if len(matches) == 1 else None
 
 
@@ -818,7 +878,7 @@ def _upload_failure_note(
             "schema_version": "v1",
             "kind": "worker.evidence.upload_failure",
             "task_id": identity.task_id,
-            "error": str(error)[:500],
+            "error": _redact_text(str(error), limit=500),
         }
     )
     note_digest, note_path = _upload_object(
@@ -904,19 +964,116 @@ def _submit_failure_attempt(
 
 def _worker_failure_outcome(error: BaseException) -> tuple[str, bool]:
     """Classify only typed transient failures as replacement-eligible."""
+    if isinstance(error, MissingHarborResultError):
+        if error.timed_out:
+            return "benchmark_timeout", False
+        return "infrastructure", True
     if isinstance(
         error,
         (
             ControlClientTransientError,
             InferenceUsageError,
             JobEnvironmentPreflightError,
-            MissingHarborResultError,
         ),
     ):
         return "infrastructure", True
     if isinstance(error, ProviderPolicyError):
         return "policy", False
     return "invalid", False
+
+
+def _sensitive_output_environment(
+    environment: Mapping[str, str] = os.environ,
+) -> tuple[str, ...]:
+    bare_names = {
+        "ACCESS_KEY",
+        "API_KEY",
+        "CREDENTIAL",
+        "PASSWORD",
+        "PRIVATE_KEY",
+        "SECRET",
+        "TOKEN",
+    }
+    suffixes = (
+        "_ACCESS_KEY",
+        "_API_KEY",
+        "_CREDENTIAL",
+        "_PASSWORD",
+        "_PRIVATE_KEY",
+        "_SECRET",
+        "_TOKEN",
+    )
+    return tuple(
+        name
+        for name, value in environment.items()
+        if value
+        and (
+            name in _SENSITIVE_OUTPUT_ENVIRONMENT
+            or name.upper() in bare_names
+            or name.upper().endswith(suffixes)
+        )
+    )
+
+
+def _sensitive_output_values(
+    environment: Mapping[str, str] = os.environ,
+) -> tuple[str, ...]:
+    values = {environment[name] for name in _sensitive_output_environment(environment)}
+    if any(len(value) > _MAX_SENSITIVE_OUTPUT_CHARS for value in values):
+        raise RuntimeError("sensitive worker setting exceeds the output safety limit")
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _redaction_marker(sensitive_values: tuple[str, ...]) -> str:
+    for marker in ("<redacted>", "[private]", "***"):
+        if all(value not in marker for value in sensitive_values):
+            return marker
+    return ""
+
+
+def _redact_pending_output(
+    pending: str,
+    sensitive_values: tuple[str, ...],
+    marker: str,
+    *,
+    final: bool,
+) -> tuple[str, str]:
+    redacted: list[str] = []
+    while pending:
+        matches = [value for value in sensitive_values if pending.startswith(value)]
+        longer_prefix = not final and any(
+            value.startswith(pending) and len(value) > len(pending)
+            for value in sensitive_values
+        )
+        if matches and not longer_prefix:
+            match = matches[0]
+            redacted.append(marker)
+            pending = pending[len(match) :]
+        elif not final and any(value.startswith(pending) for value in sensitive_values):
+            break
+        else:
+            redacted.append(pending[0])
+            pending = pending[1:]
+    return "".join(redacted), pending
+
+
+def _redact_text(value: str, *, limit: int) -> str:
+    redacted = value
+    sensitive_values = _sensitive_output_values()
+    marker = _redaction_marker(sensitive_values)
+    for sensitive in sensitive_values:
+        redacted = redacted.replace(sensitive, marker)
+    return redacted[:limit]
+
+
+def _harbor_child_environment(
+    environment: Mapping[str, str] = os.environ,
+) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in environment.items()
+        if name in _HARBOR_CHILD_ENVIRONMENT
+    }
 
 
 def _log_harbor_exception(task: LockedTask, result: dict[str, Any]) -> None:
@@ -934,7 +1091,7 @@ def _log_harbor_exception(task: LockedTask, result: dict[str, Any]) -> None:
         "Harbor task %s failed with %s: %s",
         task.task_id,
         exception_type,
-        message[:2000],
+        _redact_text(message, limit=2000),
     )
 
 
@@ -943,7 +1100,9 @@ def _run_logged_command(  # noqa: C901 -- bounded streaming state machine
     timeout_seconds: int,
     env: dict[str, str],
 ) -> tuple[str, bool]:
-    """Stream command output through logging and kill its group on timeout."""
+    """Stream bounded redacted output and stop the complete process group."""
+    sensitive_values = _sensitive_output_values(env)
+    marker = _redaction_marker(sensitive_values)
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -953,45 +1112,92 @@ def _run_logged_command(  # noqa: C901 -- bounded streaming state machine
     )
     if process.stdout is None:
         raise RuntimeError("Harbor process output pipe is unavailable")
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout_seconds
-    output = bytearray()
+    output_stream = process.stdout
+    chunks: deque[str] = deque()
+    retained_chars = 0
+    streamed_chars = 0
     output_truncated = False
+    reader_errors: list[BaseException] = []
+
+    def emit(value: str) -> None:
+        nonlocal retained_chars, streamed_chars, output_truncated
+        if not value:
+            return
+        available = max(0, _MAX_HARBOR_OUTPUT_BYTES - streamed_chars)
+        if available:
+            emitted = value[:available]
+            _LOGGER.info("%s", emitted.rstrip())
+            streamed_chars += len(emitted)
+        if len(value) > available and not output_truncated:
+            output_truncated = True
+            _LOGGER.warning(
+                "Harbor process output exceeded %d bytes and was truncated",
+                _MAX_HARBOR_OUTPUT_BYTES,
+            )
+        chunks.append(value)
+        retained_chars += len(value)
+        while retained_chars > _MAX_HARBOR_OUTPUT_BYTES and chunks:
+            overflow = retained_chars - _MAX_HARBOR_OUTPUT_BYTES
+            first = chunks[0]
+            if len(first) <= overflow:
+                retained_chars -= len(chunks.popleft())
+            else:
+                chunks[0] = first[overflow:]
+                retained_chars -= overflow
+
+    def copy_output() -> None:
+        try:
+            pending = ""
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            while raw := os.read(output_stream.fileno(), _LOG_READ_BYTES):
+                pending += decoder.decode(raw)
+                redacted, pending = _redact_pending_output(
+                    pending,
+                    sensitive_values,
+                    marker,
+                    final=False,
+                )
+                emit(redacted)
+            pending += decoder.decode(b"", final=True)
+            redacted, _ = _redact_pending_output(
+                pending,
+                sensitive_values,
+                marker,
+                final=True,
+            )
+            emit(redacted)
+        except BaseException as error:
+            reader_errors.append(error)
+
+    reader = threading.Thread(target=copy_output, daemon=True)
+    reader.start()
     timed_out = False
     try:
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            for key, _ in selector.select(timeout=min(1.0, remaining)):
-                chunk = os.read(key.fd, 64 * 1024)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                remaining_capacity = _MAX_HARBOR_OUTPUT_BYTES - len(output)
-                retained = chunk[: max(0, remaining_capacity)]
-                if retained:
-                    output.extend(retained)
-                    _LOGGER.info("%s", retained.decode(errors="replace").rstrip())
-                if len(retained) != len(chunk) and not output_truncated:
-                    output_truncated = True
-                    _LOGGER.warning(
-                        "Harbor process output exceeded %d bytes and was truncated",
-                        _MAX_HARBOR_OUTPUT_BYTES,
-                    )
-            if process.poll() is not None and not selector.get_map():
-                break
-    finally:
-        selector.close()
-    if timed_out:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-    process.wait()
+        process.wait()
+    if not timed_out:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    reader.join(timeout=_LOG_DRAIN_SECONDS)
+    if reader.is_alive():
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        reader.join(timeout=_LOG_DRAIN_SECONDS)
+    if reader.is_alive():
+        output_stream.close()
+        reader.join(timeout=_LOG_DRAIN_SECONDS)
+    if reader.is_alive():
+        raise RuntimeError("command output reader did not stop")
+    if reader_errors:
+        raise RuntimeError("command output reader failed") from reader_errors[0]
+    output = "".join(chunks)
     if output_truncated:
-        output.extend(_OUTPUT_TRUNCATION_NOTICE)
-    return bytes(output).decode(errors="replace"), timed_out
+        output += _OUTPUT_TRUNCATION_NOTICE.decode()
+    return output, timed_out
 
 
 def _run_harbor(
@@ -1003,11 +1209,14 @@ def _run_harbor(
     output, timed_out = _run_logged_command(
         ["harbor", "run", "--config", str(path), "--yes"],
         task.timeout_seconds + 600,
-        dict(os.environ),
+        _harbor_child_environment(),
     )
     result_path = _result_path(root, task)
     if result_path is None:
-        raise MissingHarborResultError("Harbor did not write a trial result")
+        raise MissingHarborResultError(
+            "Harbor did not write a trial result",
+            timed_out=timed_out,
+        )
     return output, timed_out, result_path
 
 
@@ -1034,10 +1243,22 @@ def _verified_result(task: LockedTask, result_path: Path) -> dict[str, Any]:
     if not isinstance(result_value, dict):
         raise WorkerEvidenceError("Harbor trial result must be a JSON object")
     _log_harbor_exception(task, result_value)
-    capability = _required("HARBOR_HF_WORKER_CAPABILITY").encode()
-    for trial_file in _regular_trial_files(result_path.parent):
-        if _contains_bytes(trial_file, capability):
-            raise WorkerEvidenceError("worker capability leaked into trial evidence")
+    sensitive_values = _sensitive_output_values()
+    trial_files = _regular_trial_files(result_path.parent)
+    for trial_path in result_path.parent.rglob("*"):
+        relative = trial_path.relative_to(result_path.parent).as_posix()
+        if any(sensitive in relative for sensitive in sensitive_values):
+            raise WorkerEvidenceError(
+                "sensitive worker setting leaked into trial evidence"
+            )
+    for trial_file in trial_files:
+        if any(
+            _contains_bytes(trial_file, sensitive.encode())
+            for sensitive in sensitive_values
+        ):
+            raise WorkerEvidenceError(
+                "sensitive worker setting leaked into trial evidence"
+            )
     return result_value
 
 
@@ -1055,7 +1276,11 @@ def _deliver_result(
     try:
         digest, evidence_path = _upload_evidence(config, archive)
     except ControlClientError as error:
-        _LOGGER.error("Evidence upload failed for task %s: %s", task.task_id, error)
+        _LOGGER.error(
+            "Evidence upload failed for task %s: %s",
+            task.task_id,
+            _redact_text(str(error), limit=500),
+        )
         digest, evidence_path = _upload_failure_note(_config_identity(config), error)
         outcome_override = _worker_failure_outcome(error)
     _submit_attempt(
@@ -1093,7 +1318,7 @@ def _run_task(config: WorkerConfig, root: Path) -> None:
     try:
         _run_task_once(config, root)
     except Exception as error:
-        if "worker capability leaked" in str(error):
+        if "sensitive worker setting leaked" in str(error):
             raise
         outcome, replacement_eligible = _worker_failure_outcome(error)
         _submit_failure_attempt(
@@ -1102,7 +1327,11 @@ def _run_task(config: WorkerConfig, root: Path) -> None:
             outcome=outcome,
             replacement_eligible=replacement_eligible,
         )
-        _LOGGER.exception("Harbor task %s failed before delivery", config.task.task_id)
+        _LOGGER.error(
+            "Harbor task %s failed before delivery: %s",
+            config.task.task_id,
+            _redact_text(str(error), limit=500),
+        )
 
 
 def main() -> None:
@@ -1145,7 +1374,11 @@ def main() -> None:
             outcome=outcome,
             replacement_eligible=replacement_eligible,
         )
-        _LOGGER.exception("Worker preparation failed for task %s", task_id)
+        _LOGGER.error(
+            "Worker preparation failed for task %s: %s",
+            task_id,
+            _redact_text(str(error), limit=500),
+        )
         return
     with tempfile.TemporaryDirectory(prefix="harbor-hf-control-worker-") as temporary:
         _run_task(config, Path(temporary))

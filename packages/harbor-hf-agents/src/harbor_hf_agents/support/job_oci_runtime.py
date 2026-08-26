@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -247,6 +248,125 @@ def _directory_regular_bytes(path: Path) -> int:
     return total
 
 
+@dataclass
+class _BoundedProcessOutput:
+    chunks: list[bytes]
+    retained_bytes: int = 0
+    truncated: bool = False
+    error: BaseException | None = None
+
+
+def _drain_bounded_process_output(
+    stream: BinaryIO,
+    output: _BoundedProcessOutput,
+) -> None:
+    try:
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                return
+            remaining = max(0, _MAX_COMMAND_OUTPUT_BYTES - output.retained_bytes)
+            if remaining:
+                retained = chunk[:remaining]
+                output.chunks.append(retained)
+                output.retained_bytes += len(retained)
+            if len(chunk) > remaining:
+                output.truncated = True
+    except (OSError, ValueError) as error:
+        output.error = error
+
+
+def _bounded_process_output(output: _BoundedProcessOutput) -> bytes:
+    value = b"".join(output.chunks)
+    if output.truncated:
+        value += _OUTPUT_TRUNCATION_NOTICE
+    return value
+
+
+def _start_bounded_output_readers(
+    process: subprocess.Popen[bytes],
+    label: str,
+) -> tuple[
+    _BoundedProcessOutput,
+    _BoundedProcessOutput,
+    tuple[threading.Thread, threading.Thread],
+]:
+    if process.stdout is None or process.stderr is None:
+        raise OciRuntimeUnavailableError(f"{label} output pipes are unavailable")
+    stdout_output = _BoundedProcessOutput([])
+    stderr_output = _BoundedProcessOutput([])
+    readers = (
+        threading.Thread(
+            target=_drain_bounded_process_output,
+            args=(process.stdout, stdout_output),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_drain_bounded_process_output,
+            args=(process.stderr, stderr_output),
+            daemon=True,
+        ),
+    )
+    for reader in readers:
+        reader.start()
+    return stdout_output, stderr_output, readers
+
+
+def _join_bounded_output_readers(
+    process: subprocess.Popen[bytes],
+    readers: tuple[threading.Thread, threading.Thread],
+    label: str,
+) -> None:
+    drain_deadline = time.monotonic() + _PROCESS_CLEANUP_SECONDS
+    for reader in readers:
+        reader.join(timeout=max(0.0, drain_deadline - time.monotonic()))
+    if any(reader.is_alive() for reader in readers):
+        if process.stdout is not None:
+            with suppress(OSError):
+                os.close(process.stdout.fileno())
+        if process.stderr is not None:
+            with suppress(OSError):
+                os.close(process.stderr.fileno())
+        close_deadline = time.monotonic() + _PROCESS_CLEANUP_SECONDS
+        for reader in readers:
+            if reader.is_alive():
+                reader.join(timeout=max(0.0, close_deadline - time.monotonic()))
+    if any(reader.is_alive() for reader in readers):
+        raise OciRuntimeUnavailableError(
+            f"{label} output readers did not stop after process-group cleanup"
+        )
+
+
+def _finish_bounded_process(
+    process: subprocess.Popen[bytes],
+    stdout_output: _BoundedProcessOutput,
+    stderr_output: _BoundedProcessOutput,
+    readers: tuple[threading.Thread, threading.Thread],
+    label: str,
+) -> tuple[bytes, bytes]:
+    wait_error: subprocess.TimeoutExpired | None = None
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    try:
+        process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        wait_error = error
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    _join_bounded_output_readers(process, readers, label)
+    if wait_error is not None:
+        raise OciRuntimeUnavailableError(
+            f"{label} process group survived cleanup"
+        ) from wait_error
+    error = stdout_output.error or stderr_output.error
+    if error is not None:
+        raise OciRuntimeUnavailableError(f"{label} output reader failed") from error
+    return (
+        _bounded_process_output(stdout_output),
+        _bounded_process_output(stderr_output),
+    )
+
+
 def _run_checked_with_directory_limit(
     arguments: list[str],
     *,
@@ -266,15 +386,26 @@ def _run_checked_with_directory_limit(
         )
     except OSError as error:
         raise OciRuntimeUnavailableError(f"failed to start {label}: {error}") from error
+    stdout_output, stderr_output, readers = _start_bounded_output_readers(
+        process, label
+    )
     exceeded = False
-    while process.poll() is None:
-        if _directory_regular_bytes(directory) > max_bytes:
-            exceeded = True
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            break
-        time.sleep(_IMAGE_COPY_POLL_SECONDS)
-    stdout, stderr = process.communicate()
+    try:
+        while process.poll() is None:
+            if stdout_output.error is not None or stderr_output.error is not None:
+                break
+            if _directory_regular_bytes(directory) > max_bytes:
+                exceeded = True
+                break
+            time.sleep(_IMAGE_COPY_POLL_SECONDS)
+    finally:
+        stdout, stderr = _finish_bounded_process(
+            process,
+            stdout_output,
+            stderr_output,
+            readers,
+            label,
+        )
     if exceeded or _directory_regular_bytes(directory) > max_bytes:
         raise OciImageIntegrityError(
             "task image copy exceeded the bounded compressed byte allowance"

@@ -10,7 +10,11 @@ the isolated legacy reader.
 Harbor owns the job config, task resolution, custom-agent loading, environment
 config, trial execution, locks, results, verifier rewards, exceptions, timing,
 token usage, and trial artifact inventory. Workers install Harbor from a pinned
-`harbor-framework/harbor` git commit. Upstream Harbor remains unchanged.
+`harbor-framework/harbor` git commit. Upstream Harbor remains unchanged;
+Harbor-HF uses only its public APIs and does not monkeypatch Harbor internals.
+When a Harbor CLI process exits after writing a trial result, Harbor-HF accepts
+success only if that durable result has no trial exception and its emitted lock
+exactly matches the prepared lock.
 
 `harbor-hf` owns run, execution, and physical attempt identity, Hugging Face
 infrastructure, immutable request storage, endpoint cleanup, infrastructure

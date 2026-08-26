@@ -683,7 +683,7 @@ export const systemSchema = {
   ],
   properties: {
     source_revision: { type: "string" },
-    write_mode: { enum: ["disabled", "canary", "enabled"] },
+    write_mode: { enum: ["disabled", "enabled"] },
     initialization: {
       type: "object",
       additionalProperties: false,

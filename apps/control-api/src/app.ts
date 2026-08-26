@@ -8,7 +8,6 @@ import type {
   AttemptSubmissionV1,
   HarborHFResultCatalogV1,
   PublicationReceipt,
-  RunSubmissionV1,
 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
@@ -384,6 +383,7 @@ async function publicationObjectsMatch(
 }
 
 type ResultItem = Record<string, unknown>;
+type ResultCatalogObjects = Awaited<ReturnType<Runtime["store"]["list"]>>;
 type ResultPublications = Awaited<ReturnType<Runtime["projection"]["publications"]>>;
 type ResultSupersessions = Awaited<
   ReturnType<Runtime["projection"]["publicationSupersessions"]>
@@ -391,8 +391,14 @@ type ResultSupersessions = Awaited<
 
 interface ResultItemsCache {
   fingerprint: string | null;
+  projectionFingerprint: string | null;
+  catalogCheckedAt: number;
   value: ResultItem[] | null;
-  inFlight: { fingerprint: string; promise: Promise<ResultItem[]> } | null;
+  inFlight: {
+    projectionFingerprint: string;
+    token: object;
+    promise: Promise<ResultItem[]>;
+  } | null;
 }
 
 const resultItemsCaches = new WeakMap<Runtime, ResultItemsCache>();
@@ -402,6 +408,8 @@ function resultItemsCache(runtime: Runtime): ResultItemsCache {
   if (existing) return existing;
   const created: ResultItemsCache = {
     fingerprint: null,
+    projectionFingerprint: null,
+    catalogCheckedAt: Number.NEGATIVE_INFINITY,
     value: null,
     inFlight: null,
   };
@@ -413,6 +421,7 @@ async function loadResultItems(
   runtime: Runtime,
   publications: ResultPublications,
   supersessions: ResultSupersessions,
+  catalogs: ResultCatalogObjects,
 ): Promise<ResultItem[]> {
   const projectedById = new Map(
     publications.map((publication) => [publication.publication_id, publication]),
@@ -436,7 +445,6 @@ async function loadResultItems(
         },
       ]),
   );
-  const catalogs = await runtime.store.list("results/schema=v1/catalog");
   for (const object of catalogs) {
     if (!object.key.endsWith(".json")) continue;
     const bytes = await runtime.store.read(object.key);
@@ -564,30 +572,52 @@ async function resultItems(runtime: Runtime): Promise<ResultItem[]> {
     runtime.projection.publications(),
     runtime.projection.publicationSupersessions(),
   ]);
-  const fingerprint = sha256(canonicalJson({ publications, supersessions }));
+  const projectionFingerprint = sha256(canonicalJson({ publications, supersessions }));
   const cache = resultItemsCache(runtime);
-  if (cache.value && cache.fingerprint === fingerprint) return cache.value;
-  if (cache.inFlight?.fingerprint === fingerprint) return cache.inFlight.promise;
+  if (
+    cache.value &&
+    cache.projectionFingerprint === projectionFingerprint &&
+    performance.now() - cache.catalogCheckedAt < runtime.config.sync_interval_ms
+  )
+    return cache.value;
+  if (cache.inFlight?.projectionFingerprint === projectionFingerprint)
+    return cache.inFlight.promise;
 
-  let promise: Promise<ResultItem[]>;
-  promise = loadResultItems(runtime, publications, supersessions)
-    .then((items) => {
-      const current = resultItemsCache(runtime);
-      if (current.inFlight?.promise === promise) {
-        current.fingerprint = fingerprint;
-        current.value = items;
+  const token = {};
+  const promise = (async () => {
+    const catalogs = (await runtime.store.list("results/schema=v1/catalog"))
+      .filter((object) => object.key.endsWith(".json"))
+      .map(({ key, size, source_identity }) => ({ key, size, source_identity }))
+      .sort((left, right) => left.key.localeCompare(right.key));
+    const fingerprint = sha256(canonicalJson({ projectionFingerprint, catalogs }));
+    const current = resultItemsCache(runtime);
+    if (current.value && current.fingerprint === fingerprint) {
+      if (current.inFlight?.token === token) {
+        current.projectionFingerprint = projectionFingerprint;
+        current.catalogCheckedAt = performance.now();
       }
-      return items;
-    })
-    .finally(() => {
-      const current = resultItemsCache(runtime);
-      if (current.inFlight?.promise === promise) current.inFlight = null;
-    });
-  cache.inFlight = { fingerprint, promise };
+      return current.value;
+    }
+    const items = await loadResultItems(runtime, publications, supersessions, catalogs);
+    if (current.inFlight?.token === token) {
+      current.fingerprint = fingerprint;
+      current.projectionFingerprint = projectionFingerprint;
+      current.catalogCheckedAt = performance.now();
+      current.value = items;
+    }
+    return items;
+  })().finally(() => {
+    const current = resultItemsCache(runtime);
+    if (current.inFlight?.token === token) current.inFlight = null;
+  });
+  cache.inFlight = { projectionFingerprint, token, promise };
   return promise;
 }
 
-/** Populate the immutable result catalog cache before the first Results request. */
+/**
+ * Populate the result catalog cache before the first Results request.
+ * Bucket catalog metadata is rechecked at the configured sync cadence.
+ */
 export async function warmResultItems(runtime: Runtime): Promise<void> {
   await resultItems(runtime);
 }
@@ -662,20 +692,6 @@ function filterAndSortResults(
       String(right.publication_id).localeCompare(String(left.publication_id))
     );
   });
-}
-
-function canarySubmission(body: unknown): boolean {
-  if (!body || typeof body !== "object") return false;
-  const input = body as Partial<RunSubmissionV1>;
-  return (
-    input.benchmark === "control-smoke" &&
-    input.model === "control-smoke" &&
-    input.harness === "control-smoke" &&
-    input.launch_policy === "control-smoke" &&
-    (input.deployment === undefined ||
-      input.deployment === null ||
-      input.deployment === "hf-cpu-smoke")
-  );
 }
 
 export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
@@ -1212,10 +1228,6 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     async (request, reply) => {
       if (runtime.config.write_mode === "disabled")
         throw new ControlNotReadyError("run writes are disabled before cutover");
-      if (runtime.config.write_mode === "canary" && !canarySubmission(request.body))
-        throw new PolicyError(
-          "canary mode accepts only the built-in control smoke profile",
-        );
       const result = await runtime.service.submit(
         request.body,
         idempotencyKey(request),

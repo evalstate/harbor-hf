@@ -265,7 +265,7 @@ export interface paths {
                         "application/json": {
                             source_revision: string;
                             /** @enum {unknown} */
-                            write_mode: "disabled" | "canary" | "enabled";
+                            write_mode: "disabled" | "enabled";
                             initialization: {
                                 ready: boolean;
                                 /** @enum {unknown} */

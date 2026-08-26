@@ -51,8 +51,11 @@ export class ResultPublisher {
 
   async publish(runId: string): Promise<PublicationReceipt> {
     const existing = await this.projection.runPublication(runId);
-    if (existing?.status === "published")
-      return JSON.parse(existing.body) as PublicationReceipt;
+    if (existing?.status === "published") {
+      const receipt = JSON.parse(existing.body) as PublicationReceipt;
+      await refreshLeaderboardSnapshot(this.store, this.projection);
+      return receipt;
+    }
     const run = await this.projection.run(runId);
     if (
       !run ||

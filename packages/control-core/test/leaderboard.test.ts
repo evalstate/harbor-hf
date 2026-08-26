@@ -365,6 +365,27 @@ describe("leaderboard sqlite snapshot", () => {
       "results/schema=v1/catalog/records/catalog-leaderboard-test.json",
       new TextEncoder().encode(canonicalJson(catalog)),
     );
+    await expect(
+      refreshLeaderboardSnapshot(control.store, control.projection),
+    ).rejects.toThrow();
+    await control.store.create(
+      "results/test.json",
+      new TextEncoder().encode(
+        canonicalJson({
+          schema_version: "v1",
+          kind: "publication.receipt",
+          record_id: "publication-receipt-leaderboard-test",
+          created_at: "2026-08-21T00:00:00.000Z",
+          actor: { subject: "harbor-hf-control", role: "service" },
+          run_id: submitted.run_id,
+          publication_id: "publication-leaderboard-test",
+          publication_state: "published",
+          object_digests: [],
+          catalog_digest: sha256(canonicalJson(catalog)),
+          error_code: null,
+        }),
+      ),
+    );
     const snapshot = await refreshLeaderboardSnapshot(
       control.store,
       control.projection,

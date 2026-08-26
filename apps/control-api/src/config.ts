@@ -15,7 +15,7 @@ const schema = z.object({
   HARBOR_HF_MAX_ACTIVE_JOBS: z.coerce.number().int().min(1).max(1024).default(16),
   HARBOR_HF_WEB_ROOT: z.string().min(1).default("./apps/control-web/dist"),
   HARBOR_HF_AUTH_MODE: z.enum(["oauth", "development"]).default("oauth"),
-  HARBOR_HF_WRITE_MODE: z.enum(["disabled", "canary", "enabled"]).default("disabled"),
+  HARBOR_HF_WRITE_MODE: z.enum(["disabled", "enabled"]).default("disabled"),
   HARBOR_HF_PUBLIC_ORIGIN: z.string().url().optional(),
   SPACE_HOST: z.string().min(1).optional(),
   OAUTH_CLIENT_ID: z.string().min(1).optional(),
@@ -66,7 +66,7 @@ export interface AppConfig {
   max_active_jobs: number;
   web_root: string;
   auth_mode: "oauth" | "development";
-  write_mode: "disabled" | "canary" | "enabled";
+  write_mode: "disabled" | "enabled";
   public_origin: string;
   oauth: {
     issuer: string;

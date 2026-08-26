@@ -34,6 +34,7 @@ import { createRuntime, type Runtime } from "../src/runtime.js";
 const roots: string[] = [];
 const runtimes: Runtime[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
   await Promise.all(
@@ -42,7 +43,7 @@ afterEach(async () => {
 });
 
 async function setup(
-  writeMode: AppConfig["write_mode"] = "canary",
+  writeMode: AppConfig["write_mode"] = "enabled",
   seed?: (runtime: Runtime) => Promise<void>,
   capacityProfileAlias: string | null = null,
   seedCapacity = true,
@@ -1056,7 +1057,7 @@ describe("control API", () => {
       profile_id: targetProfileId,
       promotion_state: state,
       reason: `${state} after profile review`,
-      evidence: [sha256(`${alias}-canary-evidence`)],
+      evidence: [sha256(`${alias}-evidence`)],
     });
     const approved = promotion("control-smoke", "approved", "2026-08-16T00:00:01.000Z");
     const recommended = promotion(
@@ -1064,7 +1065,7 @@ describe("control API", () => {
       "recommended",
       "2026-08-16T00:00:02.000Z",
     );
-    const { runtime, app } = await setup("canary", async (seedRuntime) => {
+    const { runtime, app } = await setup("enabled", async (seedRuntime) => {
       for (const record of [profile, approved, recommended])
         await seedRuntime.store.create(
           controlRecordPath(record),
@@ -1759,7 +1760,7 @@ describe("control API", () => {
       operators: ["operator"],
       readers: [],
     };
-    const { runtime, app } = await setup("canary", async (seededRuntime) => {
+    const { runtime, app } = await setup("enabled", async (seededRuntime) => {
       await seededRuntime.service.append(acl);
     });
     runtime.config.auth_mode = "oauth";
@@ -1865,7 +1866,7 @@ describe("control API", () => {
       operators: ["operator"],
       readers: [],
     };
-    const { runtime, app } = await setup("canary", async (seededRuntime) => {
+    const { runtime, app } = await setup("enabled", async (seededRuntime) => {
       await seededRuntime.service.append(acl);
     });
     runtime.config.auth_mode = "oauth";
@@ -1907,6 +1908,7 @@ describe("control API", () => {
 
   it("serves validated imported result catalogs", async () => {
     const { runtime, app } = await setup();
+    const monotonicNow = vi.spyOn(performance, "now").mockReturnValue(0);
     const catalog = {
       schema_version: "v1",
       kind: "result.catalog",
@@ -1933,12 +1935,21 @@ describe("control API", () => {
         },
       ],
     };
+    const listObjects = vi.spyOn(runtime.store, "list");
+    const initial = await app.inject({ method: "GET", url: "/api/v1/results" });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toEqual({ items: [], next_cursor: null });
+    expect(listObjects).toHaveBeenCalledTimes(1);
+
     await runtime.store.create(
       "results/schema=v1/catalog/imports/catalog-import-one.json",
       new TextEncoder().encode(canonicalJson(catalog)),
     );
-    const listObjects = vi.spyOn(runtime.store, "list");
+    const stillCached = await app.inject({ method: "GET", url: "/api/v1/results" });
+    expect(stillCached.json()).toEqual({ items: [], next_cursor: null });
+    expect(listObjects).toHaveBeenCalledTimes(1);
 
+    monotonicNow.mockReturnValue(runtime.config.sync_interval_ms);
     const response = await app.inject({ method: "GET", url: "/api/v1/results" });
 
     expect(response.statusCode).toBe(200);
@@ -1971,7 +1982,7 @@ describe("control API", () => {
     });
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toMatchObject({ publication_id: "publication-one" });
-    expect(listObjects).toHaveBeenCalledTimes(1);
+    expect(listObjects).toHaveBeenCalledTimes(2);
 
     await runtime.projection.db
       .insertInto("publications")
@@ -1987,7 +1998,7 @@ describe("control API", () => {
     expect(
       (await app.inject({ method: "GET", url: "/api/v1/results" })).statusCode,
     ).toBe(200);
-    expect(listObjects).toHaveBeenCalledTimes(2);
+    expect(listObjects).toHaveBeenCalledTimes(3);
     await app.close();
   });
 
@@ -2364,7 +2375,7 @@ describe("control API", () => {
     await app.close();
   });
 
-  it("enforces canary profiles, confirmation, and idempotency", async () => {
+  it("enforces profile resolution, confirmation, and idempotency", async () => {
     const { runtime, app } = await setup();
     const missingKey = await app.inject({
       method: "POST",

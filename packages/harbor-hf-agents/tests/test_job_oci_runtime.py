@@ -333,6 +333,59 @@ def test_remote_copy_stops_after_bounded_directory_growth(tmp_path: Path) -> Non
         )
 
 
+def test_remote_copy_concurrently_drains_and_bounds_both_streams(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "source"
+    destination.mkdir()
+    retained = 16 * 1024
+    monkeypatch.setattr(runtime, "_MAX_COMMAND_OUTPUT_BYTES", retained)
+    script = """
+import os
+import sys
+import time
+
+size = int(sys.argv[1])
+remaining = {1: size, 2: size}
+values = {1: b"o", 2: b"e"}
+for descriptor in remaining:
+    os.set_blocking(descriptor, False)
+deadline = time.monotonic() + 5
+while any(remaining.values()):
+    progressed = False
+    for descriptor in (1, 2):
+        count = remaining[descriptor]
+        if count == 0:
+            continue
+        try:
+            written = os.write(
+                descriptor,
+                values[descriptor] * min(count, 64 * 1024),
+            )
+        except BlockingIOError:
+            continue
+        remaining[descriptor] -= written
+        progressed = True
+    if not progressed:
+        if time.monotonic() >= deadline:
+            raise SystemExit(86)
+        time.sleep(0.001)
+"""
+
+    result = runtime._run_checked_with_directory_limit(
+        [sys.executable, "-c", script, str(512 * 1024)],
+        environment=dict(os.environ),
+        label="test copy",
+        directory=destination,
+        max_bytes=1,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == b"o" * retained + runtime._OUTPUT_TRUNCATION_NOTICE
+    assert result.stderr == b"e" * retained + runtime._OUTPUT_TRUNCATION_NOTICE
+
+
 def test_copied_concrete_manifest_needs_no_remote_inspection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

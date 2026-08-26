@@ -439,6 +439,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "tb21-deepseek-v4-flash-official-5",
       "tb21-deepseek-v4-flash-replacement",
       "tb21-deepseek-v4-flash-diagnostic-1",
+      "tb21-deepseek-v4-flash-diagnostic-2",
       "tb21-deepseek-v4-flash-deepinfra-diagnostic-1",
       "tb21-deepseek-v4-flash-dsh-providers",
       "tb21-gpt-oss-20b-dsh-providers",

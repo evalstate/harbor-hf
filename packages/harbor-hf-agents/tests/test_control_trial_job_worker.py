@@ -597,6 +597,96 @@ def test_streams_command_output_with_injected_env() -> None:
     assert "applied" in output
 
 
+def test_harbor_child_environment_is_allowlisted() -> None:
+    environment = {
+        "PATH": "/usr/bin",
+        "HOME": "/tmp/home",
+        "HARBOR_HF_RUN_ID": "run-1",
+        "HARBOR_HF_WORKER_CAPABILITY": "private-capability",
+        "UNRELATED_SECRET": "must-not-enter",
+        "ARBITRARY_VALUE": "must-not-enter",
+    }
+
+    assert worker._harbor_child_environment(environment) == {
+        "PATH": "/usr/bin",
+        "HOME": "/tmp/home",
+        "HARBOR_HF_RUN_ID": "run-1",
+        "HARBOR_HF_WORKER_CAPABILITY": "private-capability",
+    }
+
+
+def test_redacts_sensitive_output_split_across_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "split-private-worker-token"
+    monkeypatch.setattr(worker, "_LOG_READ_BYTES", 3)
+    output, timed_out = worker._run_logged_command(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os,sys,time;"
+                "value=os.environ['TEST_API_TOKEN'];"
+                "sys.stdout.write(value[:8]);sys.stdout.flush();"
+                "time.sleep(0.05);"
+                "sys.stdout.write(value[8:]);sys.stdout.flush()"
+            ),
+        ],
+        5,
+        {"PATH": os.environ["PATH"], "TEST_API_TOKEN": secret},
+    )
+
+    assert timed_out is False
+    assert secret not in output
+    assert "<redacted>" in output
+
+
+def test_redacts_sensitive_output_around_malformed_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "private-token-boundary"
+    monkeypatch.setattr(worker, "_LOG_READ_BYTES", 2)
+    output, timed_out = worker._run_logged_command(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os,sys;"
+                "value=os.environ['TEST_API_TOKEN'].encode();"
+                "sys.stdout.buffer.write(b'\\xff'+value+b'\\xfe');"
+                "sys.stdout.buffer.flush()"
+            ),
+        ],
+        5,
+        {"PATH": os.environ["PATH"], "TEST_API_TOKEN": secret},
+    )
+
+    assert timed_out is False
+    assert secret not in output
+    assert "<redacted>" in output
+
+
+def test_stops_descendant_that_keeps_output_pipe_open() -> None:
+    started = os.times().elapsed
+    output, timed_out = worker._run_logged_command(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import subprocess,sys;"
+                "subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+                "print('parent-finished',flush=True)"
+            ),
+        ],
+        5,
+        {"PATH": os.environ["PATH"]},
+    )
+
+    assert timed_out is False
+    assert "parent-finished" in output
+    assert os.times().elapsed - started < 5
+
+
 def test_harbor_output_is_bounded_and_explicitly_truncated() -> None:
     output, timed_out = worker._run_logged_command(
         [sys.executable, "-c", "import sys; sys.stdout.write('x' * 1100000)"],
@@ -638,6 +728,47 @@ def test_rejects_symlinks_and_excess_entries_in_trial_evidence(
         worker._regular_trial_files(evidence)
 
 
+def test_rejects_multiple_durable_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    task = _config(monkeypatch).task
+    task_root = tmp_path / "jobs" / task.task_id
+    for name in ("trial-a", "trial-b"):
+        trial = task_root / name
+        trial.mkdir(parents=True)
+        (trial / "result.json").write_text("{}")
+
+    with pytest.raises(worker.WorkerEvidenceError, match="multiple trial results"):
+        worker._result_path(tmp_path, task)
+
+
+def test_rejects_sensitive_values_in_evidence_content_and_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    secret = "private-evidence-token"
+    monkeypatch.setenv("TEST_API_TOKEN", secret)
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    result_path = trial / "result.json"
+    result_path.write_text('{"exception_info": null}')
+    (trial / "lock.json").write_text(
+        json.dumps(config.task.trial_lock.model_dump(mode="json"))
+    )
+    leaked = trial / "leaked.txt"
+    leaked.write_text(f"prefix-{secret}-suffix")
+
+    with pytest.raises(worker.WorkerEvidenceError, match="sensitive worker setting"):
+        worker._verified_result(config.task, result_path)
+
+    leaked.write_text("safe")
+    leaked.rename(trial / f"artifact-{secret}.txt")
+    with pytest.raises(worker.WorkerEvidenceError, match="sensitive worker setting"):
+        worker._verified_result(config.task, result_path)
+
+
 def test_runs_harbor_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -660,23 +791,26 @@ def test_runs_harbor_exactly_once(
     assert len(calls) == 1
 
 
-def test_missing_harbor_result_is_a_typed_worker_failure(
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_missing_harbor_result_preserves_timeout_provenance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    timed_out: bool,
 ) -> None:
     config = _config(monkeypatch)
     monkeypatch.setattr(
         worker,
         "_run_logged_command",
-        lambda _command, _timeout, _env: ("", False),
+        lambda _command, _timeout, _env: ("", timed_out),
     )
     monkeypatch.setattr(worker, "_result_path", lambda _root, _task: None)
 
     with pytest.raises(
         worker.MissingHarborResultError,
         match="Harbor did not write a trial result",
-    ):
+    ) as captured:
         worker._run_harbor(config, tmp_path, tmp_path / "config.json")
+    assert captured.value.timed_out is timed_out
 
 
 @pytest.mark.parametrize(
@@ -687,6 +821,10 @@ def test_missing_harbor_result_is_a_typed_worker_failure(
         (
             worker.MissingHarborResultError("missing result"),
             ("infrastructure", True),
+        ),
+        (
+            worker.MissingHarborResultError("timed out", timed_out=True),
+            ("benchmark_timeout", False),
         ),
         (worker.ProviderPolicyError(), ("policy", False)),
         (
@@ -814,7 +952,7 @@ def test_capability_leak_is_not_uploaded(
         worker,
         "_run_task_once",
         lambda _config, _root: (_ for _ in ()).throw(
-            RuntimeError("worker capability leaked into trial evidence")
+            RuntimeError("sensitive worker setting leaked into trial evidence")
         ),
     )
     monkeypatch.setattr(
@@ -823,5 +961,5 @@ def test_capability_leak_is_not_uploaded(
         lambda _config, _error: pytest.fail("must not upload leaked evidence"),
     )
 
-    with pytest.raises(RuntimeError, match="capability leaked"):
+    with pytest.raises(RuntimeError, match="sensitive worker setting leaked"):
         worker._run_task(config, tmp_path)

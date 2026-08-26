@@ -71,6 +71,7 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
   private readonly retryDelaysMs: readonly number[];
   private readonly listTimeoutMs: number;
   private readonly cache = new Map<string, Uint8Array>();
+  private readonly sourceIdentities = new Map<string, string>();
   private queue: Promise<void> = Promise.resolve();
 
   constructor(options: HuggingFaceBucketStoreOptions) {
@@ -84,8 +85,18 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
 
   async list(prefix: string): Promise<readonly ObjectEntry[]> {
     const files = await this.listEntriesWithRetry(prefix, true);
+    this.observeSourceIdentities(files);
     files.sort((left, right) => left.key.localeCompare(right.key));
     return files;
+  }
+
+  private observeSourceIdentities(entries: readonly ObjectEntry[]): void {
+    for (const entry of entries) {
+      const previous = this.sourceIdentities.get(entry.key);
+      if (previous !== undefined && previous !== entry.source_identity)
+        this.cache.delete(entry.key);
+      this.sourceIdentities.set(entry.key, entry.source_identity);
+    }
   }
 
   private async listEntriesWithRetry(
@@ -179,6 +190,7 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
 
   private async objectMetadata(key: string): Promise<ObjectEntry> {
     const entries = await this.listEntriesWithRetry(key, false);
+    this.observeSourceIdentities(entries);
     const entry = entries[0];
     if (entries.length !== 1 || !entry)
       throw new Error(`Bucket object metadata is unavailable or ambiguous: ${key}`);

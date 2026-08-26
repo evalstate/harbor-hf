@@ -97,6 +97,14 @@ Preparation and execution workers install Harbor from a pinned
 includes [PR 2681](https://github.com/harbor-framework/harbor/pull/2681). The
 former Harbor 0.21.0 empty-metrics sitecustomize patch is not applied.
 
+Execution workers invoke that pinned Harbor version without a dataset source
+label when replaying one exact prepared task. If Harbor exits nonzero only
+after writing a successful trial result, the worker still requires that exact
+durable result and its prepared lock before it can submit a completed attempt.
+A missing result, a mismatched lock, or a trial-level exception remains a
+failure. Harbor-HF uses only public Harbor APIs and does not patch Harbor
+internals.
+
 The prepared records contain the exact Harbor trial locks and the data needed
 for admission, including source and task digests, resolved image digests,
 resources, phase time limits, agent settings, and Harbor version. The final
@@ -130,9 +138,11 @@ probe running with the final task identity must have empty capability fields,
 `no_new_privs`, and no access to the worker's `/proc/<pid>/environ` or a
 root-owned mode-0600 file. A missing runtime feature or failed denial probe is
 a replacement-eligible infrastructure failure. A Harbor process that exits
-without its required trial result is also replacement-eligible because the
-worker has no truthful benchmark outcome to seal. Other evidence-integrity
-failures remain non-retryable. There is no namespace or same-UID fallback.
+without its required trial result is replacement-eligible only when the worker
+did not terminate it at the locked timeout. A timed-out Harbor process with no
+result seals `benchmark_timeout` and does not permit replacement. Other
+evidence-integrity failures remain non-retryable. There is no namespace or
+same-UID fallback.
 
 Deployment profiles contain Hugging Face infrastructure and safety limits. They
 do not contain copies of benchmark task catalogs. A new Harbor-supported
@@ -532,24 +542,27 @@ Startup follows this sequence:
 1. Open the HTTP listener so the Space platform can observe liveness during a
    long rebuild.
 2. Initialize authentication and local disposable state.
-3. Rebuild the projection from immutable records and verify control invariants.
-4. Install checked-in profiles and refresh the promoted-profile resolver.
-5. Validate or create the configured namespace capacity profile.
-6. Bootstrap the operator ACL when the immutable store does not contain one.
-7. Mark the runtime ready and start reconciliation.
+3. Load the newest valid projection snapshot when one exists.
+4. Verify the snapshot's source-object digests.
+5. Replay later immutable records in deterministic order.
+6. Validate projection and control invariants.
+7. Install checked-in profiles and refresh the promoted-profile resolver.
+8. Validate or create the configured namespace capacity profile.
+9. Bootstrap the operator ACL when the immutable store does not contain one.
+10. Mark the runtime ready and start reconciliation.
 
 `GET /health/ready` returns HTTP 200 for Space platform compatibility and
-reports `status=initializing` until step 7 completes. During initialization,
+reports `status=initializing` until step 10 completes. During initialization,
 `GET /api/v1/system` remains a read-only status route and includes both the
 runtime initialization state and the independent projection state. Other API
 and authentication routes return `control_not_ready`, even if projection
 rebuild has already completed.
 
-An initialization failure closes local resources and exits nonzero so the
-platform can restart the process. It cannot leave a live but permanently
-unready server behind. A projection schema mismatch discards the database and
-triggers a full rebuild. In-place projection migrations are unnecessary because
-the database is disposable.
+An initialization failure closes the listener and local resources and exits
+nonzero so the platform can restart the process. It cannot leave a live but
+permanently unready server behind. A projection schema mismatch discards the
+database and triggers a full rebuild. In-place projection migrations are
+unnecessary because the database is disposable.
 
 Snapshots may improve startup time. They cannot authorize paid work until their
 source digest set is verified.

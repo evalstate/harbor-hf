@@ -106,10 +106,18 @@ describe("Reconciler start", () => {
       activeRun,
       { ...activeRun, run_id: "run-secondary" },
     ]);
+    const external = new NoopActions();
+    const execute = external.execute.bind(external);
+    vi.spyOn(external, "execute").mockImplementation(async (intent) => {
+      const result = await execute(intent);
+      return intent.action_kind === "job.observe"
+        ? { ...result, observed_state: "RUNNING" }
+        : result;
+    });
     const reconciler = new Reconciler(
       control.service,
       control.projection,
-      new NoopActions(),
+      external,
       new ResultPublisher(control.store, control.projection, control.service),
       {
         interval_ms: 2_000,

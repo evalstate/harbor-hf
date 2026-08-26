@@ -156,6 +156,38 @@ describe("HuggingFaceBucketStore", () => {
     );
   });
 
+  it("invalidates cached bytes when listed source identity changes", async () => {
+    const bucket = store();
+    let identity = "a";
+    hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
+      yield {
+        type: "file",
+        path: `${path}/object.json`,
+        size: 3,
+        xetHash: identity.repeat(64),
+      };
+    });
+    hub.downloadFile
+      .mockResolvedValueOnce(new Blob(["old"]))
+      .mockResolvedValueOnce(new Blob(["new"]));
+
+    await bucket.list("control/v1");
+    await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
+      new TextEncoder().encode("old"),
+    );
+    await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
+      new TextEncoder().encode("old"),
+    );
+    expect(hub.downloadFile).toHaveBeenCalledTimes(1);
+
+    identity = "b";
+    await bucket.list("control/v1");
+    await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
+      new TextEncoder().encode("new"),
+    );
+    expect(hub.downloadFile).toHaveBeenCalledTimes(2);
+  });
+
   it("retries transient Bucket listing failures", async () => {
     hub.listFiles
       .mockImplementationOnce(async function* () {

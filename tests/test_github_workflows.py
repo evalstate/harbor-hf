@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import cast
 
@@ -34,3 +35,16 @@ def test_package_publication_waits_for_mutation_tests() -> None:
     }
     publish = _record(jobs["publish"])
     assert publish["needs"] == "mutation"
+
+
+def test_trial_worker_publication_pins_privileged_actions() -> None:
+    workflow = _workflow("publish-trial-worker.yml")
+    jobs = _record(workflow["jobs"])
+    publish = _record(jobs["publish"])
+    steps = publish["steps"]
+    assert isinstance(steps, list)
+
+    for step in steps:
+        uses = _record(step).get("uses")
+        if uses is not None:
+            assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", str(uses))
