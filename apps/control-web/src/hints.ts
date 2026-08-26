@@ -106,7 +106,7 @@ export const hints = {
   },
   jobs: {
     hfJob:
-      "Remote Hugging Face Job id. Opens the Hub inspect page. Pending means control has not observed a remote id yet.",
+      "Remote Hugging Face Job id. Opens the Hub inspect page. Queued means control has not created the remote Job. Not created means control suppressed the launch.",
     run: "Run that owns this Job.",
     action: "Latest control action for this Job: launch, observe, or cancel.",
     observed:

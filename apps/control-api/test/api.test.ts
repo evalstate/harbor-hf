@@ -1922,6 +1922,7 @@ describe("control API", () => {
       "results/schema=v1/catalog/imports/catalog-import-one.json",
       new TextEncoder().encode(canonicalJson(catalog)),
     );
+    const listObjects = vi.spyOn(runtime.store, "list");
 
     const response = await app.inject({ method: "GET", url: "/api/v1/results" });
 
@@ -1955,6 +1956,23 @@ describe("control API", () => {
     });
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toMatchObject({ publication_id: "publication-one" });
+    expect(listObjects).toHaveBeenCalledTimes(1);
+
+    await runtime.projection.db
+      .insertInto("publications")
+      .values({
+        publication_id: "publication-cache-invalidation",
+        run_id: "run-cache-invalidation",
+        status: "published",
+        catalog_digest: null,
+        body: "{}",
+        created_at: "2026-08-16T00:00:01Z",
+      })
+      .execute();
+    expect(
+      (await app.inject({ method: "GET", url: "/api/v1/results" })).statusCode,
+    ).toBe(200);
+    expect(listObjects).toHaveBeenCalledTimes(2);
     await app.close();
   });
 

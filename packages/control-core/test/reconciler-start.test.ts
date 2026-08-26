@@ -2,7 +2,7 @@ import { NoopActions } from "@harbor-hf/hf-adapters";
 import { createTestControl } from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ResultPublisher } from "../src/publication.js";
-import { Reconciler } from "../src/reconciler.js";
+import { Reconciler, rotatingBatch } from "../src/reconciler.js";
 
 const controls: Awaited<ReturnType<typeof createTestControl>>[] = [];
 
@@ -12,6 +12,17 @@ afterEach(async () => {
 });
 
 describe("Reconciler start", () => {
+  it("rotates bounded active Run recovery without starvation", () => {
+    const first = rotatingBatch(["run-a", "run-b", "run-c"], 0, 2);
+    const second = rotatingBatch(["run-a", "run-b", "run-c"], first.nextCursor, 2);
+    const third = rotatingBatch(["run-a", "run-b", "run-c"], second.nextCursor, 2);
+
+    expect(first).toEqual({ items: ["run-a", "run-b"], nextCursor: 2 });
+    expect(second).toEqual({ items: ["run-c", "run-a"], nextCursor: 1 });
+    expect(third).toEqual({ items: ["run-b", "run-c"], nextCursor: 0 });
+    expect(rotatingBatch([], 10, 2)).toEqual({ items: [], nextCursor: 0 });
+  });
+
   it("reports a rejected tick and keeps the timer stoppable", async () => {
     const control = await createTestControl();
     controls.push(control);

@@ -6,12 +6,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   affectedQueryKeys,
   collectPagedItems,
-  SSE_INVALIDATION_DEBOUNCE_MS,
   keys,
+  SSE_INVALIDATION_DEBOUNCE_MS,
   useAllProfiles,
-  useRunJobs,
   useJobs,
   useLiveUpdates,
+  useRunJobs,
   useTasks,
 } from "../src/queries";
 
@@ -312,7 +312,7 @@ describe("live query updates", () => {
         });
     });
     expect(invalidate).not.toHaveBeenCalled();
-    act(() => vi.advanceTimersByTime(999));
+    act(() => vi.advanceTimersByTime(SSE_INVALIDATION_DEBOUNCE_MS - 1));
     expect(invalidate).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(1));
 

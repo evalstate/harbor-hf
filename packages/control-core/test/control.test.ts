@@ -614,6 +614,100 @@ describe("control service", () => {
     expect(preparationLaunch?.receipt_body).not.toBeNull();
   });
 
+  it("continues observations after a Job launch transport failure", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await configureCapacity(control);
+    const first = await control.service.submit(
+      submission,
+      "launch-failure-first",
+      operator,
+    );
+    const second = await control.service.submit(
+      submission,
+      "launch-failure-second",
+      operator,
+    );
+    const observedRuns: string[] = [];
+    const noop = new NoopActions();
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.launch") {
+          if (intent.run_id === first.run_id)
+            throw new TypeError("transient launch failure");
+          return {
+            outcome: "created",
+            observed_state: "RUNNING",
+            resource_id: `job-${intent.run_id}`,
+          };
+        }
+        if (intent.action_kind === "job.observe") {
+          observedRuns.push(intent.run_id);
+          return {
+            outcome: "completed",
+            observed_state: "COMPLETED",
+            resource_id: intent.target,
+          };
+        }
+        return noop.execute(intent);
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await reconciler.tick();
+
+    await expect(reconciler.tick()).rejects.toThrow("transient launch failure");
+
+    expect(observedRuns).toContain(second.run_id);
+    expect(
+      (await control.projection.runActions(second.run_id)).find(
+        (action) =>
+          action.action_kind === "job.observe" && action.observed_state === "COMPLETED",
+      ),
+    ).toBeDefined();
+  });
+
+  it("reports the per-Run Job limit as the capacity constraint", async () => {
+    const control = await createTestControl(2);
+    controls.push(control);
+    await configureCapacity(control, {
+      maximum: 4,
+      hardwareMaximum: 4,
+      burst: 4,
+    });
+    const run = await control.service.submit(
+      submission,
+      "run-capacity-limiting-factor",
+      operator,
+    );
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await reconciler.tick();
+    const launches = (await control.projection.pendingActions()).filter(
+      (intent) => intent.action_kind === "job.launch",
+    );
+    const admissionStatuses: string[] = [];
+    for (const launch of launches)
+      admissionStatuses.push((await control.service.admitJobLaunch(launch)).status);
+    expect(admissionStatuses).toEqual(["admitted", "deferred"]);
+
+    await expect(control.service.jobCapacityView(run.run_id)).resolves.toMatchObject({
+      run_active: 1,
+      run_limit: 1,
+      limiting_factor: "run_job_capacity",
+    });
+  });
+
   it("copies locked inference limits into the worker launch", async () => {
     const control = await createTestControl(1, 1, 0, true, "required");
     controls.push(control);

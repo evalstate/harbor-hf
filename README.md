@@ -42,6 +42,9 @@ Worker control requests retry transient HTTP failures with capped backoff for
 the locked Job timeout, so in-flight preparation and evidence writes can
 survive a control projection rebuild. Reconciliation dispatches queued Jobs
 before scheduled Bucket syncs so remote projection latency does not block work.
+It also yields between bounded Run batches so web requests remain responsive.
+The validated result catalog is warmed in memory and reused until publication or
+supersession metadata changes instead of being rebuilt for every page request.
 
 The CLI submits the same lock through promoted profile aliases:
 

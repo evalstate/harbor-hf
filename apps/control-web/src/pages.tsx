@@ -175,7 +175,13 @@ function jobColumns(includeRun: boolean): ColumnDef<JobRow>[] {
         const resourceId = row.original.resource_id;
         const inspectUrl = row.original.inspect_url;
         if (!resourceId || !inspectUrl)
-          return <span className="font-mono text-xs">Pending</span>;
+          return (
+            <span className="font-mono text-xs">
+              {String(row.original.observed_state ?? "").startsWith("suppressed-")
+                ? "Not created"
+                : "Queued"}
+            </span>
+          );
         return (
           <a
             className="inline-flex items-center gap-1 font-mono text-xs text-cyan-300 hover:underline"
@@ -200,8 +206,8 @@ function jobColumns(includeRun: boolean): ColumnDef<JobRow>[] {
       accessorKey: "observed_state",
       header: () => <Hint text={hints.jobs.observed}>Observed</Hint>,
       cell: ({ getValue }) => (
-        <Badge status={String(getValue() ?? "pending").toLowerCase()}>
-          {humanize(String(getValue() ?? "pending"))}
+        <Badge status={String(getValue() ?? "queued").toLowerCase()}>
+          {humanize(String(getValue() ?? "queued"))}
         </Badge>
       ),
     },

@@ -6,9 +6,9 @@ import swagger from "@fastify/swagger";
 import type {
   Actor,
   AttemptSubmissionV1,
-  RunSubmissionV1,
   HarborHFResultCatalogV1,
   PublicationReceipt,
+  RunSubmissionV1,
 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
@@ -41,8 +41,6 @@ import {
   acceptedSchema,
   attemptAcceptedSchema,
   auditSchema,
-  runListSchema,
-  runViewSchema,
   capacitySchema,
   endpointSchema,
   evidenceAcceptedSchema,
@@ -54,6 +52,8 @@ import {
   namespaceCapacityUpdateSchema,
   profileSchema,
   publicationSchema,
+  runListSchema,
+  runViewSchema,
   sessionSchema,
   systemSchema,
   taskDetailSchema,
@@ -382,8 +382,37 @@ async function publicationObjectsMatch(
   return true;
 }
 
-async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]> {
-  const publications = await runtime.projection.publications();
+type ResultItem = Record<string, unknown>;
+type ResultPublications = Awaited<ReturnType<Runtime["projection"]["publications"]>>;
+type ResultSupersessions = Awaited<
+  ReturnType<Runtime["projection"]["publicationSupersessions"]>
+>;
+
+interface ResultItemsCache {
+  fingerprint: string | null;
+  value: ResultItem[] | null;
+  inFlight: { fingerprint: string; promise: Promise<ResultItem[]> } | null;
+}
+
+const resultItemsCaches = new WeakMap<Runtime, ResultItemsCache>();
+
+function resultItemsCache(runtime: Runtime): ResultItemsCache {
+  const existing = resultItemsCaches.get(runtime);
+  if (existing) return existing;
+  const created: ResultItemsCache = {
+    fingerprint: null,
+    value: null,
+    inFlight: null,
+  };
+  resultItemsCaches.set(runtime, created);
+  return created;
+}
+
+async function loadResultItems(
+  runtime: Runtime,
+  publications: ResultPublications,
+  supersessions: ResultSupersessions,
+): Promise<ResultItem[]> {
   const projectedById = new Map(
     publications.map((publication) => [publication.publication_id, publication]),
   );
@@ -473,7 +502,7 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
       });
     }
   }
-  for (const supersession of await runtime.projection.publicationSupersessions()) {
+  for (const supersession of supersessions) {
     const previous = byId.get(supersession.superseded_publication_id);
     if (!previous) continue;
     previous.status = "superseded";
@@ -527,6 +556,39 @@ async function resultItems(runtime: Runtime): Promise<Record<string, unknown>[]>
     Object.assign(item, summary);
   }
   return [...byId.values()];
+}
+
+async function resultItems(runtime: Runtime): Promise<ResultItem[]> {
+  const [publications, supersessions] = await Promise.all([
+    runtime.projection.publications(),
+    runtime.projection.publicationSupersessions(),
+  ]);
+  const fingerprint = sha256(canonicalJson({ publications, supersessions }));
+  const cache = resultItemsCache(runtime);
+  if (cache.value && cache.fingerprint === fingerprint) return cache.value;
+  if (cache.inFlight?.fingerprint === fingerprint) return cache.inFlight.promise;
+
+  let promise: Promise<ResultItem[]>;
+  promise = loadResultItems(runtime, publications, supersessions)
+    .then((items) => {
+      const current = resultItemsCache(runtime);
+      if (current.inFlight?.promise === promise) {
+        current.fingerprint = fingerprint;
+        current.value = items;
+      }
+      return items;
+    })
+    .finally(() => {
+      const current = resultItemsCache(runtime);
+      if (current.inFlight?.promise === promise) current.inFlight = null;
+    });
+  cache.inFlight = { fingerprint, promise };
+  return promise;
+}
+
+/** Populate the immutable result catalog cache before the first Results request. */
+export async function warmResultItems(runtime: Runtime): Promise<void> {
+  await resultItems(runtime);
 }
 
 interface ResultQuery {

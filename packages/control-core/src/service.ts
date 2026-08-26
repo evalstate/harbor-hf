@@ -1148,7 +1148,7 @@ export class ControlService {
       },
     );
     if (globallyCancelled) limitingFactor = "run_cancelled";
-    else if (runActive.length >= runLimit) limitingFactor = "namespace_job_capacity";
+    else if (runActive.length >= runLimit) limitingFactor = "run_job_capacity";
     else if (capacity && active.length >= capacity.spec.max_active_jobs)
       limitingFactor = "namespace_job_capacity";
     else if (hardwareLimit !== null && hardwareActive >= hardwareLimit)

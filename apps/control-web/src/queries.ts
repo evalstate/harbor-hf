@@ -1,9 +1,7 @@
-import { useQuery, useQueryClient, type QueryKey } from "@tanstack/react-query";
+import { type QueryKey, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type {
   AuditResponse,
-  Run,
-  RunList,
   Capacity,
   EndpointList,
   JobList,
@@ -11,6 +9,8 @@ import type {
   ProfileList,
   ResultDetail,
   ResultList,
+  Run,
+  RunList,
   SessionResponse,
   SystemResponse,
   TaskDetail,
@@ -58,7 +58,9 @@ export interface ControlEvent {
 }
 
 export type LiveStatus = "connected" | "reconnecting" | "offline" | "stale";
-export const SSE_INVALIDATION_DEBOUNCE_MS = 1_000;
+// Control records arrive in bursts while Jobs are active. One bounded refresh
+// window keeps collection queries current without continuously refetching them.
+export const SSE_INVALIDATION_DEBOUNCE_MS = 5_000;
 
 export interface LiveState {
   status: LiveStatus;

@@ -604,6 +604,60 @@ describe("control web", () => {
     expect(screen.getByText(formatMoney(1_000_000))).toBeInTheDocument();
   });
 
+  it("distinguishes queued launches from suppressed Jobs", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.includes("/api/v1/jobs"))
+          return json({
+            items: [
+              {
+                action_id: "action-job-queued",
+                run_id: "run-job-1",
+                action_kind: "job.launch",
+                generation: 1,
+                target: "task-1",
+                outcome: null,
+                observed_state: null,
+                resource_id: null,
+                inspect_url: null,
+                created_at: "2026-08-18T00:00:00.000Z",
+                cost_microusd: 0,
+                assigned_tasks: 1,
+              },
+              {
+                action_id: "action-job-suppressed",
+                run_id: "run-job-1",
+                action_kind: "job.launch",
+                generation: 1,
+                target: "task-2",
+                outcome: "completed",
+                observed_state: "suppressed-cancelled",
+                resource_id: null,
+                inspect_url: null,
+                created_at: "2026-08-18T00:00:01.000Z",
+                cost_microusd: 0,
+                assigned_tasks: 1,
+              },
+            ],
+            next_cursor: null,
+          });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+
+    renderApp("/jobs");
+
+    expect((await screen.findAllByText("Queued")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Not created")).toBeInTheDocument();
+    expect(screen.getByText("Suppressed Cancelled")).toBeInTheDocument();
+    expect(screen.queryByText("Pending")).not.toBeInTheDocument();
+  });
+
   it("shows run request errors instead of a false not-found state", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
