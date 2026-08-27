@@ -586,6 +586,16 @@ def test_rootfs_limits_reject_bytes_and_entries_before_mapping(tmp_path: Path) -
         )
 
 
+@pytest.mark.asyncio
+async def test_quiesce_is_idempotent_after_runtime_shutdown() -> None:
+    isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
+    try:
+        await isolated.quiesce()
+    finally:
+        shutil.rmtree(isolated.rootfs)
+        shutil.rmtree(isolated.workspace)
+
+
 def test_proot_exposes_only_dns_proc_and_required_devices(tmp_path: Path) -> None:
     isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
     try:

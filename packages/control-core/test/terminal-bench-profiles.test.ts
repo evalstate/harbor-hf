@@ -397,7 +397,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
         expect(harborAgent.override_setup_timeout_sec).toBe(1800);
       }
       if (name === "openhands") {
-        expect(harborAgent.override_setup_timeout_sec).toBe(3600);
+        expect(harborAgent.override_setup_timeout_sec).toBe(7200);
       }
       if (name === "openclaw") {
         expect(harborAgent.override_setup_timeout_sec).toBe(1200);

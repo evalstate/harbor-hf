@@ -1878,7 +1878,7 @@ class IsolatedOciRuntime:
     async def quiesce(self) -> None:
         """Kill every task-UID process while retaining the prepared rootfs."""
         if not self._running:
-            raise OciRuntimeError("task OCI runtime is not running")
+            return
         if platform.system() != "Linux" or os.geteuid() != 0:
             raise OciRuntimeUnavailableError(
                 "trusted worker cannot quiesce the dedicated task UID"
