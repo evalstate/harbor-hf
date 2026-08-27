@@ -64,4 +64,64 @@ printf 'fake setup complete\\n'
       await runtime.close();
     }
   });
+
+  it("cancels a running setup and preserves its streamed logs", async () => {
+    const bin = await mkdtemp(join(tmpdir(), "harbor-hf-fake-docker-"));
+    const docker = join(bin, "docker");
+    await writeFile(
+      docker,
+      `#!/bin/sh
+if [ "$1" = "kill" ]; then
+  pid_file="/tmp/fake-docker-$2.pid"
+  if [ -f "$pid_file" ]; then
+    kill -TERM "$(cat "$pid_file")"
+  fi
+  exit 0
+fi
+name=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--name" ]; then
+    shift
+    name="$1"
+  fi
+  shift
+done
+pid_file="/tmp/fake-docker-$name.pid"
+printf '%s' "$$" > "$pid_file"
+trap 'rm -f "$pid_file"; exit 143' TERM INT
+printf 'install started\\n'
+while :; do sleep 1; done
+`,
+      { mode: 0o700 },
+    );
+    await chmod(docker, 0o700);
+    process.env.PATH = `${bin}:${originalPath ?? ""}`;
+
+    const runtime = new WorkbenchRuntime("docker", "unused:test-image");
+    try {
+      const started = await runtime.startSetup(
+        fastAgentWorkbenchStarter,
+        "test-operator",
+        "cancel-running",
+      );
+      await expect
+        .poll(() => runtime.logs(started.setup_test_id, "test-operator")?.stdout)
+        .toContain("install started");
+
+      const cancelling = runtime.cancelSetup(started.setup_test_id, "test-operator");
+      expect(cancelling?.status).toBe("cancelling");
+
+      await expect
+        .poll(() => runtime.getSetup(started.setup_test_id, "test-operator")?.status)
+        .toBe("cancelled");
+      expect(runtime.logs(started.setup_test_id, "test-operator")?.stdout).toContain(
+        "install started",
+      );
+      expect(runtime.cancelSetup(started.setup_test_id, "test-operator")?.status).toBe(
+        "cancelled",
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
 });

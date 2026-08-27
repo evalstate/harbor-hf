@@ -5,11 +5,13 @@ import {
   LoaderCircle,
   Plus,
   RotateCcw,
+  Square,
   TerminalSquare,
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
+  cancelWorkbenchSetup,
   getWorkbenchFile,
   getWorkbenchLogs,
   getWorkbenchSetup,
@@ -95,7 +97,8 @@ function fieldClass(invalid = false): string {
 
 function statusTone(status: WorkbenchSetup["status"]): string {
   if (status === "passed") return "complete";
-  if (status === "failed" || status === "timed-out") return "error";
+  if (status === "cancelled" || status === "failed" || status === "timed-out")
+    return "error";
   return "active";
 }
 
@@ -107,6 +110,7 @@ export function WorkbenchPage() {
   const [checking, setChecking] = useState(false);
   const [setup, setSetup] = useState<WorkbenchSetup | null>(null);
   const [setupError, setSetupError] = useState<unknown>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [logs, setLogs] = useState({ stdout: "", stderr: "" });
   const [selectedFile, setSelectedFile] = useState<WorkbenchFile | null>(null);
@@ -116,6 +120,9 @@ export function WorkbenchPage() {
   } | null>(null);
   const [fileError, setFileError] = useState<unknown>(null);
   const previewSequence = useRef(0);
+  const activeSetupRef = useRef<HTMLDivElement | null>(null);
+  const liveOutputRef = useRef<HTMLElement | null>(null);
+  const liveOutput = `${logs.stdout}${logs.stderr ? `\n[stderr]\n${logs.stderr}` : ""}`;
 
   useEffect(() => {
     const sequence = ++previewSequence.current;
@@ -140,7 +147,7 @@ export function WorkbenchPage() {
   }, [recipe]);
 
   useEffect(() => {
-    if (!setup || !["queued", "running"].includes(setup.status)) return;
+    if (!setup || !["queued", "running", "cancelling"].includes(setup.status)) return;
     const timer = window.setInterval(() => {
       void getWorkbenchSetup(setup.setup_test_id).then(setSetup).catch(setSetupError);
       void getWorkbenchLogs(setup.setup_test_id).then(setLogs).catch(setSetupError);
@@ -153,6 +160,14 @@ export function WorkbenchPage() {
     void getWorkbenchLogs(setup.setup_test_id).then(setLogs).catch(setSetupError);
   }, [setup]);
 
+  useEffect(() => {
+    if (!liveOutput) return;
+    const output = liveOutputRef.current;
+    if (output) output.scrollTop = output.scrollHeight;
+  }, [liveOutput]);
+
+  const setupActive =
+    setup !== null && ["queued", "running", "cancelling"].includes(setup.status);
   const verifiedCurrent =
     setup?.status === "passed" &&
     preview?.recipe_digest === setup.recipe_digest &&
@@ -184,8 +199,32 @@ export function WorkbenchPage() {
       setSelectedFile(null);
       setFileContent(null);
       setLogs({ stdout: "", stderr: "" });
+      window.requestAnimationFrame(() => {
+        const target = activeSetupRef.current;
+        if (typeof target?.scrollIntoView === "function")
+          target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
     } catch (error) {
       setSetupError(error);
+    }
+  };
+
+  const cancelSetup = async () => {
+    if (!setup || !setupActive) return;
+    if (
+      !window.confirm(
+        "Cancel this setup test? The running Docker container will be stopped.",
+      )
+    )
+      return;
+    setCancelling(true);
+    setSetupError(null);
+    try {
+      setSetup(await cancelWorkbenchSetup(setup.setup_test_id));
+    } catch (error) {
+      setSetupError(error);
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -414,24 +453,67 @@ export function WorkbenchPage() {
                 edits.
               </p>
             ) : null}
-            <label className="flex items-start gap-3 text-sm text-slate-300">
-              <input
-                className="mt-1"
-                type="checkbox"
-                checked={confirmed}
-                onChange={(event) => setConfirmed(event.target.checked)}
-              />
-              <span>
-                Launch this exact setup recipe in a disposable local Docker container.
-              </span>
-            </label>
-            <Button
-              className="mt-4 w-full"
-              disabled={writeMode !== "enabled" || !confirmed || !preview || checking}
-              onClick={() => void launchSetup()}
-            >
-              <FlaskConical size={16} /> Launch setup test
-            </Button>
+            {setupActive ? (
+              <div
+                className="space-y-4 rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-4"
+                ref={activeSetupRef}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <LoaderCircle className="animate-spin text-cyan-300" size={18} />
+                    <span className="font-medium text-white">Setup submitted</span>
+                    <Badge status="active">{setup.status}</Badge>
+                  </div>
+                  <Button
+                    disabled={cancelling || setup.status === "cancelling"}
+                    variant="secondary"
+                    onClick={() => void cancelSetup()}
+                  >
+                    <Square size={14} />
+                    {setup.status === "cancelling" || cancelling
+                      ? "Cancelling…"
+                      : "Cancel setup"}
+                  </Button>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Confirmation was reset for any future retry. This setup continues
+                  below and can be safely cancelled here.
+                </p>
+                <section
+                  aria-label="Live setup output"
+                  className="max-h-64 min-h-32 overflow-auto rounded-lg border border-slate-800 bg-black/40 p-3 text-xs leading-5 text-slate-300"
+                  ref={liveOutputRef}
+                >
+                  <pre className="whitespace-pre-wrap break-words">
+                    {liveOutput || "Waiting for setup output…"}
+                  </pre>
+                </section>
+              </div>
+            ) : (
+              <>
+                <label className="flex items-start gap-3 text-sm text-slate-300">
+                  <input
+                    className="mt-1"
+                    type="checkbox"
+                    checked={confirmed}
+                    onChange={(event) => setConfirmed(event.target.checked)}
+                  />
+                  <span>
+                    Launch this exact setup recipe in a disposable local Docker
+                    container.
+                  </span>
+                </label>
+                <Button
+                  className="mt-4 w-full"
+                  disabled={
+                    writeMode !== "enabled" || !confirmed || !preview || checking
+                  }
+                  onClick={() => void launchSetup()}
+                >
+                  <FlaskConical size={16} /> Launch setup test
+                </Button>
+              </>
+            )}
           </Card>
         </div>
 
@@ -543,7 +625,7 @@ export function WorkbenchPage() {
                 <div className="flex items-center gap-2">
                   {setup.status === "passed" ? (
                     <CheckCircle2 className="text-emerald-400" size={20} />
-                  ) : setup.status === "running" || setup.status === "queued" ? (
+                  ) : ["running", "queued", "cancelling"].includes(setup.status) ? (
                     <LoaderCircle className="animate-spin text-cyan-300" size={20} />
                   ) : (
                     <FlaskConical className="text-rose-400" size={20} />

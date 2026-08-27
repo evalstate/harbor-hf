@@ -160,6 +160,17 @@ export async function getWorkbenchSetup(id: string): Promise<WorkbenchSetup> {
   );
 }
 
+export async function cancelWorkbenchSetup(id: string): Promise<WorkbenchSetup> {
+  return request<WorkbenchSetup>(
+    `/api/v1/workbench/setup-tests/${encodeURIComponent(id)}/cancel`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ confirmed: true }),
+    },
+  );
+}
+
 export async function getWorkbenchLogs(id: string): Promise<WorkbenchLogs> {
   return request<WorkbenchLogs>(
     `/api/v1/workbench/setup-tests/${encodeURIComponent(id)}/logs`,

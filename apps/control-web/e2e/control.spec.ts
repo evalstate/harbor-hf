@@ -240,6 +240,83 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
   });
 });
 
+test("tails and cancels a running Workbench setup", async ({ page }) => {
+  await page.route("**/api/v1/auth/session", (route) =>
+    route.fulfill({ json: session }),
+  );
+  await page.route("**/api/v1/system", (route) => route.fulfill({ json: system() }));
+  await page.route("**/api/v1/events", (route) => route.abort());
+  await page.route("**/api/v1/workbench/preview", async (route) => {
+    const recipe = route.request().postDataJSON();
+    return route.fulfill({
+      json: {
+        recipe,
+        recipe_digest: "sha256:workbench-running",
+        revision_id: "recipe-revision-running",
+        setup_command: "install agent",
+        run_command: "run agent",
+        environment: [],
+        harness_profile: { agent: "command-agent" },
+        warnings: [],
+      },
+    });
+  });
+  let cancellationRequested = false;
+  const setup = (status: "running" | "cancelling" | "cancelled") => ({
+    setup_test_id: "setup-test-running",
+    recipe_digest: "sha256:workbench-running",
+    revision_id: "recipe-revision-running",
+    status,
+    created_at: "2026-08-27T12:00:00.000Z",
+    started_at: "2026-08-27T12:00:01.000Z",
+    completed_at: status === "cancelled" ? "2026-08-27T12:00:02.000Z" : null,
+    exit_code: status === "cancelled" ? 137 : null,
+    error: null,
+    files: [],
+  });
+  await page.route("**/api/v1/workbench/setup-tests", (route) =>
+    route.fulfill({ status: 202, json: setup("running") }),
+  );
+  await page.route("**/api/v1/workbench/setup-tests/setup-test-running", (route) =>
+    route.fulfill({
+      json: setup(cancellationRequested ? "cancelled" : "running"),
+    }),
+  );
+  await page.route("**/api/v1/workbench/setup-tests/setup-test-running/logs", (route) =>
+    route.fulfill({
+      json: {
+        stdout: "Downloading agent package 3/10\n",
+        stderr: "",
+      },
+    }),
+  );
+  await page.route(
+    "**/api/v1/workbench/setup-tests/setup-test-running/cancel",
+    (route) => {
+      cancellationRequested = true;
+      return route.fulfill({ json: setup("cancelling") });
+    },
+  );
+
+  await page.goto("/workbench");
+  await expect(page.getByText("Preview ready")).toBeVisible();
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Launch setup test" }).click();
+  await expect(page.getByText("Setup submitted")).toBeVisible();
+  await expect(page.getByLabel("Live setup output")).toContainText(
+    "Downloading agent package 3/10",
+  );
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Cancel setup" }).click();
+  await expect(page.getByText("cancelled", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("checkbox", {
+      name: /launch this exact setup recipe/i,
+    }),
+  ).toBeVisible();
+});
+
 test("disables run launch and omits account details", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),

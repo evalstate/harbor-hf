@@ -74,7 +74,17 @@ export const workbenchSetupSchema = {
     setup_test_id: { type: "string" },
     recipe_digest: { type: "string" },
     revision_id: { type: "string" },
-    status: { enum: ["queued", "running", "passed", "failed", "timed-out"] },
+    status: {
+      enum: [
+        "queued",
+        "running",
+        "cancelling",
+        "cancelled",
+        "passed",
+        "failed",
+        "timed-out",
+      ],
+    },
     created_at: { type: "string", format: "date-time" },
     started_at: nullableString,
     completed_at: nullableString,

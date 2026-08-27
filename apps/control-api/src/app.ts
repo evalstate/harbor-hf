@@ -335,6 +335,14 @@ const agentWorkbenchSetupRequestSchema = {
     confirmed: { const: true },
   },
 } as const;
+const agentWorkbenchCancelRequestSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["confirmed"],
+  properties: {
+    confirmed: { const: true },
+  },
+} as const;
 
 interface SseEnvelope extends Omit<ControlEvent, "id"> {
   id?: string;
@@ -1308,6 +1316,41 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         setup_test_id: string;
       };
       const result = runtime.workbench.getSetup(setupTestId, actor(request).subject);
+      if (!result)
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "setup test was not found",
+            request_id: request.id,
+          },
+        });
+      return result;
+    },
+  );
+
+  app.post(
+    "/api/v1/workbench/setup-tests/:setup_test_id/cancel",
+    {
+      schema: {
+        tags: ["workbench"],
+        params: {
+          type: "object",
+          required: ["setup_test_id"],
+          properties: { setup_test_id: { type: "string", maxLength: 160 } },
+        },
+        body: agentWorkbenchCancelRequestSchema,
+        response: {
+          200: workbenchSetupSchema,
+          404: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      idempotencyKey(request);
+      const { setup_test_id: setupTestId } = request.params as {
+        setup_test_id: string;
+      };
+      const result = runtime.workbench.cancelSetup(setupTestId, actor(request).subject);
       if (!result)
         return reply.code(404).send({
           error: {

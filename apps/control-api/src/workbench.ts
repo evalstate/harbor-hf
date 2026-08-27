@@ -35,7 +35,14 @@ export interface WorkbenchSetupView {
   setup_test_id: string;
   recipe_digest: string;
   revision_id: string;
-  status: "queued" | "running" | "passed" | "failed" | "timed-out";
+  status:
+    | "queued"
+    | "running"
+    | "cancelling"
+    | "cancelled"
+    | "passed"
+    | "failed"
+    | "timed-out";
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -50,6 +57,8 @@ interface SetupState extends WorkbenchSetupView {
   stderr: string;
   directory: string;
   process: ChildProcess | null;
+  timeout: NodeJS.Timeout | null;
+  cancellation_requested: boolean;
   container_name: string;
   filePaths: Map<string, string>;
 }
@@ -193,6 +202,8 @@ export class WorkbenchRuntime {
       stderr: "",
       directory,
       process: null,
+      timeout: null,
+      cancellation_requested: false,
       container_name: containerName,
       filePaths: new Map(),
     };
@@ -253,19 +264,21 @@ export class WorkbenchRuntime {
       state.stderr = appendBounded(state.stderr, chunk);
     });
     let timedOut = false;
-    const timer = setTimeout(() => {
+    state.timeout = setTimeout(() => {
       timedOut = true;
       spawnSync("docker", ["kill", containerName], { stdio: "ignore" });
     }, preview.recipe.setup_timeout_seconds * 1000);
     child.once("error", (error) => {
-      clearTimeout(timer);
+      if (state.timeout) clearTimeout(state.timeout);
+      state.timeout = null;
       state.status = "failed";
       state.error = error.message;
       state.completed_at = new Date().toISOString();
       state.process = null;
     });
     child.once("close", (code) => {
-      clearTimeout(timer);
+      if (state.timeout) clearTimeout(state.timeout);
+      state.timeout = null;
       state.exit_code = code;
       state.process = null;
       void Promise.all([
@@ -273,7 +286,13 @@ export class WorkbenchRuntime {
         scanRoot(state, "logs", logs),
       ])
         .then(() => {
-          state.status = timedOut ? "timed-out" : code === 0 ? "passed" : "failed";
+          state.status = state.cancellation_requested
+            ? "cancelled"
+            : timedOut
+              ? "timed-out"
+              : code === 0
+                ? "passed"
+                : "failed";
           state.completed_at = new Date().toISOString();
         })
         .catch((error: unknown) => {
@@ -283,6 +302,24 @@ export class WorkbenchRuntime {
           state.completed_at = new Date().toISOString();
         });
     });
+    return this.view(state);
+  }
+
+  cancelSetup(setupTestId: string, owner: string): WorkbenchSetupView | null {
+    const state = this.setupTests.get(setupTestId);
+    if (!state || state.owner !== owner) return null;
+    if (["cancelled", "passed", "failed", "timed-out"].includes(state.status))
+      return this.view(state);
+    state.cancellation_requested = true;
+    state.status = "cancelling";
+    if (state.timeout) clearTimeout(state.timeout);
+    state.timeout = null;
+    if (state.process) {
+      const killed = spawnSync("docker", ["kill", state.container_name], {
+        stdio: "ignore",
+      });
+      if (killed.status !== 0) state.process.kill("SIGTERM");
+    }
     return this.view(state);
   }
 
@@ -332,6 +369,8 @@ export class WorkbenchRuntime {
   async close(): Promise<void> {
     for (const state of this.setupTests.values()) {
       if (state.process) {
+        if (state.timeout) clearTimeout(state.timeout);
+        state.timeout = null;
         spawnSync("docker", ["kill", state.container_name], { stdio: "ignore" });
         state.process.kill();
       }

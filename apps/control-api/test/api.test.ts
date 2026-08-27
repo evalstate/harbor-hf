@@ -344,6 +344,15 @@ describe("control API", () => {
     });
     expect(setupResponse.statusCode).toBe(503);
     expect(setupResponse.json().error.code).toBe("control_not_ready");
+
+    const missingCancel = await app.inject({
+      method: "POST",
+      url: "/api/v1/workbench/setup-tests/missing-setup/cancel",
+      headers: { "idempotency-key": "workbench-missing-cancel" },
+      payload: { confirmed: true },
+    });
+    expect(missingCancel.statusCode).toBe(404);
+    expect(missingCancel.json().error.code).toBe("not_found");
   });
 
   it("keeps routes unready after projection replay until runtime initialization ends", async () => {

@@ -277,6 +277,91 @@ describe("control web", () => {
     expect(document.querySelector("script")).toBeNull();
   });
 
+  it("tails a running Workbench setup and confirms cancellation", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let cancelled = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/workbench/preview")) {
+          const recipe = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({
+            recipe,
+            recipe_digest: "sha256:running-recipe",
+            revision_id: "agent-recipe-running",
+            setup_command: "install agent",
+            run_command: "run agent",
+            environment: [],
+            harness_profile: { agent: "command-agent" },
+            warnings: [],
+          });
+        }
+        if (path.endsWith("/api/v1/workbench/setup-tests") && init?.method === "POST")
+          return json(
+            {
+              setup_test_id: "setup-test-running",
+              recipe_digest: "sha256:running-recipe",
+              revision_id: "agent-recipe-running",
+              status: "running",
+              created_at: "2026-08-27T00:00:00.000Z",
+              started_at: "2026-08-27T00:00:01.000Z",
+              completed_at: null,
+              exit_code: null,
+              error: null,
+              files: [],
+            },
+            202,
+          );
+        if (path.endsWith("/setup-test-running/cancel") && init?.method === "POST") {
+          cancelled = true;
+          expect(JSON.parse(String(init.body))).toEqual({ confirmed: true });
+          return json({
+            setup_test_id: "setup-test-running",
+            recipe_digest: "sha256:running-recipe",
+            revision_id: "agent-recipe-running",
+            status: "cancelling",
+            created_at: "2026-08-27T00:00:00.000Z",
+            started_at: "2026-08-27T00:00:01.000Z",
+            completed_at: null,
+            exit_code: null,
+            error: null,
+            files: [],
+          });
+        }
+        if (path.endsWith("/setup-test-running/logs"))
+          return json({
+            stdout: "Downloading agent package 3/10\n",
+            stderr: "",
+          });
+        if (path.includes("/events")) throw new Error("offline");
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+
+    renderApp("/workbench");
+    expect(await screen.findByText("Preview ready")).toBeVisible();
+    const user = userEvent.setup();
+    const confirmation = screen.getByRole("checkbox", {
+      name: /launch this exact setup recipe/i,
+    });
+    await user.click(confirmation);
+    await user.click(screen.getByRole("button", { name: /launch setup test/i }));
+
+    expect(await screen.findByText("Setup submitted")).toBeVisible();
+    expect(confirmation).not.toBeInTheDocument();
+    expect(await screen.findByLabelText("Live setup output")).toHaveTextContent(
+      "Downloading agent package 3/10",
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel setup" }));
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(cancelled).toBe(true);
+    expect(await screen.findByRole("button", { name: "Cancelling…" })).toBeDisabled();
+  });
+
   it("shows only the username and sign-out control in account chrome", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(

@@ -94,6 +94,7 @@ The control API supports:
 POST /api/v1/workbench/preview
 POST /api/v1/workbench/setup-tests
 GET  /api/v1/workbench/setup-tests/{setup_test_id}
+POST /api/v1/workbench/setup-tests/{setup_test_id}/cancel
 GET  /api/v1/workbench/setup-tests/{setup_test_id}/logs
 GET  /api/v1/workbench/setup-tests/{setup_test_id}/files/{file_id}
 ```
@@ -114,6 +115,13 @@ The Docker runner:
 - bounds retained stdout, stderr, file count, and text previews;
 - refuses symlink and special-file previews; and
 - scopes in-memory setup state to the authenticated actor.
+
+After submission, the web application replaces the one-time confirmation
+control with an inline active-setup panel. The panel polls status and bounded
+stdout/stderr once per second, follows new output, and provides a separately
+confirmed Cancel action. Cancellation stops the Docker container, retains the
+available logs and files, and records the terminal setup state as `cancelled`
+rather than a generic failure.
 
 The runner is a local development facility. Setup-test state and files are
 ephemeral and are deleted when the API process stops. Production-shaped setup

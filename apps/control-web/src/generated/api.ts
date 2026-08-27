@@ -544,7 +544,7 @@ export interface paths {
                             recipe_digest: string;
                             revision_id: string;
                             /** @enum {unknown} */
-                            status: "queued" | "running" | "passed" | "failed" | "timed-out";
+                            status: "queued" | "running" | "cancelling" | "cancelled" | "passed" | "failed" | "timed-out";
                             /** Format: date-time */
                             created_at: string;
                             started_at: string | null;
@@ -617,7 +617,7 @@ export interface paths {
                             recipe_digest: string;
                             revision_id: string;
                             /** @enum {unknown} */
-                            status: "queued" | "running" | "passed" | "failed" | "timed-out";
+                            status: "queued" | "running" | "cancelling" | "cancelled" | "passed" | "failed" | "timed-out";
                             /** Format: date-time */
                             created_at: string;
                             started_at: string | null;
@@ -657,6 +657,88 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workbench/setup-tests/{setup_test_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    setup_test_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {unknown} */
+                        confirmed: true;
+                    };
+                };
+            };
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            setup_test_id: string;
+                            recipe_digest: string;
+                            revision_id: string;
+                            /** @enum {unknown} */
+                            status: "queued" | "running" | "cancelling" | "cancelled" | "passed" | "failed" | "timed-out";
+                            /** Format: date-time */
+                            created_at: string;
+                            started_at: string | null;
+                            completed_at: string | null;
+                            exit_code: number | null;
+                            error: string | null;
+                            files: {
+                                file_id: string;
+                                path: string;
+                                /** @enum {unknown} */
+                                root: "workspace" | "logs";
+                                size: number;
+                                text: boolean;
+                            }[];
+                        };
+                    };
+                };
+                /** @description Default Response */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                code: string;
+                                message: string;
+                                request_id: string;
+                                fields?: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
