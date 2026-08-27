@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compileAgentWorkbenchRecipe,
   fastAgentWorkbenchStarter,
+  fxWorkbenchStarter,
 } from "../src/workbench.js";
 
 describe("Agent Workbench recipe compiler", () => {
@@ -27,6 +28,27 @@ describe("Agent Workbench recipe compiler", () => {
           config: {
             route_api: "chat-completions",
             outputs: [{ path: "fast-agent-results.json" }],
+          },
+        },
+      },
+    });
+  });
+
+  it("compiles the FX starter through the same generic command-agent path", () => {
+    const preview = compileAgentWorkbenchRecipe(fxWorkbenchStarter);
+    expect(preview.recipe.name).toBe("fx");
+    expect(preview.setup_command).toContain("https://releases.fx.sh/v0.0.5/fx-linux-");
+    expect(preview.run_command).toContain('fx" ask --yolo --json --');
+    expect(preview.harness_profile).toMatchObject({
+      agent: "command-agent",
+      required_evidence: ["workspace", "verifier", "provider-usage"],
+      harbor_agent: {
+        import_path: "harbor_hf_agents.command_agent.agent:CommandAgent",
+        override_setup_timeout_sec: 600,
+        kwargs: {
+          config: {
+            route_api: "chat-completions",
+            outputs: [{ path: "fx-results.json" }],
           },
         },
       },

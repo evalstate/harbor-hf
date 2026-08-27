@@ -6,8 +6,8 @@ testing a generic command-line Harbor agent recipe. It is available at
 
 The Workbench is intentionally low ceremony:
 
-1. Start from the Fast-Agent 0.10.11 recipe or edit arbitrary setup and run
-   commands.
+1. Start from the Fast-Agent 0.10.11 or FX 0.0.5 recipe, or edit arbitrary
+   setup and run commands.
 2. Bind environment variables to typed runtime values instead of pasting
    credentials.
 3. Review the server-generated command and environment preview.
@@ -160,6 +160,14 @@ Its run command uses typed bindings for model name, loopback base URL,
 placeholder API key, instruction file, workspace, managed home, results, and
 trajectory output. Fast-Agent is recipe data; neither the Workbench compiler
 nor the command-agent plugin branches on its name.
+
+## FX starter
+
+The FX starter installs the pinned `v0.0.5` Linux release beneath the managed
+agent home using Python's standard library, then verifies `fx --version`. Its
+run command uses `fx ask --yolo --json`, the locked Chat Completions route, the
+task instruction file, and a declared `/logs/agent/fx-results.json` output. FX
+is recipe data and uses the same generic command-agent path as Fast-Agent.
 
 ## Benchmark handoff requirements
 
