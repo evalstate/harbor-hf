@@ -87,12 +87,16 @@ async def test_install_creates_isolated_agent_user(temp_dir) -> None:
     useradd_at = next(
         index for index, command in enumerate(commands) if "useradd" in command
     )
+    tmux_at = next(
+        index for index, command in enumerate(commands) if "tmux new-session" in command
+    )
     chown_at = next(
         index
         for index, command in enumerate(commands)
         if "chown harbor-agent:harbor-agent /opt/openhands-venv" in command
     )
-    assert useradd_at < chown_at
+    assert useradd_at < tmux_at < chown_at
+    assert mock_env.exec.call_args_list[tmux_at].kwargs["timeout_sec"] == 30
     assert any(
         "openhands-ai==1.6.0" in call.kwargs["command"]
         for call in mock_env.exec.call_args_list

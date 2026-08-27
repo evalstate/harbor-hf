@@ -45,6 +45,18 @@ class OpenHandsAgent(JobChatCompletionsAgent, OpenHands):
             environment, ("curl", "git", "build_tools", "tmux")
         )
         await self._ensure_isolated_agent_user(environment)
+        # OpenHands starts its local action server inside tmux. Check the Job's
+        # pseudoterminal path before spending the task's full execution budget.
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "set -euo pipefail; "
+                'session="harbor-hf-openhands-preflight-$$"; '
+                'tmux new-session -d -s "$session"; '
+                'tmux kill-session -t "$session"'
+            ),
+            timeout_sec=30,
+        )
         await self.exec_as_root(
             environment,
             command=(
