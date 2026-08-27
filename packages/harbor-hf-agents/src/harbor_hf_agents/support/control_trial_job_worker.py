@@ -84,6 +84,7 @@ _HARBOR_CHILD_ENVIRONMENT = frozenset(
         "HARBOR_HF_RUN_LOCK_DIGEST",
         "HARBOR_HF_TASK_IDS_JSON",
         "HARBOR_HF_TASK_IMAGE",
+        "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY",
         "HARBOR_HF_WORKER_CAPABILITY",
         "HARBOR_HF_WORKER_REVISION",
         "HARBOR_HF_WORKER_ROLE",
@@ -375,6 +376,7 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
         raise PreparedDataError("prepared Harbor task digest does not match")
     task_image = _validate_prepared_image(value)
     environment_kwargs = harbor_lock.environment.kwargs
+    _required("HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY")
     if environment_kwargs["control_declared_task_image"] != value["declared_image"]:
         raise PreparedDataError(
             "prepared Harbor environment image does not match its declaration"

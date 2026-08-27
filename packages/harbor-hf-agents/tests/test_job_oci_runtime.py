@@ -34,6 +34,7 @@ _TASK_IMAGE = (
     "example.invalid/task@sha256:"
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
+_MIRROR_REPOSITORY = "mirror.example/harbor-hf/tasks"
 
 
 def _limits() -> TransferLimits:
@@ -142,95 +143,28 @@ def _linux_task_uid_available() -> bool:
 
 def test_manifest_digest_mismatch_fails_closed() -> None:
     with pytest.raises(OciImageIntegrityError, match="does not match"):
-        runtime._selected_manifest(_TASK_IMAGE, b'{"schemaVersion":2}')
-
-
-def test_docker_reference_removes_tag_before_digest() -> None:
-    digest = f"sha256:{'a' * 64}"
-
-    assert (
-        runtime._docker_reference(f"registry.example:5000/team/task:locked@{digest}")
-        == f"docker://registry.example:5000/team/task@{digest}"
-    )
-    assert (
-        runtime._docker_reference(f"debian:forky-slim@{digest}")
-        == f"docker://docker.io/library/debian@{digest}"
-    )
-
-
-def test_docker_source_references_prefer_mirror_for_docker_hub() -> None:
-    digest = f"sha256:{'a' * 64}"
-
-    assert runtime._docker_source_references(f"alexgshaw/task@{digest}") == (
-        f"docker://mirror.gcr.io/alexgshaw/task@{digest}",
-        f"docker://docker.io/alexgshaw/task@{digest}",
-    )
-    assert runtime._docker_source_references(
-        f"registry.example/team/task@{digest}"
-    ) == (f"docker://registry.example/team/task@{digest}",)
-
-
-def test_task_image_copy_falls_back_to_docker_hub_origin(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    digest = f"sha256:{'a' * 64}"
-    sources: list[str] = []
-
-    def fake_copy(
-        arguments: list[str],
-        *,
-        environment: dict[str, str],
-        label: str,
-        directory: Path,
-        max_bytes: int,
-    ) -> subprocess.CompletedProcess[bytes]:
-        del environment, label, directory, max_bytes
-        source = arguments[-2]
-        sources.append(source)
-        if "mirror.gcr.io" in source:
-            raise OciRuntimeUnavailableError("mirror does not contain image")
-        return subprocess.CompletedProcess(arguments, 0, b"", b"")
-
-    monkeypatch.setattr(runtime, "_run_checked_with_directory_limit", fake_copy)
-
-    runtime._copy_task_image(
-        tmp_path / "auth.json",
-        f"alexgshaw/task@{digest}",
-        tmp_path / "source",
-        {},
-        1024,
-    )
-
-    assert sources == [
-        f"docker://mirror.gcr.io/alexgshaw/task@{digest}",
-        f"docker://docker.io/alexgshaw/task@{digest}",
-    ]
-
-
-def test_task_image_copy_does_not_bypass_integrity_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    calls = 0
-
-    def fake_copy(*_args: object, **_kwargs: object) -> None:
-        nonlocal calls
-        calls += 1
-        raise OciImageIntegrityError("bounded compressed byte allowance")
-
-    monkeypatch.setattr(runtime, "_run_checked_with_directory_limit", fake_copy)
-
-    with pytest.raises(OciImageIntegrityError, match="bounded compressed byte"):
-        runtime._copy_task_image(
-            tmp_path / "auth.json",
-            f"alexgshaw/task@sha256:{'a' * 64}",
-            tmp_path / "source",
-            {},
-            1024,
+        runtime._selected_manifest(
+            _TASK_IMAGE,
+            b'{"schemaVersion":2}',
+            _MIRROR_REPOSITORY,
         )
 
-    assert calls == 1
+
+def test_mirror_reference_preserves_locked_digest() -> None:
+    digest = f"sha256:{'a' * 64}"
+
+    assert (
+        runtime._mirrored_reference(
+            f"docker.io/library/task:release@{digest}",
+            _MIRROR_REPOSITORY,
+        )
+        == f"docker://{_MIRROR_REPOSITORY}@{digest}"
+    )
+
+
+def test_mirror_reference_rejects_a_tag() -> None:
+    with pytest.raises(OciImageIntegrityError, match="repository is invalid"):
+        runtime._mirrored_reference(_TASK_IMAGE, "mirror.example/tasks:latest")
 
 
 def test_multiarch_manifest_selects_only_native_linux_image(
@@ -255,9 +189,9 @@ def test_multiarch_manifest_selects_only_native_linux_image(
     image = f"example.invalid/task@sha256:{hashlib.sha256(raw).hexdigest()}"
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
 
-    source, digest = runtime._selected_manifest(image, raw)
+    source, digest = runtime._selected_manifest(image, raw, _MIRROR_REPOSITORY)
 
-    assert source == f"docker://example.invalid/task@{selected_digest}"
+    assert source == f"docker://{_MIRROR_REPOSITORY}@{selected_digest}"
     assert digest == selected_digest
 
 
@@ -498,6 +432,7 @@ def test_copied_concrete_manifest_needs_no_remote_inspection(
     manifest, copied_config = runtime._copied_source_image(
         tmp_path / "source",
         f"example.invalid/task@{manifest_digest}",
+        _MIRROR_REPOSITORY,
         tmp_path / "auth.json",
         {},
         _image_limits(),
@@ -663,7 +598,12 @@ def test_rootfs_limits_reject_bytes_and_entries_before_mapping(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_quiesce_is_idempotent_after_runtime_shutdown() -> None:
-    isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
+    isolated = IsolatedOciRuntime(
+        _TASK_IMAGE,
+        _limits(),
+        _image_limits(),
+        control_task_image_mirror_repository=_MIRROR_REPOSITORY,
+    )
     try:
         await isolated.quiesce()
     finally:
@@ -672,7 +612,12 @@ async def test_quiesce_is_idempotent_after_runtime_shutdown() -> None:
 
 
 def test_proot_exposes_only_dns_proc_and_required_devices(tmp_path: Path) -> None:
-    isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
+    isolated = IsolatedOciRuntime(
+        _TASK_IMAGE,
+        _limits(),
+        _image_limits(),
+        control_task_image_mirror_repository=_MIRROR_REPOSITORY,
+    )
     try:
         passwd = isolated.rootfs / "etc" / "passwd"
         passwd.parent.mkdir()
@@ -904,7 +849,12 @@ def test_upload_rechecks_task_parents_after_uid_freeze(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    isolated = IsolatedOciRuntime(_TASK_IMAGE, _limits(), _image_limits())
+    isolated = IsolatedOciRuntime(
+        _TASK_IMAGE,
+        _limits(),
+        _image_limits(),
+        control_task_image_mirror_repository=_MIRROR_REPOSITORY,
+    )
     source = tmp_path / "source"
     source.write_text("safe", encoding="utf-8")
     outside = tmp_path / "outside"

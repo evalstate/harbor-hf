@@ -15,6 +15,7 @@ DIGEST = f"sha256:{'a' * 64}"
 TASK_IMAGE = f"example.invalid/task@{DIGEST}"
 DECLARED_TASK_IMAGE = "example.invalid/task:release"
 WORKER_IMAGE = f"example.invalid/worker@sha256:{'b' * 64}"
+MIRROR_REPOSITORY = "mirror.example/harbor-hf/tasks"
 
 
 def _trial_lock() -> dict:
@@ -173,6 +174,10 @@ def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setenv("HARBOR_HF_JOB_IMAGE", WORKER_IMAGE)
     monkeypatch.setenv("HARBOR_HF_TASK_IMAGE", TASK_IMAGE)
+    monkeypatch.setenv(
+        "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY",
+        MIRROR_REPOSITORY,
+    )
     monkeypatch.setenv("HARBOR_HF_MAX_IMAGE_BYTES", str(20 * 1024 * 1024 * 1024))
     monkeypatch.setenv("HARBOR_HF_MAX_IMAGE_ENTRIES", "500000")
     monkeypatch.setattr(worker, "_read_prepared_job", lambda _: prepared_job)

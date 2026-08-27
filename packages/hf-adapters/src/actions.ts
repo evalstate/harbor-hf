@@ -18,10 +18,13 @@ import { jobHardwareCostMicrousd } from "./job-cost.js";
 
 const JOB_LIST_CACHE_MS = 5_000;
 const ACTIVE_JOB_STATES = ["RUNNING", "SCHEDULING"] as const;
+const MIRROR_REPOSITORY =
+  /^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?\/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 
 interface AdapterConfig {
   namespace: string;
   accessToken: string;
+  taskImageMirrorRepository: string;
   inferenceToken?: string;
   controlUrl?: string;
   hubUrl?: string;
@@ -100,6 +103,7 @@ function launchActionId(intent: ActionIntent): string {
 function jobEnvironment(
   intent: ActionIntent,
   controlUrl: string,
+  taskImageMirrorRepository: string,
 ): Record<string, string> {
   const role = workerRole(intent);
   const taskIds = stringValues(intent, "task_ids");
@@ -118,7 +122,12 @@ function jobEnvironment(
     ),
     HARBOR_HF_WORKER_ROLE: role,
     HARBOR_HF_JOB_IMAGE: jobImage,
-    ...(taskImage ? { HARBOR_HF_TASK_IMAGE: taskImage } : {}),
+    ...(taskImage
+      ? {
+          HARBOR_HF_TASK_IMAGE: taskImage,
+          HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY: taskImageMirrorRepository,
+        }
+      : {}),
     HARBOR_HF_RUN_LOCK_DIGEST: stringValue(intent, "run_lock_digest"),
     PYTHONUNBUFFERED: "1",
     ...(typeof intent.payload.worker_revision === "string"
@@ -155,7 +164,11 @@ function jobEnvironment(
   };
 }
 
-function expectedJobSpec(intent: ActionIntent, controlUrl: string): ExpectedJobSpec {
+function expectedJobSpec(
+  intent: ActionIntent,
+  controlUrl: string,
+  taskImageMirrorRepository: string,
+): ExpectedJobSpec {
   const actionId = launchActionId(intent);
   return {
     dockerImage: stringValue(intent, "job_image"),
@@ -168,7 +181,7 @@ function expectedJobSpec(intent: ActionIntent, controlUrl: string): ExpectedJobS
       harbor_hf_run_id: intent.run_id,
       harbor_hf_worker_role: workerRole(intent),
     },
-    environment: jobEnvironment(intent, controlUrl),
+    environment: jobEnvironment(intent, controlUrl, taskImageMirrorRepository),
     secretNames:
       inferenceTokenPolicy(intent) === "required"
         ? ["HARBOR_HF_WORKER_CAPABILITY", "HF_INFERENCE_TOKEN"]
@@ -237,8 +250,13 @@ function verifyNoJobIngress(job: ApiJob): void {
     throw new Error("Job exposes network ports");
 }
 
-function verifyJobSpec(intent: ActionIntent, job: ApiJob, controlUrl: string): void {
-  const expected = expectedJobSpec(intent, controlUrl);
+function verifyJobSpec(
+  intent: ActionIntent,
+  job: ApiJob,
+  controlUrl: string,
+  taskImageMirrorRepository: string,
+): void {
+  const expected = expectedJobSpec(intent, controlUrl, taskImageMirrorRepository);
   const stockJob = job as ApiJob & {
     retry?: unknown;
     timeout?: unknown;
@@ -342,8 +360,21 @@ export class HuggingFaceActions implements ExternalActionPort {
   constructor(private readonly config: AdapterConfig) {
     if (config.inferenceToken && config.inferenceToken === config.accessToken)
       throw new Error("control and inference credentials must be distinct");
+    if (!MIRROR_REPOSITORY.test(config.taskImageMirrorRepository))
+      throw new Error("task image mirror repository is invalid");
     this.endpointsUrl =
       config.endpointsUrl ?? "https://api.endpoints.huggingface.cloud/v2";
+  }
+
+  private verifyJobSpec(intent: ActionIntent, job: ApiJob): void {
+    if (!this.config.controlUrl)
+      throw new Error("Job verification requires the control service URL");
+    verifyJobSpec(
+      intent,
+      job,
+      this.config.controlUrl,
+      this.config.taskImageMirrorRepository,
+    );
   }
 
   private listJobsForAction(actionId: string): ReturnType<typeof listJobs> {
@@ -515,7 +546,11 @@ export class HuggingFaceActions implements ExternalActionPort {
       throw new Error("required worker inference credential is unavailable");
     if (!this.config.controlUrl)
       throw new Error("Job launch requires the control service URL");
-    const spec = expectedJobSpec(intent, this.config.controlUrl);
+    const spec = expectedJobSpec(
+      intent,
+      this.config.controlUrl,
+      this.config.taskImageMirrorRepository,
+    );
     const jobs = await this.listJobsForAction(intent.action_id);
     const matches = jobs.filter(
       (job) => job.labels?.harbor_hf_action_id === intent.action_id,
@@ -528,7 +563,7 @@ export class HuggingFaceActions implements ExternalActionPort {
       const job = matches[0];
       if (!job) throw new Error("matching Job disappeared");
       try {
-        verifyJobSpec(intent, job, this.config.controlUrl);
+        this.verifyJobSpec(intent, job);
       } catch (error) {
         throw new AmbiguousExternalActionError(
           "adopted Job failed locked specification validation",
@@ -597,7 +632,7 @@ export class HuggingFaceActions implements ExternalActionPort {
             : {}),
         },
       });
-      verifyJobSpec(intent, job, this.config.controlUrl);
+      this.verifyJobSpec(intent, job);
     } catch (error) {
       throw new AmbiguousExternalActionError("Job launch outcome is ambiguous", {
         cause: error,
@@ -626,7 +661,7 @@ export class HuggingFaceActions implements ExternalActionPort {
   private jobObservation(intent: ActionIntent, job: ApiJob): ExternalActionResult {
     if (!this.config.controlUrl)
       throw new Error("Job observation requires the control service URL");
-    verifyJobSpec(intent, job, this.config.controlUrl);
+    this.verifyJobSpec(intent, job);
     const hourly = payloadHourlyCost(intent);
     return {
       outcome: "completed",
@@ -648,13 +683,13 @@ export class HuggingFaceActions implements ExternalActionPort {
       ...(this.config.hubUrl ? { hubUrl: this.config.hubUrl } : {}),
     };
     const current = await getJob(options);
-    verifyJobSpec(intent, current, this.config.controlUrl);
+    this.verifyJobSpec(intent, current);
     let job: Awaited<ReturnType<typeof getJob>>;
     try {
       job = await cancelHfJob(options);
     } catch (error) {
       job = await getJob(options);
-      verifyJobSpec(intent, job, this.config.controlUrl);
+      this.verifyJobSpec(intent, job);
       if (!jobStateIsTerminal(job.status.stage)) {
         const hourly = payloadHourlyCost(intent);
         return {
@@ -667,7 +702,7 @@ export class HuggingFaceActions implements ExternalActionPort {
         };
       }
     }
-    verifyJobSpec(intent, job, this.config.controlUrl);
+    this.verifyJobSpec(intent, job);
     const hourly = payloadHourlyCost(intent);
     return {
       outcome: "completed",

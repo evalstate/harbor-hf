@@ -28,8 +28,11 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal, cast
 
 _DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-_DOCKER_HUB_MIRROR = "mirror.gcr.io"
 _DIGEST_IMAGE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+_MIRROR_REPOSITORY = re.compile(
+    r"^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?/"
+    r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$"
+)
 _INDEX_MEDIA_TYPES = frozenset(
     {
         "application/vnd.docker.distribution.manifest.list.v2+json",
@@ -473,31 +476,12 @@ def _setpriv_arguments(arguments: list[str]) -> list[str]:
     ]
 
 
-def _docker_reference(image: str) -> str:
-    name, digest = image.rsplit("@", 1)
-    first, slash, rest = name.partition("/")
-    if slash and ("." in first or ":" in first or first == "localhost"):
-        registry = "docker.io" if first == "registry-1.docker.io" else first
-        repository = rest
-    else:
-        registry = "docker.io"
-        repository = name
-    tail = repository.rsplit("/", 1)[-1]
-    if ":" in tail:
-        repository = repository.rsplit(":", 1)[0]
-    if registry == "docker.io" and "/" not in repository:
-        repository = f"library/{repository}"
-    return f"docker://{registry}/{repository}@{digest}"
-
-
-def _docker_source_references(image: str) -> tuple[str, ...]:
-    """Prefer Google's digest-preserving Docker Hub mirror when available."""
-    origin = _docker_reference(image)
-    docker_hub_prefix = "docker://docker.io/"
-    if not origin.startswith(docker_hub_prefix):
-        return (origin,)
-    mirror = f"docker://{_DOCKER_HUB_MIRROR}/{origin.removeprefix(docker_hub_prefix)}"
-    return mirror, origin
+def _mirrored_reference(image: str, mirror_repository: str) -> str:
+    """Return the configured mirror repository at the locked source digest."""
+    if _MIRROR_REPOSITORY.fullmatch(mirror_repository) is None:
+        raise OciImageIntegrityError("task image mirror repository is invalid")
+    digest = image.rsplit("@", 1)[1]
+    return f"docker://{mirror_repository}@{digest}"
 
 
 def _skopeo_source_copy_arguments(
@@ -514,37 +498,6 @@ def _skopeo_source_copy_arguments(
         source,
         f"dir:{source_directory}",
     ]
-
-
-def _copy_task_image(
-    auth_file: Path,
-    image: str,
-    source_directory: Path,
-    environment: dict[str, str],
-    max_bytes: int,
-) -> None:
-    """Copy one digest-pinned task image through an allowed public source."""
-    errors: list[OciRuntimeUnavailableError] = []
-    for source in _docker_source_references(image):
-        shutil.rmtree(source_directory, ignore_errors=True)
-        source_directory.mkdir(mode=0o700)
-        try:
-            _run_checked_with_directory_limit(
-                _skopeo_source_copy_arguments(auth_file, source, source_directory),
-                environment=environment,
-                label="task image copy",
-                directory=source_directory,
-                max_bytes=max_bytes,
-            )
-        except OciRuntimeUnavailableError as error:
-            errors.append(error)
-            continue
-        return
-    if len(errors) == 1:
-        raise errors[0]
-    raise OciRuntimeUnavailableError(
-        f"task image copy failed from the Docker Hub mirror and origin: {errors[-1]}"
-    ) from errors[-1]
 
 
 def _skopeo_oci_copy_arguments(
@@ -594,6 +547,7 @@ def _manifest_object(raw_manifest: bytes, label: str) -> dict[str, object]:
 def _selected_manifest(  # noqa: C901 -- explicit OCI index validation
     image: str,
     raw_manifest: bytes,
+    mirror_repository: str,
 ) -> tuple[str, str]:
     """Verify the locked digest and select one native Linux manifest."""
     expected_digest = image.rsplit("@", 1)[1]
@@ -605,7 +559,7 @@ def _selected_manifest(  # noqa: C901 -- explicit OCI index validation
     typed_value = _manifest_object(raw_manifest, "task image manifest")
     media_type = _optional(typed_value, "mediaType")
     if media_type not in _INDEX_MEDIA_TYPES:
-        return _docker_reference(image), expected_digest
+        return _mirrored_reference(image, mirror_repository), expected_digest
     manifests = _optional(typed_value, "manifests")
     if not isinstance(manifests, list):
         raise OciImageIntegrityError("task image index has no manifest list")
@@ -634,7 +588,7 @@ def _selected_manifest(  # noqa: C901 -- explicit OCI index validation
             "task image index must contain exactly one manifest for "
             f"linux/{architecture}"
         )
-    source = _docker_reference(image).rsplit("@", 1)[0]
+    source = _mirrored_reference(image, mirror_repository).rsplit("@", 1)[0]
     return f"{source}@{matches[0]}", matches[0]
 
 
@@ -736,6 +690,7 @@ def _image_manifest(
 def _copied_source_image(
     source_directory: Path,
     task_image: str,
+    mirror_repository: str,
     auth_file: Path,
     environment: dict[str, str],
     limits: ImageLimits,
@@ -756,7 +711,7 @@ def _copied_source_image(
                 "--authfile",
                 str(auth_file),
                 "--raw",
-                _docker_reference(task_image),
+                _mirrored_reference(task_image, mirror_repository),
             ],
             environment=environment,
             label="task image index inspection",
@@ -764,6 +719,7 @@ def _copied_source_image(
         _source, expected_selected_digest = _selected_manifest(
             task_image,
             raw_index,
+            mirror_repository,
         )
         if selected_digest != expected_selected_digest:
             raise OciImageIntegrityError(
@@ -1767,10 +1723,14 @@ class IsolatedOciRuntime:
         task_image: str,
         transfer_limits: TransferLimits,
         image_limits: ImageLimits,
+        *,
+        control_task_image_mirror_repository: str,
     ) -> None:
         if _DIGEST_IMAGE.fullmatch(task_image) is None:
             raise OciImageIntegrityError("task image is not digest-pinned")
         self.task_image = task_image
+        self.task_image_mirror_repository = control_task_image_mirror_repository
+        _mirrored_reference(task_image, control_task_image_mirror_repository)
         self.transfer_limits = transfer_limits
         self.image_limits = image_limits
         self.workspace = Path(tempfile.mkdtemp(prefix="harbor-hf-task-runtime-"))
@@ -1838,16 +1798,25 @@ class IsolatedOciRuntime:
             "copy",
         )
         source_directory = self.workspace / "source"
-        _copy_task_image(
-            auth_file,
-            self.task_image,
-            source_directory,
-            self._environment,
-            self.image_limits.max_bytes + _IMAGE_COPY_OVERHEAD_BYTES,
+        source_directory.mkdir(mode=0o700)
+        _run_checked_with_directory_limit(
+            _skopeo_source_copy_arguments(
+                auth_file,
+                _mirrored_reference(
+                    self.task_image,
+                    self.task_image_mirror_repository,
+                ),
+                source_directory,
+            ),
+            environment=self._environment,
+            label="task image copy",
+            directory=source_directory,
+            max_bytes=self.image_limits.max_bytes + _IMAGE_COPY_OVERHEAD_BYTES,
         )
         manifest, source_config = _copied_source_image(
             source_directory,
             self.task_image,
+            self.task_image_mirror_repository,
             auth_file,
             self._environment,
             self.image_limits,

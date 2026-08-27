@@ -21,6 +21,7 @@ _TASK_IMAGE = (
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 _DECLARED_TASK_IMAGE = "example.invalid/task:release"
+_MIRROR_REPOSITORY = "mirror.example/harbor-hf/tasks"
 
 
 class FakeRuntime:
@@ -31,10 +32,16 @@ class FakeRuntime:
     exec_error: BaseException | None = None
 
     def __init__(
-        self, image: str, transfer_limits: object, image_limits: object
+        self,
+        image: str,
+        transfer_limits: object,
+        image_limits: object,
+        *,
+        control_task_image_mirror_repository: str,
     ) -> None:
         del transfer_limits, image_limits
         self.image = image
+        self.task_image_mirror_repository = control_task_image_mirror_repository
         self.started = False
         self.stopped = False
         self.quiesced = False
@@ -132,6 +139,10 @@ def _trusted_worker(
     monkeypatch.setenv("HARBOR_HF_RUN_ID", "run-id")
     monkeypatch.setenv("HARBOR_HF_ACTION_ID", "action-id")
     monkeypatch.setenv("HARBOR_HF_TASK_IMAGE", _TASK_IMAGE)
+    monkeypatch.setenv(
+        "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY",
+        _MIRROR_REPOSITORY,
+    )
     monkeypatch.setenv("HARBOR_HF_MAX_IMAGE_BYTES", "1024")
     monkeypatch.setenv("HARBOR_HF_MAX_IMAGE_ENTRIES", "8")
     monkeypatch.delenv("HF_TOKEN", raising=False)
@@ -161,6 +172,19 @@ def _environment(tmp_path: Path, *, timeout: int = 5) -> ControlJobEnvironment:
     )
 
 
+def test_requires_task_image_mirror_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY")
+
+    with pytest.raises(
+        JobEnvironmentPreflightError,
+        match="HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY",
+    ):
+        _environment(tmp_path)
+
+
 @pytest.mark.asyncio
 async def test_exec_passes_only_explicit_task_environment(tmp_path: Path) -> None:
     environment = _environment(tmp_path)
@@ -175,6 +199,7 @@ async def test_exec_passes_only_explicit_task_environment(tmp_path: Path) -> Non
     assert result.return_code == 0
     runtime = FakeRuntime.instances[-1]
     assert runtime.image == _TASK_IMAGE
+    assert runtime.task_image_mirror_repository == _MIRROR_REPOSITORY
     assert runtime.exec_calls == [
         {
             "command": "env",

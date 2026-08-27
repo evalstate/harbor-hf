@@ -13,6 +13,12 @@ const schema = z.object({
   HARBOR_HF_PROFILES_ROOT: z.string().min(1).default("./profiles"),
   HARBOR_HF_CAPACITY_PROFILE_ALIAS: z.string().min(2).max(160).optional(),
   HARBOR_HF_MAX_ACTIVE_JOBS: z.coerce.number().int().min(1).max(1024).default(16),
+  HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY: z
+    .string()
+    .regex(
+      /^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?\/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/,
+    )
+    .default("ghcr.io/huggingface/harbor-hf-trial-worker"),
   HARBOR_HF_WEB_ROOT: z.string().min(1).default("./apps/control-web/dist"),
   HARBOR_HF_AUTH_MODE: z.enum(["oauth", "development"]).default("oauth"),
   HARBOR_HF_WRITE_MODE: z.enum(["disabled", "enabled"]).default("disabled"),
@@ -64,6 +70,7 @@ export interface AppConfig {
   profiles_root: string;
   capacity_profile_alias: string | null;
   max_active_jobs: number;
+  task_image_mirror_repository: string;
   web_root: string;
   auth_mode: "oauth" | "development";
   write_mode: "disabled" | "enabled";
@@ -157,6 +164,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     profiles_root: resolve(parsed.HARBOR_HF_PROFILES_ROOT),
     capacity_profile_alias: parsed.HARBOR_HF_CAPACITY_PROFILE_ALIAS ?? null,
     max_active_jobs: parsed.HARBOR_HF_MAX_ACTIVE_JOBS,
+    task_image_mirror_repository: parsed.HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY,
     web_root: resolve(parsed.HARBOR_HF_WEB_ROOT),
     auth_mode: parsed.HARBOR_HF_AUTH_MODE,
     write_mode: parsed.HARBOR_HF_WRITE_MODE,
