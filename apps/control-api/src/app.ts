@@ -1285,7 +1285,11 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       } catch (error) {
         if (
           error instanceof Error &&
-          error.message === "local setup testing is not enabled"
+          [
+            "setup testing is not enabled",
+            "Hugging Face setup Jobs are not enabled",
+            "Hugging Face setup Job could not be started",
+          ].includes(error.message)
         )
           throw new ControlNotReadyError(error.message);
         throw new PolicyError(
@@ -1293,6 +1297,23 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         );
       }
     },
+  );
+
+  app.get(
+    "/api/v1/workbench/setup-tests",
+    {
+      schema: {
+        tags: ["workbench"],
+        response: {
+          200: { type: "array", items: workbenchSetupSchema },
+          503: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request) =>
+      await runtime.workbench.listSetups(actor(request).subject).catch(() => {
+        throw new ControlNotReadyError("setup recovery is temporarily unavailable");
+      }),
   );
 
   app.get(
@@ -1308,6 +1329,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         response: {
           200: workbenchSetupSchema,
           404: cleanSchema(schemas.apiError),
+          503: cleanSchema(schemas.apiError),
         },
       },
     },
@@ -1315,7 +1337,10 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       const { setup_test_id: setupTestId } = request.params as {
         setup_test_id: string;
       };
-      const result = runtime.workbench.getSetup(setupTestId, actor(request).subject);
+      const result = await runtime.workbench.getSetup(
+        setupTestId,
+        actor(request).subject,
+      );
       if (!result)
         return reply.code(404).send({
           error: {
@@ -1342,6 +1367,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         response: {
           200: workbenchSetupSchema,
           404: cleanSchema(schemas.apiError),
+          503: cleanSchema(schemas.apiError),
         },
       },
     },
@@ -1350,7 +1376,13 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       const { setup_test_id: setupTestId } = request.params as {
         setup_test_id: string;
       };
-      const result = runtime.workbench.cancelSetup(setupTestId, actor(request).subject);
+      const result = await runtime.workbench
+        .cancelSetup(setupTestId, actor(request).subject)
+        .catch(() => {
+          throw new ControlNotReadyError(
+            "setup cancellation is temporarily unavailable",
+          );
+        });
       if (!result)
         return reply.code(404).send({
           error: {
@@ -1383,7 +1415,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       const { setup_test_id: setupTestId } = request.params as {
         setup_test_id: string;
       };
-      const result = runtime.workbench.logs(setupTestId, actor(request).subject);
+      const result = await runtime.workbench.logs(setupTestId, actor(request).subject);
       if (!result)
         return reply.code(404).send({
           error: {

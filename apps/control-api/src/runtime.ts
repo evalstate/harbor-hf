@@ -14,6 +14,7 @@ import {
   attestInferenceToken,
   HuggingFaceActions,
   HuggingFaceBucketStore,
+  HuggingFaceWorkbenchJobs,
   NoopActions,
 } from "@harbor-hf/hf-adapters";
 import { AuthenticationService, AuthStore } from "./auth.js";
@@ -67,9 +68,19 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
     : null;
   const external = hfActions ?? new NoopActions();
   const publisher = new ResultPublisher(store, projection, service);
+  const workbenchJobs =
+    config.workbench_runner === "hf-jobs" && config.hf_token
+      ? new HuggingFaceWorkbenchJobs({
+          namespace: config.namespace,
+          accessToken: config.hf_token,
+          image: config.workbench_image,
+          maxActiveJobs: config.max_active_jobs,
+        })
+      : null;
   const workbench = new WorkbenchRuntime(
     config.workbench_runner,
     config.workbench_image,
+    workbenchJobs,
   );
   const reconciler = new Reconciler(service, projection, external, publisher, {
     interval_ms: config.reconcile_interval_ms,

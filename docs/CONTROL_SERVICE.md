@@ -165,10 +165,17 @@ environment bindings, and the generic Harbor command-agent plugin. Credentials
 remain in the root-owned inference bridge; recipes receive only a loopback URL
 and placeholder key.
 
-The current Docker setup runner is development-only, actor-scoped, and
-ephemeral. Production and test configurations default it to disabled. It is not
-a second reconciler or production execution path. Durable remote setup
-verification must use normal control records and reviewed Jobs.
+Workbench setup verification is actor-scoped and ephemeral. Development
+defaults to a local Docker runner; production and test configurations default
+to disabled. An explicitly configured hosted installation may use the thin
+direct Hugging Face Jobs adapter documented in
+[Agent Workbench](agent-workbench.md). That adapter is not a Harbor Run,
+profile, action-intent, publication, or second reconciler path. It launches no
+inference credential or shared volume, keeps setup state intentionally
+ephemeral, bounds active namespace Jobs, and relies on the remote timeout to
+bound an abrupt control-service failure. Opaque actor and recipe labels allow
+the restarted service to recover recent actor-owned setup Jobs from the
+namespace Job listing without storing customer commands in control records.
 
 The current implementation does not bind a verified recipe to a Run. That
 handoff remains disabled until the exact setup-tested recipe can be finalized

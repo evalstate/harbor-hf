@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -18,10 +19,17 @@ import {
   type AgentWorkbenchPreview,
   workbenchRuntimeValues,
 } from "@harbor-hf/control-core";
+import type {
+  WorkbenchJobClient,
+  WorkbenchJobEvent,
+  WorkbenchJobSnapshot,
+} from "@harbor-hf/hf-adapters";
 
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_FILES = 1_000;
 const MAX_PREVIEW_BYTES = 64 * 1024;
+const MAX_TOTAL_PREVIEW_BYTES = 1024 * 1024;
+const MAX_REMOTE_EVENTS = 4_096;
 
 export interface WorkbenchFile {
   file_id: string;
@@ -55,12 +63,20 @@ interface SetupState extends WorkbenchSetupView {
   owner: string;
   stdout: string;
   stderr: string;
-  directory: string;
+  directory: string | null;
   process: ChildProcess | null;
   timeout: NodeJS.Timeout | null;
   cancellation_requested: boolean;
-  container_name: string;
+  container_name: string | null;
   filePaths: Map<string, string>;
+  filePreviews: Map<string, { content: string; truncated: boolean }>;
+  remote_job_id: string | null;
+  remote_abort: AbortController | null;
+  remote_stream: Promise<void> | null;
+  remote_stream_complete: boolean;
+  remote_result_received: boolean;
+  remote_sequences: Set<number>;
+  remote_preview_bytes: number;
 }
 
 function appendBounded(current: string, chunk: Buffer): string {
@@ -133,8 +149,11 @@ export class WorkbenchRuntime {
   private root: string | null = null;
 
   constructor(
-    private readonly mode: "disabled" | "docker",
+    private readonly mode: "disabled" | "docker" | "hf-jobs",
     private readonly image: string,
+    private readonly remoteJobs: WorkbenchJobClient | null = null,
+    private readonly remoteLogSliceMs = 5_000,
+    private readonly remoteRetryMs = 1_000,
   ) {}
 
   preview(value: unknown): AgentWorkbenchPreview {
@@ -151,7 +170,7 @@ export class WorkbenchRuntime {
     owner: string,
     idempotencyKey: string,
   ): Promise<WorkbenchSetupView> {
-    if (this.mode !== "docker") throw new Error("local setup testing is not enabled");
+    if (this.mode === "disabled") throw new Error("setup testing is not enabled");
     const preview = this.preview(value);
     const setupTestId = deterministicId(
       "setup-test",
@@ -161,6 +180,8 @@ export class WorkbenchRuntime {
     );
     const existing = this.setupTests.get(setupTestId);
     if (existing) return this.view(existing);
+    if (this.mode === "hf-jobs")
+      return await this.startRemoteSetup(preview, setupTestId, owner);
     const root = await this.workbenchRoot();
     const directory = resolve(root, setupTestId);
     const workspace = join(directory, "workspace");
@@ -206,6 +227,14 @@ export class WorkbenchRuntime {
       cancellation_requested: false,
       container_name: containerName,
       filePaths: new Map(),
+      filePreviews: new Map(),
+      remote_job_id: null,
+      remote_abort: null,
+      remote_stream: null,
+      remote_stream_complete: false,
+      remote_result_received: false,
+      remote_sequences: new Set(),
+      remote_preview_bytes: 0,
     };
     this.setupTests.set(setupTestId, state);
     const args = [
@@ -305,7 +334,288 @@ export class WorkbenchRuntime {
     return this.view(state);
   }
 
-  cancelSetup(setupTestId: string, owner: string): WorkbenchSetupView | null {
+  private async startRemoteSetup(
+    preview: AgentWorkbenchPreview,
+    setupTestId: string,
+    owner: string,
+  ): Promise<WorkbenchSetupView> {
+    if (!this.remoteJobs) throw new Error("Hugging Face setup Jobs are not enabled");
+    const state: SetupState = {
+      setup_test_id: setupTestId,
+      recipe_digest: preview.recipe_digest,
+      revision_id: preview.revision_id,
+      status: "queued",
+      created_at: new Date().toISOString(),
+      started_at: null,
+      completed_at: null,
+      exit_code: null,
+      error: null,
+      files: [],
+      owner,
+      stdout: "",
+      stderr: "",
+      directory: null,
+      process: null,
+      timeout: null,
+      cancellation_requested: false,
+      container_name: null,
+      filePaths: new Map(),
+      filePreviews: new Map(),
+      remote_job_id: null,
+      remote_abort: null,
+      remote_stream: null,
+      remote_stream_complete: false,
+      remote_result_received: false,
+      remote_sequences: new Set(),
+      remote_preview_bytes: 0,
+    };
+    this.setupTests.set(setupTestId, state);
+    try {
+      const job = await this.remoteJobs.start({
+        setup_id: setupTestId,
+        owner_digest: sha256(owner).replace(/^sha256:/, ""),
+        recipe_digest: preview.recipe_digest,
+        revision_id: preview.revision_id,
+        setup_command: preview.recipe.setup_command,
+        timeout_seconds: preview.recipe.setup_timeout_seconds,
+        environment: setupEnvironment(preview.recipe),
+      });
+      state.remote_job_id = job.job_id;
+      this.applyRemoteSnapshot(state, job);
+      const abort = new AbortController();
+      state.remote_abort = abort;
+      state.remote_stream = this.consumeRemoteEvents(state, abort.signal);
+      return this.view(state);
+    } catch (error) {
+      this.setupTests.delete(setupTestId);
+      throw new Error("Hugging Face setup Job could not be started", {
+        cause: error,
+      });
+    }
+  }
+
+  async listSetups(owner: string): Promise<WorkbenchSetupView[]> {
+    if (this.mode !== "hf-jobs" || !this.remoteJobs)
+      return [...this.setupTests.values()]
+        .filter((state) => state.owner === owner)
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))
+        .map((state) => this.view(state));
+    const recoveries = await this.remoteJobs.list(
+      sha256(owner).replace(/^sha256:/, ""),
+    );
+    for (const recovery of recoveries) {
+      if (this.setupTests.has(recovery.setup_id)) continue;
+      const abort = new AbortController();
+      const state: SetupState = {
+        setup_test_id: recovery.setup_id,
+        recipe_digest: recovery.recipe_digest,
+        revision_id: recovery.revision_id,
+        status: "queued",
+        created_at: recovery.snapshot.created_at,
+        started_at: recovery.snapshot.started_at,
+        completed_at: recovery.snapshot.completed_at,
+        exit_code: null,
+        error: null,
+        files: [],
+        owner,
+        stdout: "",
+        stderr: "",
+        directory: null,
+        process: null,
+        timeout: null,
+        cancellation_requested: false,
+        container_name: null,
+        filePaths: new Map(),
+        filePreviews: new Map(),
+        remote_job_id: recovery.snapshot.job_id,
+        remote_abort: abort,
+        remote_stream: null,
+        remote_stream_complete: false,
+        remote_result_received: false,
+        remote_sequences: new Set(),
+        remote_preview_bytes: 0,
+      };
+      this.setupTests.set(recovery.setup_id, state);
+      this.applyRemoteSnapshot(state, recovery.snapshot);
+      state.remote_stream = this.consumeRemoteEvents(state, abort.signal);
+    }
+    return recoveries
+      .map((recovery) => this.setupTests.get(recovery.setup_id))
+      .filter((state): state is SetupState => state !== undefined)
+      .map((state) => this.view(state));
+  }
+
+  private applyRemoteEvent(state: SetupState, event: WorkbenchJobEvent): void {
+    if (state.remote_sequences.has(event.sequence)) return;
+    if (state.remote_sequences.size >= MAX_REMOTE_EVENTS) return;
+    state.remote_sequences.add(event.sequence);
+    if (event.kind === "stdout" || event.kind === "stderr") {
+      state[event.kind] = appendBounded(
+        state[event.kind],
+        Buffer.from(event.content, "utf8"),
+      );
+      return;
+    }
+    if (event.kind === "file") {
+      if (state.files.length >= MAX_FILES) return;
+      const fileId = deterministicId(
+        "workbench-file",
+        state.setup_test_id,
+        event.root,
+        event.path,
+      );
+      if (state.files.some((file) => file.file_id === fileId)) return;
+      state.files.push({
+        file_id: fileId,
+        path: event.path,
+        root: event.root,
+        size: event.size,
+        text: event.text,
+      });
+      const previewBytes =
+        event.text && event.content !== null ? Buffer.byteLength(event.content) : 0;
+      const retainPreview =
+        previewBytes <= MAX_PREVIEW_BYTES &&
+        state.remote_preview_bytes + previewBytes <= MAX_TOTAL_PREVIEW_BYTES;
+      if (retainPreview && event.text && event.content !== null) {
+        state.filePreviews.set(fileId, {
+          content: event.content,
+          truncated: false,
+        });
+        state.remote_preview_bytes += previewBytes;
+      }
+      state.files.sort(
+        (left, right) =>
+          left.root.localeCompare(right.root) || left.path.localeCompare(right.path),
+      );
+      return;
+    }
+    if (event.kind !== "result") return;
+    state.remote_result_received = true;
+    state.exit_code = event.exit_code;
+    state.status = state.cancellation_requested
+      ? "cancelled"
+      : event.timed_out
+        ? "timed-out"
+        : event.exit_code === 0
+          ? "passed"
+          : "failed";
+    state.completed_at = new Date().toISOString();
+  }
+
+  private async consumeRemoteEvents(
+    state: SetupState,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!this.remoteJobs || !state.remote_job_id) return;
+    let terminalObserved = false;
+    try {
+      while (!signal.aborted && !state.remote_result_received) {
+        try {
+          const attemptSignal = AbortSignal.any([
+            signal,
+            AbortSignal.timeout(this.remoteLogSliceMs),
+          ]);
+          for await (const event of this.remoteJobs.events(
+            state.remote_job_id,
+            attemptSignal,
+          )) {
+            this.applyRemoteEvent(state, event);
+            if (state.remote_result_received) break;
+          }
+        } catch {
+          if (signal.aborted) return;
+        }
+        if (signal.aborted || state.remote_result_received) return;
+        let snapshot: WorkbenchJobSnapshot | null = null;
+        try {
+          snapshot = await this.remoteJobs.observe(state.remote_job_id);
+          this.applyRemoteSnapshot(state, snapshot);
+        } catch {
+          snapshot = null;
+        }
+        const terminal =
+          snapshot !== null && this.remoteStageIsTerminal(snapshot.stage);
+        if (terminal && terminalObserved) return;
+        terminalObserved = terminal;
+        await this.waitForRemoteRetry(signal);
+      }
+    } finally {
+      state.remote_stream_complete = true;
+      if (!signal.aborted) await this.refreshRemote(state);
+    }
+  }
+
+  private remoteStageIsTerminal(stage: string): boolean {
+    return ["STOPPED", "COMPLETED", "CANCELLED", "CANCELED", "ERROR"].includes(
+      stage.toUpperCase(),
+    );
+  }
+
+  private async waitForRemoteRetry(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(finish, this.remoteRetryMs);
+      signal.addEventListener("abort", finish, { once: true });
+      function finish() {
+        clearTimeout(timeout);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      }
+    });
+  }
+
+  private applyRemoteSnapshot(state: SetupState, snapshot: WorkbenchJobSnapshot): void {
+    state.created_at = snapshot.created_at;
+    state.started_at = snapshot.started_at;
+    const stage = snapshot.stage.toUpperCase();
+    const terminal = this.remoteStageIsTerminal(stage);
+    if (!terminal) {
+      state.status = state.cancellation_requested
+        ? "cancelling"
+        : stage === "RUNNING"
+          ? "running"
+          : "queued";
+      return;
+    }
+    if (state.remote_result_received) {
+      state.completed_at ??= snapshot.completed_at;
+      return;
+    }
+    if (!state.remote_stream_complete) return;
+    state.completed_at = snapshot.completed_at ?? new Date().toISOString();
+    if (state.cancellation_requested || stage === "CANCELLED" || stage === "CANCELED") {
+      state.status = "cancelled";
+      return;
+    }
+    if (
+      stage === "ERROR" &&
+      snapshot.message &&
+      /tim(?:e|ed)[ -]?out/i.test(snapshot.message)
+    ) {
+      state.status = "timed-out";
+      return;
+    }
+    state.status = "failed";
+    state.error ??= "setup Job completed without a final result";
+  }
+
+  private async refreshRemote(state: SetupState): Promise<void> {
+    if (!this.remoteJobs || !state.remote_job_id) return;
+    try {
+      this.applyRemoteSnapshot(
+        state,
+        await this.remoteJobs.observe(state.remote_job_id),
+      );
+    } catch {
+      return;
+    }
+  }
+
+  async cancelSetup(
+    setupTestId: string,
+    owner: string,
+  ): Promise<WorkbenchSetupView | null> {
     const state = this.setupTests.get(setupTestId);
     if (!state || state.owner !== owner) return null;
     if (["cancelled", "passed", "failed", "timed-out"].includes(state.status))
@@ -314,22 +624,43 @@ export class WorkbenchRuntime {
     state.status = "cancelling";
     if (state.timeout) clearTimeout(state.timeout);
     state.timeout = null;
-    if (state.process) {
+    if (state.process && state.container_name) {
       const killed = spawnSync("docker", ["kill", state.container_name], {
         stdio: "ignore",
       });
       if (killed.status !== 0) state.process.kill("SIGTERM");
     }
+    if (state.remote_job_id && this.remoteJobs) {
+      try {
+        this.applyRemoteSnapshot(
+          state,
+          await this.remoteJobs.cancel(state.remote_job_id),
+        );
+      } catch (error) {
+        await this.refreshRemote(state);
+        if (!["cancelled", "passed", "failed", "timed-out"].includes(state.status))
+          throw new Error("Hugging Face setup Job could not be cancelled", {
+            cause: error,
+          });
+      }
+    }
     return this.view(state);
   }
 
-  getSetup(setupTestId: string, owner: string): WorkbenchSetupView | null {
+  async getSetup(
+    setupTestId: string,
+    owner: string,
+  ): Promise<WorkbenchSetupView | null> {
     const state = this.setupTests.get(setupTestId);
     if (!state || state.owner !== owner) return null;
+    if (state.remote_job_id) await this.refreshRemote(state);
     return this.view(state);
   }
 
-  logs(setupTestId: string, owner: string): { stdout: string; stderr: string } | null {
+  async logs(
+    setupTestId: string,
+    owner: string,
+  ): Promise<{ stdout: string; stderr: string } | null> {
     const state = this.setupTests.get(setupTestId);
     if (!state || state.owner !== owner) return null;
     return { stdout: state.stdout, stderr: state.stderr };
@@ -342,13 +673,22 @@ export class WorkbenchRuntime {
   ): Promise<{ content: string; truncated: boolean } | null> {
     const state = this.setupTests.get(setupTestId);
     const path = state?.filePaths.get(fileId);
-    if (!state || state.owner !== owner || !path) return null;
-    const bytes = await readFile(path);
-    const selected = bytes.subarray(0, MAX_PREVIEW_BYTES);
-    return {
-      content: selected.toString("utf8"),
-      truncated: bytes.length > selected.length,
-    };
+    if (!state || state.owner !== owner) return null;
+    const preview = state.filePreviews.get(fileId);
+    if (preview) return preview;
+    if (!path) return null;
+    const handle = await open(path, "r");
+    try {
+      const bytes = Buffer.alloc(MAX_PREVIEW_BYTES + 1);
+      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+      const selected = bytes.subarray(0, Math.min(bytesRead, MAX_PREVIEW_BYTES));
+      return {
+        content: selected.toString("utf8"),
+        truncated: bytesRead > selected.length,
+      };
+    } finally {
+      await handle.close();
+    }
   }
 
   private view(state: SetupState): WorkbenchSetupView {
@@ -367,14 +707,29 @@ export class WorkbenchRuntime {
   }
 
   async close(): Promise<void> {
+    const remoteStreams: Promise<void>[] = [];
+    const remoteCancellations: Promise<unknown>[] = [];
     for (const state of this.setupTests.values()) {
       if (state.process) {
         if (state.timeout) clearTimeout(state.timeout);
         state.timeout = null;
-        spawnSync("docker", ["kill", state.container_name], { stdio: "ignore" });
+        if (state.container_name)
+          spawnSync("docker", ["kill", state.container_name], { stdio: "ignore" });
         state.process.kill();
       }
+      if (
+        this.remoteJobs &&
+        state.remote_job_id &&
+        !["cancelled", "passed", "failed", "timed-out"].includes(state.status)
+      )
+        remoteCancellations.push(
+          this.remoteJobs.cancel(state.remote_job_id).catch(() => undefined),
+        );
+      state.remote_abort?.abort();
+      if (state.remote_stream) remoteStreams.push(state.remote_stream);
     }
+    await Promise.allSettled(remoteCancellations);
+    await Promise.allSettled(remoteStreams);
     if (this.root) await rm(this.root, { recursive: true, force: true });
     this.root = null;
   }

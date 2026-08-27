@@ -11,7 +11,8 @@ The Workbench is intentionally low ceremony:
 2. Bind environment variables to typed runtime values instead of pasting
    credentials.
 3. Review the server-generated command and environment preview.
-4. Confirm and run setup in a disposable local Docker container.
+4. Confirm and run setup in a disposable local Docker container or Hugging Face
+   Job.
 5. Inspect bounded logs and files created beneath the setup workspace or logs
    directory.
 
@@ -86,7 +87,7 @@ The harness profile omits a fixed model name. During normal Harbor preparation,
 the worker injects the model name from the selected immutable model profile.
 If a harness explicitly declares a different model, preparation rejects it.
 
-## Local setup runner
+## Disposable setup runners
 
 The control API supports:
 
@@ -103,8 +104,8 @@ Setup execution is controlled by:
 
 | Variable | Values | Behavior |
 | --- | --- | --- |
-| `HARBOR_HF_WORKBENCH_RUNNER` | `disabled`, `docker` | Development defaults to `docker`; production and tests default to `disabled`. |
-| `HARBOR_HF_WORKBENCH_IMAGE` | Docker image reference | Defaults to `python:3.12-slim` in the current local implementation. |
+| `HARBOR_HF_WORKBENCH_RUNNER` | `disabled`, `docker`, `hf-jobs` | Development defaults to `docker`; production and tests default to `disabled`. Selecting `hf-jobs` requires `HF_TOKEN`. |
+| `HARBOR_HF_WORKBENCH_IMAGE` | Docker image reference | Defaults to `python:3.12-slim`; hosted installations should configure a reviewed immutable image reference. |
 
 The Docker runner:
 
@@ -116,18 +117,36 @@ The Docker runner:
 - refuses symlink and special-file previews; and
 - scopes in-memory setup state to the authenticated actor.
 
+The Hugging Face Jobs runner is a thin disposable adapter. It:
+
+- calls the Hugging Face Jobs API directly rather than creating a Harbor Run,
+  profile, lock, action intent, or reconciler record;
+- checks the configured namespace active-Job limit before launching;
+- launches one `cpu-basic` Job with one attempt and the recipe's setup timeout
+  plus a short finalization allowance;
+- labels the Job with opaque setup, actor, recipe, and revision digests so the
+  Workbench can recover the actor's recent setup tests after a service restart;
+- supplies no Job secrets, volumes, worker capability, inference credential, or
+  model route;
+- uses the control credential only in the control-service-to-Hub request;
+- runs the customer command with a constructed environment containing only
+  declared setup bindings plus managed `HOME` and `PATH`;
+- frames bounded stdout, stderr, file metadata, text previews, and the final
+  exit result through the private Job log stream; and
+- observes and cancels the exact Job directly through the Jobs API.
+
 After submission, the web application replaces the one-time confirmation
 control with an inline active-setup panel. The panel polls status and bounded
 stdout/stderr once per second, follows new output, and provides a separately
-confirmed Cancel action. Cancellation stops the Docker container, retains the
-available logs and files, and records the terminal setup state as `cancelled`
-rather than a generic failure.
+confirmed Cancel action. Cancellation stops the configured disposable
+environment, retains the available logs and files, and records the terminal
+setup state as `cancelled` rather than a generic failure.
 
-The runner is a local development facility. Setup-test state and files are
-ephemeral and are deleted when the API process stops. Production-shaped setup
-testing must use the existing durable control records, reconciler, and reviewed
-Hugging Face Job path rather than executing customer commands on the control
-host.
+Setup-test API state, reconstructed logs, and file previews remain intentionally
+ephemeral and actor-scoped. A graceful control-service shutdown cancels active
+setup environments; an abrupt failure can leave an HF Job running only until
+its bounded remote timeout. The remote Job is the lifecycle object, but the
+Workbench does not turn setup verification into durable benchmark state.
 
 ## Fast-Agent starter
 

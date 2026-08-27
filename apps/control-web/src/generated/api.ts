@@ -494,7 +494,64 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            setup_test_id: string;
+                            recipe_digest: string;
+                            revision_id: string;
+                            /** @enum {unknown} */
+                            status: "queued" | "running" | "cancelling" | "cancelled" | "passed" | "failed" | "timed-out";
+                            /** Format: date-time */
+                            created_at: string;
+                            started_at: string | null;
+                            completed_at: string | null;
+                            exit_code: number | null;
+                            error: string | null;
+                            files: {
+                                file_id: string;
+                                path: string;
+                                /** @enum {unknown} */
+                                root: "workspace" | "logs";
+                                size: number;
+                                text: boolean;
+                            }[];
+                        }[];
+                    };
+                };
+                /** @description Default Response */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                code: string;
+                                message: string;
+                                request_id: string;
+                                fields?: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
         put?: never;
         post: {
             parameters: {
@@ -653,6 +710,24 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Default Response */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                code: string;
+                                message: string;
+                                request_id: string;
+                                fields?: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
             };
         };
         put?: never;
@@ -721,6 +796,24 @@ export interface paths {
                 };
                 /** @description Default Response */
                 404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                code: string;
+                                message: string;
+                                request_id: string;
+                                fields?: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
+                /** @description Default Response */
+                503: {
                     headers: {
                         [name: string]: unknown;
                     };

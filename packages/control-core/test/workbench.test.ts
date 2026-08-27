@@ -76,6 +76,24 @@ describe("Agent Workbench recipe compiler", () => {
         ],
       }),
     ).toThrow("credential-like");
+    expect(() =>
+      compileAgentWorkbenchRecipe({
+        ...structuredClone(fastAgentWorkbenchStarter),
+        setup_command: `printf '%s' '${["hf", "not-a-real-token-value"].join("_")}'`,
+      }),
+    ).toThrow("credential-like");
+    expect(() =>
+      compileAgentWorkbenchRecipe({
+        ...structuredClone(fastAgentWorkbenchStarter),
+        environment: [
+          {
+            name: "CONFIG",
+            source: "literal",
+            value: ["hf", "not-a-real-token-value"].join("_"),
+          },
+        ],
+      }),
+    ).toThrow("credential");
   });
 
   it("keeps instructions as a path binding instead of command text", () => {

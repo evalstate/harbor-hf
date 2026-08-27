@@ -15,6 +15,7 @@ import {
   getWorkbenchFile,
   getWorkbenchLogs,
   getWorkbenchSetup,
+  listWorkbenchSetups,
   previewWorkbenchRecipe,
   startWorkbenchSetup,
   type WorkbenchFile,
@@ -125,6 +126,14 @@ export function WorkbenchPage() {
   const liveOutput = `${logs.stdout}${logs.stderr ? `\n[stderr]\n${logs.stderr}` : ""}`;
 
   useEffect(() => {
+    void listWorkbenchSetups()
+      .then((setups) => {
+        if (setups[0]) setSetup(setups[0]);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     const sequence = ++previewSequence.current;
     setChecking(true);
     setPreviewError(null);
@@ -213,7 +222,7 @@ export function WorkbenchPage() {
     if (!setup || !setupActive) return;
     if (
       !window.confirm(
-        "Cancel this setup test? The running Docker container will be stopped.",
+        "Cancel this setup test? The disposable setup environment will be stopped.",
       )
     )
       return;
@@ -304,7 +313,7 @@ export function WorkbenchPage() {
                   }
                 />
                 <span className="mt-1 block text-xs text-slate-500">
-                  Runs without model credentials in a disposable container.
+                  Runs without model credentials in a disposable setup environment.
                 </span>
               </label>
               <label className="block">
@@ -499,8 +508,7 @@ export function WorkbenchPage() {
                     onChange={(event) => setConfirmed(event.target.checked)}
                   />
                   <span>
-                    Launch this exact setup recipe in a disposable local Docker
-                    container.
+                    Launch this exact setup recipe in a disposable CPU sandbox.
                   </span>
                 </label>
                 <Button

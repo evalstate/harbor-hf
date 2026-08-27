@@ -154,6 +154,10 @@ export async function startWorkbenchSetup(
   });
 }
 
+export async function listWorkbenchSetups(): Promise<WorkbenchSetup[]> {
+  return request<WorkbenchSetup[]>("/api/v1/workbench/setup-tests");
+}
+
 export async function getWorkbenchSetup(id: string): Promise<WorkbenchSetup> {
   return request<WorkbenchSetup>(
     `/api/v1/workbench/setup-tests/${encodeURIComponent(id)}`,

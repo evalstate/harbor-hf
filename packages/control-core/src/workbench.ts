@@ -21,7 +21,7 @@ const reservedEnvironment = new Set([
 
 const secretName = /(?:^|_)(?:API_?KEY|ACCESS_?TOKEN|AUTH_?TOKEN|PASSWORD|SECRET)$/i;
 const suspiciousLiteral =
-  /(?:\bBearer\s+[A-Za-z0-9._~+/-]{12,}|(?:hf|sk)-[A-Za-z0-9_-]{12,})/i;
+  /(?:\bBearer\s+[A-Za-z0-9._~+/-]{12,}|hf[_-][A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,})/i;
 
 export const workbenchRuntimeValues = {
   instruction_path: "/run/agent/instruction.txt",
@@ -119,6 +119,11 @@ function expandSimpleEnvironment(
 function validateRecipeSemantics(recipe: AgentWorkbenchRecipeV1): void {
   if (recipe.setup_command.includes("\0") || recipe.run_command.includes("\0"))
     throw new Error("commands must not contain NUL characters");
+  if (
+    suspiciousLiteral.test(recipe.setup_command) ||
+    suspiciousLiteral.test(recipe.run_command)
+  )
+    throw new Error("commands must not contain credential-like values");
   const names = new Set<string>();
   const sources = new Map<
     string,
