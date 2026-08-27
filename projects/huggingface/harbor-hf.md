@@ -11,7 +11,7 @@ default_branch: main
 
 Status: approved
 Approved at: 2026-08-17T06:48:55Z
-Amended at: 2026-08-26T12:06:30Z
+Amended at: 2026-08-27T14:35:22Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -67,6 +67,7 @@ Installer readiness-polling amendment approved at: 2026-08-24T15:31:07Z
 Slophammer mutation-declaration amendment approved at: 2026-08-24T18:24:12Z
 Failed-Run replacement amendment approved at: 2026-08-25T22:29:22Z
 Admission-integrity repair amendment approved at: 2026-08-26T12:06:30Z
+Agent-Workbench amendment approved at: 2026-08-27T14:35:22Z
 
 ### Scope
 
@@ -136,6 +137,11 @@ Admission-integrity repair amendment approved at: 2026-08-26T12:06:30Z
 - After the redesigned service passes an unpaid control canary and a bounded paid task canary, launch fresh Terminal-Bench 2.1 single-trial runs for the Chat Completions harnesses with explicit launch authorization.
 - Harden worker retries across control-service projection rebuilds, delete only the seven fresh Runs whose final preparation Jobs failed on `control_not_ready`, and launch one replacement Run for each same authorized harness after the hardened path passes its canaries.
 - Repair the single detected Job admission-chain fork by deleting only its orphaned admission object, which has no dispatch, receipt, capacity release, advancement, or remote Job. Preserve its action intent and every other Run record. Add startup projection catch-up, deploy the reviewed revision, and restart the existing control Space.
+- Build a user-friendly Agent Workbench for private customer-authored command-agent configurations. Support editable setup and run commands, typed environment bindings, redacted expansion previews, immutable execution revisions, setup-only tests, streaming logs, bounded private file browsing, result access, and direct transition from setup verification to a small benchmark run.
+- Add one generic Harbor command-agent plugin behind the public agent interface. Keep install and execution commands, environment bindings, output declarations, and optional trace normalization as immutable configuration data. Harbor remains authoritative for task execution, verifier rewards, locks, results, and trial exceptions.
+- Add a Fast-Agent 0.10.11 starter configuration that uses the command-agent path and supports a locked model route plus `--base-url`. Accept direct ATIF output when present without making normalized traces a prerequisite for private diagnostic verifier results.
+- Exercise the Workbench end to end in the local control service and browser, including screenshot-based review, hostile-output rendering checks, setup logs, workspace browsing, command previews, and user-facing failure recovery.
+- After all local gates pass, optionally deploy the exact reviewed revision to the existing canonical `<control-space>` and run bounded setup and diagnostic trial canaries through the existing control path. Use no new persistent resource and preserve every unrelated Run and control record.
 
 ### Limits
 
@@ -208,6 +214,16 @@ Admission-integrity repair amendment approved at: 2026-08-26T12:06:30Z
 - Fresh runs start only after the exact deployed revision passes the unpaid control canary and bounded paid task canary. FX, Codex, and Claude Code remain excluded from fresh launch without a separate amendment.
 - The 2026-08-25 failed-Run replacement amendment permits targeted deletion and replacement only for the seven fresh Runs invalidated by `control_not_ready` during the control deployment. Preserve every unrelated Run and retained control object. Keep the same profiles, USD 10.60 per-Run ceiling, USD 74.20 aggregate ceiling, and excluded harnesses. Do not rerun any scored or semantic outcome.
 - The 2026-08-26 admission-integrity repair amendment permits deletion of exactly one orphaned Job admission object and no other object. It adds no compatibility path, persistent resource, credential, Run, retry, or ceiling increase.
+- The Agent Workbench must keep arbitrary commands inside the unprivileged task runtime. It must not expose the control credential, a writable canonical Bucket mount, host authentication directories, root-owned bridge state, or unrelated worker environment variables.
+- Customer-authored recipes may execute without human promotion, but remain private or diagnostic by default. Final leaderboard eligibility, shared aliases, and wider reuse require the existing reviewed promotion and publication gates.
+- Generate command and environment previews from the same immutable execution manifest used by the worker. Keep secret values redacted, reject literal credentials in durable recipes, escape arbitrary text, and never render customer HTML or scripts in the control application origin.
+- The local Hugging Face CLI credential may be accessed during this session for authenticated development and bounded control-plane API calls without printing or recording its value. It must not be passed to a remote runtime, written to Git, logs, evidence, manifests, or browser state, or copied into another credential store.
+- A provider-scoped Fast-Agent authentication export may be created only in an owner-only temporary local location for command-construction and schema testing, then removed. It must not be committed, logged, uploaded, passed to a remote Job, or used for local inference.
+- Real inference tests may use only the existing purpose-scoped inference credential already confined to the canonical control Space and root-owned worker bridge. Do not retrieve, replace, or copy that credential.
+- Keep this amendment's new paid verification at or below USD 10 total. Run at most three new single-attempt diagnostic logical trials with concurrency one after local verification succeeds. Count setup Jobs, model calls, retries, and cleanup; stop on a shared worker defect or unexpected cost.
+- Do not create, resume, or resize an Inference Endpoint under this amendment. Serverless Inference Provider calls through the existing reviewed bridge are allowed only for the bounded diagnostic trials.
+- Use only public Harbor APIs. Do not modify or publish another Harbor repository. If the command-agent implementation needs a Harbor change, stop and request a separate repository authorization.
+- Local commits and an exact reviewed deployment to the existing canonical control Space are allowed. Do not push, open a pull request, merge, create a release, or publish an official result under this amendment.
 
 ### Remaining gates
 
@@ -312,3 +328,9 @@ No project-scope amendment remains pending. Operational gates still apply:
 ### 2026-08-26
 
 - At 2026-08-26T12:06:30Z, approved removing the old orphaned admission behind the single detected integrity fork, fixing startup replay without backward compatibility, and restarting the existing control Space. The repair deletes only the admission object that never dispatched or created a remote Job and preserves every other durable record.
+
+### 2026-08-27
+
+- At 2026-08-27T14:35:22Z, fully authorized the Agent Workbench implementation and end-to-end feature-development session. The approved work includes a generic customer-authored command-agent recipe, setup and run previews, setup-only Jobs, private logs and workspace browsing, optional trace adaptation, a Fast-Agent 0.10.11 starter, local browser and screenshot testing, and up to three bounded diagnostic trials after local gates pass.
+- Authorized session-only access to the locally authenticated Hugging Face CLI credential for development API calls without exposing its value, plus temporary local creation of a provider-scoped Fast-Agent authentication export for non-inference compatibility testing. Standing credential-isolation rules still prohibit passing either local credential into a remote runtime.
+- Authorized an exact reviewed deployment to the existing canonical control Space when needed for bounded remote verification. No new persistent resource, official publication, Harbor repository change, push, pull request, merge, or release is authorized. New paid verification remains capped at USD 10.
