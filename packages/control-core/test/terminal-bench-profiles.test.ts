@@ -9,9 +9,9 @@ import {
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
 
-const WORKER_REVISION = "e733c761e1b1cf342c013769036614c8412dd494";
+const WORKER_REVISION = "a689332f0cc7370b050813130b0d7d505e46ff6e";
 const WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:0adac4fad8a48521769fb8fa8d6b0a69a058ebddefcbe0069fb5bb0ab30cfaca";
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:1bbd594ace63d8a30fcdc728235d405ee47c92b4ee53e11dbb20408b819bc2fa";
 const HARBOR_SOURCE =
   "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
 const PREPARATION_COMMAND = [
@@ -393,8 +393,11 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(harborAgent.import_path).toBe(importPath);
       expect(harborAgent.model_name).toBe(model.harbor_model_name);
       expect(harborAgent).not.toHaveProperty("name");
-      if (name === "hermes" || name === "openhands") {
+      if (name === "hermes") {
         expect(harborAgent.override_setup_timeout_sec).toBe(1800);
+      }
+      if (name === "openhands") {
+        expect(harborAgent.override_setup_timeout_sec).toBe(7200);
       }
       if (name === "openclaw") {
         expect(harborAgent.override_setup_timeout_sec).toBe(1200);

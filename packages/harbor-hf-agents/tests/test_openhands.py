@@ -93,6 +93,7 @@ async def test_install_creates_isolated_agent_user(temp_dir) -> None:
         if "chown harbor-agent:harbor-agent /opt/openhands-venv" in command
     )
     assert useradd_at < chown_at
+    assert all("tmux new-session" not in command for command in commands)
     assert any(
         "openhands-ai==1.6.0" in call.kwargs["command"]
         for call in mock_env.exec.call_args_list

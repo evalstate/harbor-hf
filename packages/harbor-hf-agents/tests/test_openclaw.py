@@ -200,10 +200,11 @@ async def test_job_route_uses_custom_provider_and_locked_output_limit(
         assert kwargs["allowed_model"] == "gpt-4.1"
         env["OPENAI_BASE_URL"] = "http://127.0.0.1:18080/v1"
         env["OPENAI_API_KEY"] = "harbor-local-inference-bridge"
+        env["JOB_INFERENCE_MAX_OUTPUT_TOKENS"] = "32768"
         return True
 
     monkeypatch.setattr(openclaw_agent, "use_job_inference_route", use_route)
-    monkeypatch.setenv("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS", "32768")
+    monkeypatch.delenv("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS", raising=False)
     environment = SimpleNamespace(
         capabilities=EnvironmentCapabilities(mounted=True),
         upload_file=AsyncMock(),
@@ -273,6 +274,10 @@ async def test_install_uses_the_prepared_environment_timeout(
 
     await agent.install(AsyncMock())
 
+    assert (
+        "ca-certificates curl passwd python3 util-linux"
+        in agent.exec_as_root.await_args.kwargs["command"]
+    )
     assert "timeout_sec" not in agent.exec_as_root.await_args.kwargs
     assert all(
         "timeout_sec" not in call.kwargs for call in agent.exec_as_agent.await_args_list

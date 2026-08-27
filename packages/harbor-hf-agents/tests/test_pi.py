@@ -117,6 +117,7 @@ async def test_uses_prepared_job_loopback_route() -> None:
         "base_url": "http://127.0.0.1:18080/v1",
         "api_key": "harbor-local-inference-bridge",
         "model": "example/model",
+        "max_output_tokens": 32768,
     }
     env: dict[str, str] = {}
 
@@ -142,6 +143,7 @@ async def test_uses_prepared_job_loopback_route() -> None:
     assert env == {
         "OPENAI_BASE_URL": "http://127.0.0.1:18080/v1",
         "OPENAI_API_KEY": "harbor-local-inference-bridge",
+        "JOB_INFERENCE_MAX_OUTPUT_TOKENS": "32768",
     }
     agent.exec_as_agent.assert_awaited_once()
     command = agent.exec_as_agent.await_args.kwargs["command"]
@@ -196,9 +198,7 @@ class TestPiAgent:
         assert "pi.txt" in run_cmd
 
     @pytest.mark.asyncio
-    async def test_run_terminates_options_before_leading_hyphen_instruction(
-        self, temp_dir
-    ):
+    async def test_run_preserves_leading_hyphen_instruction(self, temp_dir):
         agent = PiAgent(logs_dir=temp_dir, model_name="my-provider/my-model")
         mock_env = AsyncMock()
         mock_env.exec.return_value = _exec_result()
@@ -206,8 +206,85 @@ class TestPiAgent:
         await agent.run("- leading instruction", mock_env, AsyncMock())
 
         run_command = mock_env.exec.call_args_list[-1].kwargs["command"]
-        assert "--model my-model --" in run_command
-        assert "- leading instruction" in run_command
+        assert "--model my-model --" not in run_command
+        assert "\n- leading instruction" in run_command
+
+    @pytest.mark.asyncio
+    async def test_run_enforces_locked_agent_timeout(self, temp_dir):
+        agent = PiAgent(logs_dir=temp_dir, model_name="my-provider/my-model")
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = _exec_result()
+
+        with patch.dict(
+            os.environ,
+            {"HARBOR_HF_AGENT_TIMEOUT_SECONDS": "1800"},
+            clear=False,
+        ):
+            await agent.run("Fix the bug", mock_env, AsyncMock())
+
+        commands = [call.kwargs["command"] for call in mock_env.exec.call_args_list]
+        run_command = next(command for command in commands if "pi --print" in command)
+        assert "timeout --signal=TERM --kill-after=2s 1795s" in run_command
+        assert "harbor_hf_pi_execution_timeout" in run_command
+        materialize = next(
+            call
+            for call in mock_env.exec.call_args_list
+            if "httpIdleTimeoutMs" in call.kwargs["command"]
+        )
+        assert "const timeout = 1790000;" in materialize.kwargs["command"]
+        assert "HARBOR_HF_PI_HTTP_IDLE_TIMEOUT_MS" not in materialize.kwargs["env"]
+        assert "settings.json" in commands[-1]
+
+    @pytest.mark.asyncio
+    async def test_run_bounds_http_idle_timeout_by_inference_and_agent_budgets(
+        self, temp_dir
+    ):
+        agent = PiAgent(logs_dir=temp_dir, model_name="my-provider/my-model")
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = _exec_result()
+
+        with patch.dict(
+            os.environ,
+            {
+                "HARBOR_HF_AGENT_TIMEOUT_SECONDS": "900",
+                "HARBOR_HF_INFERENCE_TIMEOUT_SECONDS": "1800",
+            },
+            clear=False,
+        ):
+            await agent.run("Fix the bug", mock_env, AsyncMock())
+
+        materialize = next(
+            call
+            for call in mock_env.exec.call_args_list
+            if "httpIdleTimeoutMs" in call.kwargs["command"]
+        )
+        assert "const timeout = 890000;" in materialize.kwargs["command"]
+        assert "HARBOR_HF_PI_HTTP_IDLE_TIMEOUT_MS" not in materialize.kwargs["env"]
+        assert "Number.isSafeInteger" in materialize.kwargs["command"]
+
+    @pytest.mark.asyncio
+    async def test_run_reports_locked_agent_timeout(self, temp_dir):
+        agent = PiAgent(logs_dir=temp_dir, model_name="my-provider/my-model")
+        mock_env = AsyncMock()
+        timeout_result = _exec_result("harbor_hf_pi_execution_timeout")
+        timeout_result.return_code = 124
+
+        def execute(*_args, **kwargs):
+            if "pi --print" in kwargs.get("command", ""):
+                return timeout_result
+            return _exec_result()
+
+        mock_env.exec.side_effect = execute
+
+        with (
+            patch.dict(
+                os.environ,
+                {"HARBOR_HF_AGENT_TIMEOUT_SECONDS": "1800"},
+                clear=False,
+            ),
+            pytest.raises(TimeoutError, match="locked agent timeout"),
+        ):
+            await agent.run("Fix the bug", mock_env, AsyncMock())
 
     @pytest.mark.asyncio
     async def test_run_no_model(self, temp_dir):

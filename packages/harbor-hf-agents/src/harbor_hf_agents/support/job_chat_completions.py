@@ -29,13 +29,11 @@ def allowed_model_id(model_name: str | None) -> str:
     return model_name.split("/", 1)[1]
 
 
-def inference_max_output_tokens() -> int:
-    """Return the positive output-token limit locked for this execution Job."""
+def inference_max_output_tokens(raw: str | None) -> int:
+    """Parse the positive output-token limit locked for this execution Job."""
     name = "HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS"
-    try:
-        raw = os.environ[name]
-    except KeyError as error:
-        raise RuntimeError(f"{name} is required for Job inference") from error
+    if raw is None:
+        raise RuntimeError(f"{name} is required for Job inference")
     try:
         value = int(raw)
     except ValueError as error:

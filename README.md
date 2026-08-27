@@ -337,6 +337,16 @@ only its assigned projection-validated prepared trial, checks its Python-origin
 Harbor lock digest and image binding, and executes Harbor once. It rejects
 separate verifier images and uploads a canonical evidence manifest for
 failures; the controller alone decides whether to launch a replacement Job.
+Execution workers pull the locked digest from
+`HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY`, which defaults to the existing public
+trial-worker package. Populate it with the generic mirror workflow before
+dispatching tasks. The workflow preserves and verifies each source digest:
+
+```bash
+gh workflow run mirror-task-images.yml \
+  -f images_json='["docker.io/library/<task-image>@sha256:<digest>"]'
+```
+
 Worker control requests retry transient HTTP failures with capped backoff for
 the locked Job timeout, so in-flight preparation and evidence writes can
 survive a control projection rebuild. Reconciliation dispatches queued Jobs

@@ -6,6 +6,9 @@ from harbor_hf_agents.support.job_chat_completions import (
     JobChatCompletionsAgent,
     inference_max_output_tokens,
 )
+from harbor_hf_agents.support.job_inference_route import (
+    JOB_INFERENCE_MAX_OUTPUT_TOKENS_ENV,
+)
 
 
 class KimiCodeAgent(JobChatCompletionsAgent, KimiCode):
@@ -23,4 +26,6 @@ class KimiCodeAgent(JobChatCompletionsAgent, KimiCode):
 
     def extend_route_env(self, env: dict[str, str]) -> None:
         env["KIMI_MODEL_NAME"] = self.allowed_model_id()
-        env["KIMI_MODEL_MAX_COMPLETION_TOKENS"] = str(inference_max_output_tokens())
+        env["KIMI_MODEL_MAX_COMPLETION_TOKENS"] = str(
+            inference_max_output_tokens(env[JOB_INFERENCE_MAX_OUTPUT_TOKENS_ENV])
+        )

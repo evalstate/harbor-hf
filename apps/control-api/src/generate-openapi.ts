@@ -23,6 +23,7 @@ const config: AppConfig = {
   profiles_root: join(repository, "profiles"),
   capacity_profile_alias: null,
   max_active_jobs: 16,
+  task_image_mirror_repository: "mirror.example/harbor-hf/tasks",
   web_root: join(scratch, "web"),
   auth_mode: "development",
   write_mode: "disabled",

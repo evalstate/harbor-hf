@@ -8,6 +8,7 @@ import { HuggingFaceActions } from "../src/actions.js";
 
 const testToken = ["hf", "not-a-real-control-credential"].join("_");
 const testInferenceToken = ["hf", "not-a-real-inference-credential"].join("_");
+const taskImageMirrorRepository = "mirror.example/harbor-hf/tasks";
 
 const base: ActionIntent = {
   schema_version: "v1",
@@ -55,6 +56,11 @@ function expectedEnvironment(intent: ActionIntent): Record<string, string> {
     HARBOR_HF_JOB_IMAGE: String(payload.job_image),
     ...(typeof payload.task_image === "string"
       ? { HARBOR_HF_TASK_IMAGE: payload.task_image }
+      : {}),
+    ...(typeof payload.task_image === "string"
+      ? {
+          HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY: taskImageMirrorRepository,
+        }
       : {}),
     HARBOR_HF_RUN_LOCK_DIGEST: String(payload.run_lock_digest),
     PYTHONUNBUFFERED: "1",
@@ -146,6 +152,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
     await expect(adapter.execute(base)).resolves.toMatchObject({
@@ -164,6 +171,7 @@ describe("HuggingFaceActions", () => {
         new HuggingFaceActions({
           namespace: "example",
           accessToken: testToken,
+          taskImageMirrorRepository,
           inferenceToken: testToken,
         }),
     ).toThrow("control and inference credentials must be distinct");
@@ -241,6 +249,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
     await expect(adapter.execute(base)).resolves.toMatchObject({
@@ -297,6 +306,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -370,6 +380,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -396,6 +407,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
     await expect(adapter.execute(base)).rejects.toBeInstanceOf(
@@ -439,6 +451,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -475,6 +488,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -525,6 +539,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -537,6 +552,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
     });
     await expect(
       adapter.execute({
@@ -628,6 +644,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       inferenceToken: testInferenceToken,
       controlUrl: "https://control.example",
     });
@@ -645,6 +662,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -691,6 +709,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -739,6 +758,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
     await expect(adapter.execute(cancelIntent)).resolves.toMatchObject({
@@ -779,6 +799,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -825,6 +846,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -866,6 +888,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
     await expect(adapter.execute(observeIntent)).resolves.toMatchObject({
@@ -933,6 +956,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -999,6 +1023,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       controlUrl: "https://control.example",
     });
 
@@ -1026,6 +1051,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
       endpointsUrl: "https://endpoints.example/v2",
     });
 
@@ -1048,6 +1074,7 @@ describe("HuggingFaceActions", () => {
     const adapter = new HuggingFaceActions({
       namespace: "example",
       accessToken: testToken,
+      taskImageMirrorRepository,
     });
     const result = await adapter.execute({
       ...base,

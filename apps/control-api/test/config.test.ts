@@ -41,6 +41,18 @@ describe("control API configuration", () => {
     expect(config.max_active_jobs).toBe(128);
   });
 
+  it("loads the task image mirror repository", () => {
+    expect(loadConfig(environment).task_image_mirror_repository).toBe(
+      "ghcr.io/huggingface/harbor-hf-trial-worker",
+    );
+    const config = loadConfig({
+      ...environment,
+      HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY: "mirror.example/harbor-hf/tasks",
+    });
+
+    expect(config.task_image_mirror_repository).toBe("mirror.example/harbor-hf/tasks");
+  });
+
   it("uses a 30-second Bucket sync cadence unless configured", () => {
     expect(loadConfig(environment).sync_interval_ms).toBe(30_000);
     expect(

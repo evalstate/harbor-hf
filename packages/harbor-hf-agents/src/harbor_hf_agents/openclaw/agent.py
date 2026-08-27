@@ -33,6 +33,7 @@ from harbor_hf_agents.support.job_chat_completions import (
     inference_max_output_tokens,
 )
 from harbor_hf_agents.support.job_inference_route import (
+    JOB_INFERENCE_MAX_OUTPUT_TOKENS_ENV,
     use_job_inference_route,
     with_job_inference_bridge_cleanup,
 )
@@ -647,7 +648,7 @@ class OpenClawAgent(IsolatedProviderAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        root_pkgs = "curl ca-certificates passwd util-linux"
+        root_pkgs = "ca-certificates curl passwd python3 util-linux"
         await self.exec_as_root(
             environment,
             command=(
@@ -1181,9 +1182,9 @@ class OpenClawAgent(IsolatedProviderAgent):
                 self.logger.debug("Missing optional env key for OpenClaw run: %s", key)
 
         prefix = self._provider_env_prefix(provider)
-        bridged = False
+        job_bridged = False
         if provider == "openai":
-            bridged = await use_job_inference_route(
+            job_bridged = await use_job_inference_route(
                 self,
                 environment,
                 env,
@@ -1192,6 +1193,7 @@ class OpenClawAgent(IsolatedProviderAgent):
                 api=self._PROVIDER_API,
                 allowed_model=model,
             )
+        bridged = job_bridged
         if not bridged:
             bridged = await prepare_hf_inference_bridge(
                 self,
@@ -1210,7 +1212,15 @@ class OpenClawAgent(IsolatedProviderAgent):
                 ),
             )
         job_model_id = model if bridged else None
-        max_output_tokens = inference_max_output_tokens() if bridged else None
+        max_output_tokens = (
+            inference_max_output_tokens(
+                env[JOB_INFERENCE_MAX_OUTPUT_TOKENS_ENV]
+                if job_bridged
+                else self._get_env("HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS")
+            )
+            if bridged
+            else None
+        )
         if bridged:
             env[_JOB_API_KEY_ENV] = env[f"{prefix}_API_KEY"]
             env[_JOB_BASE_URL_ENV] = env[f"{prefix}_BASE_URL"]

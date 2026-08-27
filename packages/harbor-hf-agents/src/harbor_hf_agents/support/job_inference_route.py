@@ -29,6 +29,7 @@ _RunMethod = Callable[
     Awaitable[None],
 ]
 _JOB_ROUTE_PATH = Path("/run/harbor-hf-inference.json")
+JOB_INFERENCE_MAX_OUTPUT_TOKENS_ENV = "JOB_INFERENCE_MAX_OUTPUT_TOKENS"
 
 
 def with_job_inference_bridge_cleanup(method: _RunMethod) -> _RunMethod:
@@ -99,10 +100,12 @@ async def use_job_inference_route(
         "base_url",
         "api_key",
         "model",
+        "max_output_tokens",
     }:
         raise RuntimeError("Job inference route has unknown or missing fields")
     base_url = value["base_url"]
     api_key = value["api_key"]
+    max_output_tokens = value["max_output_tokens"]
     if (
         value["schema_version"] != "v1"
         or value["api"] != api
@@ -111,11 +114,15 @@ async def use_job_inference_route(
         or base_url != "http://127.0.0.1:18080/v1"
         or api_key != "harbor-local-inference-bridge"
         or value["model"] != allowed_model
+        or isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or max_output_tokens <= 0
     ):
-        raise RuntimeError("Job inference route does not match the locked model")
+        raise RuntimeError("Job inference route does not match the locked execution")
     bridge_pid = _job_bridge_pid()
     env[base_url_key] = base_url
     env[api_key_key] = api_key
+    env[JOB_INFERENCE_MAX_OUTPUT_TOKENS_ENV] = str(max_output_tokens)
     mark_hf_inference_bridge_active(agent, kind="job")
     await verify_hf_inference_isolation(
         agent,

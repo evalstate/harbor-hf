@@ -60,6 +60,7 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
     ? new HuggingFaceActions({
         namespace: config.namespace,
         accessToken: config.hf_token,
+        taskImageMirrorRepository: config.task_image_mirror_repository,
         ...(config.hf_inference_token
           ? { inferenceToken: config.hf_inference_token }
           : {}),

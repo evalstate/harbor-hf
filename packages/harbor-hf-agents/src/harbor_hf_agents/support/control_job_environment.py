@@ -98,6 +98,15 @@ class ControlJobEnvironment(BaseEnvironment):
             max_bytes=control_max_image_bytes,
             max_entries=control_max_image_entries,
         )
+        task_image_mirror_repository = _ambient_value(
+            "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY"
+        )
+        if not task_image_mirror_repository:
+            raise JobEnvironmentPreflightError(
+                "required Job worker setting "
+                "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY is missing"
+            )
+        self._task_image_mirror_repository = task_image_mirror_repository
         if not task_env_config.docker_image:
             raise JobEnvironmentPreflightError(
                 "ControlJobEnvironment requires a prebuilt task image"
@@ -182,7 +191,12 @@ class ControlJobEnvironment(BaseEnvironment):
         image = self.task_env_config.docker_image
         if image is None:
             raise JobEnvironmentPreflightError("prepared task image is missing")
-        runtime = IsolatedOciRuntime(image, self._transfer_limits, self._image_limits)
+        runtime = IsolatedOciRuntime(
+            image,
+            control_task_image_mirror_repository=self._task_image_mirror_repository,
+            transfer_limits=self._transfer_limits,
+            image_limits=self._image_limits,
+        )
         self._runtime = runtime
         try:
             await runtime.start()
@@ -215,7 +229,9 @@ class ControlJobEnvironment(BaseEnvironment):
 
     async def quiesce(self) -> None:
         """Kill task processes after the agent while preserving verifier state."""
-        runtime = self._require_runtime()
+        runtime = self._runtime
+        if not self._started or runtime is None:
+            return
         try:
             await runtime.quiesce()
         except OciRuntimeUnavailableError as error:
@@ -363,6 +379,7 @@ def _validate_worker_authority() -> None:
         "HARBOR_HF_RUN_ID",
         "HARBOR_HF_ACTION_ID",
         "HARBOR_HF_TASK_IMAGE",
+        "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY",
         "HARBOR_HF_MAX_IMAGE_BYTES",
         "HARBOR_HF_MAX_IMAGE_ENTRIES",
     ):

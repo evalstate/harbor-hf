@@ -15,6 +15,7 @@ DIGEST = f"sha256:{'a' * 64}"
 TASK_IMAGE = f"example.invalid/task@{DIGEST}"
 DECLARED_TASK_IMAGE = "example.invalid/task:release"
 WORKER_IMAGE = f"example.invalid/worker@sha256:{'b' * 64}"
+MIRROR_REPOSITORY = "mirror.example/harbor-hf/tasks"
 
 
 def _trial_lock() -> dict:
@@ -173,6 +174,10 @@ def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setenv("HARBOR_HF_JOB_IMAGE", WORKER_IMAGE)
     monkeypatch.setenv("HARBOR_HF_TASK_IMAGE", TASK_IMAGE)
+    monkeypatch.setenv(
+        "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY",
+        MIRROR_REPOSITORY,
+    )
     monkeypatch.setenv("HARBOR_HF_MAX_IMAGE_BYTES", str(20 * 1024 * 1024 * 1024))
     monkeypatch.setenv("HARBOR_HF_MAX_IMAGE_ENTRIES", "500000")
     monkeypatch.setattr(worker, "_read_prepared_job", lambda _: prepared_job)
@@ -233,6 +238,7 @@ def test_reads_one_prepared_worker_configuration(
         "control_declared_task_image": DECLARED_TASK_IMAGE,
         "control_task_image": TASK_IMAGE,
     }
+    assert config.task.agent_timeout_seconds == 900
     assert config.task.timeout_seconds == 2_460
 
 
@@ -607,11 +613,15 @@ def test_harbor_child_environment_is_allowlisted() -> None:
         "ARBITRARY_VALUE": "must-not-enter",
     }
 
-    assert worker._harbor_child_environment(environment) == {
+    assert worker._harbor_child_environment(
+        environment,
+        agent_timeout_seconds=900,
+    ) == {
         "PATH": "/usr/bin",
         "HOME": "/tmp/home",
         "HARBOR_HF_RUN_ID": "run-1",
         "HARBOR_HF_WORKER_CAPABILITY": "private-capability",
+        "HARBOR_HF_AGENT_TIMEOUT_SECONDS": "900",
     }
 
 
