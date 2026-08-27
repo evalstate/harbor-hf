@@ -262,11 +262,11 @@ describe("control web", () => {
     expect(screen.getByText("<injected placeholder>")).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "FX 0.0.5" }));
+    await user.click(screen.getByRole("button", { name: "FX 0.0.6" }));
     expect(screen.getByLabelText("Configuration name")).toHaveValue("fx");
     expect(
       (screen.getByLabelText("Setup command") as HTMLTextAreaElement).value,
-    ).toContain("https://releases.fx.sh/v0.0.5/");
+    ).toContain("https://releases.fx.sh/v0.0.6/");
     expect(
       (screen.getByLabelText("Run command") as HTMLTextAreaElement).value,
     ).toContain('fx" ask --yolo --json --');

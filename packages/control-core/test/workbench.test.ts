@@ -37,7 +37,7 @@ describe("Agent Workbench recipe compiler", () => {
   it("compiles the FX starter through the same generic command-agent path", () => {
     const preview = compileAgentWorkbenchRecipe(fxWorkbenchStarter);
     expect(preview.recipe.name).toBe("fx");
-    expect(preview.setup_command).toContain("https://releases.fx.sh/v0.0.5/fx-linux-");
+    expect(preview.setup_command).toContain("https://releases.fx.sh/v0.0.6/fx-linux-");
     expect(preview.run_command).toContain('fx" ask --yolo --json --');
     expect(preview.harness_profile).toMatchObject({
       agent: "command-agent",

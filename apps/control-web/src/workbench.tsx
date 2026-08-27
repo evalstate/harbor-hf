@@ -99,7 +99,7 @@ const fxStarter: WorkbenchRecipe = {
     "from urllib.request import urlopen",
     "",
     'architecture = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[platform.machine().lower()]',
-    'url = f"https://releases.fx.sh/v0.0.5/fx-linux-{architecture}.tar.gz"',
+    'url = f"https://releases.fx.sh/v0.0.6/fx-linux-{architecture}.tar.gz"',
     'destination = Path(os.environ["AGENT_HOME"]) / "bin" / "fx"',
     "with tempfile.TemporaryDirectory() as directory:",
     '    archive = Path(directory) / "fx.tar.gz"',
@@ -121,11 +121,7 @@ const fxStarter: WorkbenchRecipe = {
   environment: [
     { name: "AGENT_HOME", source: "agent_home" },
     { name: "FX_MODEL", source: "model_name" },
-    { name: "AI_GATEWAY_BASE_URL", source: "model_base_url" },
     { name: "AI_GATEWAY_API_KEY", source: "model_api_key" },
-    { name: "OPENAI_BASE_URL", source: "model_base_url" },
-    { name: "OPENAI_API_KEY", source: "model_api_key" },
-    { name: "VERCEL_AI_GATEWAY_API_KEY", source: "model_api_key" },
     { name: "FX_AUTO_UPGRADE", source: "literal", value: "0" },
     {
       name: "AGENT_RESULTS_PATH",
@@ -331,7 +327,7 @@ export function WorkbenchPage() {
                 setConfirmed(false);
               }}
             >
-              <RotateCcw size={16} /> FX 0.0.5
+              <RotateCcw size={16} /> FX 0.0.6
             </Button>
           </div>
         }

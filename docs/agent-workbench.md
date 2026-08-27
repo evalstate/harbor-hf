@@ -6,7 +6,7 @@ testing a generic command-line Harbor agent recipe. It is available at
 
 The Workbench is intentionally low ceremony:
 
-1. Start from the Fast-Agent 0.10.11 or FX 0.0.5 recipe, or edit arbitrary
+1. Start from the Fast-Agent 0.10.11 or FX 0.0.6 recipe, or edit arbitrary
    setup and run commands.
 2. Bind environment variables to typed runtime values instead of pasting
    credentials.
@@ -163,11 +163,19 @@ nor the command-agent plugin branches on its name.
 
 ## FX starter
 
-The FX starter installs the pinned `v0.0.5` Linux release beneath the managed
+The FX starter installs the pinned `v0.0.6` Linux release beneath the managed
 agent home using Python's standard library, then verifies `fx --version`. Its
 run command uses `fx ask --yolo --json`, the locked Chat Completions route, the
 task instruction file, and a declared `/logs/agent/fx-results.json` output. FX
 is recipe data and uses the same generic command-agent path as Fast-Agent.
+
+FX v0.0.6 selects a process model with `FX_MODEL` and reads a Vercel AI Gateway
+credential from `AI_GATEWAY_API_KEY`. The Workbench binds those names to the
+locked model and the non-secret model-key placeholder; users do not paste an
+API key into the recipe. FX v0.0.6 does not expose a documented custom Gateway
+base-URL override, so this starter currently verifies setup only. Benchmark
+handoff remains disabled until the inference bridge has reviewed FX v0.0.6
+route compatibility.
 
 ## Benchmark handoff requirements
 
