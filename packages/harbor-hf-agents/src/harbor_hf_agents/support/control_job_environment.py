@@ -215,7 +215,9 @@ class ControlJobEnvironment(BaseEnvironment):
 
     async def quiesce(self) -> None:
         """Kill task processes after the agent while preserving verifier state."""
-        runtime = self._require_runtime()
+        runtime = self._runtime
+        if not self._started or runtime is None:
+            return
         try:
             await runtime.quiesce()
         except OciRuntimeUnavailableError as error:

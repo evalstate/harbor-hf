@@ -218,7 +218,10 @@ async def test_timeout_destroys_the_whole_task_runtime(tmp_path: Path) -> None:
     with pytest.raises(JobEnvironmentTimeoutError, match="exceeded 1 seconds"):
         await environment.exec("setsid sleep 30")
 
+    await environment.quiesce()
+
     assert runtime.stopped is True
+    assert runtime.quiesced is False
 
 
 @pytest.mark.asyncio
