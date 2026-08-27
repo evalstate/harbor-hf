@@ -1964,7 +1964,13 @@ class IsolatedOciRuntime:
             "-b",
             "/dev/pts:/dev/pts",
         ]
-        for device in ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"):
+        for device in (
+            "/dev/null",
+            "/dev/zero",
+            "/dev/random",
+            "/dev/urandom",
+            "/dev/ptmx",
+        ):
             arguments.extend(["-b", f"{device}:{device}"])
         arguments.extend(["/usr/bin/env", "-i"])
         arguments.extend(f"{name}={value}" for name, value in sorted(merged.items()))

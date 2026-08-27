@@ -619,6 +619,7 @@ def test_proot_exposes_only_dns_proc_and_required_devices(tmp_path: Path) -> Non
     assert "/etc/resolv.conf:/etc/resolv.conf" in arguments
     assert "/proc:/proc" in arguments
     assert "/dev/pts:/dev/pts" in arguments
+    assert "/dev/ptmx:/dev/ptmx" in arguments
     assert "/dev/null:/dev/null" in arguments
     assert "/run:/run" not in arguments
     assert "/tmp:/tmp" not in arguments

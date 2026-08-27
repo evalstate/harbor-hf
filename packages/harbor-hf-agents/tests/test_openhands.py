@@ -96,6 +96,8 @@ async def test_install_creates_isolated_agent_user(temp_dir) -> None:
         if "chown harbor-agent:harbor-agent /opt/openhands-venv" in command
     )
     assert useradd_at < tmux_at < chown_at
+    assert "timeout --signal=TERM --kill-after=2s 10s" in commands[tmux_at]
+    assert "OpenHands tmux PTY preflight failed" in commands[tmux_at]
     assert mock_env.exec.call_args_list[tmux_at].kwargs["timeout_sec"] == 30
     assert any(
         "openhands-ai==1.6.0" in call.kwargs["command"]

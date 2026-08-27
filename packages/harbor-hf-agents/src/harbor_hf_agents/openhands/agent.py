@@ -52,7 +52,9 @@ class OpenHandsAgent(JobChatCompletionsAgent, OpenHands):
             command=(
                 "set -euo pipefail; "
                 'session="harbor-hf-openhands-preflight-$$"; '
-                'tmux new-session -d -s "$session"; '
+                "if ! timeout --signal=TERM --kill-after=2s 10s "
+                'tmux new-session -d -s "$session"; then '
+                'echo "OpenHands tmux PTY preflight failed" >&2; exit 1; fi; '
                 'tmux kill-session -t "$session"'
             ),
             timeout_sec=30,
