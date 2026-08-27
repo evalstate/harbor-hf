@@ -113,6 +113,133 @@ test("shows the operational overview on desktop and mobile", async ({ page }) =>
   ).toBe(true);
 });
 
+test("previews and verifies a Workbench recipe on desktop and mobile", async ({
+  page,
+}, testInfo) => {
+  await page.route("**/api/v1/auth/session", (route) =>
+    route.fulfill({ json: session }),
+  );
+  await page.route("**/api/v1/system", (route) => route.fulfill({ json: system() }));
+  await page.route("**/api/v1/events", (route) => route.abort());
+  await page.route("**/api/v1/workbench/preview", async (route) => {
+    const recipe = route.request().postDataJSON();
+    return route.fulfill({
+      json: {
+        recipe,
+        recipe_digest: "sha256:workbench-recipe",
+        revision_id: "recipe-revision-workbench",
+        setup_command:
+          "python -m venv /logs/agent/home/venv\n/logs/agent/home/venv/bin/fast-agent --version",
+        run_command:
+          "/logs/agent/home/venv/bin/fast-agent go --base-url http://127.0.0.1:18080/v1",
+        environment: [
+          {
+            name: "GENERIC_API_KEY",
+            source: "model_api_key",
+            value: "<redacted>",
+            redacted: true,
+          },
+          {
+            name: "TASK_WORKSPACE",
+            source: "workspace_path",
+            value: "/app",
+            redacted: false,
+          },
+        ],
+        harness_profile: { agent: "command-agent" },
+        warnings: [],
+      },
+    });
+  });
+  await page.route("**/api/v1/workbench/setup-tests", (route) =>
+    route.fulfill({
+      status: 202,
+      json: {
+        setup_test_id: "setup-test-workbench",
+        recipe_digest: "sha256:workbench-recipe",
+        revision_id: "recipe-revision-workbench",
+        status: "passed",
+        created_at: "2026-08-27T12:00:00.000Z",
+        started_at: "2026-08-27T12:00:01.000Z",
+        completed_at: "2026-08-27T12:00:02.000Z",
+        exit_code: 0,
+        error: null,
+        files: [
+          {
+            file_id: "file-instruction",
+            path: "instruction.txt",
+            root: "workspace",
+            size: 31,
+            text: true,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/v1/workbench/setup-tests/*/logs", (route) =>
+    route.fulfill({
+      json: {
+        stdout: "fast-agent-mcp v0.10.11\n",
+        stderr: "",
+        stdout_truncated: false,
+        stderr_truncated: false,
+      },
+    }),
+  );
+  await page.route("**/api/v1/workbench/setup-tests/*/files/*", (route) =>
+    route.fulfill({
+      json: {
+        file_id: "file-instruction",
+        path: "instruction.txt",
+        content: "<script>window.compromised=true</script>",
+        truncated: false,
+      },
+    }),
+  );
+
+  await page.goto("/workbench");
+  await expect(page.getByRole("heading", { name: "Agent Workbench" })).toBeVisible();
+  await expect(page.getByText("Preview ready")).toBeVisible();
+  await expect(page.getByText("<injected placeholder>", { exact: true })).toBeVisible();
+  await expect(page.getByText(/injected-placeholder/)).toHaveCount(0);
+
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Launch setup test" }).click();
+  await expect(page.getByText("fast-agent-mcp v0.10.11")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /workspace\/instruction\.txt/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /workspace\/instruction\.txt/ }).click();
+  await expect(page.getByLabel("Contents of instruction.txt")).toContainText(
+    "<script>window.compromised=true</script>",
+  );
+  expect(
+    await page.evaluate(
+      () => (window as Window & { compromised?: boolean }).compromised,
+    ),
+  ).toBeUndefined();
+  await expect(
+    page.getByRole("button", { name: "Benchmark handoff unavailable" }),
+  ).toBeDisabled();
+  await page.screenshot({
+    path: testInfo.outputPath("agent-workbench-desktop.png"),
+    fullPage: true,
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("agent-workbench-mobile.png"),
+    fullPage: true,
+  });
+});
+
 test("disables run launch and omits account details", async ({ page }) => {
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),

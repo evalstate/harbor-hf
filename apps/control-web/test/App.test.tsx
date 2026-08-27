@@ -190,6 +190,93 @@ describe("control web", () => {
     expect(loginHref("/results")).toBe("/auth/login?return_to=%2Fresults");
   });
 
+  it("previews and verifies a Workbench setup without rendering hostile output", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system")) return json(system());
+        if (path.endsWith("/api/v1/workbench/preview")) {
+          const recipe = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return json({
+            recipe,
+            recipe_digest: "sha256:recipe",
+            revision_id: "agent-recipe-preview",
+            setup_command:
+              "python -m venv /logs/agent/home/venv\npip install fast-agent-mcp==0.10.11",
+            run_command: "fast-agent go --base-url http://127.0.0.1:18080/v1",
+            environment: [
+              {
+                name: "GENERIC_API_KEY",
+                source: "model_api_key",
+                value: "<injected-placeholder>",
+                redacted: true,
+              },
+            ],
+            harness_profile: { agent: "command-agent" },
+            warnings: [],
+          });
+        }
+        if (path.endsWith("/api/v1/workbench/setup-tests") && init?.method === "POST")
+          return json(
+            {
+              setup_test_id: "setup-test-one",
+              recipe_digest: "sha256:recipe",
+              revision_id: "agent-recipe-preview",
+              status: "passed",
+              created_at: "2026-08-27T00:00:00.000Z",
+              started_at: "2026-08-27T00:00:01.000Z",
+              completed_at: "2026-08-27T00:00:02.000Z",
+              exit_code: 0,
+              error: null,
+              files: [
+                {
+                  file_id: "workbench-file-one",
+                  path: "hostile.txt",
+                  root: "workspace",
+                  size: 31,
+                  text: true,
+                },
+              ],
+            },
+            202,
+          );
+        if (path.endsWith("/setup-test-one/logs"))
+          return json({ stdout: "fast-agent-mcp v0.10.11\n", stderr: "" });
+        if (path.endsWith("/files/workbench-file-one"))
+          return json({
+            content: "<script>window.compromised = true</script>",
+            truncated: false,
+          });
+        if (path.includes("/events")) throw new Error("offline");
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/workbench");
+    expect(
+      await screen.findByRole("heading", { name: "Agent Workbench" }),
+    ).toBeVisible();
+    expect(await screen.findByText("Preview ready")).toBeVisible();
+    expect(screen.getByText("<injected placeholder>")).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /launch this exact setup recipe/i,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /launch setup test/i }));
+    expect(await screen.findByText("passed")).toBeVisible();
+    expect(await screen.findByText(/fast-agent-mcp v0.10.11/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /hostile.txt/i }));
+    expect(
+      await screen.findByText("<script>window.compromised = true</script>"),
+    ).toBeVisible();
+    expect(document.querySelector("script")).toBeNull();
+  });
+
   it("shows only the username and sign-out control in account chrome", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(

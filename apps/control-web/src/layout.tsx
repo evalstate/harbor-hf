@@ -11,6 +11,7 @@ import {
   ServerCog,
   ShieldCheck,
   Trophy,
+  Wrench,
   X,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
@@ -23,6 +24,7 @@ import { Badge, Button, ErrorNotice, Hint } from "./ui";
 
 const adminNavigation = [
   ["/overview", "Overview", Gauge, hints.nav.overview],
+  ["/workbench", "Workbench", Wrench, hints.nav.workbench],
   ["/runs", "Runs", ClipboardList, hints.nav.runs],
   ["/jobs", "Jobs", ServerCog, hints.nav.jobs],
   ["/endpoints", "Endpoints", Network, hints.nav.endpoints],
@@ -38,6 +40,7 @@ export function loginHref(returnTo: string): string {
 function isAdminPath(path: string): boolean {
   return (
     path === "/overview" ||
+    path.startsWith("/workbench") ||
     path.startsWith("/runs") ||
     path.startsWith("/jobs") ||
     path.startsWith("/endpoints") ||

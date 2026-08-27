@@ -156,6 +156,26 @@ special cases.
 One-time migration programs do not define run behavior and do not become
 the path for adding run support.
 
+## Agent Workbench
+
+The authenticated web application includes an Agent Workbench for compiling and
+locally verifying generic command-line agent recipes. The Workbench uses the
+versioned recipe schema, server-authoritative preview compiler, typed
+environment bindings, and the generic Harbor command-agent plugin. Credentials
+remain in the root-owned inference bridge; recipes receive only a loopback URL
+and placeholder key.
+
+The current Docker setup runner is development-only, actor-scoped, and
+ephemeral. Production and test configurations default it to disabled. It is not
+a second reconciler or production execution path. Durable remote setup
+verification must use normal control records and reviewed Jobs.
+
+The current implementation does not bind a verified recipe to a Run. That
+handoff remains disabled until the exact setup-tested recipe can be finalized
+as a private unpromoted harness profile and resolved by digest through the
+normal diagnostic Run path with a compatible pinned worker deployment. See
+[Agent Workbench](agent-workbench.md).
+
 ## Technology choices
 
 TypeScript is the control-service language. Hugging Face maintains JavaScript

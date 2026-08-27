@@ -20,6 +20,7 @@ import {
 } from "./pages";
 import { keys, useLiveUpdates, useSession, useSystem } from "./queries";
 import { ErrorNotice, Loading, QueryContent } from "./ui";
+import { WorkbenchPage } from "./workbench";
 
 function isPublicBoard(path: string): boolean {
   return path === "/" || path === "/leaderboard";
@@ -88,6 +89,7 @@ function AuthenticatedApp({
           {system.data ? (
             <>
               <Route path="/overview" element={<OverviewPage />} />
+              <Route path="/workbench" element={<WorkbenchPage />} />
               <Route path="/runs" element={<RunsPage />} />
               <Route path="/runs/:runId" element={<RunPage />} />
               <Route path="/runs/:runId/tasks/:taskId" element={<TaskPage />} />

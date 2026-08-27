@@ -1,4 +1,5 @@
 import type { paths } from "./generated/api";
+import type { AgentWorkbenchRecipeV1 } from "@harbor-hf/contracts";
 
 export type SessionResponse =
   paths["/api/v1/auth/session"]["get"]["responses"][200]["content"]["application/json"];
@@ -36,6 +37,17 @@ export type RunAction =
   paths["/api/v1/runs/{run_id}/actions"]["post"]["requestBody"]["content"]["application/json"];
 export type Accepted =
   paths["/api/v1/runs"]["post"]["responses"][202]["content"]["application/json"];
+
+export type WorkbenchRecipe = AgentWorkbenchRecipeV1;
+export type WorkbenchPreview =
+  paths["/api/v1/workbench/preview"]["post"]["responses"][200]["content"]["application/json"];
+export type WorkbenchSetup =
+  paths["/api/v1/workbench/setup-tests"]["post"]["responses"][202]["content"]["application/json"];
+export type WorkbenchFile = WorkbenchSetup["files"][number];
+export type WorkbenchLogs =
+  paths["/api/v1/workbench/setup-tests/{setup_test_id}/logs"]["get"]["responses"][200]["content"]["application/json"];
+export type WorkbenchFileContent =
+  paths["/api/v1/workbench/setup-tests/{setup_test_id}/files/{file_id}"]["get"]["responses"][200]["content"]["application/json"];
 
 export class ApiError extends Error {
   constructor(
@@ -121,4 +133,44 @@ export async function actOnRun(runId: string, input: RunAction): Promise<Accepte
     headers: { "Idempotency-Key": crypto.randomUUID() },
     body: JSON.stringify(input),
   });
+}
+
+export async function previewWorkbenchRecipe(
+  recipe: WorkbenchRecipe,
+): Promise<WorkbenchPreview> {
+  return request<WorkbenchPreview>("/api/v1/workbench/preview", {
+    method: "POST",
+    body: JSON.stringify(recipe),
+  });
+}
+
+export async function startWorkbenchSetup(
+  recipe: WorkbenchRecipe,
+): Promise<WorkbenchSetup> {
+  return request<WorkbenchSetup>("/api/v1/workbench/setup-tests", {
+    method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({ recipe, confirmed: true }),
+  });
+}
+
+export async function getWorkbenchSetup(id: string): Promise<WorkbenchSetup> {
+  return request<WorkbenchSetup>(
+    `/api/v1/workbench/setup-tests/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function getWorkbenchLogs(id: string): Promise<WorkbenchLogs> {
+  return request<WorkbenchLogs>(
+    `/api/v1/workbench/setup-tests/${encodeURIComponent(id)}/logs`,
+  );
+}
+
+export async function getWorkbenchFile(
+  setupId: string,
+  fileId: string,
+): Promise<WorkbenchFileContent> {
+  return request<WorkbenchFileContent>(
+    `/api/v1/workbench/setup-tests/${encodeURIComponent(setupId)}/files/${encodeURIComponent(fileId)}`,
+  );
 }

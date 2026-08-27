@@ -130,7 +130,10 @@ def _job_config(lock: dict[str, Any]) -> JobConfig:
         if key in raw_job:
             raise RuntimeError(f"benchmark Harbor job cannot set control field {key}")
     agent = copy.deepcopy(raw_agent)
-    if agent["model_name"] != model["harbor_model_name"]:
+    configured_model = agent.get("model_name")
+    if configured_model is None:
+        agent["model_name"] = model["harbor_model_name"]
+    elif configured_model != model["harbor_model_name"]:
         raise RuntimeError("Harbor agent model does not match the model profile")
     value = copy.deepcopy(raw_job)
     value.update(

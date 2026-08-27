@@ -36,6 +36,12 @@ flowchart LR
     W -->|scoped receipts and evidence| API
 ```
 
+A development installation also exposes an authenticated
+[Agent Workbench](docs/agent-workbench.md) for compiling generic command-agent
+recipes, previewing typed environment expansion, and testing setup in a
+disposable local Docker container. The current Workbench setup runner is
+ephemeral and does not yet bind recipes to benchmark Runs.
+
 A mutating `harbor-hf` command submits one authenticated and confirmed request.
 The control service validates it, writes durable intent, and returns. The local
 CLI then exits; preparation, execution, observation, cleanup, and publication

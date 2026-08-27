@@ -4,6 +4,106 @@ const nullableInteger = {
   anyOf: [{ type: "integer" }, { type: "null" }],
 } as const;
 
+const workbenchFileSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["file_id", "path", "root", "size", "text"],
+  properties: {
+    file_id: { type: "string" },
+    path: { type: "string" },
+    root: { enum: ["workspace", "logs"] },
+    size: integer,
+    text: { type: "boolean" },
+  },
+} as const;
+
+export const workbenchPreviewSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "recipe",
+    "recipe_digest",
+    "revision_id",
+    "setup_command",
+    "run_command",
+    "environment",
+    "harness_profile",
+    "warnings",
+  ],
+  properties: {
+    recipe: { type: "object", additionalProperties: true },
+    recipe_digest: { type: "string" },
+    revision_id: { type: "string" },
+    setup_command: { type: "string" },
+    run_command: { type: "string" },
+    environment: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "source", "value", "redacted"],
+        properties: {
+          name: { type: "string" },
+          source: { type: "string" },
+          value: { type: "string" },
+          redacted: { type: "boolean" },
+        },
+      },
+    },
+    harness_profile: { type: "object", additionalProperties: true },
+    warnings: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
+export const workbenchSetupSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "setup_test_id",
+    "recipe_digest",
+    "revision_id",
+    "status",
+    "created_at",
+    "started_at",
+    "completed_at",
+    "exit_code",
+    "error",
+    "files",
+  ],
+  properties: {
+    setup_test_id: { type: "string" },
+    recipe_digest: { type: "string" },
+    revision_id: { type: "string" },
+    status: { enum: ["queued", "running", "passed", "failed", "timed-out"] },
+    created_at: { type: "string", format: "date-time" },
+    started_at: nullableString,
+    completed_at: nullableString,
+    exit_code: nullableInteger,
+    error: nullableString,
+    files: { type: "array", items: workbenchFileSchema },
+  },
+} as const;
+
+export const workbenchLogsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["stdout", "stderr"],
+  properties: {
+    stdout: { type: "string" },
+    stderr: { type: "string" },
+  },
+} as const;
+
+export const workbenchFileContentSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["content", "truncated"],
+  properties: {
+    content: { type: "string" },
+    truncated: { type: "boolean" },
+  },
+} as const;
+
 export const runViewSchema = {
   type: "object",
   additionalProperties: false,

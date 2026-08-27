@@ -74,6 +74,23 @@ def test_builds_generic_harbor_job_without_name_branches() -> None:
     assert config.environment.import_path.endswith(":ControlJobEnvironment")
 
 
+def test_injects_the_locked_model_when_the_harness_is_model_independent() -> None:
+    value = _run_lock()
+    del value["profiles"][2]["spec"]["harbor_agent"]["model_name"]
+
+    config = worker._job_config(value)
+
+    assert config.agents[0].model_name == "openai/example/model:provider"
+
+
+def test_rejects_a_harness_locked_to_a_different_model() -> None:
+    value = _run_lock()
+    value["profiles"][2]["spec"]["harbor_agent"]["model_name"] = "other/model"
+
+    with pytest.raises(RuntimeError, match="does not match"):
+        worker._job_config(value)
+
+
 def test_rejects_benchmark_control_fields() -> None:
     value = _run_lock()
     value["profiles"][0]["spec"]["harbor_job"]["agents"] = []

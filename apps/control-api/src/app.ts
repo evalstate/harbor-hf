@@ -58,6 +58,10 @@ import {
   systemSchema,
   taskDetailSchema,
   taskSchema,
+  workbenchFileContentSchema,
+  workbenchLogsSchema,
+  workbenchPreviewSchema,
+  workbenchSetupSchema,
 } from "./api-schemas.js";
 import {
   type AuthenticatedActor,
@@ -283,6 +287,54 @@ function cleanSchema(value: object): object {
   delete clone.$id;
   return clone;
 }
+
+function inlineLocalSchema(value: object): object {
+  const root = structuredClone(value) as Record<string, unknown>;
+  const definitions =
+    typeof root.$defs === "object" && root.$defs !== null
+      ? (root.$defs as Record<string, unknown>)
+      : {};
+
+  const visit = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(visit);
+    if (typeof node !== "object" || node === null) return node;
+
+    const record = node as Record<string, unknown>;
+    const reference = record.$ref;
+    if (typeof reference === "string" && reference.startsWith("#/$defs/")) {
+      const key = decodeURIComponent(reference.slice("#/$defs/".length));
+      const target = definitions[key];
+      if (typeof target !== "object" || target === null)
+        throw new Error(`unknown local schema definition: ${reference}`);
+      const siblings = Object.fromEntries(
+        Object.entries(record).filter(([name]) => name !== "$ref"),
+      );
+      return visit({ ...(target as Record<string, unknown>), ...siblings });
+    }
+
+    return Object.fromEntries(
+      Object.entries(record)
+        .filter(([name]) => !["$schema", "$id", "$defs"].includes(name))
+        .map(([name, child]) => [name, visit(child)]),
+    );
+  };
+
+  return visit(root) as object;
+}
+
+const agentWorkbenchRecipeSchema = inlineLocalSchema(schemas.agentWorkbench) as Record<
+  string,
+  unknown
+>;
+const agentWorkbenchSetupRequestSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["recipe", "confirmed"],
+  properties: {
+    recipe: agentWorkbenchRecipeSchema,
+    confirmed: { const: true },
+  },
+} as const;
 
 interface SseEnvelope extends Omit<ControlEvent, "id"> {
   id?: string;
@@ -1174,6 +1226,172 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       },
     },
     async () => runtime.service.namespaceCapacityView(),
+  );
+
+  app.post(
+    "/api/v1/workbench/preview",
+    {
+      schema: {
+        tags: ["workbench"],
+        body: agentWorkbenchRecipeSchema,
+        response: { 200: workbenchPreviewSchema },
+      },
+    },
+    async (request) => {
+      try {
+        return runtime.workbench.preview(request.body);
+      } catch (error) {
+        throw new PolicyError(
+          error instanceof Error ? error.message : "workbench recipe is invalid",
+        );
+      }
+    },
+  );
+
+  app.post(
+    "/api/v1/workbench/setup-tests",
+    {
+      schema: {
+        tags: ["workbench"],
+        body: agentWorkbenchSetupRequestSchema,
+        response: {
+          202: workbenchSetupSchema,
+          503: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("workbench setup testing is disabled");
+      const body = request.body as { recipe: unknown; confirmed: true };
+      try {
+        return reply
+          .code(202)
+          .send(
+            await runtime.workbench.startSetup(
+              body.recipe,
+              actor(request).subject,
+              idempotencyKey(request),
+            ),
+          );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "local setup testing is not enabled"
+        )
+          throw new ControlNotReadyError(error.message);
+        throw new PolicyError(
+          error instanceof Error ? error.message : "workbench setup is invalid",
+        );
+      }
+    },
+  );
+
+  app.get(
+    "/api/v1/workbench/setup-tests/:setup_test_id",
+    {
+      schema: {
+        tags: ["workbench"],
+        params: {
+          type: "object",
+          required: ["setup_test_id"],
+          properties: { setup_test_id: { type: "string", maxLength: 160 } },
+        },
+        response: {
+          200: workbenchSetupSchema,
+          404: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      const { setup_test_id: setupTestId } = request.params as {
+        setup_test_id: string;
+      };
+      const result = runtime.workbench.getSetup(setupTestId, actor(request).subject);
+      if (!result)
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "setup test was not found",
+            request_id: request.id,
+          },
+        });
+      return result;
+    },
+  );
+
+  app.get(
+    "/api/v1/workbench/setup-tests/:setup_test_id/logs",
+    {
+      schema: {
+        tags: ["workbench"],
+        params: {
+          type: "object",
+          required: ["setup_test_id"],
+          properties: { setup_test_id: { type: "string", maxLength: 160 } },
+        },
+        response: {
+          200: workbenchLogsSchema,
+          404: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      const { setup_test_id: setupTestId } = request.params as {
+        setup_test_id: string;
+      };
+      const result = runtime.workbench.logs(setupTestId, actor(request).subject);
+      if (!result)
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "setup-test logs were not found",
+            request_id: request.id,
+          },
+        });
+      return result;
+    },
+  );
+
+  app.get(
+    "/api/v1/workbench/setup-tests/:setup_test_id/files/:file_id",
+    {
+      schema: {
+        tags: ["workbench"],
+        params: {
+          type: "object",
+          required: ["setup_test_id", "file_id"],
+          properties: {
+            setup_test_id: { type: "string", maxLength: 160 },
+            file_id: { type: "string", maxLength: 160 },
+          },
+        },
+        response: {
+          200: workbenchFileContentSchema,
+          404: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      const { setup_test_id: setupTestId, file_id: fileId } = request.params as {
+        setup_test_id: string;
+        file_id: string;
+      };
+      const result = await runtime.workbench.file(
+        setupTestId,
+        fileId,
+        actor(request).subject,
+      );
+      if (!result)
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "setup-test file was not found",
+            request_id: request.id,
+          },
+        });
+      return result;
+    },
   );
 
   app.post(

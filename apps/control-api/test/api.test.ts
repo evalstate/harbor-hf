@@ -20,6 +20,7 @@ import {
 import {
   encodeLeaderboardSqlite,
   eventCursor,
+  fastAgentWorkbenchStarter,
   LEADERBOARD_RECEIPT_PREFIX,
   LEADERBOARD_SNAPSHOT_PREFIX,
   loadLatestLeaderboard,
@@ -81,6 +82,8 @@ async function setup(
     observe_interval_ms: 0,
     worker_receipt_grace_ms: 0,
     source_revision: "test-revision",
+    workbench_runner: "disabled",
+    workbench_image: "python:3.12-slim",
     bootstrap_operator_subjects: [],
   };
   const runtime = await createRuntime(config);
@@ -295,6 +298,52 @@ describe("control API", () => {
       204,
     );
     await app.close();
+  });
+
+  it("previews command-agent recipes without exposing a real credential", async () => {
+    const { app } = await setup();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/workbench/preview",
+      payload: fastAgentWorkbenchStarter,
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.setup_command).toContain("fast-agent-mcp==0.10.11");
+    expect(body.run_command).toContain("http://127.0.0.1:18080/v1");
+    expect(body.environment).toContainEqual(
+      expect.objectContaining({
+        name: "GENERIC_API_KEY",
+        value: "<injected-placeholder>",
+        redacted: true,
+      }),
+    );
+    expect(JSON.stringify(body)).not.toContain("test-token-not-a-real-credential");
+  });
+
+  it("rejects credential-like Workbench literals and disabled setup execution", async () => {
+    const { app } = await setup();
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/v1/workbench/preview",
+      payload: {
+        ...structuredClone(fastAgentWorkbenchStarter),
+        environment: [
+          { name: "SERVICE_API_KEY", source: "literal", value: "not-a-secret" },
+        ],
+      },
+    });
+    expect(invalid.statusCode).toBe(422);
+    expect(invalid.json().error.code).toBe("policy_rejected");
+
+    const setupResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/workbench/setup-tests",
+      headers: { "idempotency-key": "workbench-disabled-setup" },
+      payload: { recipe: fastAgentWorkbenchStarter, confirmed: true },
+    });
+    expect(setupResponse.statusCode).toBe(503);
+    expect(setupResponse.json().error.code).toBe("control_not_ready");
   });
 
   it("keeps routes unready after projection replay until runtime initialization ends", async () => {

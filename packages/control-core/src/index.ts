@@ -12,3 +12,4 @@ export * from "./run-id.js";
 export * from "./job-admission.js";
 export * from "./service.js";
 export * from "./store.js";
+export * from "./workbench.js";

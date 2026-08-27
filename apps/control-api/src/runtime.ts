@@ -18,6 +18,7 @@ import {
 } from "@harbor-hf/hf-adapters";
 import { AuthenticationService, AuthStore } from "./auth.js";
 import type { AppConfig } from "./config.js";
+import { WorkbenchRuntime } from "./workbench.js";
 
 export interface Runtime {
   config: AppConfig;
@@ -26,6 +27,7 @@ export interface Runtime {
   service: ControlService;
   auth: AuthenticationService;
   reconciler: Reconciler;
+  workbench: WorkbenchRuntime;
   readonly ready: boolean;
   initialize(): Promise<void>;
   start(onReconcilerError?: (error: unknown) => void): void;
@@ -65,6 +67,10 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
     : null;
   const external = hfActions ?? new NoopActions();
   const publisher = new ResultPublisher(store, projection, service);
+  const workbench = new WorkbenchRuntime(
+    config.workbench_runner,
+    config.workbench_image,
+  );
   const reconciler = new Reconciler(service, projection, external, publisher, {
     interval_ms: config.reconcile_interval_ms,
     sync_interval_ms: config.sync_interval_ms,
@@ -81,6 +87,7 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
     service,
     auth,
     reconciler,
+    workbench,
     get ready() {
       return initializationReady && projection.system().ready;
     },
@@ -125,6 +132,7 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
       initializationReady = false;
       abort.abort();
       await reconciler.stop();
+      await workbench.close();
       authStore.close();
       await projection.close();
     },
