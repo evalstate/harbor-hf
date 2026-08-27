@@ -68,6 +68,7 @@ Slophammer mutation-declaration amendment approved at: 2026-08-24T18:24:12Z
 Failed-Run replacement amendment approved at: 2026-08-25T22:29:22Z
 Admission-integrity repair amendment approved at: 2026-08-26T12:06:30Z
 Agent-Workbench amendment approved at: 2026-08-27T14:35:22Z
+Agent-Workbench FX-example-and-push amendment approved at: 2026-08-27T22:02:30Z
 
 ### Scope
 
@@ -142,6 +143,7 @@ Agent-Workbench amendment approved at: 2026-08-27T14:35:22Z
 - Add a Fast-Agent 0.10.11 starter configuration that uses the command-agent path and supports a locked model route plus `--base-url`. Accept direct ATIF output when present without making normalized traces a prerequisite for private diagnostic verifier results.
 - Exercise the Workbench end to end in the local control service and browser, including screenshot-based review, hostile-output rendering checks, setup logs, workspace browsing, command previews, and user-facing failure recovery.
 - After all local gates pass, optionally deploy the exact reviewed revision to the existing canonical `<control-space>` and run bounded setup and diagnostic trial canaries through the existing control path. Use no new persistent resource and preserve every unrelated Run and control record.
+- Add an FX starter recipe to the Agent Workbench using the same generic command-agent compiler and setup runner, commit the reviewed example, and push the current `feat/agent-workbench` branch to its configured public `origin`.
 
 ### Limits
 
@@ -334,3 +336,4 @@ No project-scope amendment remains pending. Operational gates still apply:
 - At 2026-08-27T14:35:22Z, fully authorized the Agent Workbench implementation and end-to-end feature-development session. The approved work includes a generic customer-authored command-agent recipe, setup and run previews, setup-only Jobs, private logs and workspace browsing, optional trace adaptation, a Fast-Agent 0.10.11 starter, local browser and screenshot testing, and up to three bounded diagnostic trials after local gates pass.
 - Authorized session-only access to the locally authenticated Hugging Face CLI credential for development API calls without exposing its value, plus temporary local creation of a provider-scoped Fast-Agent authentication export for non-inference compatibility testing. Standing credential-isolation rules still prohibit passing either local credential into a remote runtime.
 - Authorized an exact reviewed deployment to the existing canonical control Space when needed for bounded remote verification. No new persistent resource, official publication, Harbor repository change, push, pull request, merge, or release is authorized. New paid verification remains capped at USD 10.
+- At 2026-08-27T22:02:30Z, approved adding an FX example to the Agent Workbench, committing the reviewed change, and pushing only the current `feat/agent-workbench` branch to its configured public `origin`. No pull request, merge, deployment, release, credential transfer, paid run, or other remote mutation is authorized.
