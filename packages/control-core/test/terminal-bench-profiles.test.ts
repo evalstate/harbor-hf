@@ -1,5 +1,11 @@
 import { readFile } from "node:fs/promises";
-import type { ProfileObject } from "@harbor-hf/contracts";
+import type {
+  BenchmarkProfileSpec,
+  DeploymentProfileSpec,
+  HarnessProfileSpec,
+  ModelProfileSpec,
+  ProfileObject,
+} from "@harbor-hf/contracts";
 import {
   canonicalJson,
   deterministicId,
@@ -7,7 +13,11 @@ import {
   validateControlRecord,
 } from "@harbor-hf/contracts";
 import { describe, expect, it } from "vitest";
-import { loadBuiltInProfiles } from "../src/profiles.js";
+import {
+  loadBuiltInProfiles,
+  ProfileResolver,
+  validatePreparedRunProfiles,
+} from "../src/profiles.js";
 import {
   compileAgentWorkbenchRecipe,
   fastAgentWorkbenchStarter,
@@ -16,6 +26,9 @@ import {
 const WORKER_REVISION = "a689332f0cc7370b050813130b0d7d505e46ff6e";
 const WORKER_IMAGE =
   "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:1bbd594ace63d8a30fcdc728235d405ee47c92b4ee53e11dbb20408b819bc2fa";
+const COMMAND_WORKER_REVISION = "600b37a8dfb2cc15ae1e366ea9344a1c00aff6f8";
+const COMMAND_WORKER_IMAGE =
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:9ad873c39a0b9c1735d90affa8f77200e5db14c4eccb20ea064eebd65f1ae707";
 const HARBOR_SOURCE =
   "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
 const PREPARATION_COMMAND = [
@@ -335,6 +348,55 @@ describe("Terminal-Bench 2.1 profiles", () => {
     );
   });
 
+  it("admits the reviewed Workbench recipe through the normal Run profiles", async () => {
+    const profiles = await loadBuiltInProfiles("profiles");
+    const resolver = new ProfileResolver(profiles);
+    const resolved = resolver.resolve({
+      benchmark: "terminal-bench-2-1-canary",
+      model: "gpt-oss-20b",
+      harness: "fast-agent-0-10-11-command",
+      deployment: "tb21-gpt-oss-20b-fast-agent-command-providers",
+      launch_policy: "diagnostic-single-attempt",
+    });
+    const selected = new Map(resolved.map((item) => [item.kind, item]));
+    const tasks = resolver.tasks("terminal-bench-2-1-canary");
+    const deployment = selected.get("deployment");
+    const benchmark = selected.get("benchmark");
+    const model = selected.get("model");
+    const harness = selected.get("harness");
+
+    expect(tasks).toHaveLength(2);
+    expect(new Set(tasks.map((task) => task.source_task_id)).size).toBe(2);
+    expect(deployment?.profile_id).toBe(
+      "sha256:c0ba512665c721a23d8dc5d30ea3ba489c4a8d3077b8be452d5600093fbbbf65",
+    );
+    expect(selected.get("launch_policy")?.profile_id).toBe(
+      "sha256:8367b014c1ce08591864a68603dd64dd4b331e60b1beae8886c4ceccea1c8f8a",
+    );
+    expect(() =>
+      validatePreparedRunProfiles(
+        deployment?.spec as DeploymentProfileSpec,
+        benchmark?.spec as BenchmarkProfileSpec,
+        model?.spec as ModelProfileSpec,
+        harness?.spec as HarnessProfileSpec,
+        tasks,
+      ),
+    ).not.toThrow();
+    expect(record(deployment?.spec).models).toEqual(["gpt-oss-20b"]);
+    expect(record(deployment?.spec).harnesses).toEqual(["fast-agent-0-10-11-command"]);
+    expect(record(record(deployment?.spec).trial_job_template).max_jobs).toBe(1);
+    expect(
+      record(record(deployment?.spec).trial_job_template)
+        .inference_max_total_concurrency,
+    ).toBe(1);
+    expect(record(selected.get("launch_policy")?.spec)).toMatchObject({
+      max_infrastructure_attempts: 1,
+      max_preparation_attempts: 1,
+      max_run_ceiling_microusd: 1_000_000,
+      publication_role: "diagnostic",
+    });
+  });
+
   it("pins DeepSeek V4 Flash to DeepSeek Harness for provider runs", async () => {
     const model = record(
       (await profile("model", "deepseek-v4-flash-0731-together")).spec,
@@ -454,30 +516,35 @@ describe("Terminal-Bench 2.1 profiles", () => {
   });
 
   it("uses self-contained workers for every Terminal-Bench deployment", async () => {
-    const names = [
-      "tb21-deepseek-v4-flash-canary",
-      "tb21-deepseek-v4-flash-official-5",
-      "tb21-deepseek-v4-flash-replacement",
-      "tb21-deepseek-v4-flash-diagnostic-1",
-      "tb21-deepseek-v4-flash-diagnostic-2",
-      "tb21-deepseek-v4-flash-deepinfra-diagnostic-1",
-      "tb21-deepseek-v4-flash-dsh-providers",
-      "tb21-gpt-oss-20b-dsh-providers",
-      "tb21-gpt-oss-20b-opencode-providers",
-      "tb21-gpt-oss-20b-qwen-code-providers",
-      "tb21-gpt-oss-20b-fx-providers",
-      "tb21-gpt-oss-20b-mini-swe-agent-providers",
-      "tb21-gpt-oss-20b-pi-providers",
-      "tb21-gpt-oss-20b-kimi-code-providers",
-      "tb21-gpt-oss-20b-hermes-providers",
-      "tb21-gpt-oss-20b-openhands-providers",
-      "tb21-gpt-oss-20b-openclaw-providers",
-    ];
-    for (const name of names) {
+    const deployments = [
+      ["tb21-deepseek-v4-flash-canary", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-deepseek-v4-flash-official-5", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-deepseek-v4-flash-replacement", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-deepseek-v4-flash-diagnostic-1", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-deepseek-v4-flash-diagnostic-2", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-deepseek-v4-flash-deepinfra-diagnostic-1", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-deepseek-v4-flash-dsh-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-dsh-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-opencode-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-qwen-code-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-fx-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-mini-swe-agent-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-pi-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-kimi-code-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-hermes-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-openhands-providers", WORKER_IMAGE, WORKER_REVISION],
+      ["tb21-gpt-oss-20b-openclaw-providers", WORKER_IMAGE, WORKER_REVISION],
+      [
+        "tb21-gpt-oss-20b-fast-agent-command-providers",
+        COMMAND_WORKER_IMAGE,
+        COMMAND_WORKER_REVISION,
+      ],
+    ] as const;
+    for (const [name, image, revision] of deployments) {
       const deployment = record((await profile("deployment", name)).spec);
       expect(deployment.harbor_version).toBe("0.22.0");
-      expect(deployment.job_image).toBe(WORKER_IMAGE);
-      expect(deployment.worker_revision).toBe(WORKER_REVISION);
+      expect(deployment.job_image).toBe(image);
+      expect(deployment.worker_revision).toBe(revision);
       expect(deployment.preparation_job_command).toEqual(PREPARATION_COMMAND);
       expect(deployment.job_command).toEqual(EXECUTION_COMMAND);
       const template = record(deployment.trial_job_template);
