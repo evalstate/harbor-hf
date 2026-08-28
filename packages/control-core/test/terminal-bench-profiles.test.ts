@@ -26,9 +26,9 @@ import {
 const WORKER_REVISION = "a689332f0cc7370b050813130b0d7d505e46ff6e";
 const WORKER_IMAGE =
   "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:1bbd594ace63d8a30fcdc728235d405ee47c92b4ee53e11dbb20408b819bc2fa";
-const COMMAND_WORKER_REVISION = "600b37a8dfb2cc15ae1e366ea9344a1c00aff6f8";
+const COMMAND_WORKER_REVISION = "8d56439745c6139e6decaba1e74234d748e281d6";
 const COMMAND_WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:9ad873c39a0b9c1735d90affa8f77200e5db14c4eccb20ea064eebd65f1ae707";
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:7a390c4264c010e6a6008deff606271332a953b960e18125ab6efcb5fde85013";
 const HARBOR_SOURCE =
   "git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893";
 const PREPARATION_COMMAND = [
@@ -368,7 +368,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     expect(tasks).toHaveLength(2);
     expect(new Set(tasks.map((task) => task.source_task_id)).size).toBe(2);
     expect(deployment?.profile_id).toBe(
-      "sha256:c0ba512665c721a23d8dc5d30ea3ba489c4a8d3077b8be452d5600093fbbbf65",
+      "sha256:e706a06a9a438a1fc97dce50fef6740bda26474f048b6322b16e13e1eccff6b3",
     );
     expect(selected.get("launch_policy")?.profile_id).toBe(
       "sha256:8367b014c1ce08591864a68603dd64dd4b331e60b1beae8886c4ceccea1c8f8a",
