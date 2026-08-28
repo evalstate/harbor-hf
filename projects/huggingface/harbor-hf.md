@@ -71,6 +71,7 @@ Agent-Workbench amendment approved at: 2026-08-27T14:35:22Z
 Agent-Workbench FX-example-and-push amendment approved at: 2026-08-27T22:02:30Z
 Agent-Workbench canary-activation amendment approved at: 2026-08-28T07:28:34Z
 Canonical work-remote amendment approved at: 2026-08-28T07:44:34Z
+Private Harbor-HF recovery amendment approved at: 2026-08-28T08:21:01Z
 
 ### Scope
 
@@ -355,3 +356,4 @@ No project-scope amendment remains pending. Operational gates still apply:
 - Approved pushing only `feat/agent-workbench`, publishing one exact generic trial-worker image, committing and pushing the resulting digest-pinned deployment and single-attempt diagnostic policy, deploying the exact reviewed revision to the existing canonical control Space, verifying the Fast-Agent setup path, and launching one two-task `terminal-bench-2-1-canary` Run with `gpt-oss-20b`.
 - Keep trial concurrency at one, physical infrastructure attempts at one per logical task, diagnostic publication only, and the hard Run ceiling at USD 1.00. No new persistent resource, credential, Endpoint, pull request, merge, release, force push, default-branch update, official result, or unrelated hosted mutation is authorized.
 - At 2026-08-28T07:44:34Z, approved making `huggingface/harbor-hf` the checkout's normal work remote, retaining the former fork only as a secondary remote, and pushing `feat/agent-workbench` directly to the canonical repository so its existing Actions publisher can build the exact worker image. This supersedes the unapproved temporary-branch proposal without authorizing a default-branch update, merge, pull-request mutation, force push, shared-branch deletion, tag, or release.
+- At 2026-08-28T08:21:01Z, confirmed authority over the existing private Harbor-HF Spaces and Buckets in the operator-selected namespace. This authorizes restoring the failed control deployment to its prior known-good source, implementing and deploying a general durable-schema compatibility repair for the legacy capacity profile, and resuming the already-approved Workbench setup and two-task diagnostic canary. Keep private resource identifiers out of repository content. Do not create or delete persistent resources, replace or transfer credentials, create an Endpoint, increase the USD 1.00 Run ceiling, or broaden publication beyond diagnostic.
