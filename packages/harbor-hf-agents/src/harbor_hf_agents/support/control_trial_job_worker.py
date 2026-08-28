@@ -527,7 +527,12 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
     *,
     timed_out: bool = False,
 ) -> tuple[str, bool]:
-    if timed_out or "AgentTimeoutError" in stderr or "VerifierTimeoutError" in stderr:
+    if (
+        timed_out
+        or "AgentSetupTimeoutError" in stderr
+        or "AgentTimeoutError" in stderr
+        or "VerifierTimeoutError" in stderr
+    ):
         return "benchmark_timeout", False
     if result is None:
         if "JobEnvironmentPreflightError" in stderr:
@@ -547,7 +552,7 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
     else:
         name = ""
         detail = ""
-    if name in {"AgentTimeoutError", "VerifierTimeoutError"}:
+    if name in {"AgentSetupTimeoutError", "AgentTimeoutError", "VerifierTimeoutError"}:
         return "benchmark_timeout", False
     if name == ProviderPolicyError.__name__ or name in _POLICY_FAILURES:
         return "policy", False
@@ -555,17 +560,17 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
         return "agent", False
     if "policy_rejected" in detail:
         return "policy", False
-    if (
-        name in _ENVIRONMENT_SETUP_ERRORS
-        or name == TransientProviderError.__name__
-        or not _phase_started(result, "agent_execution")
-    ):
+    if name in _ENVIRONMENT_SETUP_ERRORS or name == TransientProviderError.__name__:
         return "infrastructure", True
     if "Verifier" in name or "Reward" in name:
         return "verifier", False
     if "Refusal" in name:
         return "refusal", False
-    return "agent", False
+    if _phase_started(result, "agent_setup") or _phase_started(
+        result, "agent_execution"
+    ):
+        return "agent", False
+    return "invalid", False
 
 
 def _phase_started(result: dict[str, Any], name: str) -> bool:
@@ -582,11 +587,11 @@ def _outcome_with_usage(
     replacement_eligible: bool,
     usage: InferenceUsage | None,
 ) -> tuple[str, bool]:
-    """Treat missing trusted provider usage as an infrastructure failure."""
+    """Treat missing trusted provider usage as infrastructure only after success."""
     if (
         usage is not None
         and (usage.requests == 0 or usage.input_tokens == 0)
-        and outcome in {"agent", "complete"}
+        and outcome == "complete"
     ):
         return "infrastructure", True
     return outcome, replacement_eligible
@@ -972,7 +977,7 @@ def _worker_failure_outcome(error: BaseException) -> tuple[str, bool]:
     if isinstance(error, MissingHarborResultError):
         if error.timed_out:
             return "benchmark_timeout", False
-        return "infrastructure", True
+        return "invalid", False
     if isinstance(
         error,
         (

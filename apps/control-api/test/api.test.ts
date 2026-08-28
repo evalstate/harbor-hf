@@ -365,7 +365,7 @@ describe("control API", () => {
     expect(body.run_command).toContain("http://127.0.0.1:18080/v1");
     expect(body.environment).toContainEqual(
       expect.objectContaining({
-        name: "GENERIC_API_KEY",
+        name: "OPENAI_API_KEY",
         value: "<injected-placeholder>",
         redacted: true,
       }),

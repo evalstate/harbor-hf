@@ -485,7 +485,22 @@ def test_harbor_run_config_uses_one_adhoc_task(
             },
             "",
             False,
-            ("infrastructure", True),
+            ("agent", False),
+        ),
+        (
+            {
+                "exception_info": {"exception_type": "AgentSetupTimeoutError"},
+                "agent_setup": {"started_at": "2026-08-25T00:00:00Z"},
+            },
+            "",
+            False,
+            ("benchmark_timeout", False),
+        ),
+        (
+            {"exception_info": {"exception_type": "RuntimeError"}},
+            "",
+            False,
+            ("invalid", False),
         ),
         (
             {
@@ -553,7 +568,7 @@ def test_provider_usage_overrides_untrusted_agent_token_counts(
             "agent",
             False,
             worker.InferenceUsage(requests=1, input_tokens=0, output_tokens=0),
-            ("infrastructure", True),
+            ("agent", False),
         ),
         (
             "complete",
@@ -571,6 +586,25 @@ def test_missing_provider_usage_is_retryable_infrastructure(
     expected: tuple[str, bool],
 ) -> None:
     assert worker._outcome_with_usage(outcome, replacement, usage) == expected
+
+
+@pytest.mark.parametrize(
+    ("timed_out", "expected"),
+    [
+        (False, ("invalid", False)),
+        (True, ("benchmark_timeout", False)),
+    ],
+)
+def test_missing_harbor_result_is_not_retryable(
+    timed_out: bool,
+    expected: tuple[str, bool],
+) -> None:
+    assert (
+        worker._worker_failure_outcome(
+            worker.MissingHarborResultError("missing", timed_out=timed_out)
+        )
+        == expected
+    )
 
 
 def test_streams_command_output_and_kills_a_hung_process(
@@ -830,7 +864,7 @@ def test_missing_harbor_result_preserves_timeout_provenance(
         (worker.WorkerEvidenceError("invalid evidence"), ("invalid", False)),
         (
             worker.MissingHarborResultError("missing result"),
-            ("infrastructure", True),
+            ("invalid", False),
         ),
         (
             worker.MissingHarborResultError("timed out", timed_out=True),

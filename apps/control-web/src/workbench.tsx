@@ -27,6 +27,7 @@ import {
 } from "./api";
 import { useControlState } from "./control-state";
 import { PageHeader } from "./layout";
+import { firstCompatibleLaunchSelection } from "./launch";
 import { cn, formatDate } from "./lib";
 import { useAllProfiles } from "./queries";
 import { Badge, Button, Card, ErrorNotice } from "./ui";
@@ -46,8 +47,56 @@ const fastAgentStarter: WorkbenchRecipe = {
   schema_version: "v1",
   name: "fast-agent",
   setup_command: [
-    'python -m venv "$AGENT_HOME/venv"',
-    '"$AGENT_HOME/venv/bin/pip" install --no-cache-dir fast-agent-mcp==0.10.11',
+    "set -eu",
+    "uv_version=0.12.5",
+    "uv_sha256=68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2",
+    "python_version=3.12.14",
+    'case "$(uname -m)" in',
+    "  x86_64|amd64) uv_target=x86_64-unknown-linux-gnu ;;",
+    '  *) printf "unsupported setup architecture\\n" >&2; exit 2 ;;',
+    "esac",
+    "command -v /usr/lib/apt/apt-helper >/dev/null 2>&1",
+    "command -v tar >/dev/null 2>&1",
+    "command -v sha256sum >/dev/null 2>&1",
+    'mkdir -p "$AGENT_HOME/bin" "$AGENT_HOME/cache" "$AGENT_HOME/python"',
+    `uv_archive="$AGENT_HOME/cache/uv-\${uv_version}.tar.gz"`,
+    'uv_download_log="$AGENT_HOME/cache/uv-download.log"',
+    "if ! /usr/lib/apt/apt-helper \\",
+    "  -o Acquire::https::Verify-Peer=false \\",
+    "  -o Acquire::https::Verify-Host=false \\",
+    "  download-file \\",
+    `  "https://github.com/astral-sh/uv/releases/download/\${uv_version}/uv-\${uv_target}.tar.gz" \\`,
+    '  "$uv_archive" >"$uv_download_log" 2>&1',
+    "then",
+    '  printf "pinned uv download failed\\n" >&2',
+    "  exit 1",
+    "fi",
+    'printf "%s  %s\\n" "$uv_sha256" "$uv_archive" |',
+    "  sha256sum --check --strict",
+    'rm -rf "$AGENT_HOME/cache/uv-extract"',
+    'mkdir -p "$AGENT_HOME/cache/uv-extract"',
+    'tar -xzf "$uv_archive" \\',
+    '  -C "$AGENT_HOME/cache/uv-extract" \\',
+    "  --strip-components=1",
+    'install -m 0755 "$AGENT_HOME/cache/uv-extract/uv" "$AGENT_HOME/bin/uv"',
+    'UV_CACHE_DIR="$AGENT_HOME/cache/uv" \\',
+    'UV_PYTHON_INSTALL_DIR="$AGENT_HOME/python" \\',
+    "UV_NO_PROGRESS=1 \\",
+    '  "$AGENT_HOME/bin/uv" python install "$python_version"',
+    'UV_CACHE_DIR="$AGENT_HOME/cache/uv" \\',
+    'UV_PYTHON_INSTALL_DIR="$AGENT_HOME/python" \\',
+    "UV_NO_PROGRESS=1 \\",
+    '  "$AGENT_HOME/bin/uv" venv \\',
+    '  --python "$python_version" \\',
+    "  --python-preference only-managed \\",
+    '  "$AGENT_HOME/venv"',
+    'UV_CACHE_DIR="$AGENT_HOME/cache/uv" \\',
+    'UV_PYTHON_INSTALL_DIR="$AGENT_HOME/python" \\',
+    "UV_NO_PROGRESS=1 \\",
+    '  "$AGENT_HOME/bin/uv" pip install \\',
+    '  --python "$AGENT_HOME/venv/bin/python" \\',
+    "  fast-agent-mcp==0.10.11",
+    '"$AGENT_HOME/venv/bin/python" --version',
     '"$AGENT_HOME/venv/bin/fast-agent" --version',
   ].join("\n"),
   run_command: [
@@ -67,7 +116,7 @@ const fastAgentStarter: WorkbenchRecipe = {
   environment: [
     { name: "AGENT_HOME", source: "agent_home" },
     { name: "AGENT_MODEL", source: "model_name" },
-    { name: "GENERIC_API_KEY", source: "model_api_key" },
+    { name: "OPENAI_API_KEY", source: "model_api_key" },
     { name: "MODEL_BASE_URL", source: "model_base_url" },
     {
       name: "AGENT_RESULTS_PATH",
@@ -158,6 +207,55 @@ function statusTone(status: WorkbenchSetup["status"]): string {
   return "active";
 }
 
+type WorkbenchPublicationState =
+  | { kind: "test-required" }
+  | { kind: "loading" }
+  | { kind: "error"; error: unknown }
+  | { kind: "unpublished" }
+  | { kind: "published-no-deployment"; alias: string }
+  | { kind: "published"; alias: string };
+
+function WorkbenchFlow() {
+  const stages = [
+    [
+      "Configure",
+      "Edit commands and bindings, then review the authoritative recipe preview.",
+    ],
+    [
+      "Test",
+      "Install this exact recipe in a disposable CPU sandbox. No benchmark or model request is made.",
+    ],
+    [
+      "Publish",
+      "Match the tested recipe to an approved immutable harness profile. Workbench checks publication status; it does not publish arbitrary recipes.",
+    ],
+    [
+      "Run",
+      "Open the normal Run launcher to choose the benchmark, model, runtime, launch policy, and cost ceiling.",
+    ],
+  ] as const;
+  return (
+    <Card className="mb-6">
+      <h2 className="font-semibold text-white">Configure → Test → Publish → Run</h2>
+      <ol className="mt-4 grid gap-3 md:grid-cols-4">
+        {stages.map(([title, description], index) => (
+          <li className="rounded-lg border border-slate-800 p-3" key={title}>
+            <div className="flex items-center gap-2">
+              <Badge status="active">{index + 1}</Badge>
+              <span className="font-medium text-slate-100">{title}</span>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-slate-400">{description}</p>
+          </li>
+        ))}
+      </ol>
+      <p className="mt-4 text-sm font-medium text-amber-200">
+        Setup and publication are separate. Passing setup does not publish a profile or
+        start a benchmark Run.
+      </p>
+    </Card>
+  );
+}
+
 export function WorkbenchPage() {
   const navigate = useNavigate();
   const { writeMode } = useControlState();
@@ -235,19 +333,30 @@ export function WorkbenchPage() {
 
   const setupActive =
     setup !== null && ["queued", "running", "cancelling"].includes(setup.status);
-  const verifiedCurrent =
+  const setupMatchesCurrent =
     !checking &&
-    setup?.status === "passed" &&
+    setup !== null &&
+    preview !== null &&
     preview?.recipe_digest === setup.recipe_digest &&
     preview?.revision_id === setup.revision_id;
-  const reviewedHarness = useMemo(() => {
-    if (!verifiedCurrent || !preview) return undefined;
+  const verifiedCurrent = setupMatchesCurrent && setup?.status === "passed";
+  const publicationState = useMemo<WorkbenchPublicationState>(() => {
+    if (!verifiedCurrent || !preview) return { kind: "test-required" };
+    if (profiles.isPending && !profiles.data) return { kind: "loading" };
+    if (profiles.isError) return { kind: "error", error: profiles.error };
     const items = profiles.data?.items ?? [];
-    const approvedModels = new Set(
+    const approved = (kind: string) =>
       items
-        .filter((profile) => profile.profile_kind === "model")
-        .flatMap((profile) => profile.approved_aliases),
-    );
+        .filter((profile) => profile.profile_kind === kind)
+        .flatMap((profile) =>
+          profile.approved_aliases.map((alias) => ({
+            alias,
+            spec: profile.spec,
+          })),
+        );
+    const models = approved("model");
+    const harnesses = approved("harness");
+    const deployments = approved("deployment");
     const candidates = items
       .filter(
         (profile) =>
@@ -257,27 +366,24 @@ export function WorkbenchPage() {
       )
       .flatMap((profile) => profile.approved_aliases)
       .sort();
+    if (!candidates[0]) return { kind: "unpublished" };
     for (const alias of candidates) {
-      const compatible = items.some((profile) => {
-        if (
-          profile.profile_kind !== "deployment" ||
-          profile.approved_aliases.length === 0
-        )
-          return false;
-        const harnesses = profile.spec.harnesses;
-        const models = profile.spec.models;
-        return (
-          Array.isArray(harnesses) &&
-          harnesses.includes(alias) &&
-          Array.isArray(models) &&
-          models.some((model) => typeof model === "string" && approvedModels.has(model))
-        );
-      });
-      if (compatible) return { alias, runnable: true as const };
+      try {
+        firstCompatibleLaunchSelection(models, harnesses, deployments, alias);
+        return { kind: "published", alias };
+      } catch {
+        // Try the next exact published alias.
+      }
     }
-    if (candidates[0]) return { alias: candidates[0], runnable: false as const };
-    return undefined;
-  }, [preview, profiles.data?.items, verifiedCurrent]);
+    return { kind: "published-no-deployment", alias: candidates[0] };
+  }, [
+    preview,
+    profiles.data,
+    profiles.error,
+    profiles.isError,
+    profiles.isPending,
+    verifiedCurrent,
+  ]);
 
   const updateEnvironment = (
     index: number,
@@ -351,7 +457,7 @@ export function WorkbenchPage() {
     <>
       <PageHeader
         title="Agent Workbench"
-        description="Configure and privately verify a command-line agent. The service previews the exact immutable recipe before executing setup in a disposable CPU sandbox."
+        description="Configure, test, publish, then run a command-line agent. Setup tests are private: passing setup does not publish a profile or start a benchmark Run."
         action={
           <div className="flex flex-wrap gap-2">
             <Button
@@ -377,6 +483,8 @@ export function WorkbenchPage() {
           </div>
         }
       />
+
+      <WorkbenchFlow />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(22rem,0.85fr)]">
         <div className="space-y-6">
@@ -567,10 +675,10 @@ export function WorkbenchPage() {
               </div>
             </div>
             {setupError ? <ErrorNotice error={setupError} /> : null}
-            {setup && !verifiedCurrent && setup.status === "passed" ? (
+            {setup && !setupMatchesCurrent && setup.status === "passed" ? (
               <p className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
-                Setup verified an older recipe. Run setup again to test the current
-                edits.
+                This setup passed for an older recipe. Test the current edits before
+                checking publication or starting a Run.
               </p>
             ) : null}
             {setupActive ? (
@@ -758,37 +866,95 @@ export function WorkbenchPage() {
                     ? ` · finished ${formatDate(setup.completed_at)}`
                     : ""}
                 </p>
+                {verifiedCurrent ? (
+                  <p className="mt-2 max-w-xl text-sm text-slate-300">
+                    Setup passed for the current recipe. Installation was verified, but
+                    this setup did not publish a profile or start a benchmark Run.
+                  </p>
+                ) : null}
               </div>
-              {verifiedCurrent ? (
-                <div className="max-w-sm text-right">
+              <div className="max-w-md text-right">
+                <div className="flex justify-end">
+                  <Badge
+                    status={
+                      publicationState.kind === "published"
+                        ? "complete"
+                        : publicationState.kind === "loading"
+                          ? "active"
+                          : "error"
+                    }
+                  >
+                    {publicationState.kind === "test-required"
+                      ? "Test required"
+                      : publicationState.kind === "loading"
+                        ? "Checking profiles"
+                        : publicationState.kind === "error"
+                          ? "Profile error"
+                          : publicationState.kind === "unpublished"
+                            ? "Unpublished"
+                            : publicationState.kind === "published-no-deployment"
+                              ? "Published · no compatible deployment"
+                              : "Published"}
+                  </Badge>
+                </div>
+                <p className="mt-2 text-xs text-slate-400">
+                  {publicationState.kind === "test-required"
+                    ? "Test the current recipe before checking whether it is published."
+                    : publicationState.kind === "loading"
+                      ? "Checking the approved profile catalog…"
+                      : publicationState.kind === "error"
+                        ? "The profile catalog could not be loaded, so publication and Run readiness are unknown."
+                        : publicationState.kind === "unpublished"
+                          ? "Setup passed, but no approved harness profile matches this exact recipe."
+                          : publicationState.kind === "published-no-deployment"
+                            ? `This exact recipe is already published as ${publicationState.alias}, but no compatible approved deployment is available.`
+                            : `This exact recipe is already published as ${publicationState.alias} and has a compatible approved deployment.`}
+                </p>
+                {publicationState.kind === "error" ? (
+                  <div className="mt-3">
+                    <ErrorNotice error={publicationState.error} />
+                    <Button
+                      className="mt-2"
+                      variant="secondary"
+                      onClick={() => void profiles.refetch()}
+                    >
+                      Retry profile catalog
+                    </Button>
+                  </div>
+                ) : null}
+                <div className="mt-3">
                   <Button
-                    disabled={!reviewedHarness?.runnable}
+                    disabled={publicationState.kind !== "published"}
                     variant="secondary"
                     onClick={() => {
-                      if (!reviewedHarness?.runnable) return;
+                      if (publicationState.kind !== "published") return;
                       const query = new URLSearchParams({
                         launch: "1",
-                        harness: reviewedHarness.alias,
+                        harness: publicationState.alias,
                       });
                       navigate(`/runs?${query.toString()}`);
                     }}
                   >
-                    {reviewedHarness?.runnable
-                      ? "Continue to run launcher"
-                      : reviewedHarness
-                        ? "Worker deployment pending"
-                        : "Recipe not reviewed for Runs"}{" "}
+                    {publicationState.kind === "published"
+                      ? "Open Run launcher"
+                      : "Run unavailable"}{" "}
                     <FileCode2 size={16} />
                   </Button>
                   <p className="mt-2 text-xs text-slate-500">
-                    {reviewedHarness?.runnable
-                      ? "The launcher receives only the reviewed immutable harness alias. Select the two-task canary, model, diagnostic policy, and cost ceiling there."
-                      : reviewedHarness
-                        ? "This exact recipe is reviewed, but no compatible digest-pinned trial-worker deployment is available yet."
-                        : "Only an exact setup-tested recipe matching a reviewed immutable harness profile can continue to a benchmark Run."}
+                    {publicationState.kind === "published"
+                      ? "Choose the benchmark, model, runtime, launch policy, and cost ceiling there. Starting a Run requires a separate confirmation."
+                      : publicationState.kind === "test-required"
+                        ? "Pass setup for the current recipe first."
+                        : publicationState.kind === "loading"
+                          ? "Waiting for publication status."
+                          : publicationState.kind === "error"
+                            ? "Retry the profile catalog request."
+                            : publicationState.kind === "unpublished"
+                              ? "Publish this exact recipe through the reviewed profile workflow first."
+                              : "A compatible approved deployment is required before launch."}
                   </p>
                 </div>
-              ) : null}
+              </div>
             </div>
             {setup.error ? (
               <p className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">
@@ -797,99 +963,101 @@ export function WorkbenchPage() {
             ) : null}
           </Card>
 
-          <div className="grid gap-6 xl:grid-cols-2">
-            <Card>
-              <h2 className="font-semibold text-white">Setup logs</h2>
-              <div className="mt-4 space-y-4">
-                <div>
-                  <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">
-                    Standard output
-                  </h3>
-                  <section
-                    aria-label="Setup standard output"
-                    className="max-h-[32rem] min-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-800 bg-black/30 p-3 text-xs leading-5 text-slate-300"
-                  >
-                    <pre>{logs.stdout || "Waiting for output…"}</pre>
-                  </section>
-                </div>
-                {logs.stderr ? (
+          {!setupActive ? (
+            <div className="grid gap-6 xl:grid-cols-2">
+              <Card>
+                <h2 className="font-semibold text-white">Final setup output</h2>
+                <div className="mt-4 space-y-4">
                   <div>
                     <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">
-                      Standard error
+                      Standard output
                     </h3>
                     <section
-                      aria-label="Setup standard error"
-                      className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-rose-900/60 bg-rose-950/20 p-3 text-xs leading-5 text-rose-200"
+                      aria-label="Final setup standard output"
+                      className="max-h-[32rem] min-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-800 bg-black/30 p-3 text-xs leading-5 text-slate-300"
                     >
-                      <pre>{logs.stderr}</pre>
+                      <pre>{logs.stdout || "Waiting for output…"}</pre>
                     </section>
                   </div>
-                ) : null}
-              </div>
-            </Card>
-
-            <Card>
-              <h2 className="font-semibold text-white">Created files</h2>
-              <p className="mt-1 text-sm text-slate-400">
-                Text previews are escaped and bounded. Binary files are listed only.
-              </p>
-              <div className="mt-4 grid min-h-72 gap-4 md:grid-cols-[minmax(12rem,0.8fr)_minmax(0,1.2fr)]">
-                <div className="max-h-[32rem] overflow-auto rounded-lg border border-slate-800 p-2">
-                  {setup.files.length === 0 ? (
-                    <p className="p-3 text-sm text-slate-500">
-                      Files appear after setup completes.
-                    </p>
-                  ) : (
-                    setup.files.map((file) => (
-                      <button
-                        className={cn(
-                          "block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400",
-                          selectedFile?.file_id === file.file_id
-                            ? "bg-cyan-400/10 text-cyan-200"
-                            : "text-slate-300",
-                        )}
-                        key={file.file_id}
-                        onClick={() => void selectFile(file)}
-                        type="button"
-                      >
-                        <span className="text-slate-500">{file.root}/</span>
-                        {file.path}
-                        <span className="ml-2 text-slate-600">{file.size} B</span>
-                      </button>
-                    ))
-                  )}
-                </div>
-                <div className="min-w-0 rounded-lg border border-slate-800 bg-black/20 p-3">
-                  {fileError ? <ErrorNotice error={fileError} /> : null}
-                  {!selectedFile ? (
-                    <p className="text-sm text-slate-500">
-                      Select a file to inspect it.
-                    </p>
-                  ) : !selectedFile.text ? (
-                    <p className="text-sm text-slate-400">
-                      Binary file · {selectedFile.size} bytes
-                    </p>
-                  ) : fileContent ? (
-                    <>
+                  {logs.stderr ? (
+                    <div>
+                      <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+                        Standard error
+                      </h3>
                       <section
-                        aria-label={`Contents of ${selectedFile.path}`}
-                        className="max-h-[30rem] overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-300"
+                        aria-label="Final setup standard error"
+                        className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-rose-900/60 bg-rose-950/20 p-3 text-xs leading-5 text-rose-200"
                       >
-                        <pre>{fileContent.content}</pre>
+                        <pre>{logs.stderr}</pre>
                       </section>
-                      {fileContent.truncated ? (
-                        <p className="mt-2 text-xs text-amber-300">
-                          Preview truncated.
-                        </p>
-                      ) : null}
-                    </>
-                  ) : (
-                    <p className="text-sm text-slate-500">Loading preview…</p>
-                  )}
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            </Card>
-          </div>
+              </Card>
+
+              <Card>
+                <h2 className="font-semibold text-white">Created files</h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  Text previews are escaped and bounded. Binary files are listed only.
+                </p>
+                <div className="mt-4 grid min-h-72 gap-4 md:grid-cols-[minmax(12rem,0.8fr)_minmax(0,1.2fr)]">
+                  <div className="max-h-[32rem] overflow-auto rounded-lg border border-slate-800 p-2">
+                    {setup.files.length === 0 ? (
+                      <p className="p-3 text-sm text-slate-500">
+                        Files appear after setup completes.
+                      </p>
+                    ) : (
+                      setup.files.map((file) => (
+                        <button
+                          className={cn(
+                            "block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400",
+                            selectedFile?.file_id === file.file_id
+                              ? "bg-cyan-400/10 text-cyan-200"
+                              : "text-slate-300",
+                          )}
+                          key={file.file_id}
+                          onClick={() => void selectFile(file)}
+                          type="button"
+                        >
+                          <span className="text-slate-500">{file.root}/</span>
+                          {file.path}
+                          <span className="ml-2 text-slate-600">{file.size} B</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                  <div className="min-w-0 rounded-lg border border-slate-800 bg-black/20 p-3">
+                    {fileError ? <ErrorNotice error={fileError} /> : null}
+                    {!selectedFile ? (
+                      <p className="text-sm text-slate-500">
+                        Select a file to inspect it.
+                      </p>
+                    ) : !selectedFile.text ? (
+                      <p className="text-sm text-slate-400">
+                        Binary file · {selectedFile.size} bytes
+                      </p>
+                    ) : fileContent ? (
+                      <>
+                        <section
+                          aria-label={`Contents of ${selectedFile.path}`}
+                          className="max-h-[30rem] overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-300"
+                        >
+                          <pre>{fileContent.content}</pre>
+                        </section>
+                        {fileContent.truncated ? (
+                          <p className="mt-2 text-xs text-amber-300">
+                            Preview truncated.
+                          </p>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="text-sm text-slate-500">Loading preview…</p>
+                    )}
+                  </div>
+                </div>
+              </Card>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </>

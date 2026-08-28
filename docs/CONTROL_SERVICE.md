@@ -138,11 +138,10 @@ probe running with the final task identity must have empty capability fields,
 `no_new_privs`, and no access to the worker's `/proc/<pid>/environ` or a
 root-owned mode-0600 file. A missing runtime feature or failed denial probe is
 a replacement-eligible infrastructure failure. A Harbor process that exits
-without its required trial result is replacement-eligible only when the worker
-did not terminate it at the locked timeout. A timed-out Harbor process with no
-result seals `benchmark_timeout` and does not permit replacement. Other
-evidence-integrity failures remain non-retryable. There is no namespace or
-same-UID fallback.
+without its required trial result seals `invalid` and does not permit
+replacement. A timed-out Harbor process with no result instead seals
+`benchmark_timeout` and remains non-retryable. Other evidence-integrity
+failures remain non-retryable. There is no namespace or same-UID fallback.
 
 Deployment profiles contain Hugging Face infrastructure and safety limits. They
 do not contain copies of benchmark task catalogs. A new Harbor-supported

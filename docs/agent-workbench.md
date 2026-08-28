@@ -4,17 +4,20 @@ Agent Workbench is an authenticated control-web page for authoring and privately
 testing a generic command-line Harbor agent recipe. It is available at
 `/workbench`.
 
-The Workbench is intentionally low ceremony:
+The Workbench presents four distinct stages:
 
-1. Start from the Fast-Agent 0.10.11 or FX 0.0.6 recipe, or edit arbitrary
-   setup and run commands.
-2. Bind environment variables to typed runtime values instead of pasting
-   credentials.
-3. Review the server-generated command and environment preview.
-4. Confirm and run setup in a disposable local Docker container or Hugging Face
-   Job.
-5. Inspect bounded logs and files created beneath the setup workspace or logs
-   directory.
+1. **Configure** setup and run commands plus typed environment bindings.
+2. **Test** installation in a disposable local Docker container or Hugging Face
+   Job without a benchmark or model request.
+3. **Publish** by matching the exact tested compiler output to an existing
+   approved immutable harness profile.
+4. **Run** through the normal launcher, where benchmark, model, deployment,
+   launch policy, and cost ceiling are selected and separately confirmed.
+
+A successful setup test is ephemeral verification. It does not create, approve,
+or publish a harness profile and does not start a Run. The current Publish stage
+checks the existing reviewed profile catalog; arbitrary recipe finalization
+remains a later generic profile workflow.
 
 The current implementation can continue an exact setup-tested recipe to the
 normal Run launcher only when its compiler output exactly matches a reviewed
@@ -87,6 +90,13 @@ The compiler derives evidence requirements from capabilities rather than the
 agent name. Route bindings require provider-usage evidence. A declared ATIF
 path requires trajectory evidence.
 
+Recipe setup failures and client-configuration failures after agent setup
+begins are sealed as non-retryable agent outcomes. Missing trusted provider
+usage can reclassify only an otherwise successful attempt as infrastructure;
+it does not turn an explicit agent failure into a replacement. Typed task
+environment failures and typed transient provider failures remain the bounded
+replacement-eligible infrastructure cases.
+
 The harness profile omits a fixed model name. During normal Harbor preparation,
 the worker injects the model name from the selected immutable model profile.
 If a harness explicitly declares a different model, preparation rejects it.
@@ -140,11 +150,13 @@ The Hugging Face Jobs runner is a thin disposable adapter. It:
 - observes and cancels the exact Job directly through the Jobs API.
 
 After submission, the web application replaces the one-time confirmation
-control with an inline active-setup panel. The panel polls status and bounded
+control with one inline live-output panel. The panel polls status and bounded
 stdout/stderr once per second, follows new output, and provides a separately
-confirmed Cancel action. Cancellation stops the configured disposable
-environment, retains the available logs and files, and records the terminal
-setup state as `cancelled` rather than a generic failure.
+confirmed Cancel action. Once setup is terminal, the live panel is replaced by
+the final stdout/stderr and created-file views; the same logs are not displayed
+twice. Cancellation stops the configured disposable environment, retains the
+available logs and files, and records the terminal setup state as `cancelled`
+rather than a generic failure.
 
 Setup-test API state, reconstructed logs, and file previews remain intentionally
 ephemeral and actor-scoped. A graceful control-service shutdown cancels active
@@ -154,16 +166,27 @@ Workbench does not turn setup verification into durable benchmark state.
 
 ## Fast-Agent starter
 
-The starter installs exactly:
+The starter bootstraps a version-pinned command-agent toolchain from immutable
+recipe data:
 
 ```text
+uv 0.12.5
+CPython 3.12.14
 fast-agent-mcp==0.10.11
 ```
 
+The setup command downloads the pinned Linux `uv` archive, verifies its exact
+SHA-256 before execution, installs the selected managed Python version beneath
+the agent home, and installs the selected Fast-Agent package version into that
+managed environment. It does not depend on an ambient task-image Python, venv,
+or pip. Download diagnostics remain beneath the non-browsable managed agent
+home.
+
 Its run command uses typed bindings for model name, loopback base URL,
-placeholder API key, instruction file, workspace, managed home, results, and
-trajectory output. Fast-Agent is recipe data; neither the Workbench compiler
-nor the command-agent plugin branches on its name.
+`OPENAI_API_KEY` as the non-secret route placeholder, instruction file,
+workspace, managed home, results, and trajectory output. Fast-Agent and its
+toolchain remain recipe data; neither the Workbench compiler nor the
+command-agent plugin branches on their names.
 
 The checked-in `fast-agent-0-10-11-command` harness profile is derived from the
 same compiler output returned by the Workbench preview. After setup passes, the
@@ -200,6 +223,14 @@ The narrow reviewed-profile flow is:
 5. It opens the existing Run launcher with only that harness alias.
 6. The user selects the benchmark, model, deployment route, diagnostic launch
    policy, and cost ceiling, then submits through `POST /api/v1/runs`.
+
+The browser reports publication as one of these explicit states:
+
+- checking the approved profile catalog;
+- profile catalog unavailable;
+- setup-tested recipe is unpublished;
+- exact recipe is published but has no compatible deployment; or
+- exact recipe is published and ready for the normal Run launcher.
 
 The launcher selects harnesses by exact immutable alias. Reasoning is displayed
 from the selected harness profile rather than being used to guess a harness by

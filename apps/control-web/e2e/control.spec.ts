@@ -231,6 +231,15 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
 
   await page.goto("/workbench");
   await expect(page.getByRole("heading", { name: "Agent Workbench" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Configure → Test → Publish → Run" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Setup and publication are separate. Passing setup does not publish a profile or start a benchmark Run.",
+      { exact: true },
+    ),
+  ).toBeVisible();
   await expect(page.getByText("Preview ready")).toBeVisible();
   await expect(page.getByText("<injected placeholder>", { exact: true })).toBeVisible();
   await expect(page.getByText(/injected-placeholder/)).toHaveCount(0);
@@ -238,6 +247,7 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
   await page.getByRole("checkbox").check();
   await page.getByRole("button", { name: "Launch setup test" }).click();
   await expect(page.getByText("fast-agent-mcp v0.10.11")).toBeVisible();
+  await expect(page.getByText("Published", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", { name: /workspace\/instruction\.txt/ }),
   ).toBeVisible();
@@ -250,9 +260,7 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
       () => (window as Window & { compromised?: boolean }).compromised,
     ),
   ).toBeUndefined();
-  await expect(
-    page.getByRole("button", { name: "Continue to run launcher" }),
-  ).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Open Run launcher" })).toBeEnabled();
   await page.screenshot({
     path: testInfo.outputPath("agent-workbench-desktop.png"),
     fullPage: true,
@@ -270,7 +278,7 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
     path: testInfo.outputPath("agent-workbench-mobile.png"),
     fullPage: true,
   });
-  await page.getByRole("button", { name: "Continue to run launcher" }).click();
+  await page.getByRole("button", { name: "Open Run launcher" }).click();
   await expect(page).toHaveURL(/\/runs$/);
   await expect(page.getByLabel("Harness", { exact: true })).toHaveValue(
     "fast-agent-0-10-11-command",
@@ -343,10 +351,13 @@ test("tails and cancels a running Workbench setup", async ({ page }) => {
   await expect(page.getByLabel("Live setup output")).toContainText(
     "Downloading agent package 3/10",
   );
+  await expect(page.getByLabel("Final setup standard output")).toHaveCount(0);
 
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Cancel setup" }).click();
   await expect(page.getByText("cancelled", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Live setup output")).toHaveCount(0);
+  await expect(page.getByLabel("Final setup standard output")).toHaveCount(1);
   await expect(
     page.getByRole("checkbox", {
       name: /launch this exact setup recipe/i,

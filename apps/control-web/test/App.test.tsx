@@ -259,6 +259,12 @@ describe("control web", () => {
     expect(
       await screen.findByRole("heading", { name: "Agent Workbench" }),
     ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Configure → Test → Publish → Run" }),
+    ).toBeVisible();
+    expect(
+      screen.getAllByText(/Passing setup does not publish a profile/i),
+    ).toHaveLength(2);
     expect(await screen.findByText("Preview ready")).toBeVisible();
     expect(screen.getByText("<injected placeholder>")).toBeVisible();
 
@@ -283,6 +289,10 @@ describe("control web", () => {
     await waitFor(() => expect(launchSetup).toBeEnabled());
     await user.click(launchSetup);
     expect(await screen.findByText("passed")).toBeVisible();
+    expect(await screen.findByText("Published", { exact: true })).toBeVisible();
+    expect(
+      screen.getByText(/already published as fast-agent-0-10-11-command/i),
+    ).toBeVisible();
     expect(await screen.findByText(/fast-agent-mcp v0.10.11/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: /hostile.txt/i }));
     expect(
@@ -290,27 +300,109 @@ describe("control web", () => {
     ).toBeVisible();
     expect(document.querySelector("script")).toBeNull();
     const continueToRun = await screen.findByRole("button", {
-      name: /continue to run launcher/i,
+      name: /open run launcher/i,
     });
     const configurationName = screen.getByLabelText("Configuration name");
     await user.clear(configurationName);
     await user.type(configurationName, "fast-agent-edited");
     await waitFor(() =>
-      expect(
-        screen.queryByRole("button", { name: /continue to run launcher/i }),
-      ).not.toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: /run unavailable/i })).toBeDisabled(),
     );
     await user.clear(configurationName);
     await user.type(configurationName, "fast-agent");
     const restoredContinue = await screen.findByRole("button", {
-      name: /continue to run launcher/i,
+      name: /open run launcher/i,
     });
-    expect(continueToRun).not.toBeInTheDocument();
+    expect(restoredContinue).toBe(continueToRun);
     await user.click(restoredContinue);
     expect(await screen.findByRole("heading", { name: "Runs" })).toBeVisible();
     expect(await screen.findByRole("heading", { name: "Start a run" })).toBeVisible();
     expect(screen.getByLabelText("Harness")).toHaveValue("fast-agent-0-10-11-command");
   });
+
+  it.each([
+    ["loading", "Checking profiles"],
+    ["error", "Profile error"],
+    ["unpublished", "Unpublished"],
+    ["no-deployment", "Published · no compatible deployment"],
+  ] as const)(
+    "explains the %s Workbench publication state",
+    async (mode, expectedState) => {
+      vi.stubGlobal("EventSource", FakeEventSource);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const path = String(input);
+          if (path.includes("auth/session")) return json(session());
+          if (path.includes("/system")) return json(system());
+          if (path.endsWith("/api/v1/workbench/preview"))
+            return json(compileAgentWorkbenchRecipe(JSON.parse(String(init?.body))));
+          if (path.endsWith("/api/v1/workbench/setup-tests") && init?.method === "POST")
+            return json(
+              {
+                setup_test_id: "setup-test-publication-state",
+                recipe_digest: reviewedFastAgentPreview.recipe_digest,
+                revision_id: reviewedFastAgentPreview.revision_id,
+                status: "passed",
+                created_at: "2026-08-27T00:00:00.000Z",
+                started_at: "2026-08-27T00:00:01.000Z",
+                completed_at: "2026-08-27T00:00:02.000Z",
+                exit_code: 0,
+                error: null,
+                files: [],
+              },
+              202,
+            );
+          if (path.endsWith("/setup-test-publication-state/logs"))
+            return json({ stdout: "setup complete\n", stderr: "" });
+          if (path.includes("/profiles")) {
+            if (mode === "loading") return new Promise<Response>(() => undefined);
+            if (mode === "error") return json({ error: "forbidden" }, 403);
+            const profiles = launchProfiles();
+            return json({
+              ...profiles,
+              items: profiles.items.filter((profile) => {
+                if (mode === "unpublished")
+                  return !profile.approved_aliases.includes(
+                    "fast-agent-0-10-11-command",
+                  );
+                if (mode === "no-deployment")
+                  return !(
+                    profile.profile_kind === "deployment" &&
+                    Array.isArray(profile.spec.harnesses) &&
+                    profile.spec.harnesses.includes("fast-agent-0-10-11-command")
+                  );
+                return true;
+              }),
+            });
+          }
+          if (path.includes("/events")) throw new Error("offline");
+          throw new Error(`unexpected request: ${path}`);
+        }),
+      );
+
+      renderApp("/workbench");
+      expect(await screen.findByText("Preview ready")).toBeVisible();
+      const user = userEvent.setup();
+      await user.click(
+        screen.getByRole("checkbox", {
+          name: /launch this exact setup recipe/i,
+        }),
+      );
+      await user.click(
+        screen.getByRole("button", {
+          name: /launch setup test/i,
+        }),
+      );
+
+      expect(await screen.findByText(expectedState, { exact: true })).toBeVisible();
+      expect(screen.getByRole("button", { name: /run unavailable/i })).toBeDisabled();
+      if (mode === "error")
+        expect(
+          screen.getByRole("button", { name: /retry profile catalog/i }),
+        ).toBeVisible();
+    },
+  );
 
   it("tails a running Workbench setup and confirms cancellation", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
@@ -391,6 +483,9 @@ describe("control web", () => {
     expect(await screen.findByLabelText("Live setup output")).toHaveTextContent(
       "Downloading agent package 3/10",
     );
+    expect(
+      screen.queryByLabelText("Final setup standard output"),
+    ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel setup" }));
     expect(confirm).toHaveBeenCalledOnce();
     expect(cancelled).toBe(true);
