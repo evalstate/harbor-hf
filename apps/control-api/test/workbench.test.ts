@@ -146,8 +146,13 @@ class FakeWorkbenchJobs implements WorkbenchJobClient {
   readonly requests: WorkbenchJobRequest[] = [];
   readonly cancellations: string[] = [];
   private eventCalls = 0;
+  private resultEmitted = false;
+  private staleSnapshotObserved = false;
 
-  constructor(private cancelled = false) {}
+  constructor(
+    private cancelled = false,
+    private staleSnapshotAfterResult = false,
+  ) {}
 
   async list(ownerDigest: string): Promise<WorkbenchJobRecovery[]> {
     const request = this.requests[0];
@@ -168,6 +173,14 @@ class FakeWorkbenchJobs implements WorkbenchJobClient {
   }
 
   async observe(): Promise<WorkbenchJobSnapshot> {
+    if (
+      this.staleSnapshotAfterResult &&
+      this.resultEmitted &&
+      !this.staleSnapshotObserved
+    ) {
+      this.staleSnapshotObserved = true;
+      return this.snapshot("RUNNING");
+    }
     return this.snapshot(this.cancelled ? "CANCELED" : "COMPLETED");
   }
 
@@ -190,6 +203,7 @@ class FakeWorkbenchJobs implements WorkbenchJobClient {
       text: true,
       content: "<safe>\n",
     };
+    this.resultEmitted = true;
     yield { kind: "result", sequence: 2, exit_code: 0, timed_out: false };
   }
 
@@ -259,6 +273,38 @@ describe("Hugging Face Workbench runner", () => {
       expect((await runtime.logs(started.setup_test_id, "test-operator"))?.stdout).toBe(
         "remote setup started\n",
       );
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("keeps a successful result terminal when the provider snapshot lags", async () => {
+    const jobs = new FakeWorkbenchJobs(false, true);
+    const runtime = new WorkbenchRuntime(
+      "hf-jobs",
+      "example.invalid/setup@sha256:test",
+      jobs,
+      10,
+      10,
+    );
+    try {
+      const started = await runtime.startSetup(
+        fastAgentWorkbenchStarter,
+        "test-operator",
+        "remote-stale-snapshot",
+      );
+      await expect
+        .poll(async () => {
+          const setup = await runtime.getSetup(started.setup_test_id, "test-operator");
+          return setup?.exit_code;
+        })
+        .toBe(0);
+      await expect(
+        runtime.getSetup(started.setup_test_id, "test-operator"),
+      ).resolves.toMatchObject({
+        status: "passed",
+        exit_code: 0,
+      });
     } finally {
       await runtime.close();
     }

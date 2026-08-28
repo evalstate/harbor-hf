@@ -568,6 +568,10 @@ export class WorkbenchRuntime {
   private applyRemoteSnapshot(state: SetupState, snapshot: WorkbenchJobSnapshot): void {
     state.created_at = snapshot.created_at;
     state.started_at = snapshot.started_at;
+    if (state.remote_result_received) {
+      state.completed_at ??= snapshot.completed_at;
+      return;
+    }
     const stage = snapshot.stage.toUpperCase();
     const terminal = this.remoteStageIsTerminal(stage);
     if (!terminal) {
@@ -576,10 +580,6 @@ export class WorkbenchRuntime {
         : stage === "RUNNING"
           ? "running"
           : "queued";
-      return;
-    }
-    if (state.remote_result_received) {
-      state.completed_at ??= snapshot.completed_at;
       return;
     }
     if (!state.remote_stream_complete) return;
