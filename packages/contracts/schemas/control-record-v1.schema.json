@@ -193,6 +193,9 @@
         },
         {
           "$ref": "#/$defs/CapacityProfileObject"
+        },
+        {
+          "$ref": "#/$defs/LegacyCapacityProfileObject"
         }
       ]
     },
@@ -1625,6 +1628,66 @@
         }
       }
     },
+    "LegacyCapacityProfileSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "max_active_sandboxes",
+        "hardware_limits",
+        "start_burst",
+        "start_refill_tokens",
+        "start_refill_period_seconds"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "max_active_sandboxes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "hardware_limits": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hardware", "max_active_sandboxes"],
+            "properties": {
+              "hardware": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "max_active_sandboxes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1024
+              }
+            }
+          }
+        },
+        "start_burst": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "start_refill_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "start_refill_period_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        }
+      }
+    },
     "ProfileSpec": {
       "oneOf": [
         {
@@ -1644,6 +1707,9 @@
         },
         {
           "$ref": "#/$defs/CapacityProfileSpec"
+        },
+        {
+          "$ref": "#/$defs/LegacyCapacityProfileSpec"
         }
       ]
     },
@@ -2239,6 +2305,53 @@
             },
             "spec": {
               "$ref": "#/$defs/CapacityProfileSpec"
+            }
+          }
+        }
+      ]
+    },
+    "LegacyCapacityProfileObject": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "kind",
+            "record_id",
+            "created_at",
+            "actor",
+            "profile_kind",
+            "name",
+            "spec"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "v1"
+            },
+            "kind": {
+              "const": "profile.object"
+            },
+            "record_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            },
+            "profile_kind": {
+              "const": "capacity"
+            },
+            "name": {
+              "$ref": "#/$defs/Id"
+            },
+            "spec": {
+              "$ref": "#/$defs/LegacyCapacityProfileSpec"
             }
           }
         }

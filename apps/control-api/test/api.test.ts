@@ -159,6 +159,56 @@ function capacityRecords(): Array<ProfileObject | ProfilePromotion> {
   return [profile, promotion];
 }
 
+function legacyCapacityRecords(): Array<ProfileObject | ProfilePromotion> {
+  const spec = {
+    namespace: "test",
+    max_active_sandboxes: 16,
+    hardware_limits: [
+      { hardware: "cpu-basic", max_active_sandboxes: 12 },
+      { hardware: "cpu-upgrade", max_active_sandboxes: 4 },
+    ],
+    start_burst: 16,
+    start_refill_tokens: 16,
+    start_refill_period_seconds: 60,
+  } as const;
+  const profile = {
+    schema_version: "v1",
+    kind: "profile.object",
+    record_id: deterministicId(
+      "profile",
+      "capacity",
+      "capacity-legacy",
+      sha256(canonicalJson(spec)),
+    ),
+    created_at: "2026-08-18T00:00:00.000Z",
+    actor: { subject: "profile-import", role: "migration" },
+    profile_kind: "capacity",
+    name: "capacity-legacy",
+    spec,
+  } as ProfileObject;
+  const profileId = sha256(canonicalJson(profile));
+  const promotion: ProfilePromotion = {
+    schema_version: "v1",
+    kind: "profile.promotion",
+    record_id: deterministicId(
+      "promotion",
+      "capacity",
+      "capacity-legacy",
+      profileId,
+      "approved",
+    ),
+    created_at: "2026-08-18T00:00:01.000Z",
+    actor: { subject: "profile-operator", role: "operator" },
+    profile_kind: "capacity",
+    alias: "capacity-legacy",
+    profile_id: profileId,
+    promotion_state: "approved",
+    reason: "approved historical capacity policy",
+    evidence: [],
+  };
+  return [profile, promotion];
+}
+
 function openSse(url: string): Promise<IncomingMessage> {
   return new Promise((resolvePromise, rejectPromise) => {
     const request = get(url, resolvePromise);
@@ -1055,6 +1105,67 @@ describe("control API", () => {
       start_burst: 16,
       start_refill_tokens: 16,
     });
+    await app.close();
+  });
+
+  it("preserves a historical capacity profile and appends a current Job cap", async () => {
+    let legacyKey = "";
+    let legacyBytes = new Uint8Array();
+    const { runtime, app } = await setup(
+      "enabled",
+      async (selected) => {
+        for (const record of legacyCapacityRecords()) {
+          const bytes = new TextEncoder().encode(canonicalJson(record));
+          await selected.store.create(controlRecordPath(record), bytes);
+          if (record.kind === "profile.object") {
+            legacyKey = controlRecordPath(record);
+            legacyBytes = bytes;
+          }
+        }
+      },
+      "capacity-legacy",
+      false,
+    );
+
+    const capacity = await app.inject({ method: "GET", url: "/api/v1/capacity" });
+    expect(capacity.statusCode).toBe(200);
+    expect(capacity.json()).toMatchObject({
+      alias: "capacity-legacy",
+      configured: true,
+      max_active_jobs: 16,
+      start_burst: 16,
+      start_refill_tokens: 16,
+    });
+    expect(Buffer.from(await runtime.store.read(legacyKey))).toEqual(
+      Buffer.from(legacyBytes),
+    );
+    const profiles = await app.inject({
+      method: "GET",
+      url: "/api/v1/profiles?limit=100",
+    });
+    expect(profiles.statusCode).toBe(200);
+    const historical = profiles
+      .json()
+      .items.find(
+        (item: { profile_kind: string; spec: Record<string, unknown> }) =>
+          item.profile_kind === "capacity" && "max_active_sandboxes" in item.spec,
+      );
+    expect(historical.spec).toMatchObject({
+      max_active_sandboxes: 16,
+      hardware_limits: [
+        { hardware: "cpu-basic", max_active_sandboxes: 12 },
+        { hardware: "cpu-upgrade", max_active_sandboxes: 4 },
+      ],
+    });
+    expect(historical.approved_aliases).toEqual([]);
+    const selected = profiles
+      .json()
+      .items.find(
+        (item: { profile_kind: string; approved_aliases: string[] }) =>
+          item.profile_kind === "capacity" &&
+          item.approved_aliases.includes("capacity-legacy"),
+      );
+    expect(selected.spec).toMatchObject({ max_active_jobs: 16 });
     await app.close();
   });
 

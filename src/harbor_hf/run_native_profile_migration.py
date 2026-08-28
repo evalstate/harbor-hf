@@ -1929,9 +1929,28 @@ def _validator() -> Validator:
         schema: object = json.loads(schema_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ProfileMigrationError("current control schema is unavailable") from error
-    checked_schema = _json_object(schema)
+    checked_schema = _migration_target_schema(_json_object(schema))
     Draft202012Validator.check_schema(checked_schema)
     return Draft202012Validator(checked_schema, format_checker=FormatChecker())
+
+
+def _migration_target_schema(schema: JsonObject) -> JsonObject:
+    definitions = _object(schema["$defs"])
+    for definition_name, reference in (
+        ("ProfileObject", "#/$defs/LegacyCapacityProfileObject"),
+        ("ProfileSpec", "#/$defs/LegacyCapacityProfileSpec"),
+    ):
+        definition = _object(definitions[definition_name])
+        variants = _list(definition["oneOf"])
+        retained = [
+            variant for variant in variants if _object(variant).get("$ref") != reference
+        ]
+        if len(retained) != len(variants) - 1:
+            raise ProfileMigrationError(
+                "current control schema has no isolated legacy capacity variant"
+            )
+        definition["oneOf"] = retained
+    return schema
 
 
 def _inventory_digest(entries: Iterable[tuple[str, int, str]]) -> str:

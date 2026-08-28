@@ -1,7 +1,7 @@
 /* Generated from JSON Schema. Do not edit. */
 
 export type HarborHFControlRecordV1 = (ProfileObject | ProfilePromotion | OperatorAcl | RunRequest | RunLock | PreparedTrial | PreparedJob | ActionIntent | ActionDispatch | JobAdmissionGrant | JobCapacityRelease | ActionReceipt | ActionAdvanced | AttemptReceipt | TerminalSelection | TaskExhaustion | TaskCancellation | BudgetEvent | EndpointResource | PublicationReceipt | PublicationSupersession | MigrationRecord)
-export type ProfileObject = (BenchmarkProfileObject | ModelProfileObject | HarnessProfileObject | DeploymentProfileObject | LaunchPolicyProfileObject | CapacityProfileObject)
+export type ProfileObject = (BenchmarkProfileObject | ModelProfileObject | HarnessProfileObject | DeploymentProfileObject | LaunchPolicyProfileObject | CapacityProfileObject | LegacyCapacityProfileObject)
 export type BenchmarkProfileObject = (Base & {
 schema_version: "v1"
 kind: "profile.object"
@@ -147,6 +147,16 @@ actor: Actor
 profile_kind: "capacity"
 name: Id
 spec: CapacityProfileSpec
+})
+export type LegacyCapacityProfileObject = (Base & {
+schema_version: "v1"
+kind: "profile.object"
+record_id: Id
+created_at: Timestamp
+actor: Actor
+profile_kind: "capacity"
+name: Id
+spec: LegacyCapacityProfileSpec
 })
 export type ProfilePromotion = (Base & {
 schema_version: "v1"
@@ -580,6 +590,20 @@ start_burst: number
 start_refill_tokens: number
 start_refill_period_seconds: number
 max_active_jobs: number
+}
+export interface LegacyCapacityProfileSpec {
+namespace: string
+max_active_sandboxes: number
+/**
+ * @maxItems 32
+ */
+hardware_limits: {
+hardware: string
+max_active_sandboxes: number
+}[]
+start_burst: number
+start_refill_tokens: number
+start_refill_period_seconds: number
 }
 export interface ProfileRef {
 kind: ("benchmark" | "model" | "harness" | "deployment" | "launch_policy")

@@ -219,10 +219,59 @@ describe("canonical contracts", () => {
     ).toThrow(ContractValidationError);
   });
 
-  it("does not expose a Sandbox contract or action kind", () => {
-    expect(JSON.stringify(schemas.controlRecord).toLowerCase()).not.toContain(
-      "sandbox",
-    );
+  it("replays the exact historical capacity profile without normalizing it", () => {
+    const spec = {
+      namespace: "test",
+      max_active_sandboxes: 16,
+      hardware_limits: [
+        { hardware: "cpu-basic", max_active_sandboxes: 12 },
+        { hardware: "cpu-upgrade", max_active_sandboxes: 4 },
+      ],
+      start_burst: 16,
+      start_refill_tokens: 16,
+      start_refill_period_seconds: 60,
+    } as const;
+    const profile = {
+      schema_version: "v1",
+      kind: "profile.object",
+      record_id: "profile-capacity-legacy",
+      created_at: "2026-08-22T00:00:00.000Z",
+      actor: { subject: "profile-migration", role: "migration" },
+      profile_kind: "capacity",
+      name: "capacity-legacy",
+      spec,
+    } as const;
+
+    expect(validateControlRecord(profile)).toEqual(profile);
+    for (const invalidSpec of [
+      { ...spec, max_active_jobs: 16 },
+      {
+        ...spec,
+        hardware_limits: [
+          {
+            hardware: "cpu-basic",
+            max_active_sandboxes: 12,
+            max_active_jobs: 12,
+          },
+        ],
+      },
+      { ...spec, undocumented: true },
+      {
+        namespace: spec.namespace,
+        max_active_sandboxes: spec.max_active_sandboxes,
+        hardware_limits: spec.hardware_limits,
+        start_burst: spec.start_burst,
+        start_refill_tokens: spec.start_refill_tokens,
+      },
+      { ...spec, max_active_sandboxes: 1025 },
+    ])
+      expect(() => validateControlRecord({ ...profile, spec: invalidSpec })).toThrow(
+        ContractValidationError,
+      );
+  });
+
+  it("does not re-expose Sandbox records or action kinds", () => {
+    expect(JSON.stringify(schemas.controlRecord)).not.toContain('"const":"sandbox.');
     expect(() =>
       validateControlRecord({
         schema_version: "v1",

@@ -311,6 +311,16 @@ cannot admit new Job work. No production quota is implied by the default.
 Operators select values from verified quota and profiling evidence. Existing
 run locks keep their per-run `max_jobs` and worker concurrency.
 
+The durable v1 schema also recognizes the exact historical capacity-profile
+shape that used `max_active_sandboxes`. Those immutable objects remain
+replayable provenance and keep their original bytes, digests, and promotion
+references. They cannot authorize Run-native Job admission. When a
+write-enabled service has no executable current capacity policy, startup uses
+the configured Job cap to append a new `max_active_jobs` profile and promotion;
+it does not rewrite or delete the historical object. The one-time Run-native
+profile migration still treats the legacy variant as source-only and emits
+current Job-capacity records.
+
 ## HTTP API
 
 The service exposes these route groups:

@@ -424,6 +424,10 @@ export class ControlService {
   capacityProfile(): { profile_id: string; spec: CapacityProfileSpec } | null {
     if (!this.capacityProfileAlias) return null;
     const selected = this.resolver.promoted("capacity", this.capacityProfileAlias);
+    if (!("max_active_jobs" in selected.profile.spec))
+      throw new PolicyError(
+        "historical capacity profile cannot authorize Run-native Job admission",
+      );
     const spec = selected.profile.spec as CapacityProfileSpec;
     if (spec.namespace !== this.namespace)
       throw new PolicyError("capacity profile namespace does not match service");
