@@ -1,3 +1,4 @@
+import { canonicalJson } from "@harbor-hf/contracts/canonical-json";
 import {
   CheckCircle2,
   FileCode2,
@@ -9,7 +10,8 @@ import {
   TerminalSquare,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   cancelWorkbenchSetup,
   getWorkbenchFile,
@@ -26,6 +28,7 @@ import {
 import { useControlState } from "./control-state";
 import { PageHeader } from "./layout";
 import { cn, formatDate } from "./lib";
+import { useAllProfiles } from "./queries";
 import { Badge, Button, Card, ErrorNotice } from "./ui";
 
 const sources = [
@@ -156,7 +159,9 @@ function statusTone(status: WorkbenchSetup["status"]): string {
 }
 
 export function WorkbenchPage() {
+  const navigate = useNavigate();
   const { writeMode } = useControlState();
+  const profiles = useAllProfiles();
   const [recipe, setRecipe] = useState<WorkbenchRecipe>(copyStarter);
   const [preview, setPreview] = useState<WorkbenchPreview | null>(null);
   const [previewError, setPreviewError] = useState<unknown>(null);
@@ -188,6 +193,7 @@ export function WorkbenchPage() {
   useEffect(() => {
     const sequence = ++previewSequence.current;
     setChecking(true);
+    setPreview(null);
     setPreviewError(null);
     const timer = window.setTimeout(() => {
       void previewWorkbenchRecipe(recipe)
@@ -230,9 +236,48 @@ export function WorkbenchPage() {
   const setupActive =
     setup !== null && ["queued", "running", "cancelling"].includes(setup.status);
   const verifiedCurrent =
+    !checking &&
     setup?.status === "passed" &&
     preview?.recipe_digest === setup.recipe_digest &&
     preview?.revision_id === setup.revision_id;
+  const reviewedHarness = useMemo(() => {
+    if (!verifiedCurrent || !preview) return undefined;
+    const items = profiles.data?.items ?? [];
+    const approvedModels = new Set(
+      items
+        .filter((profile) => profile.profile_kind === "model")
+        .flatMap((profile) => profile.approved_aliases),
+    );
+    const candidates = items
+      .filter(
+        (profile) =>
+          profile.profile_kind === "harness" &&
+          profile.approved_aliases.length > 0 &&
+          canonicalJson(profile.spec) === canonicalJson(preview.harness_profile),
+      )
+      .flatMap((profile) => profile.approved_aliases)
+      .sort();
+    for (const alias of candidates) {
+      const compatible = items.some((profile) => {
+        if (
+          profile.profile_kind !== "deployment" ||
+          profile.approved_aliases.length === 0
+        )
+          return false;
+        const harnesses = profile.spec.harnesses;
+        const models = profile.spec.models;
+        return (
+          Array.isArray(harnesses) &&
+          harnesses.includes(alias) &&
+          Array.isArray(models) &&
+          models.some((model) => typeof model === "string" && approvedModels.has(model))
+        );
+      });
+      if (compatible) return { alias, runnable: true as const };
+    }
+    if (candidates[0]) return { alias: candidates[0], runnable: false as const };
+    return undefined;
+  }, [preview, profiles.data?.items, verifiedCurrent]);
 
   const updateEnvironment = (
     index: number,
@@ -716,12 +761,31 @@ export function WorkbenchPage() {
               </div>
               {verifiedCurrent ? (
                 <div className="max-w-sm text-right">
-                  <Button disabled variant="secondary">
-                    Benchmark handoff unavailable <FileCode2 size={16} />
+                  <Button
+                    disabled={!reviewedHarness?.runnable}
+                    variant="secondary"
+                    onClick={() => {
+                      if (!reviewedHarness?.runnable) return;
+                      const query = new URLSearchParams({
+                        launch: "1",
+                        harness: reviewedHarness.alias,
+                      });
+                      navigate(`/runs?${query.toString()}`);
+                    }}
+                  >
+                    {reviewedHarness?.runnable
+                      ? "Continue to run launcher"
+                      : reviewedHarness
+                        ? "Worker deployment pending"
+                        : "Recipe not reviewed for Runs"}{" "}
+                    <FileCode2 size={16} />
                   </Button>
                   <p className="mt-2 text-xs text-slate-500">
-                    This build verifies setup only. It does not yet bind the recipe to a
-                    benchmark Run.
+                    {reviewedHarness?.runnable
+                      ? "The launcher receives only the reviewed immutable harness alias. Select the two-task canary, model, diagnostic policy, and cost ceiling there."
+                      : reviewedHarness
+                        ? "This exact recipe is reviewed, but no compatible digest-pinned trial-worker deployment is available yet."
+                        : "Only an exact setup-tested recipe matching a reviewed immutable harness profile can continue to a benchmark Run."}
                   </p>
                 </div>
               ) : null}

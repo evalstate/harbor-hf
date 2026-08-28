@@ -8,6 +8,10 @@ import {
 } from "@harbor-hf/contracts";
 import { describe, expect, it } from "vitest";
 import { loadBuiltInProfiles } from "../src/profiles.js";
+import {
+  compileAgentWorkbenchRecipe,
+  fastAgentWorkbenchStarter,
+} from "../src/workbench.js";
 
 const WORKER_REVISION = "a689332f0cc7370b050813130b0d7d505e46ff6e";
 const WORKER_IMAGE =
@@ -316,6 +320,19 @@ describe("Terminal-Bench 2.1 profiles", () => {
     expect(deployment.models).toEqual(["gpt-oss-20b"]);
     expect(deployment.harnesses).toEqual(["dsh"]);
     expect(deployment.inference_provider).toBe("together");
+  });
+
+  it("derives the reviewed Fast-Agent command profile from the Workbench compiler", async () => {
+    const harness = await profile("harness", "fast-agent-0-10-11-command");
+    const preview = compileAgentWorkbenchRecipe(fastAgentWorkbenchStarter);
+
+    expect(harness.spec).toEqual(preview.harness_profile);
+    expect(harness.spec.revision).toBe(preview.recipe_digest);
+    const harborAgent = record(harness.spec.harbor_agent);
+    expect(harborAgent.model_name).toBeUndefined();
+    expect(harborAgent.import_path).toBe(
+      "harbor_hf_agents.command_agent.agent:CommandAgent",
+    );
   });
 
   it("pins DeepSeek V4 Flash to DeepSeek Harness for provider runs", async () => {

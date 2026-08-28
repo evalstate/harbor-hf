@@ -109,6 +109,38 @@ def test_config_rejects_reserved_and_credential_environment_names(name: str) -> 
         )
 
 
+def test_config_allows_a_credential_name_only_for_the_route_placeholder() -> None:
+    config = CommandAgentConfig.model_validate(
+        _config(
+            run={
+                "argv": ["agent"],
+                "bindings": {"GENERIC_API_KEY": "route_api_key"},
+            }
+        )
+    )
+    assert config.run.bindings == {"GENERIC_API_KEY": "route_api_key"}
+
+    for source in ("workspace_path", "model_name"):
+        with pytest.raises(ValidationError, match="credential"):
+            CommandAgentConfig.model_validate(
+                _config(
+                    run={
+                        "argv": ["agent"],
+                        "bindings": {"GENERIC_API_KEY": source},
+                    }
+                )
+            )
+    with pytest.raises(ValidationError, match="credential"):
+        CommandAgentConfig.model_validate(
+            _config(
+                run={
+                    "argv": ["agent"],
+                    "literals": {"GENERIC_API_KEY": "not-a-secret"},
+                }
+            )
+        )
+
+
 def test_config_accepts_only_the_declared_binding_types() -> None:
     bindings = {
         "TASK_FILE": "instruction_path",

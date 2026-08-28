@@ -79,6 +79,23 @@ _RESERVED_ENV_NAMES = frozenset(
 )
 
 
+def _validate_environment_name(
+    name: str,
+    *,
+    allow_route_placeholder: bool = False,
+) -> None:
+    if _ENV_NAME.fullmatch(name) is None:
+        raise ValueError(f"binding environment name {name!r} is not a portable name")
+    if name in _RESERVED_ENV_NAMES or name.startswith("HARBOR_"):
+        raise ValueError(
+            f"binding environment name {name!r} is reserved or credential-like"
+        )
+    if is_sensitive_env_key(name) and not allow_route_placeholder:
+        raise ValueError(
+            f"binding environment name {name!r} is reserved or credential-like"
+        )
+
+
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -99,19 +116,13 @@ class CommandSpec(_StrictModel):
         if duplicated:
             names = ", ".join(sorted(duplicated))
             raise ValueError(f"command environment names are duplicated: {names}")
-        for name in (*self.bindings, *self.literals):
-            if _ENV_NAME.fullmatch(name) is None:
-                raise ValueError(
-                    f"binding environment name {name!r} is not a portable name"
-                )
-            if (
-                name in _RESERVED_ENV_NAMES
-                or name.startswith("HARBOR_")
-                or is_sensitive_env_key(name)
-            ):
-                raise ValueError(
-                    f"binding environment name {name!r} is reserved or credential-like"
-                )
+        for name, binding in self.bindings.items():
+            _validate_environment_name(
+                name,
+                allow_route_placeholder=binding == "route_api_key",
+            )
+        for name in self.literals:
+            _validate_environment_name(name)
         for value in self.literals.values():
             if "\0" in value:
                 raise ValueError("literal environment values must not contain NUL")

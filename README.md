@@ -40,7 +40,9 @@ A configured installation also exposes an authenticated
 [Agent Workbench](docs/agent-workbench.md) for compiling generic command-agent
 recipes, previewing typed environment expansion, and testing setup in a
 disposable local Docker container or direct Hugging Face Job. Workbench setup
-state is ephemeral and does not yet bind recipes to benchmark Runs.
+state is ephemeral. An exact setup-tested recipe can continue to the normal Run
+launcher only when it matches a reviewed immutable harness profile with a
+compatible approved deployment; arbitrary edited recipes remain setup-only.
 
 A mutating `harbor-hf` command submits one authenticated and confirmed request.
 The control service validates it, writes durable intent, and returns. The local

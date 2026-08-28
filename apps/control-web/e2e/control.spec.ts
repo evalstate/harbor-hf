@@ -1,4 +1,10 @@
 import { expect, test } from "@playwright/test";
+import {
+  compileAgentWorkbenchRecipe,
+  fastAgentWorkbenchStarter,
+} from "../../../packages/control-core/src/workbench";
+
+const reviewedFastAgentPreview = compileAgentWorkbenchRecipe(fastAgentWorkbenchStarter);
 
 const session = {
   authenticated: true,
@@ -121,43 +127,69 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
   );
   await page.route("**/api/v1/system", (route) => route.fulfill({ json: system() }));
   await page.route("**/api/v1/events", (route) => route.abort());
-  await page.route("**/api/v1/workbench/preview", async (route) => {
-    const recipe = route.request().postDataJSON();
-    return route.fulfill({
+  await page.route("**/api/v1/profiles**", (route) =>
+    route.fulfill({
       json: {
-        recipe,
-        recipe_digest: "sha256:workbench-recipe",
-        revision_id: "recipe-revision-workbench",
-        setup_command:
-          "python -m venv /logs/agent/home/venv\n/logs/agent/home/venv/bin/fast-agent --version",
-        run_command:
-          "/logs/agent/home/venv/bin/fast-agent go --base-url http://127.0.0.1:18080/v1",
-        environment: [
+        items: [
           {
-            name: "GENERIC_API_KEY",
-            source: "model_api_key",
-            value: "<redacted>",
-            redacted: true,
+            profile_id: "sha256:model",
+            profile_kind: "model",
+            name: "gpt-oss-20b",
+            source: "built-in",
+            promotion_state: "approved",
+            alias: "gpt-oss-20b",
+            approved_aliases: ["gpt-oss-20b"],
+            spec: {
+              model_id: "openai/gpt-oss-20b",
+              revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+            },
+            created_at: "2026-08-27T00:00:00.000Z",
           },
           {
-            name: "TASK_WORKSPACE",
-            source: "workspace_path",
-            value: "/app",
-            redacted: false,
+            profile_id: "sha256:harness",
+            profile_kind: "harness",
+            name: "fast-agent-0-10-11-command",
+            source: "built-in",
+            promotion_state: "approved",
+            alias: "fast-agent-0-10-11-command",
+            approved_aliases: ["fast-agent-0-10-11-command"],
+            spec: reviewedFastAgentPreview.harness_profile,
+            created_at: "2026-08-27T00:00:00.000Z",
+          },
+          {
+            profile_id: "sha256:deployment",
+            profile_kind: "deployment",
+            name: "tb21-gpt-oss-command-providers",
+            source: "built-in",
+            promotion_state: "approved",
+            alias: "tb21-gpt-oss-command-providers",
+            approved_aliases: ["tb21-gpt-oss-command-providers"],
+            spec: {
+              models: ["gpt-oss-20b"],
+              harnesses: ["fast-agent-0-10-11-command"],
+              inference_provider: "together",
+            },
+            created_at: "2026-08-27T00:00:00.000Z",
           },
         ],
-        harness_profile: { agent: "command-agent" },
-        warnings: [],
+        next_cursor: null,
       },
-    });
+    }),
+  );
+  await page.route("**/api/v1/runs", (route) =>
+    route.fulfill({ json: { items: [], next_cursor: null } }),
+  );
+  await page.route("**/api/v1/workbench/preview", async (route) => {
+    const recipe = route.request().postDataJSON();
+    return route.fulfill({ json: compileAgentWorkbenchRecipe(recipe) });
   });
   await page.route("**/api/v1/workbench/setup-tests", (route) =>
     route.fulfill({
       status: 202,
       json: {
         setup_test_id: "setup-test-workbench",
-        recipe_digest: "sha256:workbench-recipe",
-        revision_id: "recipe-revision-workbench",
+        recipe_digest: reviewedFastAgentPreview.recipe_digest,
+        revision_id: reviewedFastAgentPreview.revision_id,
         status: "passed",
         created_at: "2026-08-27T12:00:00.000Z",
         started_at: "2026-08-27T12:00:01.000Z",
@@ -219,8 +251,8 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
     ),
   ).toBeUndefined();
   await expect(
-    page.getByRole("button", { name: "Benchmark handoff unavailable" }),
-  ).toBeDisabled();
+    page.getByRole("button", { name: "Continue to run launcher" }),
+  ).toBeEnabled();
   await page.screenshot({
     path: testInfo.outputPath("agent-workbench-desktop.png"),
     fullPage: true,
@@ -238,6 +270,11 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
     path: testInfo.outputPath("agent-workbench-mobile.png"),
     fullPage: true,
   });
+  await page.getByRole("button", { name: "Continue to run launcher" }).click();
+  await expect(page).toHaveURL(/\/runs$/);
+  await expect(page.getByLabel("Harness", { exact: true })).toHaveValue(
+    "fast-agent-0-10-11-command",
+  );
 });
 
 test("tails and cancels a running Workbench setup", async ({ page }) => {

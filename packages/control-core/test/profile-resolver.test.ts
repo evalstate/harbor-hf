@@ -46,4 +46,23 @@ describe("ProfileResolver", () => {
       extra.profile_id,
     );
   });
+
+  it("resolves distinct command recipes by alias without an agent-name branch", () => {
+    const first = profile("harness", "first-command-recipe", {
+      agent: "command-agent",
+      revision: "sha256:first",
+    });
+    const second = profile("harness", "second-command-recipe", {
+      agent: "command-agent",
+      revision: "sha256:second",
+    });
+    const resolver = new ProfileResolver([first, second]);
+
+    expect(resolver.get("harness", "first-command-recipe").profile.spec.revision).toBe(
+      "sha256:first",
+    );
+    expect(resolver.get("harness", "second-command-recipe").profile.spec.revision).toBe(
+      "sha256:second",
+    );
+  });
 });

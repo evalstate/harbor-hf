@@ -14,8 +14,7 @@ export type DeploymentKind = "providers" | "endpoints";
 
 export type LaunchSelection = {
   model: string;
-  harnessAgent: string;
-  reasoning: ReasoningOption;
+  harness: string;
   deploymentKind: DeploymentKind;
 };
 
@@ -96,6 +95,7 @@ export function profileLabel(
     return typeof spec.model_id === "string" ? spec.model_id : alias;
   if (kind === "harness") {
     const agent = typeof spec.agent === "string" ? spec.agent : alias;
+    if (agent === "command-agent") return humanize(alias);
     if (agent === "dsh" || agent.startsWith("dsh-") || alias.startsWith("dsh"))
       return "DeepSeek Harness";
     if (agent === "opencode") return "OpenCode";
@@ -115,17 +115,10 @@ export function labeledHarness(value: string | null | undefined): string {
 
 export function selectHarnessAlias(
   harnesses: ReadonlyArray<{ alias: string; spec: Record<string, unknown> }>,
-  agent: string,
-  reasoning: string,
+  alias: string,
 ): string {
-  const match = harnesses.find(
-    (item) =>
-      harnessAgent(item.spec) === agent && harnessReasoning(item.spec) === reasoning,
-  );
-  if (!match)
-    throw new Error(
-      `no approved ${agent} harness with reasoning ${reasoning} is available`,
-    );
+  const match = harnesses.find((item) => item.alias === alias);
+  if (!match) throw new Error(`approved harness ${alias || "selection"} is missing`);
   return match.alias;
 }
 
@@ -157,6 +150,7 @@ export function firstCompatibleLaunchSelection(
   models: ReadonlyArray<ApprovedProfile>,
   harnesses: ReadonlyArray<ApprovedProfile>,
   deployments: ReadonlyArray<ApprovedProfile>,
+  preferredHarness?: string,
 ): LaunchSelection {
   const modelAliases = new Set(models.map((profile) => profile.alias));
   const harnessByAlias = new Map(harnesses.map((profile) => [profile.alias, profile]));
@@ -171,21 +165,12 @@ export function firstCompatibleLaunchSelection(
       if (typeof model !== "string" || !modelAliases.has(model)) continue;
       for (const harnessAlias of deploymentHarnesses) {
         if (typeof harnessAlias !== "string") continue;
+        if (preferredHarness && harnessAlias !== preferredHarness) continue;
         const harness = harnessByAlias.get(harnessAlias);
         if (!harness) continue;
-        const agent = harnessAgent(harness.spec);
-        const reasoning = harnessReasoning(harness.spec);
-        const selectedHarness = harnesses.find(
-          (profile) =>
-            harnessAgent(profile.spec) === agent &&
-            harnessReasoning(profile.spec) === reasoning,
-        );
-        if (!selectedHarness || !deploymentHarnesses.includes(selectedHarness.alias))
-          continue;
         return {
           model,
-          harnessAgent: agent,
-          reasoning,
+          harness: harness.alias,
           deploymentKind: kind,
         };
       }

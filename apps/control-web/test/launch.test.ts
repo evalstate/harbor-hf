@@ -19,7 +19,7 @@ describe("launch helpers", () => {
     );
   });
 
-  it("selects OpenCode by agent and reasoning without a silent substitute", () => {
+  it("selects the exact approved harness alias without a silent substitute", () => {
     expect(
       selectHarnessAlias(
         [
@@ -33,16 +33,14 @@ describe("launch helpers", () => {
           },
         ],
         "opencode",
-        "off",
       ),
     ).toBe("opencode");
     expect(() =>
       selectHarnessAlias(
         [{ alias: "pi-high", spec: { agent: "pi", reasoning_effort: "high" } }],
         "opencode",
-        "off",
       ),
-    ).toThrow(/no approved opencode harness/);
+    ).toThrow(/approved harness opencode is missing/);
   });
 
   it("doubles the estimated reservation for the default ceiling", () => {
@@ -82,13 +80,12 @@ describe("launch helpers", () => {
       ),
     ).toEqual({
       model: "compatible-model",
-      harnessAgent: "general-agent",
-      reasoning: "medium",
+      harness: "compatible-harness",
       deploymentKind: "providers",
     });
   });
 
-  it("skips an ambiguous harness alias unsupported by the deployment", () => {
+  it("keeps the exact compatible alias when command recipes share an agent name", () => {
     expect(
       firstCompatibleLaunchSelection(
         [{ alias: "model", spec: {} }],
@@ -99,27 +96,19 @@ describe("launch helpers", () => {
         ],
         [
           {
-            alias: "ambiguous-runtime",
+            alias: "second-runtime",
             spec: {
               models: ["model"],
               harnesses: ["second-harness"],
               inference_provider: "provider",
             },
           },
-          {
-            alias: "compatible-runtime",
-            spec: {
-              models: ["model"],
-              harnesses: ["distinct-harness"],
-              inference_provider: "provider",
-            },
-          },
         ],
+        "second-harness",
       ),
     ).toEqual({
       model: "model",
-      harnessAgent: "other-agent",
-      reasoning: "off",
+      harness: "second-harness",
       deploymentKind: "providers",
     });
   });

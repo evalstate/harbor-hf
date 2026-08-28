@@ -177,11 +177,16 @@ bound an abrupt control-service failure. Opaque actor and recipe labels allow
 the restarted service to recover recent actor-owned setup Jobs from the
 namespace Job listing without storing customer commands in control records.
 
-The current implementation does not bind a verified recipe to a Run. That
-handoff remains disabled until the exact setup-tested recipe can be finalized
-as a private unpromoted harness profile and resolved by digest through the
-normal diagnostic Run path with a compatible pinned worker deployment. See
-[Agent Workbench](agent-workbench.md).
+An exact setup-tested recipe may continue to the normal Run launcher when its
+complete compiler output matches a reviewed immutable harness profile and an
+approved compatible deployment exists. The browser passes only the non-secret
+harness alias. The normal profile resolver, Run submission API, preparation
+worker, execution worker, and reconciler remain authoritative.
+
+Arbitrary edited recipes remain setup-only until actor-owned private profile
+finalization, owner-scoped resolution, diagnostic-only policy enforcement, and
+generic capability-based deployment matching are implemented. See [Agent
+Workbench](agent-workbench.md).
 
 ## Technology choices
 

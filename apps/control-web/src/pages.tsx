@@ -43,10 +43,8 @@ import {
   counted,
   doubleReservationMicrousd,
   firstCompatibleLaunchSelection,
-  harnessAgent,
   labeledHarness,
   profileLabel,
-  REASONING_OPTIONS,
   selectDeploymentAlias,
   selectHarnessAlias,
 } from "./launch";
@@ -391,8 +389,7 @@ const launchSchema = z.object({
   benchmark: z.string().min(2),
   model: z.string().min(2),
   launchPolicy: z.string().min(2),
-  harnessAgent: z.string().min(2),
-  reasoning: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
+  harness: z.string().min(2),
   deploymentKind: z.enum(["providers", "endpoints"]),
   ceiling_usd: z.number().nonnegative(),
   confirmed: z
@@ -848,7 +845,13 @@ export function OverviewPage() {
   );
 }
 
-function LaunchPanel({ onClose }: { onClose(): void }) {
+function LaunchPanel({
+  onClose,
+  initialHarness,
+}: {
+  onClose(): void;
+  initialHarness?: string;
+}) {
   const navigate = useNavigate();
   const client = useQueryClient();
   const profiles = useAllProfiles();
@@ -860,8 +863,7 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
       benchmark: "",
       model: "",
       launchPolicy: "",
-      harnessAgent: "",
-      reasoning: "off",
+      harness: initialHarness ?? "",
       deploymentKind: "providers",
       ceiling_usd: 0,
       confirmed: false,
@@ -892,16 +894,6 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
   const previousApprovedSignature = useRef<string | undefined>(undefined);
   const ofKind = (kind: string) =>
     approved.filter((profile) => profile.profile_kind === kind);
-  const uniqueAgents = useMemo(
-    () => [
-      ...new Set(
-        approved
-          .filter((profile) => profile.profile_kind === "harness")
-          .map((profile) => harnessAgent(profile.spec)),
-      ),
-    ],
-    [approved],
-  );
   const compatibleDefault = useMemo(() => {
     const profileRefs = (kind: string) =>
       approved
@@ -915,11 +907,12 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
         profileRefs("model"),
         profileRefs("harness"),
         profileRefs("deployment"),
+        initialHarness,
       );
     } catch {
       return undefined;
     }
-  }, [approved]);
+  }, [approved, initialHarness]);
   useEffect(() => {
     let replacedSelection = false;
     if (
@@ -957,8 +950,7 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
     try {
       const harness = selectHarnessAlias(
         profileRefs("harness"),
-        form.getValues("harnessAgent"),
-        form.getValues("reasoning"),
+        form.getValues("harness"),
       );
       approvedAlias(form.getValues("model"), aliases("model"), "model");
       selectDeploymentAlias(
@@ -976,12 +968,8 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
         form.setValue("model", compatibleDefault.model);
         replacedSelection = true;
       }
-      if (form.getValues("harnessAgent") !== compatibleDefault.harnessAgent) {
-        form.setValue("harnessAgent", compatibleDefault.harnessAgent);
-        replacedSelection = true;
-      }
-      if (form.getValues("reasoning") !== compatibleDefault.reasoning) {
-        form.setValue("reasoning", compatibleDefault.reasoning);
+      if (form.getValues("harness") !== compatibleDefault.harness) {
+        form.setValue("harness", compatibleDefault.harness);
         replacedSelection = true;
       }
       if (form.getValues("deploymentKind") !== compatibleDefault.deploymentKind) {
@@ -1017,8 +1005,7 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
           alias: profile.approved_alias,
           spec: profile.spec,
         })),
-        values.harnessAgent,
-        values.reasoning,
+        values.harness,
       ),
       deployment: "",
       launch_policy: approvedAlias(
@@ -1174,28 +1161,11 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
               className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
               disabled={!writesAllowed}
               aria-label="Harness"
-              {...form.register("harnessAgent", { onChange: resetConfirmation })}
+              {...form.register("harness", { onChange: resetConfirmation })}
             >
-              {uniqueAgents.map((agent) => (
-                <option key={agent} value={agent}>
-                  {profileLabel("harness", agent, { agent })}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-1.5 text-sm">
-            <Hint text={hints.launch.reasoning} icon>
-              Reasoning
-            </Hint>
-            <select
-              className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
-              disabled={!writesAllowed}
-              aria-label="Reasoning"
-              {...form.register("reasoning", { onChange: resetConfirmation })}
-            >
-              {REASONING_OPTIONS.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
+              {ofKind("harness").map((profile) => (
+                <option key={profile.profile_id} value={profile.approved_alias}>
+                  {profileLabel("harness", profile.approved_alias, profile.spec)}
                 </option>
               ))}
             </select>
@@ -1278,7 +1248,19 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
                 </div>
                 <div>
                   <dt className="text-slate-500">Locked harness</dt>
-                  <dd>{labeledHarness(values.harnessAgent)}</dd>
+                  <dd>
+                    {profileLabel(
+                      "harness",
+                      resolved?.harness ?? values.harness,
+                      specOf("harness") ?? {},
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Locked reasoning</dt>
+                  <dd>
+                    {humanize(String(specOf("harness")?.reasoning_effort ?? "off"))}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-slate-500">Locked deployment</dt>
@@ -1340,11 +1322,29 @@ function LaunchPanel({ onClose }: { onClose(): void }) {
 
 export function RunsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const handoff = useRef<{
+    launch: boolean;
+    harness: string | undefined;
+  } | null>(null);
+  if (!handoff.current) {
+    handoff.current = {
+      launch: searchParams.get("launch") === "1",
+      harness: searchParams.get("harness") ?? undefined,
+    };
+  }
   const navigation = useCursorNavigation();
-  const [launching, setLaunching] = useState(false);
+  const initialHarness = handoff.current.harness;
+  const [launching, setLaunching] = useState(handoff.current.launch);
   const query = useRuns(navigation.cursor);
   const { writesAllowed, writeMode } = useControlState();
   const filter = searchParams.get("status") ?? "all";
+  useEffect(() => {
+    if (!searchParams.has("launch") && !searchParams.has("harness")) return;
+    const updated = new URLSearchParams(searchParams);
+    updated.delete("launch");
+    updated.delete("harness");
+    setSearchParams(updated, { replace: true });
+  }, [searchParams, setSearchParams]);
   const items = (query.data?.items ?? []).filter(
     (item) => filter === "all" || item.status === filter,
   );
@@ -1436,7 +1436,12 @@ export function RunsPage() {
           </Button>
         }
       />
-      {launching ? <LaunchPanel onClose={() => setLaunching(false)} /> : null}
+      {launching ? (
+        <LaunchPanel
+          {...(initialHarness ? { initialHarness } : {})}
+          onClose={() => setLaunching(false)}
+        />
+      ) : null}
       <nav className="mb-4 flex flex-wrap gap-2" aria-label="Filter runs">
         {["all", "active", "cancelling", "publishing", "completed", "cancelled"].map(
           (status) => (

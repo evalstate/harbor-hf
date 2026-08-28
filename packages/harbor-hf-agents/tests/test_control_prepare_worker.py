@@ -83,6 +83,46 @@ def test_injects_the_locked_model_when_the_harness_is_model_independent() -> Non
     assert config.agents[0].model_name == "openai/example/model:provider"
 
 
+def test_preserves_nested_command_agent_configuration_during_preparation() -> None:
+    value = _run_lock()
+    command_config = {
+        "schema_version": "v1",
+        "setup": {
+            "script": "install-agent",
+            "bindings": {"AGENT_HOME": "agent_home"},
+            "literals": {},
+        },
+        "run": {
+            "script": "run-agent",
+            "bindings": {
+                "MODEL_BASE_URL": "route_base_url",
+                "GENERIC_API_KEY": "route_api_key",
+            },
+            "literals": {"OUTPUT_PATH": "/logs/agent/result.json"},
+        },
+        "route_api": "chat-completions",
+        "outputs": [{"path": "result.json"}],
+        "atif": {"path": "trajectory.json"},
+    }
+    harbor_agent = value["profiles"][2]["spec"]["harbor_agent"]
+    del harbor_agent["model_name"]
+    harbor_agent["import_path"] = "harbor_hf_agents.command_agent.agent:CommandAgent"
+    harbor_agent["override_setup_timeout_sec"] = 1800
+    harbor_agent["kwargs"] = {"config": command_config}
+
+    config = worker._job_config(value)
+
+    assert config.agents[0].model_name == "openai/example/model:provider"
+    assert config.agents[0].import_path == (
+        "harbor_hf_agents.command_agent.agent:CommandAgent"
+    )
+    assert config.agents[0].override_setup_timeout_sec == 1800
+    assert config.agents[0].kwargs == {"config": command_config}
+    assert config.model_dump(mode="json")["agents"][0]["kwargs"] == {
+        "config": command_config,
+    }
+
+
 def test_rejects_a_harness_locked_to_a_different_model() -> None:
     value = _run_lock()
     value["profiles"][2]["spec"]["harbor_agent"]["model_name"] = "other/model"

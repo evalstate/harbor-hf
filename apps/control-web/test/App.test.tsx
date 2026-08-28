@@ -5,11 +5,17 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  compileAgentWorkbenchRecipe,
+  fastAgentWorkbenchStarter,
+} from "../../../packages/control-core/src/workbench";
 import App from "../src/App";
 import { ApiError, type SessionResponse } from "../src/api";
 import { loginHref } from "../src/layout";
 import { formatMoney } from "../src/lib";
 import { keys } from "../src/queries";
+
+const reviewedFastAgentPreview = compileAgentWorkbenchRecipe(fastAgentWorkbenchStarter);
 
 class FakeEventSource {
   onopen: (() => void) | null = null;
@@ -115,9 +121,20 @@ function launchProfiles() {
         agent: "opencode",
         reasoning_effort: "off",
       }),
+      approved("fast-agent-0-10-11-command", "harness", {
+        ...reviewedFastAgentPreview.harness_profile,
+      }),
       approved("tb21-gpt-oss-20b-opencode-providers", "deployment", {
         models: ["gpt-oss-20b"],
         harnesses: ["opencode"],
+        trial_job_template: {
+          inference_upstream: "https://router.huggingface.co/v1",
+        },
+      }),
+      approved("tb21-gpt-oss-20b-command-providers", "deployment", {
+        models: ["gpt-oss-20b"],
+        harnesses: ["fast-agent-0-10-11-command"],
+        inference_provider: "together",
         trial_job_template: {
           inference_upstream: "https://router.huggingface.co/v1",
         },
@@ -199,32 +216,14 @@ describe("control web", () => {
         if (path.includes("auth/session")) return json(session());
         if (path.includes("/system")) return json(system());
         if (path.endsWith("/api/v1/workbench/preview")) {
-          const recipe = JSON.parse(String(init?.body)) as Record<string, unknown>;
-          return json({
-            recipe,
-            recipe_digest: "sha256:recipe",
-            revision_id: "agent-recipe-preview",
-            setup_command:
-              "python -m venv /logs/agent/home/venv\npip install fast-agent-mcp==0.10.11",
-            run_command: "fast-agent go --base-url http://127.0.0.1:18080/v1",
-            environment: [
-              {
-                name: "GENERIC_API_KEY",
-                source: "model_api_key",
-                value: "<injected-placeholder>",
-                redacted: true,
-              },
-            ],
-            harness_profile: { agent: "command-agent" },
-            warnings: [],
-          });
+          return json(compileAgentWorkbenchRecipe(JSON.parse(String(init?.body))));
         }
         if (path.endsWith("/api/v1/workbench/setup-tests") && init?.method === "POST")
           return json(
             {
               setup_test_id: "setup-test-one",
-              recipe_digest: "sha256:recipe",
-              revision_id: "agent-recipe-preview",
+              recipe_digest: reviewedFastAgentPreview.recipe_digest,
+              revision_id: reviewedFastAgentPreview.revision_id,
               status: "passed",
               created_at: "2026-08-27T00:00:00.000Z",
               started_at: "2026-08-27T00:00:01.000Z",
@@ -250,6 +249,8 @@ describe("control web", () => {
             content: "<script>window.compromised = true</script>",
             truncated: false,
           });
+        if (path.includes("/profiles")) return json(launchProfiles());
+        if (path.includes("/runs")) return json({ items: [], next_cursor: null });
         if (path.includes("/events")) throw new Error("offline");
         throw new Error(`unexpected request: ${path}`);
       }),
@@ -288,6 +289,27 @@ describe("control web", () => {
       await screen.findByText("<script>window.compromised = true</script>"),
     ).toBeVisible();
     expect(document.querySelector("script")).toBeNull();
+    const continueToRun = await screen.findByRole("button", {
+      name: /continue to run launcher/i,
+    });
+    const configurationName = screen.getByLabelText("Configuration name");
+    await user.clear(configurationName);
+    await user.type(configurationName, "fast-agent-edited");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /continue to run launcher/i }),
+      ).not.toBeInTheDocument(),
+    );
+    await user.clear(configurationName);
+    await user.type(configurationName, "fast-agent");
+    const restoredContinue = await screen.findByRole("button", {
+      name: /continue to run launcher/i,
+    });
+    expect(continueToRun).not.toBeInTheDocument();
+    await user.click(restoredContinue);
+    expect(await screen.findByRole("heading", { name: "Runs" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Start a run" })).toBeVisible();
+    expect(screen.getByLabelText("Harness")).toHaveValue("fast-agent-0-10-11-command");
   });
 
   it("tails a running Workbench setup and confirms cancellation", async () => {
