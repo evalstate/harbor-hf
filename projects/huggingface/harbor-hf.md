@@ -70,6 +70,7 @@ Admission-integrity repair amendment approved at: 2026-08-26T12:06:30Z
 Agent-Workbench amendment approved at: 2026-08-27T14:35:22Z
 Agent-Workbench FX-example-and-push amendment approved at: 2026-08-27T22:02:30Z
 Agent-Workbench canary-activation amendment approved at: 2026-08-28T07:28:34Z
+Canonical work-remote amendment approved at: 2026-08-28T07:44:34Z
 
 ### Scope
 
@@ -146,6 +147,7 @@ Agent-Workbench canary-activation amendment approved at: 2026-08-28T07:28:34Z
 - After all local gates pass, optionally deploy the exact reviewed revision to the existing canonical `<control-space>` and run bounded setup and diagnostic trial canaries through the existing control path. Use no new persistent resource and preserve every unrelated Run and control record.
 - Add an FX starter recipe to the Agent Workbench using the same generic command-agent compiler and setup runner, commit the reviewed example, and push the current `feat/agent-workbench` branch to its configured public `origin`.
 - Activate the reviewed Fast-Agent Workbench canary path: keep Slophammer's Python mutation-declaration rule disabled, remove mutation execution from the mandatory local completion gate while retaining the on-demand tooling, push only `feat/agent-workbench`, publish one reviewed digest-pinned generic trial-worker image from the exact committed revision, add its compatible deployment and diagnostic launch-policy profiles, deploy the exact reviewed control revision to the existing canonical `<control-space>`, verify setup through the Workbench setup path, and submit one normal Run using `terminal-bench-2-1-canary`, `gpt-oss-20b`, and the reviewed Fast-Agent command-agent harness.
+- Make the canonical `huggingface/harbor-hf` repository the normal work remote for this checkout. Rename that remote to `origin`, retain the former fork as a secondary `fork` remote, push `feat/agent-workbench` directly to the canonical repository, and use the canonical repository's existing Actions workflow and package permission for worker-image publication.
 
 ### Limits
 
@@ -234,6 +236,7 @@ Agent-Workbench canary-activation amendment approved at: 2026-08-28T07:28:34Z
 - Run exactly two single-trial logical tasks from `terminal-bench-2-1-canary`, with at most one active trial Job, one physical infrastructure attempt per logical task, diagnostic publication only, and a hard Run ceiling of USD 1.00. Use only the existing serverless Inference Providers route and the inference-only credential already confined to the root-owned worker bridge.
 - Setup verification plus the two-task Run must remain within the existing Agent Workbench USD 10 aggregate allowance. Stop before another setup Job, retry, replacement, or Run if the reviewed image, worker revision, lock, task digest, model route, cost, credential boundary, or concurrency differs from this amendment.
 - Slophammer `py.mutation-required` remains explicitly disabled with a reason. The local mutation script and manual workflow may remain available on demand, but mutation execution is not a completion, deployment, or canary gate for this amendment.
+- The canonical work-remote amendment authorizes normal feature-branch fetches and fast-forward pushes to `huggingface/harbor-hf`. It does not authorize changing the upstream default branch, merging, opening or modifying a pull request, force pushing, deleting a shared branch, creating a tag or release, or pushing additional commits to the retained fork without separate approval.
 
 ### Remaining gates
 
@@ -351,3 +354,4 @@ No project-scope amendment remains pending. Operational gates still apply:
 - At 2026-08-28T07:28:34Z, approved keeping Slophammer mutation testing disabled, checking the current upstream defect status, and proceeding with the remaining Agent Workbench activation steps.
 - Approved pushing only `feat/agent-workbench`, publishing one exact generic trial-worker image, committing and pushing the resulting digest-pinned deployment and single-attempt diagnostic policy, deploying the exact reviewed revision to the existing canonical control Space, verifying the Fast-Agent setup path, and launching one two-task `terminal-bench-2-1-canary` Run with `gpt-oss-20b`.
 - Keep trial concurrency at one, physical infrastructure attempts at one per logical task, diagnostic publication only, and the hard Run ceiling at USD 1.00. No new persistent resource, credential, Endpoint, pull request, merge, release, force push, default-branch update, official result, or unrelated hosted mutation is authorized.
+- At 2026-08-28T07:44:34Z, approved making `huggingface/harbor-hf` the checkout's normal work remote, retaining the former fork only as a secondary remote, and pushing `feat/agent-workbench` directly to the canonical repository so its existing Actions publisher can build the exact worker image. This supersedes the unapproved temporary-branch proposal without authorizing a default-branch update, merge, pull-request mutation, force push, shared-branch deletion, tag, or release.
