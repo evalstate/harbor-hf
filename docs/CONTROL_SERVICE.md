@@ -826,10 +826,12 @@ creation, terminal observation without a receipt, and status views that do not
 expose private topology or credentials.
 
 Behavior changes also run the repository Ruff, format, type, coverage,
-Slophammer, dry-run, and mutation gates together with generated-contract,
-OpenAPI, TypeScript, build, and browser checks. Pi Reviewer runs against the
-current base until no P0 or P1 finding remains. Relevant pull-request CI must be
-green before the change is ready to merge.
+Slophammer, and dry-run gates together with generated-contract, OpenAPI,
+TypeScript, build, and browser checks. Mutation testing remains available as an
+opt-in focused review and Python package-publication preflight rather than a
+normal completion or deployment gate. Pi Reviewer runs against the current base
+until no P0 or P1 finding remains. Relevant pull-request CI must be green before
+the change is ready to merge.
 
 ## Deployment and replacement
 

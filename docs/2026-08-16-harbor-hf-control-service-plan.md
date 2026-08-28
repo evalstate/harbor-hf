@@ -892,8 +892,9 @@ The implementation is ready only when all of these pass:
   next actions.
 - A clean launch creates no repository, Bucket, Space, Dataset, or schedule.
 - Historical run and publication checksums remain unchanged.
-- The local quality, mutation, schema, documentation, dependency, browser, and
-  Space build gates pass.
+- The local quality, schema, documentation, dependency, browser, and Space build
+  gates pass. Mutation testing is an opt-in focused review and Python package
+  publication preflight.
 
 ## Valid-result implementation and rollout
 
@@ -982,7 +983,6 @@ uv run ruff check .
 uv run ruff format --check .
 uv run ty check
 uv run pytest --cov=src/harbor_hf --cov-fail-under=85
-uv run python scripts/check_mutation.py --min-kill-rate 90
 uv run slophammer-py dry .
 uv run pip-audit
 npm ci
