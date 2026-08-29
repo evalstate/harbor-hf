@@ -229,11 +229,22 @@ def _fx_gateway_request(  # noqa: C901 -- strict protocol translation
             message["tool_calls"] = tool_calls
         messages.append(message)
 
-    system_messages = [message for message in messages if message["role"] == "system"]
-    non_system_messages = [
-        message for message in messages if message["role"] != "system"
-    ]
-    messages = [*system_messages, *non_system_messages]
+    system_content: list[str] = []
+    non_system_messages: list[dict[str, object]] = []
+    for message in messages:
+        if message["role"] != "system":
+            non_system_messages.append(message)
+            continue
+        content = message["content"]
+        if not isinstance(content, str):
+            raise ValueError("FX gateway system message content is invalid")
+        system_content.append(content)
+    messages = non_system_messages
+    if system_content:
+        messages.insert(
+            0,
+            {"role": "system", "content": "\n\n".join(system_content)},
+        )
 
     request: dict[str, object] = {
         "model": allowed_model,
