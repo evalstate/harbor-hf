@@ -8,6 +8,8 @@ from uuid import uuid4
 import httpx
 import typer
 
+from harbor_hf.workbench_cli import TransientControlError, register_workbench_commands
+
 app = typer.Typer(
     no_args_is_help=True,
     help="Operate Harbor-HF through the TypeScript control service.",
@@ -53,6 +55,8 @@ def _request(
     *,
     payload: dict[str, object] | None = None,
     idempotency_key: str | None = None,
+    timeout_seconds: float = 30.0,
+    transient: bool = False,
 ) -> object:
     try:
         response = httpx.request(
@@ -60,11 +64,17 @@ def _request(
             f"{_base_url()}{path}",
             headers=_headers(idempotency_key=idempotency_key),
             json=payload,
-            timeout=30,
+            timeout=timeout_seconds,
             follow_redirects=False,
         )
-    except (httpx.HTTPError, ValueError) as error:
+    except httpx.HTTPError as error:
+        if transient:
+            raise TransientControlError from None
         _fail(f"control API request failed: {type(error).__name__}")
+    except ValueError as error:
+        _fail(f"control API request failed: {type(error).__name__}")
+    if transient and response.status_code in {429, 500, 502, 503, 504}:
+        raise TransientControlError
     if response.status_code >= 400:
         try:
             body = response.json()
@@ -79,6 +89,9 @@ def _request(
 
 def _echo(value: object) -> None:
     typer.echo(json.dumps(value, indent=2, sort_keys=True))
+
+
+register_workbench_commands(app, request=_request, echo=_echo, fail=_fail)
 
 
 @capacity_app.callback(invoke_without_command=True)

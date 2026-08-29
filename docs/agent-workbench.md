@@ -108,11 +108,55 @@ The control API supports:
 ```text
 POST /api/v1/workbench/preview
 POST /api/v1/workbench/setup-tests
+GET  /api/v1/workbench/setup-tests
 GET  /api/v1/workbench/setup-tests/{setup_test_id}
 POST /api/v1/workbench/setup-tests/{setup_test_id}/cancel
 GET  /api/v1/workbench/setup-tests/{setup_test_id}/logs
 GET  /api/v1/workbench/setup-tests/{setup_test_id}/files/{file_id}
 ```
+
+## Operator CLI
+
+The Python operator CLI exposes the same actor-scoped Workbench control
+surface without adding a Workbench-specific Run path:
+
+```text
+harbor-hf workbench preview RECIPE.json
+harbor-hf workbench setup start RECIPE.json
+harbor-hf workbench setup list
+harbor-hf workbench setup status SETUP_TEST_ID
+harbor-hf workbench setup wait SETUP_TEST_ID
+harbor-hf workbench setup cancel SETUP_TEST_ID
+harbor-hf workbench setup logs SETUP_TEST_ID
+harbor-hf workbench setup files SETUP_TEST_ID
+harbor-hf workbench setup file SETUP_TEST_ID FILE_ID
+harbor-hf workbench publication RECIPE.json --setup-test SETUP_TEST_ID
+```
+
+`RECIPE.json` may be `-` to read one UTF-8 JSON object from stdin. Setup start
+requires a separate confirmation unless `--yes` is supplied, and stdin setup
+start always requires `--yes`. Generated idempotency keys are printed only to
+stderr so stdout remains machine-readable JSON.
+
+`setup start --wait` and `setup wait` poll actor-scoped setup state and exit
+nonzero unless the setup passes. They never cancel a setup test when the local
+wait deadline expires. `setup cancel --wait` succeeds only when cancellation
+reaches the `cancelled` terminal state.
+
+Logs are JSON by default. `--channel stdout` and `stderr` preserve the selected
+text exactly; `combined` inserts a visible `[stderr]` separator when stderr is
+present. File previews are JSON by default; `--output` writes a mode-0600 local
+file atomically, refuses overwrite without `--force`, and refuses a truncated
+preview without `--allow-truncated`.
+
+The `publication` command mirrors the browser's exact publication-state check:
+the current recipe must match the passed setup digest and revision, the
+compiler-produced harness profile must exactly equal an approved immutable
+harness profile, and an approved compatible model and deployment must exist.
+It reports `test-required`, `unpublished`, `published-no-deployment`, or
+`published`. It does not create or approve profiles and does not submit a Run.
+Use `harbor-hf run submit` for the separately confirmed benchmark, model,
+deployment, launch policy, and cost ceiling.
 
 Setup execution is controlled by:
 

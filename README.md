@@ -325,6 +325,36 @@ the configured HTTPS control API and does not access the Bucket directly. A
 valid token does not grant control access unless its Hugging Face identity is
 also present in the service access list.
 
+## Configure and test an agent recipe
+
+The authenticated CLI mirrors the Agent Workbench's private recipe-preview and
+setup-test APIs. Recipes are complete JSON documents conforming to
+`packages/contracts/schemas/agent-workbench-v1.schema.json`:
+
+```bash
+harbor-hf workbench preview recipe.json
+harbor-hf workbench setup start recipe.json --yes
+harbor-hf workbench setup list
+harbor-hf workbench setup wait <setup-test-id>
+harbor-hf workbench setup logs <setup-test-id> --channel combined
+harbor-hf workbench setup files <setup-test-id>
+```
+
+After setup passes, check whether the exact recipe compiler output already
+matches an approved immutable harness profile and compatible deployment:
+
+```bash
+harbor-hf workbench publication recipe.json \
+  --setup-test <setup-test-id> \
+  --require-ready
+```
+
+This reports publication readiness; it does not create or approve a profile and
+does not start a benchmark Run. Use `harbor-hf run submit` for the separately
+confirmed benchmark, model, deployment, launch policy, and cost ceiling. See
+[Agent Workbench](docs/agent-workbench.md) for the full command and security
+contract.
+
 ## Start a run
 
 The control console starts a run from Terminal-Bench 2.1, `openai/gpt-oss-20b`, Inference Providers, OpenCode, and no extra reasoning by default. Dashboard harnesses that speak Chat Completions (OpenCode, Qwen Code, mini-swe-agent, Pi, Kimi Code, Hermes, OpenHands, OpenClaw, FX, and DeepSeek Harness) call the inference bridge inside their physical trial Job. The Job receives only the dedicated inference credential required by its immutable deployment profile. Codex and Claude Code stay off that route because they need a native API the router path cannot preserve. The cost ceiling tracks twice the estimated reservation until you edit it. Submit locks those choices onto a run named `run-<model>-<harness>-<reasoning>-<runtime>-<id>`.
