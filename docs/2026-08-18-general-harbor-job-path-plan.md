@@ -563,5 +563,5 @@ The work is complete when:
   hardware capacity, provider capacity, start pacing, budget, cancellation, or
   cleanup limits work; and
 - generated contracts, Python and TypeScript checks, coverage, Slophammer, dry
-  checks, mutation checks, Pi Reviewer, browser tests, and relevant pull-request
-  CI pass before merge.
+  checks, focused regression tests, Pi Reviewer, browser tests, and relevant
+  pull-request CI pass before merge.

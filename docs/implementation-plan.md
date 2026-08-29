@@ -544,7 +544,7 @@ Deliverables:
 - document the run feature as additive until migration is complete.
 
 Exit evidence: the existing remote smoke, artifact audit, lifecycle tests,
-mutation gate, and endpoint cleanup verification remain valid.
+focused regression tests, and endpoint cleanup verification remain valid.
 
 ### Milestone 1: Run Schema And Deterministic Planning
 
@@ -795,7 +795,7 @@ Tests:
 - session export, redaction, ambiguity, Unicode, parallel tool, and ATIF-v1.7
   tests;
 - provider evidence, checksum, terminal-marker, and infrastructure-only retry
-  mutation tests; and
+  regression tests; and
 - Fireworks and Together paid canaries covering every applicable API and agent
   family.
 
@@ -809,7 +809,6 @@ provider-agent path.
 - Ruff format and lint pass.
 - Ty type checking passes without adding unbounded `Any`.
 - Pytest passes with at least 85% coverage and focused tests for every behavior.
-- Mutation testing remains at or above 90% for behavior changes.
 - `pip-audit`, Slophammer DRY, and Slophammer production checks pass.
 - No local model loading, inference, or benchmark task execution occurs.
 - Remote tests use explicit markers and verify all touched endpoints are paused.

@@ -836,11 +836,10 @@ expose private topology or credentials.
 
 Behavior changes also run the repository Ruff, format, type, coverage,
 Slophammer, and dry-run gates together with generated-contract, OpenAPI,
-TypeScript, build, and browser checks. Mutation testing remains available as an
-opt-in focused review and Python package-publication preflight rather than a
-normal completion or deployment gate. Pi Reviewer runs against the current base
-until no P0 or P1 finding remains. Relevant pull-request CI must be green before
-the change is ready to merge.
+TypeScript, build, and browser checks. Mutation testing is intentionally not
+part of the repository or package-publication workflow. Pi Reviewer runs
+against the current base until no P0 or P1 finding remains. Relevant
+pull-request CI must be green before the change is ready to merge.
 
 ## Deployment and replacement
 

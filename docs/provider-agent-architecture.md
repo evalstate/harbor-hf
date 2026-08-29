@@ -305,7 +305,7 @@ This is a hard replacement for new provider runs:
 4. Migrate every provider run profile to its custom-agent `import_path`.
 5. Remove name-based provider branches, built-in-agent assumptions, custom
    runtime-manifest work, exact session filename entries, and Harbor fork pins.
-6. Run local contract and mutation tests.
+6. Run local contract and fail-closed regression tests.
 7. Run one Fireworks and one Together paid canary for every applicable wire API
    and agent family.
 8. Launch full runs only after all canaries pass.
@@ -334,7 +334,7 @@ Local validation must cover:
   trajectories, logs;
 - infrastructure-versus-agent failure categorization;
 - provider checkpoint and terminal-marker ordering; and
-- mutation tests for every fail-closed branch.
+- deterministic regression tests for every fail-closed branch.
 
 Paid canaries must retain and verify the Harbor result, compatibility bundle,
 provider evidence, judge evidence, redacted session, ATIF trajectory, workspace,

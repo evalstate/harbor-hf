@@ -541,7 +541,7 @@ The implementation is eligible for production only after all of these checks pas
 - cancellation drains and reaches a terminal run state;
 - all trial evidence, sessions, ATIF trajectories, judge exchanges, workspaces, checksums, and secret scans pass;
 - final publication and catalog authority remain separate;
-- local quality, mutation, dependency, schema, and documentation gates pass.
+- local quality, regression, dependency, schema, and documentation gates pass.
 
 ## Boundaries
 

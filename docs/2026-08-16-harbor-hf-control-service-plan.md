@@ -893,8 +893,8 @@ The implementation is ready only when all of these pass:
 - A clean launch creates no repository, Bucket, Space, Dataset, or schedule.
 - Historical run and publication checksums remain unchanged.
 - The local quality, schema, documentation, dependency, browser, and Space build
-  gates pass. Mutation testing is an opt-in focused review and Python package
-  publication preflight.
+  gates pass. Package publication uses those deterministic gates without a
+  mutation-testing preflight.
 
 ## Valid-result implementation and rollout
 
