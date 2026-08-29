@@ -74,6 +74,7 @@ Canonical work-remote amendment approved at: 2026-08-28T07:44:34Z
 Private Harbor-HF recovery amendment approved at: 2026-08-28T08:21:01Z
 Run-native profile migration amendment approved at: 2026-08-28T08:58:58Z
 Agent-Workbench recipe-and-UX repair amendment approved at: 2026-08-28T15:38:33Z
+Mutation-tooling retirement amendment approved: 2026-08-26
 
 ### Scope
 
@@ -125,6 +126,7 @@ Agent-Workbench recipe-and-UX repair amendment approved at: 2026-08-28T15:38:33Z
 - Run one replacement exact `install:configure` retry for the existing installer-test resources from the plan's sealed source revision, with the project uv environment selecting the sealed Hugging Face CLI version.
 - Add visible bounded Space-start and application-readiness polling to installer configuration, with exact retry conditions, sanitized progress, and fail-closed timeout rollback.
 - Disable Slophammer's Python mutation-declaration rule with a documented reason and remove its obsolete baseline finding while retaining optional manual mutation tooling.
+- Retire mutation testing completely from the root project and Harbor agent package. Remove mutmut dependencies and configuration, mutation runner scripts and workflows, package-publication mutation preflights, active developer instructions, documentation, and lockfile entries. Preserve ordinary deterministic pytest regression tests whose filenames use `mutation_contracts`; they do not invoke mutation tooling.
 - Add a leaderboard snapshot in the existing canonical `<artifact-bucket>`: a configuration digest, mechanical eligibility, and a derived SQLite file of the rows shown on the board. Keep one Space and one Bucket.
 - Make the official leaderboard the Space default route and allow anonymous `GET /api/v1/leaderboard`. The current operator dashboard moves to `/overview` behind a "Run benchmark" button and Hugging Face login.
 - Integrate the requested dashboard harnesses as Harbor agent plugins behind the existing campaign path: OpenCode, Qwen Code, mini-swe-agent, Pi, Kimi Code, Hermes, Codex, OpenHands, OpenClaw, and Claude Code. Prove each with one Terminal-Bench 2.1 two-task canary. Reject a harness that needs a native API the locked Hugging Face router route cannot preserve.
@@ -349,6 +351,7 @@ No project-scope amendment remains pending. Operational gates still apply:
 ### 2026-08-26
 
 - At 2026-08-26T12:06:30Z, approved removing the old orphaned admission behind the single detected integrity fork, fixing startup replay without backward compatibility, and restarting the existing control Space. The repair deletes only the admission object that never dispatched or created a remote Job and preserves every other durable record.
+- Approved fully retiring mutation testing from every supported root and agent-package path, superseding the earlier requirement to retain on-demand tooling. Remove its dependencies, configuration, scripts, GitHub Actions workflow, release preflight, active documentation, and lockfile entries. Keep deterministic regression tests that do not execute mutation tooling. Limit this amendment to local repository changes, validation, and commits; do not push, deploy, mutate hosted resources, move credentials, or spend.
 
 ### 2026-08-27
 
