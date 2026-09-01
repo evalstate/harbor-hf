@@ -11,7 +11,7 @@ default_branch: main
 
 Status: approved
 Approved at: 2026-08-17T06:48:55Z
-Amended at: 2026-08-28T15:38:33Z
+Amended at: 2026-09-01T08:56:03Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -74,6 +74,7 @@ Canonical work-remote amendment approved at: 2026-08-28T07:44:34Z
 Private Harbor-HF recovery amendment approved at: 2026-08-28T08:21:01Z
 Run-native profile migration amendment approved at: 2026-08-28T08:58:58Z
 Agent-Workbench recipe-and-UX repair amendment approved at: 2026-08-28T15:38:33Z
+Agent-Workbench upstream integration amendment approved at: 2026-09-01T08:56:03Z
 Mutation-tooling retirement amendment approved: 2026-08-26
 
 ### Scope
@@ -369,3 +370,7 @@ No project-scope amendment remains pending. Operational gates still apply:
 - At 2026-08-28T08:21:01Z, confirmed authority over the existing private Harbor-HF Spaces and Buckets in the operator-selected namespace. This authorizes restoring the failed control deployment to its prior known-good source, implementing and deploying a general durable-schema compatibility repair for the legacy capacity profile, and resuming the already-approved Workbench setup and two-task diagnostic canary. Keep private resource identifiers out of repository content. Do not create or delete persistent resources, replace or transfer credentials, create an Endpoint, increase the USD 1.00 Run ceiling, or broaden publication beyond diagnostic.
 - At 2026-08-28T08:58:58Z, applied that authority to the exact reviewed one-time Run-native profile migration for the existing private `<artifact-bucket>`. The approved plan inventories 45 profiles and one promotion, adds and verifies 21 current-schema replacements, remaps one promotion, then deletes 21 superseded profile-prefix records. It transforms one capacity profile, 17 deployment profiles, and two launch policies under only `control/schema=v1/profiles/`, using the checked-in general worker image and revision. Keep the existing `<control-space>` paused during apply, require the digest-bound dry-run manifest and final verification manifest, and stop on any inventory drift. Do not touch ACL, Run, credential, configuration, or other Bucket prefixes.
 - At 2026-08-28T15:38:33Z, approved repairing the Agent Workbench and reviewed Fast-Agent recipe after the first two-task diagnostic exposed hidden task-image Python assumptions, incompatible route-key naming, and unclear setup-to-Run UX. Keep each CLI ecosystem's installation and run behavior in immutable recipes through the generic command-agent path; improve the configure, test, publish, and Run workflow plus log and reviewed-profile states; correct deterministic failure classification; run the normal non-mutation gates; commit and push only `feat/agent-workbench`; publish and pin one replacement generic worker image only if worker code changes; deploy the exact reviewed revision to the existing canonical resources; and launch exactly one new two-task diagnostic canary under the same concurrency, one-attempt, diagnostic-only, no-Endpoint, and USD 1.00 limits. Preserve the failed first canary and do not retry or replace either of its attempts.
+
+### 2026-09-01
+
+- At 2026-09-01T08:56:03Z, approved fetching the latest canonical `main` branch and merging it into local `feat/agent-workbench`, preserving both sides' intended behavior. Resolve conflicts if necessary, run relevant validation and the public-privacy check, inspect the resulting diff and metadata, and commit the merge locally. Do not push, open or modify a pull request, update the default branch, deploy, mutate hosted resources, handle credentials, run inference, or incur cost.
