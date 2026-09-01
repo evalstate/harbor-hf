@@ -252,7 +252,9 @@ async def test_rejects_control_authority_under_an_alias(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_timeout_destroys_the_whole_task_runtime(tmp_path: Path) -> None:
+async def test_timeout_retains_runtime_for_evidence_and_verifier(
+    tmp_path: Path,
+) -> None:
     environment = _environment(tmp_path, timeout=1)
     await environment.start(force_build=False)
     runtime = FakeRuntime.instances[-1]
@@ -261,10 +263,12 @@ async def test_timeout_destroys_the_whole_task_runtime(tmp_path: Path) -> None:
     with pytest.raises(JobEnvironmentTimeoutError, match="exceeded 1 seconds"):
         await environment.exec("setsid sleep 30")
 
-    await environment.quiesce()
+    runtime.exec_error = None
+    result = await environment.exec("verify")
 
-    assert runtime.stopped is True
-    assert runtime.quiesced is False
+    assert runtime.stopped is False
+    assert runtime.quiesced is True
+    assert result.return_code == 0
 
 
 @pytest.mark.asyncio

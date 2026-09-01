@@ -2074,7 +2074,9 @@ class IsolatedOciRuntime:
                 process.kill()
             await process.wait()
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-            await self.stop()
+            # Harbor still needs the stopped task tree for workspace capture,
+            # diagnostic logs, and verifier execution after an agent timeout.
+            await self.quiesce()
             raise
         if process.returncode is None:
             raise OciRuntimeError("task command did not terminate")
