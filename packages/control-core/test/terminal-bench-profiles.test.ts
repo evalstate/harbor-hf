@@ -17,9 +17,9 @@ import {
 const MATRIX_WORKER_REVISION = "1d1346a2de44eac1a924d49da29459ccc0464bd0";
 const MATRIX_WORKER_IMAGE =
   "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:b0aa46621509a74be133e68c8858164b50dba57a48807353c0f3c7bd9a99d239";
-const CONTINUATION_WORKER_REVISION = "5e67876ca27d1cd404c64d0bb545fe78a5976f83";
+const CONTINUATION_WORKER_REVISION = "33e32e569669108ec8f37234f732d8e0edf760f8";
 const CONTINUATION_WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:ef2f610ebc8b149f882095db8687c45fa7ebdb832c5b434bc99ea599e5b5cc2f";
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:e6659bb4f1fedf3cc318fc4e5e8db2e7b0c01d630dd523d0b95581f140a2747a";
 const PREVIOUS_WORKER_REVISION = "8fa3b80ee9da16f989cbef5f532a54f2ef375197";
 const PREVIOUS_WORKER_IMAGE =
   "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:56aae633c6cc9137a0a2366ebf3e52abcc2a43006f293c2bee888a0086913a2b";
