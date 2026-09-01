@@ -17,6 +17,9 @@ import {
 const MATRIX_WORKER_REVISION = "1d1346a2de44eac1a924d49da29459ccc0464bd0";
 const MATRIX_WORKER_IMAGE =
   "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:b0aa46621509a74be133e68c8858164b50dba57a48807353c0f3c7bd9a99d239";
+const OPENHANDS_WORKER_REVISION = "578c04dd5256695c8db8306eaaa84300137d58f1";
+const OPENHANDS_WORKER_IMAGE =
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:fc3d236a883618d2280ca736a22bdfc5ba0984dd9043b0f8a6890c86acbc9ec2";
 const PREVIOUS_WORKER_REVISION = "8fa3b80ee9da16f989cbef5f532a54f2ef375197";
 const PREVIOUS_WORKER_IMAGE =
   "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:56aae633c6cc9137a0a2366ebf3e52abcc2a43006f293c2bee888a0086913a2b";
@@ -623,12 +626,14 @@ describe("Terminal-Bench 2.1 profiles", () => {
     for (const name of deploymentNames) {
       const spec = record((await profile("deployment", name)).spec);
       const template = record(spec.trial_job_template);
-      expect(spec.job_image).toBe(
-        matrixNames.has(name) ? MATRIX_WORKER_IMAGE : PREVIOUS_WORKER_IMAGE,
-      );
-      expect(spec.worker_revision).toBe(
-        matrixNames.has(name) ? MATRIX_WORKER_REVISION : PREVIOUS_WORKER_REVISION,
-      );
+      const [workerImage, workerRevision] =
+        name === "tb21-gpt-oss-20b-openhands-providers"
+          ? [OPENHANDS_WORKER_IMAGE, OPENHANDS_WORKER_REVISION]
+          : matrixNames.has(name)
+            ? [MATRIX_WORKER_IMAGE, MATRIX_WORKER_REVISION]
+            : [PREVIOUS_WORKER_IMAGE, PREVIOUS_WORKER_REVISION];
+      expect(spec.job_image).toBe(workerImage);
+      expect(spec.worker_revision).toBe(workerRevision);
       expect(spec.preparation_job_command).toEqual(PREPARATION_COMMAND);
       expect(spec.job_command).toEqual(EXECUTION_COMMAND);
       expect(template.root_bootstrap_command).toEqual(ROOT_BRIDGE_COMMAND);
