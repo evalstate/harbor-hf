@@ -257,6 +257,15 @@ function verifyJobSpec(
   taskImageMirrorRepository: string,
 ): void {
   const expected = expectedJobSpec(intent, controlUrl, taskImageMirrorRepository);
+  const expectedEnvironment = { ...expected.environment };
+  if (
+    intent.action_kind === "job.observe" &&
+    job.environment &&
+    !Object.hasOwn(job.environment, "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY")
+  )
+    // The launch receipt already attested older immutable Jobs created before
+    // mirror routing existed. Observations still verify every field they carry.
+    delete expectedEnvironment.HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY;
   const stockJob = job as ApiJob & {
     retry?: unknown;
     timeout?: unknown;
@@ -271,7 +280,7 @@ function verifyJobSpec(
       expected.timeoutSeconds ||
     normalizedJobAttempts(job.attempts, stockJob.retry) !== 1 ||
     !recordsEqual(job.labels, expected.labels) ||
-    !recordsEqual(job.environment, expected.environment)
+    !recordsEqual(job.environment, expectedEnvironment)
   )
     throw new Error("Job specification does not match the locked launch intent");
   if (job.spaceId !== undefined && job.spaceId !== null)

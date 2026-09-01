@@ -900,6 +900,71 @@ describe("HuggingFaceActions", () => {
     });
   });
 
+  it("observes a historical Job created before task-image mirror routing", async () => {
+    const observeIntent: ActionIntent = {
+      ...base,
+      action_kind: "job.observe",
+      target: "job-historical",
+      payload: {
+        ...base.payload,
+        resource_id: "job-historical",
+        launch_action_id: base.action_id,
+      },
+    };
+    const historicalJob = apiJob(observeIntent, {
+      id: "job-historical",
+      status: { stage: "COMPLETED", failureCount: 0 },
+    });
+    delete (historicalJob.environment as Record<string, string>)
+      .HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([historicalJob]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      taskImageMirrorRepository,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.observeJobs([observeIntent])).resolves.toMatchObject([
+      { outcome: "completed", observed_state: "COMPLETED" },
+    ]);
+  });
+
+  it("still requires task-image mirror routing when adopting a new Job", async () => {
+    const unmirroredJob = apiJob();
+    delete (unmirroredJob.environment as Record<string, string>)
+      .HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([unmirroredJob]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      taskImageMirrorRepository,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.execute(base)).rejects.toBeInstanceOf(
+      AmbiguousExternalActionError,
+    );
+  });
+
   it("caches and paginates batched Job observations by namespace", async () => {
     const first: ActionIntent = {
       ...base,
