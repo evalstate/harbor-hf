@@ -176,7 +176,7 @@ describe("control service", () => {
     );
   });
 
-  it("keeps historical run locks readable but unable to create work", async () => {
+  it("keeps historical run locks read-only without blocking startup", async () => {
     const control = await createTestControl();
     controls.push(control);
     const legacy: RunLock = {
@@ -261,9 +261,7 @@ describe("control service", () => {
       control.projection,
       control.profiles,
     );
-    await expect(restarted.initialize(control.profiles)).rejects.toThrow(
-      "historical run is not ready for the profile cutover",
-    );
+    await expect(restarted.initialize(control.profiles)).resolves.toBeUndefined();
     expect(await control.projection.runLock(legacy.run_id)).toEqual(legacy);
   });
 

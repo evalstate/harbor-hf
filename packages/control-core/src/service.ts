@@ -410,47 +410,8 @@ export class ControlService {
   }
 
   async initialize(builtInProfiles: readonly LoadedProfile[]): Promise<void> {
-    await this.assertLegacyCutoverReady();
     for (const item of builtInProfiles) await this.append(item.profile);
     await this.refreshProfileResolver();
-  }
-
-  private async assertLegacyCutoverReady(): Promise<void> {
-    const pageSize = 100;
-    for (let offset = 0; ; offset += pageSize) {
-      const runs = await this.projection.runs(pageSize, offset);
-      for (const run of runs) {
-        const lock = await this.projection.runLock(run.run_id);
-        if (!lock || isCurrentRunLock(lock)) continue;
-        if (
-          !runStatusIsTerminal(run.status) ||
-          run.pending_actions > 0 ||
-          run.cleanup_pending
-        )
-          throw new PolicyError(
-            `historical run is not ready for the profile cutover: ${run.run_id}`,
-          );
-        const jobs = await this.projection.jobs(null, 0, run.run_id);
-        if (jobs.some((job) => !jobStateIsTerminal(job.observed_state)))
-          throw new PolicyError(
-            `historical run still has an active Job: ${run.run_id}`,
-          );
-      }
-      if (runs.length < pageSize) break;
-    }
-    const endpoints = await this.projection.endpoints(1_000_000);
-    const legacyRunIds = new Set<string>();
-    for (const endpoint of endpoints) {
-      if (endpoint.cleanup_verified) continue;
-      const lock = await this.projection.runLock(endpoint.run_id);
-      if (lock && !isCurrentRunLock(lock)) legacyRunIds.add(endpoint.run_id);
-    }
-    if (legacyRunIds.size > 0)
-      throw new PolicyError(
-        `historical runs still require Endpoint cleanup: ${[...legacyRunIds].join(
-          ", ",
-        )}`,
-      );
   }
 
   async refreshProfileResolver(): Promise<void> {
