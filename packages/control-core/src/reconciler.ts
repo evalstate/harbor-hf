@@ -326,7 +326,7 @@ export class Reconciler {
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
     // Admit runs and dispatch queued Jobs before historical advancement or
     // Bucket I/O so slow projection work cannot starve physical execution.
-    const initialPending = await this.executableItems(
+    const initialPending = await this.executableActions(
       await this.projection.pendingActions(10_000),
     );
     const admissions = initialPending.filter(
@@ -339,7 +339,7 @@ export class Reconciler {
       newlyAdmittedRuns.add(intent.run_id);
       handled += 1;
     }
-    const pendingBeforeAdvancement = await this.executableItems(
+    const pendingBeforeAdvancement = await this.executableActions(
       await this.projection.pendingActions(10_000),
     );
     const queuedLaunches = pendingBeforeAdvancement.filter(
@@ -370,7 +370,7 @@ export class Reconciler {
       this.options.batch_size,
     )) {
       try {
-        if (!(await this.runHasExecution(intent.run_id))) continue;
+        if (!(await this.actionIsExecutable(intent))) continue;
         await this.advance(intent, receipt);
         await this.service.markAdvanced(intent, receipt);
         handled += 1;
@@ -379,7 +379,7 @@ export class Reconciler {
       }
     }
     await yieldToEventLoop();
-    const pending = await this.executableItems(
+    const pending = await this.executableActions(
       await this.projection.pendingActions(10_000),
     );
     const dueNow = (intent: ActionIntent): boolean => {
@@ -580,13 +580,19 @@ export class Reconciler {
     return fairJobLaunchOrder(intents, latest?.run_id ?? null);
   }
 
-  private async runHasExecution(runId: string): Promise<boolean> {
+  private async runExecutionState(
+    runId: string,
+  ): Promise<"executable" | "historical" | "missing"> {
     const lock = await this.projection.runLock(runId);
-    if (!lock) return false;
-    if (isCurrentRunLock(lock)) return true;
-    if (!(await this.projection.runContinuation(runId))) return false;
+    if (!lock) return "missing";
+    if (isCurrentRunLock(lock)) return "executable";
+    if (!(await this.projection.runContinuation(runId))) return "historical";
     await this.service.runExecution(lock);
-    return true;
+    return "executable";
+  }
+
+  private async runHasExecution(runId: string): Promise<boolean> {
+    return (await this.runExecutionState(runId)) === "executable";
   }
 
   private async executableItems<T extends { run_id: string }>(
@@ -609,6 +615,36 @@ export class Reconciler {
         .map(([runId]) => runId),
     );
     return items.filter((item) => executable.has(item.run_id));
+  }
+
+  private async actionIsExecutable(intent: ActionIntent): Promise<boolean> {
+    const state = await this.runExecutionState(intent.run_id);
+    return (
+      state === "executable" ||
+      (state === "historical" && intent.action_kind === "job.observe")
+    );
+  }
+
+  private async executableActions(
+    intents: readonly ActionIntent[],
+  ): Promise<ActionIntent[]> {
+    const states = new Map<string, Promise<"executable" | "historical" | "missing">>();
+    for (const intent of intents) {
+      if (!states.has(intent.run_id))
+        states.set(intent.run_id, this.runExecutionState(intent.run_id));
+    }
+    const resolved = new Map(
+      await Promise.all(
+        [...states].map(async ([runId, state]) => [runId, await state] as const),
+      ),
+    );
+    return intents.filter((intent) => {
+      const state = resolved.get(intent.run_id);
+      return (
+        state === "executable" ||
+        (state === "historical" && intent.action_kind === "job.observe")
+      );
+    });
   }
 
   private async handle(intent: ActionIntent): Promise<void> {
@@ -1241,6 +1277,7 @@ export class Reconciler {
       return;
     }
     await this.releaseObservedJobReservation(intent, receipt.created_at);
+    if (!(await this.runHasExecution(intent.run_id))) return;
     if (intent.payload.worker_role === "preparation") {
       await this.handlePreparationTerminal(intent, receipt, state);
       return;

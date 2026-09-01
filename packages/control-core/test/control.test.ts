@@ -450,15 +450,44 @@ describe("control service", () => {
       "2026-08-16T00:01:02.000Z",
     );
     await control.service.append(terminalObservation);
-    const terminalObservationReceipt = await control.service.receipt(
-      terminalObservation,
+    const terminalObservationReconciler = new Reconciler(
+      control.service,
+      control.projection,
       {
-        outcome: "completed",
-        observed_state: "COMPLETED",
-        resource_id: "legacy-active-job",
+        execute: async (): Promise<ExternalActionResult> => ({
+          outcome: "completed",
+          observed_state: "COMPLETED",
+          resource_id: "legacy-active-job",
+        }),
       },
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
-    await control.service.markAdvanced(terminalObservation, terminalObservationReceipt);
+    const markAdvanced = control.service.markAdvanced.bind(control.service);
+    const interruptedAdvancement = vi
+      .spyOn(control.service, "markAdvanced")
+      .mockImplementation(async (intent, receipt) => {
+        if (intent.action_id === terminalObservation.action_id)
+          throw new Error("historical observation advancement interrupted");
+        return markAdvanced(intent, receipt);
+      });
+    await expect(terminalObservationReconciler.tick()).rejects.toThrow(
+      "historical observation advancement interrupted",
+    );
+    expect(
+      (await control.projection.unadvancedActions()).map(
+        ({ intent }) => intent.action_id,
+      ),
+    ).toContain(terminalObservation.action_id);
+    interruptedAdvancement.mockRestore();
+    await terminalObservationReconciler.tick();
+    expect(
+      (await control.projection.action(terminalObservation.action_id))?.observed_state,
+    ).toBe("COMPLETED");
+    expect(
+      (await control.projection.task(legacy.run_id, unresolvedTask.task_id))?.task
+        .terminal_outcome,
+    ).toBeNull();
     await control.service.append({
       schema_version: "v1",
       kind: "attempt.receipt",

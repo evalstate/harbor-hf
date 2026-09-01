@@ -2165,7 +2165,7 @@ export class Projection {
       .where("actions.receipt_body", "is not", null)
       .where("advancements.action_id", "is", null)
       .where(
-        sql<boolean>`json_extract(actions.intent_body, '$.actor.role') <> 'migration'`,
+        sql<boolean>`(json_extract(actions.intent_body, '$.actor.role') <> 'migration' or actions.action_kind = 'job.observe')`,
       )
       .orderBy("actions.created_at")
       .orderBy("actions.action_id")
