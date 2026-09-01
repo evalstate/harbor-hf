@@ -70,14 +70,36 @@ manifest or select tasks again. Harbor's internal retry count remains zero.
 After a trial, the worker compares Harbor's emitted `TrialLock` with the
 prepared lock before it can submit evidence or an outcome.
 
+A physical Job may park before the trial ends only at a completed agent model or
+tool boundary. The checkpoint adapter saves the task workspace changes, full
+agent conversation, completed tool results, pending actions, logs, trajectory,
+usage, remaining limits and exact trial provenance. It never checkpoints a
+partial model response or a live process. An interruption during a provider
+response returns to the last committed pre-request or post-response boundary.
+
+A resumed physical Job validates the immutable checkpoint manifest and worker
+format compatibility before it restores the workspace and agent state. It
+reconstructs the same prepared trial and continues the same logical attempt.
+It does not repeat completed agent work, increment Harbor's attempt count or
+reset the shared token, cost, elapsed-time or deadline budgets. Missing,
+corrupt, conflicting or incompatible checkpoint data is an infrastructure
+failure and cannot start agent work.
+
 Both workers install the reviewed Harbor-HF agent package at its immutable
 revision and use the pinned Harbor git commit. The preparation worker has no
 persistent secret, inference access, or Bucket mount. The execution worker has
 no broad control credential or Bucket mount. Its short-lived capability is
-scoped to the assigned lock, evidence upload, and attempt receipt. When
-inference is required, the Job receives only the inference credential for the
-root-owned bridge. The benchmark agent receives only its loopback route and
-placeholder key.
+scoped to the assigned lock, checkpoint and evidence upload, and attempt
+receipt. When inference is required, the Job receives only the inference
+credential for the root-owned bridge. The benchmark agent receives only its
+loopback route and placeholder key.
+
+A reviewed worker repair can resume a parked attempt only when the worker
+explicitly supports and validates the checkpoint format. Final evidence records
+every physical Job, worker and repair generation, checkpoint handoff, usage and
+cost for the logical trial. Valid completed-task receipts stay selected, and
+recovery runs only unresolved tasks. A repeated deterministic shared failure
+pauses the affected fleet.
 
 ## Custom Provider Agents
 

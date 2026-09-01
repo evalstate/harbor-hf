@@ -685,12 +685,47 @@ selection does not pass the current read-only audit.
 
 ## Cooperative pause and resume
 
-Pause and resume use the control API, reconciler, Jobs, and Bucket. A pause
-request is durable and prevents new Job admission. An active Job may finish its
-one assigned trial and submit evidence. Resume creates one idempotent action for
-unresolved tasks and never reruns a task that already has a valid selected
-attempt. Repeated requests adopt the existing action, and replay derives the
-same unresolved task set.
+Pause and resume use the control API, reconciler, Jobs, and existing private
+Bucket. A pause request is durable and prevents new Job admission. An active Job
+parks its logical attempt at the next completed model-response or tool-action
+boundary. The worker does not checkpoint a partial model response or a live
+process. If interruption occurs during a provider response, recovery returns to
+the last committed pre-request or post-response boundary.
+
+Each checkpoint contains the task workspace changes, full agent conversation,
+tool results and pending actions, logs and trajectory data, used and remaining
+token, cost, elapsed-time and deadline budgets, and the exact benchmark, model,
+harness, worker and task revisions. The worker writes the checkpoint bytes and
+an immutable manifest to the existing private artifact Bucket. The manifest
+binds their checksums, checkpoint format, logical attempt, physical Job and
+worker generation.
+
+The service marks an attempt `parked` only after it reads back and verifies the
+checkpoint bytes and manifest and writes a control record that points to that
+exact checkpoint. A failed checkpoint upload never creates a resumable state.
+The worker keeps running when that is safe or records an infrastructure failure.
+Park and resume actions use deterministic identities, so repeated requests adopt
+the same matching objects and reject conflicting bytes.
+
+Resume starts a new physical Job for the same logical task attempt. The Job
+rejects a missing, corrupt, conflicting or incompatible checkpoint before agent
+work starts. It restores the workspace and agent state and continues without
+repeating completed work or consuming another benchmark trial. All physical
+Jobs share one cumulative token, cost, elapsed-time and deadline budget for the
+logical attempt.
+
+A reviewed worker repair may resume a parked attempt only when the new worker
+explicitly supports and validates the checkpoint format. Control records retain
+every physical Job, worker and repair generation, checkpoint handoff, usage and
+cost. Valid completed-task receipts remain selected, and recovery schedules only
+unresolved tasks. A repeated deterministic shared failure pauses the affected
+fleet.
+
+Final publication retains the full physical Job, worker, checkpoint, usage,
+cost and repair history behind each logical result. Whole-process and
+whole-container snapshots are not part of this design. The
+[task-attempt checkpoint and resume plan](2026-09-01-task-attempt-checkpoint-resume-plan.md)
+defines implementation and verification.
 
 ## Safe publication and supersession
 

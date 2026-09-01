@@ -86,16 +86,40 @@ metrics, and result tables.
 ### Trial Job isolation
 
 The TypeScript control service launches one Hugging Face Job for each physical
-trial attempt. Every launch uses immutable intent, admission, dispatch,
-observation, receipt, and advancement records. A lost create response becomes
-adoption-only and cannot issue a second create request.
+trial execution. A logical task attempt can span more than one physical Job when
+it parks and resumes from a verified application checkpoint. Every launch uses
+immutable intent, admission, dispatch, observation, receipt, and advancement
+records. A lost create response becomes adoption-only and cannot issue a second
+create request.
 
 The Job receives a short-lived capability scoped to its run, launch action, and
 task. It never receives `HF_TOKEN` or a writable Bucket mount. When inference is
 required, root bootstrap starts a credential-holding loopback bridge, removes
 the inference credential from the benchmark process environment, and drops
-privileges before Harbor starts. Evidence returns through content-addressed
-uploads and a verified manifest.
+privileges before Harbor starts. Evidence and checkpoints return through
+content-addressed uploads and verified manifests.
+
+### Task-attempt checkpoints
+
+A checkpoint records application state only after a complete model response or
+tool action. It contains the workspace changes, agent conversation, tool state,
+logs, trajectory, usage, cumulative budgets, and exact run provenance needed to
+continue the same logical attempt. It does not preserve a partial provider
+response, process memory or a whole container.
+
+The existing private artifact Bucket stores checkpoint bytes and immutable
+manifests. A durable park record points to a checkpoint only after checksum
+verification. A later physical Job restores that checkpoint and continues the
+same logical attempt under the same cumulative token, cost, elapsed-time and
+deadline limits. Missing, corrupt, conflicting or worker-incompatible
+checkpoints fail before agent work starts.
+
+Checkpoint and resume operations are idempotent. Every physical Job and worker
+generation remains visible in the result provenance. A repaired worker can
+restore a checkpoint only when it explicitly supports that checkpoint format.
+The [task-attempt checkpoint and resume
+plan](2026-09-01-task-attempt-checkpoint-resume-plan.md) defines the staged
+implementation and remote checks.
 
 ### Planner
 
@@ -266,11 +290,15 @@ The stable hierarchy is:
 1. An experiment groups a requested matrix.
 2. A run represents one homogeneous matrix cell.
 3. A trial represents one task and logical attempt.
-4. An execution represents one physical invocation, including infrastructure
-   retries.
+4. An execution represents one physical Job invocation. A parked trial can have
+   more than one execution.
+5. A checkpoint identifies one verified application boundary used to hand a
+   logical attempt from one execution to another.
 
-Retries never replace previous attempts. Composite or manually selected
-results must be labeled explicitly and must not appear as single-run results.
+A resumed execution continues the same trial and does not consume another
+benchmark attempt. Replacement attempts remain separate trials and never
+replace previous records. Composite or manually selected results must be
+labeled explicitly and must not appear as single-run results.
 
 ## Reproducibility Boundary
 
