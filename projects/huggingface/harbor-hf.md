@@ -11,7 +11,7 @@ default_branch: main
 
 Status: approved
 Approved at: 2026-08-17T06:48:55Z
-Amended at: 2026-09-01T14:07:05Z
+Amended at: 2026-09-01T18:11:42Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -69,6 +69,7 @@ Failed-Run replacement amendment approved at: 2026-08-25T22:29:22Z
 Admission-integrity repair amendment approved at: 2026-08-26T12:06:30Z
 GLM-5.3-Flash full-run amendment approved at: 2026-09-01T11:12:25Z
 GLM-5.3-Flash streaming-replacement amendment approved at: 2026-09-01T14:07:05Z
+Historical-Run continuation amendment approved at: 2026-09-01T18:11:42Z
 
 ### Scope
 
@@ -140,6 +141,7 @@ GLM-5.3-Flash streaming-replacement amendment approved at: 2026-09-01T14:07:05Z
 - Repair the single detected Job admission-chain fork by deleting only its orphaned admission object, which has no dispatch, receipt, capacity release, advancement, or remote Job. Preserve its action intent and every other Run record. Add startup projection catch-up, deploy the reviewed revision, and restart the existing control Space.
 - Run one final Terminal-Bench 2.1 full evaluation with all 89 tasks and one trial per task, using the existing promoted GLM-5.3-Flash Together deployment and Pi 0.84.2 with reasoning off.
 - Cancel only the GLM-5.3-Flash plus Pi full Run invalidated by the pre-streaming inference bridge after its admitted Jobs reach evidence boundaries, then launch exactly one clean 89-task replacement using the fixed streaming worker.
+- Add one append-only execution-continuation attachment to each of the seven approved historical gpt-oss 89-task Runs so the current TypeScript control service can finish only their unresolved tasks without changing Run IDs or rerunning selected outcomes.
 
 ### Limits
 
@@ -214,6 +216,7 @@ GLM-5.3-Flash streaming-replacement amendment approved at: 2026-09-01T14:07:05Z
 - The 2026-08-26 admission-integrity repair amendment permits deletion of exactly one orphaned Job admission object and no other object. It adds no compatibility path, persistent resource, credential, Run, retry, or ceiling increase.
 - The 2026-09-01 GLM-5.3-Flash amendment permits exactly one new full Run with a USD 18 hard ceiling, at most 16 active trial Jobs, and at most two physical attempts per task. These bounds come from the checked-in `tb21-full-glm-standard` launch policy. The measured estimate is USD 2.052029 from its published two-task canary, as recorded in the full-matrix plan. Do not launch another matrix cell, create a persistent resource or credential, or rerun a valid logical task.
 - The 2026-09-01 streaming-replacement amendment classifies every outcome from the first GLM-5.3-Flash plus Pi full Run as invalid because its immutable worker buffered streaming provider responses until completion. It permits cancelling only that paused Run and launching one clean full replacement with a new USD 18 hard ceiling, at most 16 active trial Jobs, and at most two physical attempts per task. It explicitly permits the replacement to rerun those invalidated tasks. Do not resume the invalidated Run, launch another matrix cell, create a persistent resource or credential, or alter any other Run.
+- The 2026-09-01 historical-Run continuation amendment permits one immutable attachment per approved historical Run. The attachment must preserve the original lock, Run ID, task IDs, selected outcomes, attempt and evidence history, observed cost, ceiling, model, benchmark, harness, provider, and trial identity. It may bind only a reviewed current deployment and worker contract that matches those identities. It may admit only tasks without a valid selected receipt. It creates no replacement Run, persistent resource, credential, budget reset, selected-task retry, deletion, or compatibility writer outside the TypeScript control service. The seven USD 10.60 per-Run ceilings and USD 74.20 aggregate ceiling remain unchanged.
 
 ### Remaining gates
 
@@ -224,6 +227,7 @@ No project-scope amendment remains pending. Operational gates still apply:
 - Keep the harness-integration canary series inside the USD 80 hard ceiling. Reject a harness that needs a native API the locked router route cannot preserve.
 - Keep the seven gpt-oss 89-task harness diagnostics inside USD 10.60 each and USD 74.20 combined.
 - Finish those existing 89-task rows, plus the existing OpenCode and FX 89-task rows, without a second campaign for the same harness.
+- Attach and resume a historical Run only after deterministic replay and selection-preservation tests pass and that harness's reviewed worker passes its bounded canary.
 - Keep the approved GLM-5.3-Flash Together plus Pi replacement inside its USD 18 immutable ceiling and the rollout plan's 16-Job physical concurrency limit. Do not resume the invalidated first Run.
 
 ## Approval history
@@ -324,3 +328,4 @@ No project-scope amendment remains pending. Operational gates still apply:
 
 - At 2026-09-01T11:12:25Z, approved one full 89-task, single-trial Terminal-Bench 2.1 Run with GLM-5.3-Flash through Together and Pi 0.84.2 reasoning off. The selected launch option fixes the hard ceiling at USD 18 and uses the existing profile limits of 16 active trial Jobs and two physical attempts per task.
 - At 2026-09-01T14:07:05Z, approved cancelling only the paused GLM-5.3-Flash plus Pi Run invalidated by the pre-streaming inference bridge and launching one clean 89-task replacement on the fixed streaming worker. The replacement has a new USD 18 hard ceiling, at most 16 active trial Jobs, and at most two physical attempts per task. Outcomes from the invalidated Run may be rerun only in this replacement.
+- At 2026-09-01T18:11:42Z, approved a narrow continuation mechanism for the seven historical gpt-oss full Runs that the current service cannot resume. Each Run may receive one append-only current execution attachment after local verification and its harness canary. The same Run then schedules only unresolved tasks, retains all selected outcomes and costs, and remains inside its existing ceiling. No replacement Run, selected-task retry, deletion, resource, credential, or budget increase is authorized.
