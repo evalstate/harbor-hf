@@ -3,9 +3,9 @@ import type {
   ActionIntent,
   ActionReceipt,
   AttemptReceipt,
-  CurrentRunLock,
   DeploymentProfileSpec,
   EndpointResource,
+  ResolvedExecutionContract,
   RunLock,
 } from "@harbor-hf/contracts";
 import {
@@ -64,6 +64,14 @@ export interface ReconcilerOptions {
   batch_size: number;
   dispatch_adoption_delay_ms?: number;
   worker_receipt_grace_ms?: number;
+}
+
+interface ExecutableRun {
+  run_id: string;
+  tasks: RunLock["tasks"];
+  profiles: RunLock["profiles"];
+  execution: ResolvedExecutionContract;
+  source_lock: RunLock;
 }
 
 const terminalJobStates = new Set([
@@ -126,7 +134,10 @@ function scalar<T extends string | number | boolean>(
   return value as T;
 }
 
-function profile(lock: RunLock, kind: string): Record<string, unknown> {
+function profile(
+  lock: { profiles: RunLock["profiles"] },
+  kind: string,
+): Record<string, unknown> {
   const selected = lock.profiles.find((item) => item.kind === kind);
   if (!selected) throw new PolicyError(`run lock is missing ${kind}`);
   return selected.spec as unknown as Record<string, unknown>;
@@ -311,10 +322,14 @@ export class Reconciler {
     const failures: unknown[] = [];
     const activeRuns = await this.projection.activeRuns();
     const syncRunIds = activeRuns.map((run) => run.run_id);
+    const executableRuns = await this.executableItems(activeRuns);
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
     // Admit runs and dispatch queued Jobs before historical advancement or
     // Bucket I/O so slow projection work cannot starve physical execution.
-    const admissions = (await this.projection.pendingActions(10_000)).filter(
+    const initialPending = await this.executableItems(
+      await this.projection.pendingActions(10_000),
+    );
+    const admissions = initialPending.filter(
       (intent) => intent.action_kind === "run.admit",
     );
     const newlyAdmittedRuns = new Set<string>();
@@ -324,7 +339,9 @@ export class Reconciler {
       newlyAdmittedRuns.add(intent.run_id);
       handled += 1;
     }
-    const pendingBeforeAdvancement = await this.projection.pendingActions(10_000);
+    const pendingBeforeAdvancement = await this.executableItems(
+      await this.projection.pendingActions(10_000),
+    );
     const queuedLaunches = pendingBeforeAdvancement.filter(
       (intent) =>
         intent.action_kind === "job.launch" &&
@@ -353,6 +370,7 @@ export class Reconciler {
       this.options.batch_size,
     )) {
       try {
+        if (!(await this.runHasExecution(intent.run_id))) continue;
         await this.advance(intent, receipt);
         await this.service.markAdvanced(intent, receipt);
         handled += 1;
@@ -361,7 +379,9 @@ export class Reconciler {
       }
     }
     await yieldToEventLoop();
-    const pending = await this.projection.pendingActions(10_000);
+    const pending = await this.executableItems(
+      await this.projection.pendingActions(10_000),
+    );
     const dueNow = (intent: ActionIntent): boolean => {
       const notBefore = intent.payload.not_before;
       return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
@@ -410,7 +430,7 @@ export class Reconciler {
     failures.push(...laterLaunchBatch.failures);
     await yieldToEventLoop();
     const activeRunBatch = rotatingBatch(
-      activeRuns,
+      executableRuns,
       this.activeRunCursor,
       this.options.batch_size,
     );
@@ -558,6 +578,37 @@ export class Reconciler {
   private async fairJobLaunches(intents: ActionIntent[]): Promise<ActionIntent[]> {
     const latest = await this.projection.latestJobAdmission(this.service.namespace);
     return fairJobLaunchOrder(intents, latest?.run_id ?? null);
+  }
+
+  private async runHasExecution(runId: string): Promise<boolean> {
+    const lock = await this.projection.runLock(runId);
+    if (!lock) return false;
+    if (isCurrentRunLock(lock)) return true;
+    if (!(await this.projection.runContinuation(runId))) return false;
+    await this.service.runExecution(lock);
+    return true;
+  }
+
+  private async executableItems<T extends { run_id: string }>(
+    items: readonly T[],
+  ): Promise<T[]> {
+    const availability = new Map<string, Promise<boolean>>();
+    for (const item of items) {
+      if (!availability.has(item.run_id))
+        availability.set(item.run_id, this.runHasExecution(item.run_id));
+    }
+    const executable = new Set(
+      (
+        await Promise.all(
+          [...availability].map(
+            async ([runId, available]) => [runId, await available] as const,
+          ),
+        )
+      )
+        .filter(([, available]) => available)
+        .map(([runId]) => runId),
+    );
+    return items.filter((item) => executable.has(item.run_id));
   }
 
   private async handle(intent: ActionIntent): Promise<void> {
@@ -720,6 +771,20 @@ export class Reconciler {
         break;
       case "run.resume": {
         const lock = await this.requiredLock(intent.run_id);
+        const historical = !isCurrentRunLock(lock.source_lock);
+        const continuation = historical
+          ? await this.projection.runContinuation(intent.run_id)
+          : null;
+        if (historical) {
+          if (!continuation)
+            throw new PolicyError(
+              "historical run has no execution continuation attachment",
+            );
+          await this.service.assertReusableHistoricalPreparation(
+            lock.source_lock,
+            lock.execution,
+          );
+        }
         const deployment = lock.execution.deployment;
         if (
           preparationRequired(deployment) &&
@@ -764,16 +829,21 @@ export class Reconciler {
           const sourceRow = await this.projection.action(latest.action_id);
           if (sourceRow?.action_kind !== "job.launch")
             throw new PolicyError("resume attempt has no physical Job launch");
-          await this.finishAttempt(
-            JSON.parse(latest.body) as AttemptReceipt,
-            JSON.parse(sourceRow.intent_body) as ActionIntent,
-          );
+          const source = JSON.parse(sourceRow.intent_body) as ActionIntent;
+          if (
+            continuation &&
+            source.payload.run_continuation_id !== continuation.record_id
+          ) {
+            freshTaskIds.push(taskId);
+            continue;
+          }
+          await this.finishAttempt(JSON.parse(latest.body) as AttemptReceipt, source);
         }
         if (freshTaskIds.length > 0)
           await this.launchExecution(
             lock,
             receipt.created_at,
-            intent.generation,
+            scalar<number>(intent.payload, "launch_generation", "number"),
             freshTaskIds,
           );
         break;
@@ -829,7 +899,7 @@ export class Reconciler {
   }
 
   private async launchPreparation(
-    lock: CurrentRunLock,
+    lock: ExecutableRun,
     createdAt: string,
     attempt: number,
     generation = attempt,
@@ -888,7 +958,7 @@ export class Reconciler {
         trusted_worker: profileScalar<boolean>(deployment, "trusted_worker", "boolean"),
         worker_revision: profileScalar<string>(deployment, "worker_revision", "string"),
         inference_token: "forbidden",
-        run_lock_digest: sha256(canonicalJson(lock)),
+        run_lock_digest: sha256(canonicalJson(lock.source_lock)),
         ...(hourly !== undefined ? { active_hourly_cost_microusd: hourly } : {}),
       },
     );
@@ -896,7 +966,7 @@ export class Reconciler {
   }
 
   private executionReservations(
-    lock: CurrentRunLock,
+    lock: ExecutableRun,
     taskIds: readonly string[],
     generation: number,
     createdAt: string,
@@ -994,7 +1064,7 @@ export class Reconciler {
   }
 
   private async launchExecution(
-    lock: CurrentRunLock,
+    lock: ExecutableRun,
     createdAt: string,
     generation: number,
     taskIds = lock.tasks.map((task) => task.task_id),
@@ -1012,6 +1082,12 @@ export class Reconciler {
 
     const execution = lock.execution;
     const deployment = execution.deployment;
+    const historical = !isCurrentRunLock(lock.source_lock);
+    const continuation = historical
+      ? await this.projection.runContinuation(lock.run_id)
+      : null;
+    if (historical && !continuation)
+      throw new PolicyError("historical run has no execution continuation attachment");
     const policy = profile(lock, "launch_policy");
     const reservation = profileScalar<number>(policy, "reservation_microusd", "number");
     const reservations = this.executionReservations(
@@ -1093,7 +1169,8 @@ export class Reconciler {
           ...(deployment.worker_revision
             ? { worker_revision: deployment.worker_revision }
             : {}),
-          run_lock_digest: sha256(canonicalJson(lock)),
+          run_lock_digest: sha256(canonicalJson(lock.source_lock)),
+          ...(continuation ? { run_continuation_id: continuation.record_id } : {}),
           ...(prepared ? { prepared_job_digest: sha256(canonicalJson(prepared)) } : {}),
         },
       );
@@ -1229,7 +1306,7 @@ export class Reconciler {
     const prepared = successful ? await this.service.preparedJob(intent.run_id) : null;
     if (prepared) {
       const lock = await this.requiredLock(intent.run_id);
-      if (prepared.run_lock_digest !== sha256(canonicalJson(lock)))
+      if (prepared.run_lock_digest !== sha256(canonicalJson(lock.source_lock)))
         throw new PolicyError("prepared job does not match the run lock");
       if (!(await this.projection.runPaused(intent.run_id)))
         await this.launchExecution(
@@ -1371,8 +1448,13 @@ export class Reconciler {
       (await this.taskCancellationRequested(attempt.run_id, attempt.task_id))
     )
       return;
+    const task = await this.projection.task(attempt.run_id, attempt.task_id);
+    if (task?.task.selected_attempt_id) return;
     const lock = await this.requiredLock(attempt.run_id);
-    const validity = attemptAdmissibility(attempt, requiredPositiveMetrics(lock));
+    const validity = attemptAdmissibility(
+      attempt,
+      requiredPositiveMetrics(lock.source_lock),
+    );
     const attempts = (await this.projection.runAttempts(attempt.run_id)).filter(
       (item) => item.task_id === attempt.task_id,
     );
@@ -1451,11 +1533,14 @@ export class Reconciler {
       if (priorLaunch?.action_kind !== "job.launch")
         throw new PolicyError("attempt does not identify its physical Job launch");
       const launch = JSON.parse(priorLaunch.intent_body) as ActionIntent;
+      const retryGeneration = isCurrentRunLock(lock.source_lock)
+        ? infrastructureAttempts.length
+        : await this.projection.nextExecutionLaunchGeneration(attempt.run_id);
       const retry = this.service.actionIntent(
         attempt.run_id,
         "job.launch",
         attempt.task_id,
-        infrastructureAttempts.length,
+        retryGeneration,
         {
           ...withoutRunActionIdempotency(launch.payload),
           task_id: attempt.task_id,
@@ -1710,13 +1795,15 @@ export class Reconciler {
     return true;
   }
 
-  private async requiredLock(runId: string): Promise<CurrentRunLock> {
+  private async requiredLock(runId: string): Promise<ExecutableRun> {
     const lock = await this.projection.runLock(runId);
     if (!lock) throw new PolicyError(`run lock is missing: ${runId}`);
-    if (!isCurrentRunLock(lock))
-      throw new PolicyError(
-        `historical run lock is read-only after the profile cutover: ${runId}`,
-      );
-    return lock;
+    return {
+      run_id: lock.run_id,
+      tasks: lock.tasks,
+      profiles: lock.profiles,
+      execution: await this.service.runExecution(lock),
+      source_lock: lock,
+    };
   }
 }

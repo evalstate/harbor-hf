@@ -59,6 +59,15 @@ def _trial_lock() -> dict:
 
 
 def _lock() -> dict:
+    deployment = {
+        "route": "hf_job",
+        "preparation": "required",
+        "job_image": WORKER_IMAGE,
+        "harbor_version": "0.22.0",
+        "worker_revision": "abcdef0",
+        "input_price_microusd_per_million_tokens": 100_000,
+        "output_price_microusd_per_million_tokens": 200_000,
+    }
     return {
         "run_id": "run-1",
         "tasks": [
@@ -72,17 +81,18 @@ def _lock() -> dict:
         "profiles": [
             {
                 "kind": "deployment",
-                "spec": {
-                    "route": "hf_job",
-                    "preparation": "required",
-                    "job_image": WORKER_IMAGE,
-                    "harbor_version": "0.22.0",
-                    "worker_revision": "abcdef0",
-                    "input_price_microusd_per_million_tokens": 100_000,
-                    "output_price_microusd_per_million_tokens": 200_000,
-                },
+                "spec": deployment,
             }
         ],
+        "execution": {
+            "contract_version": "v1",
+            "deployment": deployment,
+            "harbor_agent": {
+                "import_path": "example.agent:Agent",
+                "model_name": "openai/example/model:together",
+                "kwargs": {},
+            },
+        },
     }
 
 
@@ -191,6 +201,41 @@ def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
 def _config(monkeypatch: pytest.MonkeyPatch) -> worker.WorkerConfig:
     _configure(monkeypatch)
     return worker._locked_config(_lock())
+
+
+def test_reads_historical_execution_from_the_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = _lock()
+    execution = lock.pop("execution")
+    lock_digest = worker.digest_bytes(worker._canonical_json(lock))
+    monkeypatch.setenv("HARBOR_HF_ACTION_ID", "action-1")
+    monkeypatch.setenv("HARBOR_HF_RUN_LOCK_DIGEST", lock_digest)
+
+    class ContinuationClient:
+        def request_sync(
+            self,
+            method: str,
+            path: str,
+            *,
+            idempotency_key: str,
+        ) -> dict:
+            assert method == "GET"
+            assert path == "/api/v1/runs/run-1/continuation"
+            assert idempotency_key == "control-worker-continuation-action-1"
+            return {
+                "run_id": "run-1",
+                "run_lock_digest": lock_digest,
+                "execution": execution,
+            }
+
+    monkeypatch.setattr(
+        worker,
+        "_control_client",
+        lambda _run_id: ContinuationClient(),
+    )
+
+    assert worker._read_execution(lock, "run-1") == execution
 
 
 def test_evidence_chunks_fit_the_encoded_api_limit() -> None:
@@ -412,6 +457,7 @@ def test_harbor_run_config_uses_one_adhoc_task(
     tmp_path: Path,
 ) -> None:
     config = _config(monkeypatch)
+    config.harbor_agent["import_path"] = "reviewed.agent:Agent"
 
     path = worker._job_config(config, tmp_path)
     written = json.loads(path.read_text())
@@ -426,6 +472,7 @@ def test_harbor_run_config_uses_one_adhoc_task(
     assert written["tasks"][0]["git_commit_id"] == "b" * 40
     assert written["tasks"][0]["source"] is None
     assert written["environment"]["kwargs"]["control_task_image"] == TASK_IMAGE
+    assert written["agents"][0]["import_path"] == "reviewed.agent:Agent"
 
 
 @pytest.mark.parametrize(

@@ -5,5 +5,6 @@ export type * from "./leaderboard-snapshot-v1.js";
 export type * from "./prepared-job-submission-v1.js";
 export type * from "./result-catalog-v1.js";
 export type * from "./run-action-v1.js";
+export type * from "./run-continuation-v1.js";
 export type * from "./run-submission-v1.js";
 export type * from "./worker-evidence-manifest-v1.js";

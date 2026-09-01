@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProfileObject } from "@harbor-hf/contracts";
@@ -6,8 +6,8 @@ import { canonicalJson, sha256 } from "@harbor-hf/contracts";
 import {
   ControlService,
   FilesystemObjectStore,
-  Projection,
   type LoadedProfile,
+  Projection,
 } from "@harbor-hf/control-core";
 
 export function profile(
@@ -243,29 +243,14 @@ export interface TestControl {
   close(): Promise<void>;
 }
 
-export async function createTestControl(
-  taskCount = 1,
-  maxInfrastructureAttempts = 1,
-  reservationMicrousd = 0,
-  successWithoutWorkerReceipt = true,
-  inferenceToken: "forbidden" | "required" = "forbidden",
-  maxRunCeilingMicrousd?: number,
-  requiredPositiveMetrics: string[] = [],
+export async function createTestControlFromProfiles(
+  profiles: LoadedProfile[],
 ): Promise<TestControl> {
   const root = await mkdtemp(join(tmpdir(), "harbor-hf-control-test-"));
   const bucket = join(root, "bucket");
   await mkdir(bucket, { recursive: true });
   const store = new FilesystemObjectStore(bucket);
   const projection = await Projection.open(join(root, "projection.sqlite"));
-  const profiles = smokeProfiles(
-    taskCount,
-    maxInfrastructureAttempts,
-    reservationMicrousd,
-    successWithoutWorkerReceipt,
-    inferenceToken,
-    maxRunCeilingMicrousd,
-    requiredPositiveMetrics,
-  );
   const service = new ControlService("test", store, projection, profiles);
   await projection.rebuild(store);
   await service.initialize(profiles);
@@ -281,4 +266,25 @@ export async function createTestControl(
       await rm(root, { recursive: true, force: true });
     },
   };
+}
+
+export async function createTestControl(
+  taskCount = 1,
+  maxInfrastructureAttempts = 1,
+  reservationMicrousd = 0,
+  successWithoutWorkerReceipt = true,
+  inferenceToken: "forbidden" | "required" = "forbidden",
+  maxRunCeilingMicrousd?: number,
+  requiredPositiveMetrics: string[] = [],
+): Promise<TestControl> {
+  const profiles = smokeProfiles(
+    taskCount,
+    maxInfrastructureAttempts,
+    reservationMicrousd,
+    successWithoutWorkerReceipt,
+    inferenceToken,
+    maxRunCeilingMicrousd,
+    requiredPositiveMetrics,
+  );
+  return createTestControlFromProfiles(profiles);
 }

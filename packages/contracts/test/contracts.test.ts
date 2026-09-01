@@ -6,6 +6,7 @@ import {
   deterministicId,
   schemas,
   sha256,
+  validateRunContinuation,
   validateRunSubmission,
   validateControlRecord,
   validateLeaderboardSnapshot,
@@ -547,6 +548,13 @@ describe("canonical contracts", () => {
         action_id: "action-1",
       }),
     ).toBe("control/schema=v1/runs/run-1/actions/action-1/zz-advanced.json");
+    expect(
+      controlRecordPath({
+        kind: "run.continuation",
+        record_id: "continuation-1",
+        run_id: "run-1",
+      }),
+    ).toBe("control/schema=v1/runs/run-1/continuation.json");
   });
 
   it("validates run submission boundaries", () => {
@@ -567,6 +575,24 @@ describe("canonical contracts", () => {
         harness: "x",
         launch_policy: "x",
         ceiling_microusd: -1,
+        confirmed: false,
+      }),
+    ).toThrow(ContractValidationError);
+  });
+
+  it("requires explicit historical continuation confirmation", () => {
+    expect(
+      validateRunContinuation({
+        reason: "finish unresolved tasks",
+        confirmed: true,
+      }),
+    ).toEqual({
+      reason: "finish unresolved tasks",
+      confirmed: true,
+    });
+    expect(() =>
+      validateRunContinuation({
+        reason: "finish unresolved tasks",
         confirmed: false,
       }),
     ).toThrow(ContractValidationError);

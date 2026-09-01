@@ -13,6 +13,7 @@ export const schemas = {
   apiError: load("api-error-v1.schema.json"),
   attemptSubmission: load("attempt-submission-v1.schema.json"),
   runAction: load("run-action-v1.schema.json"),
+  runContinuation: load("run-continuation-v1.schema.json"),
   runSubmission: load("run-submission-v1.schema.json"),
   controlRecord: load("control-record-v1.schema.json"),
   preparedJobSubmission: load("prepared-job-submission-v1.schema.json"),
@@ -30,6 +31,7 @@ ajv.addFormat("date-time", {
 const validators = {
   attemptSubmission: ajv.compile(schemas.attemptSubmission),
   runAction: ajv.compile(schemas.runAction),
+  runContinuation: ajv.compile(schemas.runContinuation),
   runSubmission: ajv.compile(schemas.runSubmission),
   controlRecord: ajv.compile(schemas.controlRecord),
   preparedJobSubmission: ajv.compile(schemas.preparedJobSubmission),
@@ -65,6 +67,10 @@ export function validateControlRecord<T>(value: unknown): T {
 
 export function validateRunSubmission<T>(value: unknown): T {
   return validate<T>(validators.runSubmission, value, "run submission");
+}
+
+export function validateRunContinuation<T>(value: unknown): T {
+  return validate<T>(validators.runContinuation, value, "run continuation");
 }
 
 export function validateRunAction<T>(value: unknown): T {

@@ -22,6 +22,9 @@
       "$ref": "#/$defs/RunLock"
     },
     {
+      "$ref": "#/$defs/RunContinuation"
+    },
+    {
       "$ref": "#/$defs/PreparedTrial"
     },
     {
@@ -570,6 +573,67 @@
             },
             "start_paused": {
               "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
+    "RunContinuation": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "kind",
+            "record_id",
+            "created_at",
+            "actor",
+            "run_id",
+            "run_lock_digest",
+            "idempotency_key_digest",
+            "idempotency_payload_digest",
+            "execution",
+            "reason"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "v1"
+            },
+            "kind": {
+              "const": "run.continuation"
+            },
+            "record_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            },
+            "run_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "run_lock_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "idempotency_key_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "idempotency_payload_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "execution": {
+              "$ref": "#/$defs/ResolvedExecutionContract"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
             }
           }
         }
@@ -2362,6 +2426,9 @@
         "run_lock_digest": {
           "$ref": "#/$defs/Digest"
         },
+        "run_continuation_id": {
+          "$ref": "#/$defs/Id"
+        },
         "worker_role": {
           "enum": ["preparation", "execution"]
         },
@@ -2377,6 +2444,11 @@
           "type": "string",
           "minLength": 7,
           "maxLength": 160
+        },
+        "launch_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
         },
         "task_limit": {
           "type": "integer",

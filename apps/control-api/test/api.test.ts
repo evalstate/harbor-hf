@@ -886,6 +886,32 @@ describe("control API", () => {
     await app.close();
   });
 
+  it("rejects continuation attachments for current runs", async () => {
+    const { app } = await setup();
+    const submission = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "current-continuation-run" },
+      payload: input,
+    });
+    const runId = submission.json().run_id as string;
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/continuation`,
+      headers: { "idempotency-key": "current-continuation-attachment" },
+      payload: {
+        reason: "not a historical run",
+        confirmed: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toMatchObject({
+      error: { message: "current run locks do not need continuation" },
+    });
+    await app.close();
+  });
+
   it("rejects lifecycle mutations after a Run completes", async () => {
     const { runtime, app } = await setup();
     const submission = await app.inject({
@@ -1505,6 +1531,15 @@ describe("control API", () => {
     expect(sha256(canonicalJson(lockResponse.json()))).toBe(
       sha256(canonicalJson(lock)),
     );
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/api/v1/runs/${submission.run_id}/continuation`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(404);
     expect(
       (await app.inject({ method: "GET", url: "/api/v1/profiles", headers }))
         .statusCode,

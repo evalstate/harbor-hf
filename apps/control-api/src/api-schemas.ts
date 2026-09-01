@@ -208,6 +208,18 @@ export const acceptedSchema = {
   },
 } as const;
 
+export const runContinuationAcceptedSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["run_id", "continuation_id", "status_url", "adopted"],
+  properties: {
+    run_id: { type: "string" },
+    continuation_id: { type: "string" },
+    status_url: { type: "string" },
+    adopted: { type: "boolean" },
+  },
+} as const;
+
 export const evidenceUploadSchema = {
   type: "object",
   additionalProperties: false,

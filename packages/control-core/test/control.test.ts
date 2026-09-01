@@ -2,6 +2,8 @@ import { join } from "node:path";
 import type {
   ActionIntent,
   AttemptReceipt,
+  PreparedJob,
+  PreparedTrial,
   ProfileObject,
   ProfilePromotion,
   RunLock,
@@ -16,8 +18,13 @@ import {
 } from "@harbor-hf/contracts";
 import { NoopActions } from "@harbor-hf/hf-adapters";
 import type { TestControl } from "@harbor-hf/test-fixtures";
-import { createTestControl } from "@harbor-hf/test-fixtures";
+import {
+  createTestControl,
+  createTestControlFromProfiles,
+  preparedProfiles,
+} from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { assertRunContinuationCompatible } from "../src/execution-contract.js";
 import { Projection } from "../src/projection.js";
 import { ResultPublisher } from "../src/publication.js";
 import {
@@ -176,9 +183,36 @@ describe("control service", () => {
     );
   });
 
-  it("keeps historical run locks read-only without blocking startup", async () => {
-    const control = await createTestControl();
+  it("attaches current execution without mutating a historical lock", async () => {
+    const control = await createTestControlFromProfiles(preparedProfiles(2));
     controls.push(control);
+    const historicalProfiles = control.profiles.map(({ profile, profile_id }) => {
+      const spec = profile.spec as unknown as Record<string, unknown>;
+      const historicalSpec =
+        profile.profile_kind === "model" ||
+        profile.profile_kind === "harness" ||
+        profile.profile_kind === "deployment"
+          ? Object.fromEntries(
+              Object.entries(spec).filter(([key]) => key !== "contract_version"),
+            )
+          : spec;
+      if (profile.profile_kind === "harness")
+        historicalSpec.harbor_agent = {
+          import_path: "legacy.agent:Agent",
+          kwargs: {},
+        };
+      if (profile.profile_kind === "deployment") {
+        historicalSpec.job_image =
+          "example.invalid/legacy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        historicalSpec.worker_revision = "legacy-worker";
+      }
+      return {
+        kind: profile.profile_kind,
+        name: profile.name,
+        profile_id,
+        spec: historicalSpec,
+      };
+    }) as RunLock["profiles"];
     const legacy: RunLock = {
       schema_version: "v1",
       kind: "run.lock",
@@ -186,66 +220,130 @@ describe("control service", () => {
       created_at: "2026-08-16T00:00:00.000Z",
       actor: { subject: "migration", role: "migration" },
       run_id: "run-legacy-read-only",
-      profiles: [
-        {
-          kind: "benchmark",
-          name: "control-smoke",
-          profile_id: `sha256:${"a".repeat(64)}`,
-          spec: {
-            benchmark: "control-smoke",
-            revision: "legacy",
-            task_ids: ["task-legacy"],
-            task_digests: [`sha256:${"b".repeat(64)}`],
-          },
-        },
-        {
-          kind: "model",
-          name: "control-smoke",
-          profile_id: `sha256:${"c".repeat(64)}`,
-          spec: { model_id: "control-smoke", revision: "legacy" },
-        },
-        {
-          kind: "harness",
-          name: "control-smoke",
-          profile_id: `sha256:${"d".repeat(64)}`,
-          spec: {
-            agent: "control-smoke",
-            revision: "legacy",
-            required_evidence: [],
-          },
-        },
-        {
-          kind: "deployment",
-          name: "hf-cpu-smoke",
-          profile_id: `sha256:${"e".repeat(64)}`,
-          spec: {
-            route: "hf_job",
-            models: ["control-smoke"],
-            harnesses: ["control-smoke"],
-          },
-        },
-        {
-          kind: "launch_policy",
-          name: "control-smoke",
-          profile_id: `sha256:${"f".repeat(64)}`,
-          spec: {
-            max_infrastructure_attempts: 1,
-            reservation_microusd: 0,
-            success_without_worker_receipt: true,
-            publication_role: "diagnostic",
-          },
-        },
-      ],
+      profiles: historicalProfiles,
       tasks: [
         {
-          task_id: "task-legacy",
-          input_digest: `sha256:${"b".repeat(64)}`,
+          task_id: "task-001-trial-1",
+          source_task_id: "task-001",
+          trial_index: 1,
+          input_digest: sha256("task-001"),
+        },
+        {
+          task_id: "task-002-trial-1",
+          source_task_id: "task-002",
+          trial_index: 1,
+          input_digest: sha256("task-002"),
         },
       ],
-      ceiling_microusd: 0,
+      ceiling_microusd: 1_000_000,
       source_revision: `sha256:${"0".repeat(64)}`,
     };
     await control.service.append(legacy);
+    const [selectedTask, unresolvedTask] = legacy.tasks;
+    if (!selectedTask || !unresolvedTask)
+      throw new Error("historical continuation test needs two tasks");
+    const preparationId = deterministicId("preparation", legacy.run_id);
+    const runLockDigest = ControlService.recordDigest(legacy);
+    const preparedTrials: PreparedTrial[] = legacy.tasks.map((task) => {
+      if (!task.source_task_id || task.trial_index === undefined)
+        throw new Error(`prepared task identity is incomplete: ${task.task_id}`);
+      return {
+        schema_version: "v1",
+        kind: "prepared.trial",
+        record_id: deterministicId("prepared-trial", legacy.run_id, task.task_id),
+        created_at: "2026-08-16T00:00:00.000Z",
+        actor: { subject: "migration", role: "migration" },
+        run_id: legacy.run_id,
+        preparation_id: preparationId,
+        run_lock_digest: runLockDigest,
+        task_id: task.task_id,
+        source_task_id: task.source_task_id,
+        trial_index: task.trial_index,
+        input_digest: task.input_digest,
+        trial_lock: { schema_version: 2 },
+        trial_lock_digest: sha256(task.task_id),
+        declared_image: "python:3.12",
+        image: `library/python@sha256:${"b".repeat(64)}`,
+        cpus: 1,
+        memory_mb: 2048,
+        storage_mb: 10240,
+        gpus: 0,
+        agent_timeout_seconds: 900,
+        verifier_timeout_seconds: 600,
+        environment_build_timeout_seconds: 600,
+        agent_setup_timeout_seconds: 360,
+      };
+    });
+    for (const trial of preparedTrials) await control.service.append(trial);
+    const preparedJob: PreparedJob = {
+      schema_version: "v1",
+      kind: "prepared.job",
+      record_id: deterministicId("prepared-job", legacy.run_id),
+      created_at: "2026-08-16T00:00:00.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: legacy.run_id,
+      preparation_id: preparationId,
+      run_lock_digest: runLockDigest,
+      harbor_version: "0.21.0",
+      job_config: { n_attempts: 1 },
+      job_lock_header: { schema_version: 3 },
+      trials: preparedTrials.map((trial) => ({
+        task_id: trial.task_id,
+        record_id: trial.record_id,
+        record_digest: ControlService.recordDigest(trial),
+      })) as PreparedJob["trials"],
+      harbor_lock_digest: sha256("harbor-lock"),
+    };
+    await control.service.append(preparedJob);
+    const historicalLaunch = control.service.actionIntent(
+      legacy.run_id,
+      "job.launch",
+      selectedTask.task_id,
+      0,
+      {
+        worker_role: "execution",
+        task_id: selectedTask.task_id,
+        task_ids: [selectedTask.task_id],
+      },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:00:01.000Z",
+    );
+    await control.service.append(historicalLaunch);
+    const launchReceipt = await control.service.receipt(historicalLaunch, {
+      outcome: "completed",
+      observed_state: "COMPLETED",
+    });
+    await control.service.markAdvanced(historicalLaunch, launchReceipt);
+    const selectedAttempt: AttemptReceipt = {
+      schema_version: "v1",
+      kind: "attempt.receipt",
+      record_id: "attempt-receipt-legacy-selected",
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: legacy.run_id,
+      task_id: selectedTask.task_id,
+      attempt_id: "attempt-legacy-selected",
+      action_id: historicalLaunch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      evidence_digest: sha256("legacy-selected-evidence"),
+      evidence_path: "evidence/legacy-selected",
+      cost_microusd: 7,
+      metrics: {},
+    };
+    await control.service.append(selectedAttempt);
+    await control.service.append({
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: "terminal-legacy-selected",
+      created_at: "2026-08-16T00:00:03.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: legacy.run_id,
+      task_id: selectedTask.task_id,
+      attempt_id: selectedAttempt.attempt_id,
+      outcome: "infrastructure",
+      reason: "historical selected outcome",
+    });
 
     await expect(
       control.service.runAction(
@@ -254,15 +352,295 @@ describe("control service", () => {
         "legacy-pause",
         operator,
       ),
-    ).rejects.toThrow("historical run locks cannot create work");
+    ).rejects.toThrow("historical run has no execution continuation attachment");
+    const blockedLaunch = control.service.actionIntent(
+      legacy.run_id,
+      "job.launch",
+      unresolvedTask.task_id,
+      0,
+      {
+        worker_role: "execution",
+        task_id: unresolvedTask.task_id,
+        task_ids: [unresolvedTask.task_id],
+      },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:00:04.000Z",
+    );
+    await control.service.append(blockedLaunch);
+    const blockedExternal = new NoopActions();
+    const execute = vi.spyOn(blockedExternal, "execute");
+    const blockedReconciler = new Reconciler(
+      control.service,
+      control.projection,
+      blockedExternal,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await expect(blockedReconciler.tick()).resolves.toBe(0);
+    expect(execute).not.toHaveBeenCalled();
+    expect(
+      (await control.projection.action(blockedLaunch.action_id))?.receipt_body,
+    ).toBeNull();
+    const blockedReceipt = await control.service.receipt(blockedLaunch, {
+      outcome: "completed",
+      observed_state: "suppressed-historical",
+    });
+    await control.service.markAdvanced(blockedLaunch, blockedReceipt);
+    const pause = control.service.actionIntent(
+      legacy.run_id,
+      "run.pause",
+      "run",
+      0,
+      { reason: "preserve the historical boundary" },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:01:00.000Z",
+    );
+    await control.service.append(pause);
+    const pauseReceipt = await control.service.receipt(pause, {
+      outcome: "completed",
+      observed_state: "paused",
+    });
+    await expect(
+      control.service.continueHistoricalRun(
+        legacy.run_id,
+        { reason: "finish unresolved tasks", confirmed: true },
+        "legacy-continuation",
+        operator,
+      ),
+    ).rejects.toThrow("unadvanced action");
+    await control.service.markAdvanced(pause, pauseReceipt);
+    const activeHistoricalLaunch = control.service.actionIntent(
+      legacy.run_id,
+      "job.launch",
+      unresolvedTask.task_id,
+      1,
+      {
+        worker_role: "execution",
+        task_id: unresolvedTask.task_id,
+        task_ids: [unresolvedTask.task_id],
+      },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:01:01.000Z",
+    );
+    await control.service.append(activeHistoricalLaunch);
+    const activeLaunchReceipt = await control.service.receipt(activeHistoricalLaunch, {
+      outcome: "completed",
+      observed_state: "RUNNING",
+      resource_id: "legacy-active-job",
+    });
+    await control.service.markAdvanced(activeHistoricalLaunch, activeLaunchReceipt);
+    await expect(
+      control.service.continueHistoricalRun(
+        legacy.run_id,
+        { reason: "finish unresolved tasks", confirmed: true },
+        "legacy-continuation",
+        operator,
+      ),
+    ).rejects.toThrow("running Job");
+    const terminalObservation = control.service.actionIntent(
+      legacy.run_id,
+      "job.observe",
+      "legacy-active-job",
+      0,
+      {
+        launch_action_id: activeHistoricalLaunch.action_id,
+        resource_id: "legacy-active-job",
+      },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:01:02.000Z",
+    );
+    await control.service.append(terminalObservation);
+    const terminalObservationReceipt = await control.service.receipt(
+      terminalObservation,
+      {
+        outcome: "completed",
+        observed_state: "COMPLETED",
+        resource_id: "legacy-active-job",
+      },
+    );
+    await control.service.markAdvanced(terminalObservation, terminalObservationReceipt);
+    await control.service.append({
+      schema_version: "v1",
+      kind: "attempt.receipt",
+      record_id: "attempt-receipt-legacy-unselected",
+      created_at: "2026-08-16T00:01:03.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: legacy.run_id,
+      task_id: unresolvedTask.task_id,
+      attempt_id: "attempt-legacy-unselected",
+      action_id: activeHistoricalLaunch.action_id,
+      outcome: "complete",
+      replacement_eligible: false,
+      evidence_digest: sha256("legacy-unselected-evidence"),
+      evidence_path: "evidence/legacy-unselected",
+      cost_microusd: 5,
+      metrics: {},
+    });
+    const continuation = await control.service.continueHistoricalRun(
+      legacy.run_id,
+      { reason: "finish unresolved tasks", confirmed: true },
+      "legacy-continuation",
+      operator,
+    );
+    expect(continuation.adopted).toBe(false);
+    expect(
+      await control.service.continueHistoricalRun(
+        legacy.run_id,
+        { reason: "finish unresolved tasks", confirmed: true },
+        "legacy-continuation",
+        operator,
+      ),
+    ).toMatchObject({ adopted: true });
+    const attached = await control.projection.runContinuation(legacy.run_id);
+    expect(attached).toMatchObject({
+      run_id: legacy.run_id,
+      run_lock_digest: ControlService.recordDigest(legacy),
+      reason: "finish unresolved tasks",
+    });
+    if (!attached) throw new Error("run continuation is missing");
+    expect(() =>
+      assertRunContinuationCompatible(legacy, {
+        ...attached.execution,
+        deployment: {
+          ...attached.execution.deployment,
+          trial_job_template: {
+            ...attached.execution.deployment.trial_job_template,
+            inference_upstream: "https://incompatible.example/v1",
+          },
+        },
+      }),
+    ).toThrow("continuation changes the locked deployment inference_upstream");
+    await expect(
+      control.service.uploadEvidenceObject(
+        legacy.run_id,
+        historicalLaunch.action_id,
+        selectedTask.task_id,
+        sha256("late historical evidence"),
+        new TextEncoder().encode("late historical evidence"),
+      ),
+    ).rejects.toThrow("not bound to the execution continuation");
+    await expect(
+      control.service.runAction(
+        legacy.run_id,
+        {
+          action: "retry_infrastructure",
+          task_id: selectedTask.task_id,
+          confirmed: true,
+        },
+        "legacy-retry",
+        operator,
+      ),
+    ).rejects.toThrow("historical continuation cannot retry");
+    const resumed = await control.service.runAction(
+      legacy.run_id,
+      { action: "resume", confirmed: true },
+      "legacy-resume",
+      operator,
+    );
+    const resume = await control.projection.action(resumed.action_id);
+    const resumeIntent = JSON.parse(resume?.intent_body ?? "{}") as ActionIntent;
+    expect(resumeIntent).toMatchObject({
+      payload: { task_ids: [unresolvedTask.task_id] },
+    });
+    const resumedNoop = new NoopActions();
+    let resumedLaunchCount = 0;
+    const resumedExecute = vi.fn(
+      async (intent: ActionIntent): Promise<ExternalActionResult> => {
+        if (intent.action_kind !== "job.launch") return resumedNoop.execute(intent);
+        resumedLaunchCount += 1;
+        return resumedLaunchCount === 1
+          ? { outcome: "failed", observed_state: "job-create-failed" }
+          : {
+              outcome: "completed",
+              observed_state: "RUNNING",
+              resource_id: "continued-job",
+            };
+      },
+    );
+    const resumedReconciler = new Reconciler(
+      control.service,
+      control.projection,
+      { execute: resumedExecute },
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(resumedReconciler, 3);
+    const resumedLaunches = resumedExecute.mock.calls
+      .map(([intent]) => intent)
+      .filter(
+        (intent) =>
+          intent.action_kind === "job.launch" &&
+          intent.payload.task_id === unresolvedTask.task_id,
+      );
+    const resumedLaunch = resumedLaunches[0];
+    expect(resumedLaunch?.payload).toMatchObject({
+      job_image:
+        "example.invalid/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      worker_revision: "abcdef0",
+      run_continuation_id: attached.record_id,
+    });
+    expect(attached.execution.harness.harbor_agent).toEqual({
+      import_path: "example.agent:Agent",
+      kwargs: {},
+    });
+    expect(resumedLaunches.map((intent) => intent.generation)).toEqual([2, 3]);
+    expect(await control.projection.run(legacy.run_id)).toMatchObject({
+      paused: false,
+      reserved_microusd: 100_012,
+    });
+    await expect(
+      control.service.continueHistoricalRun(
+        legacy.run_id,
+        { reason: "finish unresolved tasks", confirmed: true },
+        "legacy-continuation",
+        operator,
+      ),
+    ).resolves.toMatchObject({ adopted: true });
+    expect(
+      (await control.projection.task(legacy.run_id, selectedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "infrastructure",
+      selected_attempt_id: selectedAttempt.attempt_id,
+    });
+    const rebuilt = await Projection.open(
+      join(control.root, "historical-continuation.sqlite"),
+    );
+    await rebuilt.rebuild(control.store);
     const restarted = new ControlService(
       "test",
       control.store,
-      control.projection,
+      rebuilt,
       control.profiles,
     );
     await expect(restarted.initialize(control.profiles)).resolves.toBeUndefined();
-    expect(await control.projection.runLock(legacy.run_id)).toEqual(legacy);
+    expect(await rebuilt.runLock(legacy.run_id)).toEqual(legacy);
+    expect(
+      (await rebuilt.task(legacy.run_id, selectedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "infrastructure",
+      selected_attempt_id: selectedAttempt.attempt_id,
+    });
+    await expect(restarted.runExecution(legacy)).resolves.toMatchObject({
+      contract_version: "v1",
+    });
+    await rebuilt.close();
+
+    const orphan = {
+      ...attached,
+      record_id: "continuation-orphan",
+      run_id: "run-orphan",
+    };
+    await control.store.create(
+      controlRecordPath(orphan),
+      new TextEncoder().encode(canonicalJson(orphan)),
+    );
+    const invalid = await Projection.open(
+      join(control.root, "invalid-continuation.sqlite"),
+    );
+    await expect(invalid.rebuild(control.store)).rejects.toThrow(
+      "run continuation has no lock",
+    );
+    await invalid.close();
   });
 
   it("replaces the promoted namespace Job cap and start pacing", async () => {

@@ -410,6 +410,17 @@ curl -X POST "$HARBOR_HF_CONTROL_URL/api/v1/capacity" \
 
 The same information is available in the Space's web console. Dotted labels show a hover explanation of that control. Hover or focus a Recent run spend point to see its Run ID and exact observed cost. Logical task outcomes use full phrases (scored success, provider rejected the request, agent ended without a score) instead of the raw `complete`, `policy`, and `agent` tokens. The Jobs page shows the latest observed state and recorded hardware cost for each HF Job and links the Job ID to its Hub inspect page. Execution Job logs stream Harbor trial stdout as the trial runs. Execution workers install Harbor from a pinned git commit so new harnesses can be evaluated before a PyPI release. They preserve a successful exact durable trial result if Harbor exits nonzero only after writing that result; a missing or exceptional trial result remains a failure. The Results list shows pass rate, primary metric, and token cost. Open a result for the Wilson 95% CI, publication identity, and the Hub link to the Bucket prefix that holds the generated objects. Eligible final, clean, fully scored catalogs are also written as a SQLite snapshot under `results/schema=v1/leaderboard/` in the Bucket. Diagnostic and incomplete catalogs stay off that snapshot. The Space home page is that public leaderboard: it ranks configurations by score then cost and plots the Pareto frontier of observed spend versus primary metric. One left navigation lists Leaderboard and Admin. Admin contains Overview, Runs, Jobs, Endpoints, Results, Profiles, and Audit. Clicking an Admin view starts Hugging Face login when there is no session; the sidebar has no persistent sign-in or account-details prompt. Login waits for runtime initialization, including the projected operator ACL, so a partial startup cannot misreport an authorized identity as denied. `/health/ready` stays reachable during a long rebuild and reports `initializing` until the complete runtime is ready. Run and task pages list the Jobs launched for that run. Observed run spend is the sum of recorded attempt receipts and Job hardware receipts. The browser uses same-origin API requests and never receives the Bucket credential.
 
+One paused historical Run can receive one immutable current execution attachment when its original prepared Job remains reusable:
+
+```bash
+harbor-hf run continue-historical <run-id> \
+  --reason "finish unresolved tasks on the reviewed worker" \
+  --idempotency-key <stable-request-key> \
+  --yes
+```
+
+The service verifies the original lock, every prepared trial, launch resources, model, revision, harness, provider, limits, and pricing before attaching the current deployment. Resume then admits only tasks without a selected receipt. Selected infrastructure outcomes are not retryable through this path. The Run ID, original lock, selected outcomes, evidence, spend, and ceiling do not change.
+
 ## Repair infrastructure failures
 
 Terminal benchmark outcomes stay sealed. Only a task recorded as an eligible infrastructure failure can receive a bounded replacement:

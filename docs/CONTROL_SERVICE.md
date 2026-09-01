@@ -174,12 +174,17 @@ behavior, version, reasoning mode, or capability, never by exact model route
 alone. A bounded profile alias can preserve an established public name, but it
 resolves to the same active profile and has a documented removal release.
 
-New run locks use only this composed form. Historical locks remain immutable and
-readable through a bounded read-only branch, but they cannot create, resume, or
-retry work after the profile cutover. The cutover requires every old-format run
-to have no active resource, pending action, cleanup work, or unfinished
-publication. The [reusable harness profile plan](2026-08-28-reusable-harness-profiles-plan.md)
-defines the implementation, migration, and rollback checks.
+New run locks use only this composed form. A paused, nonterminal historical run
+may receive one append-only `run.continuation` record when its original prepared
+Job remains available. The service resolves the same model, harness, deployment,
+benchmark, and launch-policy aliases against reviewed current profiles, then
+rejects changes to the locked model revision, harness revision, provider,
+inference limits, hardware, Harbor version, context limit, or prices. It also
+revalidates every prepared-trial reference and preserves each derived launch's
+hardware, timeout, cost rate, concurrency, and image limits. The attachment
+binds a current worker and execution contract to the original lock digest. It
+does not rewrite the lock, reset cost, change the ceiling, reopen selected
+tasks, or retry a selected infrastructure outcome.
 
 A new Harbor-supported benchmark or compatible model requires configuration and
 immutable data only. A new harness implementation belongs in a Harbor agent
@@ -334,6 +339,8 @@ GET  /api/v1/runs
 POST /api/v1/runs
 GET  /api/v1/runs/{run_id}
 GET  /api/v1/runs/{run_id}/lock
+GET  /api/v1/runs/{run_id}/continuation
+POST /api/v1/runs/{run_id}/continuation
 GET  /api/v1/runs/{run_id}/prepared-job
 GET  /api/v1/runs/{run_id}/prepared-job/trials/{task_id}
 GET  /api/v1/runs/{run_id}/tasks
@@ -396,8 +403,10 @@ the profile is repaired and deployed.
 
 A built-in profile change produces a new content-derived profile record ID. New
 runs resolve the new ID. Existing run locks keep their original profile IDs and
-digests and remain readable without a compatibility writer or historical
-rewrite.
+digests. An explicitly authorized historical continuation is a separate
+immutable record at a fixed per-Run path, not a historical rewrite. The
+capability-scoped worker route returns that attachment only when its original
+lock digest matches the worker capability.
 
 Each execution Job runs one physical Harbor trial. The deployment profile locks
 the digest-pinned trusted worker image, hardware, timeout, resource limits,

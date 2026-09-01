@@ -18,6 +18,7 @@ import type {
   ProfilePromotion,
   PublicationReceipt,
   PublicationSupersession,
+  RunContinuation,
   RunLock,
   RunRequest,
   TaskCancellation,
@@ -38,6 +39,10 @@ import {
 } from "./attempt-admissibility.js";
 import { type ControlEvent, decodeEventCursor, eventCursor } from "./events.js";
 import { verifyEvidenceReference, verifyWorkerEvidence } from "./evidence.js";
+import {
+  assertRunContinuationCompatible,
+  isCurrentRunLock,
+} from "./execution-contract.js";
 import type { PromotedProfile } from "./profiles.js";
 import type { ImmutableObjectStore, ObjectEntry } from "./store.js";
 
@@ -81,6 +86,13 @@ interface RunRow {
   request_body: string | null;
   lock_body: string | null;
   ceiling_microusd: number;
+}
+
+interface RunContinuationRow {
+  run_id: string;
+  record_id: string;
+  created_at: string;
+  body: string;
 }
 
 interface ActionRow {
@@ -254,6 +266,7 @@ interface MigrationRow {
 interface DatabaseSchema {
   objects: ObjectRow;
   runs: RunRow;
+  run_continuations: RunContinuationRow;
   actions: ActionRow;
   jobs: JobRow;
   dispatches: DispatchRow;
@@ -441,7 +454,9 @@ const terminalJobStates = new Set([
 ]);
 
 function jobStateIsTerminal(state: string | null): boolean {
-  return state !== null && terminalJobStates.has(state.toUpperCase());
+  if (state === null) return false;
+  const normalized = state.toUpperCase();
+  return terminalJobStates.has(normalized) || normalized.startsWith("SUPPRESSED-");
 }
 
 function assignedTaskIdsFromIntent(intentBody: string): string[] {
@@ -667,6 +682,14 @@ export class Projection {
       .addColumn("ceiling_microusd", "integer", (column) =>
         column.notNull().defaultTo(0),
       )
+      .execute();
+    await this.db.schema
+      .createTable("run_continuations")
+      .ifNotExists()
+      .addColumn("run_id", "text", (column) => column.primaryKey())
+      .addColumn("record_id", "text", (column) => column.notNull().unique())
+      .addColumn("created_at", "text", (column) => column.notNull())
+      .addColumn("body", "text", (column) => column.notNull())
       .execute();
     await this.db.schema
       .createTable("actions")
@@ -915,6 +938,7 @@ export class Projection {
       "dispatches",
       "jobs",
       "actions",
+      "run_continuations",
       "runs",
       "objects",
     ] as const) {
@@ -1148,6 +1172,9 @@ export class Projection {
       case "run.lock":
         await this.applyRunLock(record);
         break;
+      case "run.continuation":
+        await this.applyRunContinuation(record);
+        break;
       case "action.intent":
         await this.applyActionIntent(record);
         break;
@@ -1257,6 +1284,18 @@ export class Projection {
         })
         .execute();
     }
+  }
+
+  private async applyRunContinuation(record: RunContinuation): Promise<void> {
+    await this.db
+      .insertInto("run_continuations")
+      .values({
+        run_id: record.run_id,
+        record_id: record.record_id,
+        created_at: record.created_at,
+        body: body(record),
+      })
+      .execute();
   }
 
   private async applyActionIntent(record: ActionIntent): Promise<void> {
@@ -1798,6 +1837,51 @@ export class Projection {
   }
 
   private async verifyInvariants(): Promise<void> {
+    const continuationRows = await this.db
+      .selectFrom("run_continuations")
+      .select(["run_id", "record_id", "body"])
+      .execute();
+    const continuationLocks = new Map(
+      (
+        await this.db
+          .selectFrom("runs")
+          .select(["run_id", "lock_body"])
+          .where(
+            "run_id",
+            "in",
+            continuationRows.map((row) => row.run_id),
+          )
+          .execute()
+      ).map((run) => [run.run_id, run.lock_body]),
+    );
+    for (const row of continuationRows) {
+      const lockBody = continuationLocks.get(row.run_id);
+      const continuation = JSON.parse(row.body) as RunContinuation;
+      if (!lockBody)
+        throw new ProjectionIntegrityError(
+          `run continuation has no lock: ${row.record_id}`,
+        );
+      const lock = JSON.parse(lockBody) as RunLock;
+      if (
+        isCurrentRunLock(lock) ||
+        continuation.actor.role !== "operator" ||
+        continuation.run_id !== lock.run_id ||
+        continuation.run_lock_digest !== sha256(canonicalJson(lock))
+      )
+        throw new ProjectionIntegrityError(
+          `run continuation binding is invalid: ${row.record_id}`,
+        );
+      try {
+        assertRunContinuationCompatible(lock, continuation.execution);
+      } catch (error) {
+        throw new ProjectionIntegrityError(
+          `run continuation execution is incompatible: ${row.record_id}: ${
+            error instanceof Error ? error.message : "validation failed"
+          }`,
+        );
+      }
+    }
+
     const profileRows = await this.db
       .selectFrom("profiles")
       .select(["profile_id", "profile_kind", "spec_body"])
@@ -2093,6 +2177,19 @@ export class Projection {
     }));
   }
 
+  async runHasUnadvancedActions(runId: string): Promise<boolean> {
+    return Boolean(
+      await this.db
+        .selectFrom("actions")
+        .leftJoin("advancements", "advancements.action_id", "actions.action_id")
+        .select("actions.action_id")
+        .where("actions.run_id", "=", runId)
+        .where("actions.receipt_body", "is not", null)
+        .where("advancements.action_id", "is", null)
+        .executeTakeFirst(),
+    );
+  }
+
   async actionDispatch(actionId: string): Promise<Selectable<DispatchRow> | null> {
     return (
       (await this.db
@@ -2249,6 +2346,15 @@ export class Projection {
     return row?.lock_body ? (JSON.parse(row.lock_body) as RunLock) : null;
   }
 
+  async runContinuation(runId: string): Promise<RunContinuation | null> {
+    const row = await this.db
+      .selectFrom("run_continuations")
+      .select("body")
+      .where("run_id", "=", runId)
+      .executeTakeFirst();
+    return row ? (JSON.parse(row.body) as RunContinuation) : null;
+  }
+
   async budget(recordId: string): Promise<Selectable<BudgetRow> | null> {
     return (
       (await this.db
@@ -2352,6 +2458,26 @@ export class Projection {
     const launch = actions.find((action) => action.action_id === actionId);
     if (launch?.action_kind !== "job.launch") return false;
     return launchStillRunning(launch, actions);
+  }
+
+  async runHasRunningJobs(runId: string): Promise<boolean> {
+    const actions = await this.runActions(runId);
+    return actions.some(
+      (action) =>
+        action.action_kind === "job.launch" && launchStillRunning(action, actions),
+    );
+  }
+
+  async nextExecutionLaunchGeneration(runId: string): Promise<number> {
+    return (
+      (await this.runActions(runId)).reduce((maximum, action) => {
+        if (action.action_kind !== "job.launch") return maximum;
+        const launch = JSON.parse(action.intent_body) as ActionIntent;
+        return launch.payload.worker_role === "preparation"
+          ? maximum
+          : Math.max(maximum, action.generation);
+      }, -1) + 1
+    );
   }
 
   /**

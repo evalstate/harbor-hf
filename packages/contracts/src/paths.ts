@@ -48,6 +48,8 @@ export function controlRecordPath(record: RecordIdentity): string {
       return `${root}/runs/${required(record.run_id, "run_id")}/request.json`;
     case "run.lock":
       return `${root}/runs/${required(record.run_id, "run_id")}/run.lock.json`;
+    case "run.continuation":
+      return `${root}/runs/${required(record.run_id, "run_id")}/continuation.json`;
     case "prepared.trial":
       return `${root}/runs/${required(record.run_id, "run_id")}/prepared/trials/${required(record.task_id, "task_id")}.json`;
     case "prepared.job":

@@ -52,6 +52,7 @@ import {
   namespaceCapacityViewSchema,
   profileSchema,
   publicationSchema,
+  runContinuationAcceptedSchema,
   runListSchema,
   runViewSchema,
   sessionSchema,
@@ -108,7 +109,7 @@ function isWorkerCapabilityRoute(request: FastifyRequest): boolean {
   return (
     (request.method === "GET" &&
       (/^\/api\/v1\/runs\/[^/]+$/.test(path) ||
-        /^\/api\/v1\/runs\/[^/]+\/(?:lock|prepared-job(?:\/trials\/[^/]+)?)$/.test(
+        /^\/api\/v1\/runs\/[^/]+\/(?:lock|continuation|prepared-job(?:\/trials\/[^/]+)?)$/.test(
           path,
         ))) ||
     (request.method === "POST" &&
@@ -1238,6 +1239,30 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     },
   );
 
+  app.post(
+    "/api/v1/runs/:run_id/continuation",
+    {
+      schema: {
+        tags: ["runs"],
+        body: cleanSchema(schemas.runContinuation),
+        response: { 202: runContinuationAcceptedSchema },
+      },
+    },
+    async (request, reply) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("run writes are disabled before cutover");
+      const { run_id } = request.params as { run_id: string };
+      const result = await runtime.service.continueHistoricalRun(
+        run_id,
+        request.body,
+        idempotencyKey(request),
+        domainActor(request),
+      );
+      reply.header("Location", result.status_url);
+      return reply.code(202).send(result);
+    },
+  );
+
   app.get(
     "/api/v1/runs/:run_id",
     {
@@ -1343,6 +1368,27 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       );
     },
   );
+
+  app.get("/api/v1/runs/:run_id/continuation", async (request, reply) => {
+    const { run_id } = request.params as { run_id: string };
+    requireWorkerOperation(request, "run.read");
+    if (request.workerCapability?.run_id !== run_id)
+      throw new WorkerScopeError("the worker capability does not authorize this run");
+    const continuation = await runtime.projection.runContinuation(run_id);
+    if (!continuation)
+      return reply.code(404).send({
+        error: {
+          code: "not_found",
+          message: "run continuation was not found",
+          request_id: request.id,
+        },
+      });
+    if (continuation.run_lock_digest !== request.workerCapability.run_lock_digest)
+      throw new WorkerScopeError(
+        "the worker capability does not match this run continuation",
+      );
+    return continuation;
+  });
 
   app.post(
     "/api/v1/runs/:run_id/prepared-job",

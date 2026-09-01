@@ -35,7 +35,6 @@ from harbor_hf_agents.support.control_client import (
     ControlClientTransientError,
     digest_bytes,
     digest_json,
-    run_lock_profile,
 )
 from harbor_hf_agents.support.control_job_environment import (
     ControlJobEnvironment,
@@ -168,6 +167,7 @@ class WorkerConfig:
     worker_revision: str
     input_price: int
     output_price: int
+    harbor_agent: dict[str, Any]
     job_config: dict[str, Any]
     task: LockedTask
 
@@ -225,6 +225,37 @@ def _read_lock(run_id: str) -> dict[str, Any]:
         f"/api/v1/runs/{quote(run_id, safe='')}/lock",
         idempotency_key=f"control-worker-lock-{_required('HARBOR_HF_ACTION_ID')}",
     )
+
+
+def _read_execution(lock: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Read the immutable execution bound to a current or continued Run."""
+    try:
+        execution = lock["execution"]
+    except KeyError:
+        continuation = _control_client(run_id).request_sync(
+            "GET",
+            f"/api/v1/runs/{quote(run_id, safe='')}/continuation",
+            idempotency_key=(
+                f"control-worker-continuation-{_required('HARBOR_HF_ACTION_ID')}"
+            ),
+        )
+        try:
+            continuation_run_id = continuation["run_id"]
+            continuation_lock_digest = continuation["run_lock_digest"]
+            execution = continuation["execution"]
+        except KeyError as error:
+            raise PreparedDataError(
+                "run continuation is missing its immutable execution binding"
+            ) from error
+        if continuation_run_id != run_id or continuation_lock_digest != _required(
+            "HARBOR_HF_RUN_LOCK_DIGEST"
+        ):
+            raise PreparedDataError(
+                "run continuation does not match the worker capability"
+            ) from None
+    if not isinstance(execution, dict) or execution["contract_version"] != "v1":
+        raise PreparedDataError("run execution contract is invalid")
+    return execution
 
 
 def _read_prepared_job(run_id: str) -> dict[str, Any]:
@@ -309,7 +340,14 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
     run_id = identity.run_id
     if lock["run_id"] != run_id:
         raise PreparedDataError("run lock identity does not match worker environment")
-    deployment = run_lock_profile(lock, "deployment")
+    execution = _read_execution(lock, run_id)
+    try:
+        deployment = execution["deployment"]
+        harbor_agent = execution["harbor_agent"]
+    except KeyError as error:
+        raise PreparedDataError("prepared execution contract is incomplete") from error
+    if not isinstance(deployment, dict) or not isinstance(harbor_agent, dict):
+        raise PreparedDataError("prepared execution contract is invalid")
     if deployment["route"] != "hf_job" or deployment["preparation"] != "required":
         raise PreparedDataError("control worker requires a prepared HF Job deployment")
     worker_image = str(deployment["job_image"])
@@ -350,6 +388,9 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
     if task_id not in references:
         raise PreparedDataError("worker task assignment is outside the prepared job")
 
+    # The capability-authenticated control service verifies complete record
+    # digests. Recomputing JavaScript records here would change valid JSON
+    # numbers whose Python and JavaScript spellings differ.
     reference = references[task_id]
     value = _read_prepared_trial(run_id, task_id)
     expected = expected_tasks[task_id]
@@ -421,6 +462,7 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
         worker_revision=str(deployment["worker_revision"]),
         input_price=int(deployment["input_price_microusd_per_million_tokens"]),
         output_price=int(deployment["output_price_microusd_per_million_tokens"]),
+        harbor_agent=copy.deepcopy(harbor_agent),
         job_config=copy.deepcopy(job_config),
         task=LockedTask(
             task_id=task_id,
@@ -463,7 +505,7 @@ def _job_config(config: WorkerConfig, root: Path) -> Path:
         )
     verifier = lock.verifier.model_dump(mode="json")
     verifier.pop("environment_mode", None)
-    agent = lock.agent.model_dump(mode="json")
+    agent = copy.deepcopy(config.harbor_agent)
     agent["skills"] = []
     value = copy.deepcopy(config.job_config)
     value.update(
