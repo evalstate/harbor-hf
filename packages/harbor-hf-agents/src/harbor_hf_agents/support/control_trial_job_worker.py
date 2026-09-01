@@ -28,6 +28,7 @@ from urllib.parse import quote
 
 from harbor.models.job.config import JobConfig
 from harbor.models.job.lock import TrialLock
+from harbor.models.trial.config import AgentConfig
 
 from harbor_hf_agents.support.control_client import (
     ControlClient,
@@ -163,6 +164,7 @@ class WorkerConfig:
 
     run_id: str
     action_id: str
+    historical: bool
     harbor_version: str
     worker_revision: str
     input_price: int
@@ -340,6 +342,7 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
     run_id = identity.run_id
     if lock["run_id"] != run_id:
         raise PreparedDataError("run lock identity does not match worker environment")
+    historical = "execution" not in lock
     execution = _read_execution(lock, run_id)
     try:
         deployment = execution["deployment"]
@@ -458,6 +461,7 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
     return WorkerConfig(
         run_id=run_id,
         action_id=identity.action_id,
+        historical=historical,
         harbor_version=str(deployment["harbor_version"]),
         worker_revision=str(deployment["worker_revision"]),
         input_price=int(deployment["input_price_microusd_per_million_tokens"]),
@@ -1276,7 +1280,24 @@ def _run_harbor(
     return output, timed_out, result_path
 
 
-def _verified_result(task: LockedTask, result_path: Path) -> dict[str, Any]:
+def _expected_trial_lock(
+    config: WorkerConfig,
+    observed_lock: TrialLock,
+) -> TrialLock:
+    if not config.historical:
+        return config.task.trial_lock
+    expected_agent_value = copy.deepcopy(config.harbor_agent)
+    expected_agent_value["skills"] = []
+    expected_agent = AgentConfig.model_validate(expected_agent_value)
+    if observed_lock.agent != expected_agent:
+        raise WorkerEvidenceError("executed Harbor agent differs from the continuation")
+    # Continuations may update the reviewed agent implementation while the
+    # prepared task, environment, verifier, and other inputs stay immutable.
+    return config.task.trial_lock.model_copy(update={"agent": expected_agent})
+
+
+def _verified_result(config: WorkerConfig, result_path: Path) -> dict[str, Any]:
+    task = config.task
     observed_lock_path = result_path.parent / "lock.json"
     if not observed_lock_path.exists():
         raise WorkerEvidenceError("Harbor did not write a trial lock")
@@ -1287,7 +1308,8 @@ def _verified_result(task: LockedTask, result_path: Path) -> dict[str, Any]:
             label="Harbor trial lock",
         )
     )
-    if observed_lock != task.trial_lock:
+    expected_lock = _expected_trial_lock(config, observed_lock)
+    if observed_lock != expected_lock:
         raise WorkerEvidenceError("executed Harbor trial lock differs from preparation")
     result_value = json.loads(
         _read_bounded_file(
@@ -1359,7 +1381,7 @@ def _run_task_once(config: WorkerConfig, root: Path) -> None:
         task.timeout_seconds,
     )
     output, timed_out, result_path = _run_harbor(config, root, path)
-    result_value = _verified_result(task, result_path)
+    result_value = _verified_result(config, result_path)
     _deliver_result(
         config,
         root,

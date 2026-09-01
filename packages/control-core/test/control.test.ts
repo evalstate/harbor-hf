@@ -488,7 +488,7 @@ describe("control service", () => {
       (await control.projection.task(legacy.run_id, unresolvedTask.task_id))?.task
         .terminal_outcome,
     ).toBeNull();
-    await control.service.append({
+    const unselectedAttempt: AttemptReceipt = {
       schema_version: "v1",
       kind: "attempt.receipt",
       record_id: "attempt-receipt-legacy-unselected",
@@ -504,7 +504,8 @@ describe("control service", () => {
       evidence_path: "evidence/legacy-unselected",
       cost_microusd: 5,
       metrics: {},
-    });
+    };
+    await control.service.append(unselectedAttempt);
     const continuation = await control.service.continueHistoricalRun(
       legacy.run_id,
       { reason: "finish unresolved tasks", confirmed: true },
@@ -527,6 +528,17 @@ describe("control service", () => {
       reason: "finish unresolved tasks",
     });
     if (!attached) throw new Error("run continuation is missing");
+    await control.service.exhaustTask(
+      unselectedAttempt,
+      "historical attempt has no valid selection",
+      1,
+    );
+    expect(
+      (await control.projection.task(legacy.run_id, unresolvedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "invalid",
+      selected_attempt_id: null,
+    });
     expect(() =>
       assertRunContinuationCompatible(legacy, {
         ...attached.execution,
@@ -593,7 +605,7 @@ describe("control service", () => {
       new ResultPublisher(control.store, control.projection, control.service),
       { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
-    await settle(resumedReconciler, 3);
+    await settle(resumedReconciler, 5);
     const resumedLaunches = resumedExecute.mock.calls
       .map(([intent]) => intent)
       .filter(

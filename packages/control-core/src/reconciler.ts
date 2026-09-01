@@ -25,6 +25,7 @@ import type { ResultPublisher } from "./publication.js";
 import {
   type ControlService,
   executionReservationCategory,
+  historicalTaskNeedsSelection,
   infrastructureSealReplaceable,
   type JobBudgetReservation,
   PolicyError,
@@ -857,6 +858,13 @@ export class Reconciler {
         const freshTaskIds: string[] = [];
         for (const taskId of taskIds) {
           const detail = await this.projection.task(intent.run_id, taskId);
+          if (
+            detail?.task.terminal_outcome &&
+            historicalTaskNeedsSelection(detail.task)
+          ) {
+            freshTaskIds.push(taskId);
+            continue;
+          }
           const latest = detail?.attempts.at(-1);
           if (!latest) {
             freshTaskIds.push(taskId);
@@ -1105,6 +1113,7 @@ export class Reconciler {
     generation: number,
     taskIds = lock.tasks.map((task) => task.task_id),
   ): Promise<void> {
+    const historical = !isCurrentRunLock(lock.source_lock);
     const tasks = new Map(
       (await this.projection.tasks(lock.run_id)).map((task) => [task.task_id, task]),
     );
@@ -1112,13 +1121,13 @@ export class Reconciler {
     for (const taskId of taskIds) {
       const task = tasks.get(taskId);
       if (!task) throw new PolicyError(`run task is missing: ${taskId}`);
-      if (!task.terminal_outcome) pendingTaskIds.push(taskId);
+      if (!task.terminal_outcome || (historical && historicalTaskNeedsSelection(task)))
+        pendingTaskIds.push(taskId);
     }
     if (pendingTaskIds.length === 0) return;
 
     const execution = lock.execution;
     const deployment = execution.deployment;
-    const historical = !isCurrentRunLock(lock.source_lock);
     const continuation = historical
       ? await this.projection.runContinuation(lock.run_id)
       : null;
@@ -1435,9 +1444,18 @@ export class Reconciler {
   ): Promise<void> {
     const tasks = stringArray(intent.payload, "task_ids");
     const known = await this.projection.runAttempts(intent.run_id);
+    const continuation = await this.projection.runContinuation(intent.run_id);
+    const continued =
+      continuation !== null &&
+      intent.payload.run_continuation_id === continuation.record_id;
     for (const taskId of tasks) {
       const task = await this.projection.task(intent.run_id, taskId);
-      if (!task || task.task.terminal_outcome) continue;
+      if (
+        !task ||
+        (task.task.terminal_outcome &&
+          !(continued && historicalTaskNeedsSelection(task.task)))
+      )
+        continue;
       const launchActionId =
         intent.action_kind === "job.launch"
           ? intent.action_id
@@ -1821,11 +1839,21 @@ export class Reconciler {
     if (intent.payload.worker_role === "preparation") return false;
     const taskIds = stringArray(intent.payload, "task_ids");
     if (taskIds.length === 0) return false;
+    const lock = await this.projection.runLock(intent.run_id);
+    const historical = lock !== null && !isCurrentRunLock(lock);
+    const continuation = historical
+      ? await this.projection.runContinuation(intent.run_id)
+      : null;
+    const continued =
+      continuation !== null &&
+      intent.payload.run_continuation_id === continuation.record_id;
     for (const taskId of taskIds) {
       const task = await this.projection.task(intent.run_id, taskId);
       if (
         !task?.task.terminal_outcome ||
-        infrastructureSealReplaceable(task.task.terminal_outcome)
+        (historical
+          ? continued && historicalTaskNeedsSelection(task.task)
+          : infrastructureSealReplaceable(task.task.terminal_outcome))
       )
         return false;
     }

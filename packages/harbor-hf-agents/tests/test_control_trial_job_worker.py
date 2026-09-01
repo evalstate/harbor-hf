@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -201,6 +202,15 @@ def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
 def _config(monkeypatch: pytest.MonkeyPatch) -> worker.WorkerConfig:
     _configure(monkeypatch)
     return worker._locked_config(_lock())
+
+
+def _harbor_result(tmp_path: Path, trial_lock: worker.TrialLock) -> Path:
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    result_path = trial / "result.json"
+    result_path.write_text('{"exception_info": null}')
+    (trial / "lock.json").write_text(json.dumps(trial_lock.model_dump(mode="json")))
+    return result_path
 
 
 def test_reads_historical_execution_from_the_continuation(
@@ -812,6 +822,72 @@ def test_rejects_multiple_durable_results(
         worker._result_path(tmp_path, task)
 
 
+def test_historical_result_uses_the_continuation_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    continuation_agent = worker.AgentConfig.model_validate(
+        {
+            **config.harbor_agent,
+            "kwargs": {"continuation": True},
+            "skills": [],
+        }
+    )
+    historical = replace(
+        config,
+        historical=True,
+        harbor_agent=continuation_agent.model_dump(
+            mode="json",
+            exclude={"skills"},
+        ),
+    )
+    observed_lock = config.task.trial_lock.model_copy(
+        update={"agent": continuation_agent}
+    )
+
+    assert worker._verified_result(
+        historical,
+        _harbor_result(tmp_path, observed_lock),
+    ) == {"exception_info": None}
+
+
+def test_historical_result_keeps_non_agent_inputs_immutable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = replace(_config(monkeypatch), historical=True)
+    changed_environment = config.task.trial_lock.environment.model_copy(
+        update={"delete": False}
+    )
+    observed_lock = config.task.trial_lock.model_copy(
+        update={"environment": changed_environment}
+    )
+
+    with pytest.raises(worker.WorkerEvidenceError, match="differs from preparation"):
+        worker._verified_result(
+            config,
+            _harbor_result(tmp_path, observed_lock),
+        )
+
+
+def test_current_result_cannot_replace_the_prepared_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    changed_agent = config.task.trial_lock.agent.model_copy(
+        update={"kwargs": {"replacement": True}}
+    )
+    observed_lock = config.task.trial_lock.model_copy(update={"agent": changed_agent})
+
+    with pytest.raises(worker.WorkerEvidenceError, match="differs from preparation"):
+        worker._verified_result(
+            config,
+            _harbor_result(tmp_path, observed_lock),
+        )
+
+
 def test_rejects_sensitive_values_in_evidence_content_and_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -830,12 +906,12 @@ def test_rejects_sensitive_values_in_evidence_content_and_paths(
     leaked.write_text(f"prefix-{secret}-suffix")
 
     with pytest.raises(worker.WorkerEvidenceError, match="sensitive worker setting"):
-        worker._verified_result(config.task, result_path)
+        worker._verified_result(config, result_path)
 
     leaked.write_text("safe")
     leaked.rename(trial / f"artifact-{secret}.txt")
     with pytest.raises(worker.WorkerEvidenceError, match="sensitive worker setting"):
-        worker._verified_result(config.task, result_path)
+        worker._verified_result(config, result_path)
 
 
 def test_runs_harbor_exactly_once(

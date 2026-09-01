@@ -411,6 +411,16 @@ export function infrastructureSealReplaceable(terminalOutcome: string | null): b
   return terminalOutcome === null || terminalOutcome === "infrastructure";
 }
 
+export function historicalTaskNeedsSelection(task: {
+  selected_attempt_id: string | null;
+  terminal_outcome: string | null;
+}): boolean {
+  return (
+    task.selected_attempt_id === null &&
+    [null, "infrastructure", "invalid"].includes(task.terminal_outcome)
+  );
+}
+
 export class ControlService {
   readonly resolver: ProfileResolver;
   private projectionQueue: Promise<void> = Promise.resolve();
@@ -1794,9 +1804,16 @@ export class ControlService {
       typeof intent.payload.task_id === "string" ? intent.payload.task_id : null;
     if (taskId) {
       const task = await this.projection.task(intent.run_id, taskId);
+      const continuation = await this.projection.runContinuation(intent.run_id);
+      const continuedFailure =
+        task &&
+        continuation &&
+        intent.payload.run_continuation_id === continuation.record_id &&
+        historicalTaskNeedsSelection(task.task);
       if (
         task?.task.terminal_outcome &&
-        !infrastructureSealReplaceable(task.task.terminal_outcome)
+        !infrastructureSealReplaceable(task.task.terminal_outcome) &&
+        !continuedFailure
       )
         throw new PolicyError(`terminal task cannot receive action: ${taskId}`);
     }
@@ -2091,10 +2108,10 @@ export class ControlService {
     await this.assertHistoricalLaunchBinding(lock, launch);
     const task = await this.projection.task(input.run_id, input.task_id);
     if (!task) throw new PolicyError(`task does not exist: ${input.task_id}`);
-    if (
-      !infrastructureSealReplaceable(task.task.terminal_outcome) ||
-      (!isCurrentRunLock(lock) && task.task.terminal_outcome !== null)
-    )
+    const replaceable = isCurrentRunLock(lock)
+      ? infrastructureSealReplaceable(task.task.terminal_outcome)
+      : historicalTaskNeedsSelection(task.task);
+    if (!replaceable)
       throw new PolicyError(`terminal task cannot receive attempt: ${input.task_id}`);
     const run = await this.projection.run(input.run_id);
     if (!run) throw new PolicyError(`run does not exist: ${input.run_id}`);
@@ -3059,8 +3076,8 @@ export class ControlService {
       const deployment = execution.deployment;
       const needsPreparation =
         preparationRequired(deployment) && !(await this.preparedJob(runId));
-      const unresolvedTasks = (await this.projection.tasks(runId)).filter(
-        (task) => !task.terminal_outcome,
+      const unresolvedTasks = (await this.projection.tasks(runId)).filter((task) =>
+        historical ? historicalTaskNeedsSelection(task) : !task.terminal_outcome,
       );
       const unresolvedTaskIds = (
         input.task_limit ? unresolvedTasks.slice(0, input.task_limit) : unresolvedTasks
@@ -3103,6 +3120,13 @@ export class ControlService {
         const freshTaskIds: string[] = [];
         for (const taskId of unresolvedTaskIds) {
           const detail = await this.projection.task(runId, taskId);
+          if (
+            detail?.task.terminal_outcome &&
+            historicalTaskNeedsSelection(detail.task)
+          ) {
+            freshTaskIds.push(taskId);
+            continue;
+          }
           const latest = detail?.attempts.at(-1);
           if (!latest) {
             freshTaskIds.push(taskId);
