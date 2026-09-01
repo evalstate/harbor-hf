@@ -11,7 +11,7 @@ default_branch: main
 
 Status: approved
 Approved at: 2026-08-17T06:48:55Z
-Amended at: 2026-09-01T08:56:03Z
+Amended at: 2026-09-01T09:56:29Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -75,6 +75,7 @@ Private Harbor-HF recovery amendment approved at: 2026-08-28T08:21:01Z
 Run-native profile migration amendment approved at: 2026-08-28T08:58:58Z
 Agent-Workbench recipe-and-UX repair amendment approved at: 2026-08-28T15:38:33Z
 Agent-Workbench upstream integration amendment approved at: 2026-09-01T08:56:03Z
+Agent-Workbench upstream push amendment approved at: 2026-09-01T09:56:29Z
 Mutation-tooling retirement amendment approved: 2026-08-26
 
 ### Scope
@@ -374,3 +375,4 @@ No project-scope amendment remains pending. Operational gates still apply:
 ### 2026-09-01
 
 - At 2026-09-01T08:56:03Z, approved fetching the latest canonical `main` branch and merging it into local `feat/agent-workbench`, preserving both sides' intended behavior. Resolve conflicts if necessary, run relevant validation and the public-privacy check, inspect the resulting diff and metadata, and commit the merge locally. Do not push, open or modify a pull request, update the default branch, deploy, mutate hosted resources, handle credentials, run inference, or incur cost.
+- At 2026-09-01T09:56:29Z, approved committing this authorization amendment and pushing the verified local `feat/agent-workbench` history through the current merge commit to public `origin/feat/agent-workbench`. Require a normal fast-forward branch update after fetching and confirming no remote divergence. Do not force push, create or modify a pull request, update the default branch, create a tag or release, deploy, mutate hosted resources, handle credentials, run inference, or incur cost.
