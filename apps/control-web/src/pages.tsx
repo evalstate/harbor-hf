@@ -55,6 +55,7 @@ import {
   cn,
   estimateLaunchReservationMicrousd,
   formatDate,
+  formatExactMoney,
   formatMoney,
   formatPercent,
   formatPercentInterval,
@@ -406,6 +407,7 @@ function SpendChart({
 }: {
   data: Array<{ name: string; spendMicrousd: number }>;
 }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const width = 640;
   const height = 248;
   const left = 96;
@@ -435,6 +437,29 @@ function SpendChart({
     label: formatMoney(ratio * scale),
   }));
   const yAxisCenter = top + plotHeight / 2;
+  const activeItem = activeIndex === null ? undefined : data[activeIndex];
+  const activePoint = activeIndex === null ? undefined : points[activeIndex];
+  const active =
+    activeItem && activePoint
+      ? {
+          item: activeItem,
+          x: activePoint[0],
+          y: activePoint[1],
+        }
+      : null;
+  const tooltipWidth = 300;
+  const tooltipHeight = 52;
+  const tooltipX = active
+    ? Math.min(
+        Math.max(active.x - tooltipWidth / 2, left),
+        width - tooltipWidth - right,
+      )
+    : 0;
+  const tooltipY = active
+    ? active.y - tooltipHeight - 10 >= top
+      ? active.y - tooltipHeight - 10
+      : active.y + 10
+    : 0;
   return (
     <svg
       className="h-full w-full"
@@ -515,11 +540,64 @@ function SpendChart({
         strokeLinejoin="round"
         strokeLinecap="round"
       />
-      {points.map(([x, y], index) => (
-        <circle key={data[index]?.name} cx={x} cy={y} r="4" fill="#67e8f9">
-          <title>{`${data[index]?.name}: ${formatMoney(data[index]?.spendMicrousd ?? 0)}`}</title>
-        </circle>
-      ))}
+      {points.map(([x, y], index) => {
+        const item = data[index];
+        if (!item) return null;
+        return (
+          // biome-ignore lint/a11y/noStaticElementInteractions: Each chart point is keyboard-focusable and exposes the same tooltip on focus.
+          <g
+            key={item.name}
+            aria-label={`${item.name} observed spend`}
+            className="cursor-help outline-none"
+            tabIndex={0}
+            onBlur={() => setActiveIndex(null)}
+            onFocus={() => setActiveIndex(index)}
+            onMouseEnter={() => setActiveIndex(index)}
+            onMouseLeave={() => setActiveIndex(null)}
+          >
+            <circle cx={x} cy={y} r="10" fill="transparent" />
+            <circle
+              cx={x}
+              cy={y}
+              r={activeIndex === index ? 6 : 4}
+              fill="#67e8f9"
+              stroke={activeIndex === index ? "#f8fafc" : "none"}
+              strokeWidth={activeIndex === index ? 2 : 0}
+            />
+            <title>{`${item.name}: ${formatExactMoney(item.spendMicrousd)}`}</title>
+          </g>
+        );
+      })}
+      {active ? (
+        <g pointerEvents="none">
+          <rect
+            x={tooltipX}
+            y={tooltipY}
+            width={tooltipWidth}
+            height={tooltipHeight}
+            rx="6"
+            fill="#0f172a"
+            stroke="#334155"
+          />
+          <text
+            x={tooltipX + 10}
+            y={tooltipY + 19}
+            className="fill-slate-300"
+            fontSize="10"
+          >
+            {active.item.name}
+          </text>
+          <text
+            x={tooltipX + 10}
+            y={tooltipY + 39}
+            className="fill-slate-100"
+            fontSize="12"
+            fontWeight="600"
+          >
+            {`Observed spend: ${formatExactMoney(active.item.spendMicrousd)}`}
+          </text>
+        </g>
+      ) : null}
     </svg>
   );
 }

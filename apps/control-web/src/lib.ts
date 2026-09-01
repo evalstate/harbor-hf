@@ -13,6 +13,15 @@ export function formatMoney(microusd: number): string {
   }).format(microusd / 1_000_000);
 }
 
+export function formatExactMoney(microusd: number): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  }).format(microusd / 1_000_000);
+}
+
 export function estimateLaunchReservationMicrousd(
   taskCount: number,
   deployment: Record<string, unknown> | undefined,

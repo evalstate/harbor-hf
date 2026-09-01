@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { ApiError, type SessionResponse } from "../src/api";
 import { loginHref } from "../src/layout";
-import { formatMoney } from "../src/lib";
+import { formatExactMoney, formatMoney } from "../src/lib";
 import { keys } from "../src/queries";
 
 class FakeEventSource {
@@ -256,7 +256,8 @@ describe("control web", () => {
     expect(screen.getByText(/safe-request-id/)).toBeInTheDocument();
   });
 
-  it("labels both axes on the overview spend chart", async () => {
+  it("labels both axes and shows exact spend on chart hover", async () => {
+    const user = userEvent.setup();
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
@@ -285,7 +286,7 @@ describe("control web", () => {
                 terminal_tasks: 1,
                 successful_tasks: 1,
                 total_tasks: 1,
-                observed_microusd: 10_000,
+                observed_microusd: 10_123,
                 ceiling_microusd: 1_000_000,
                 created_at: "2026-08-21T20:00:00.000Z",
               },
@@ -304,6 +305,10 @@ describe("control web", () => {
     expect(screen.getByText("Observed spend (USD)")).toBeInTheDocument();
     expect(screen.getByText("Runs, oldest to newest")).toBeInTheDocument();
     expect(screen.getByText(formatMoney(50_000))).toBeInTheDocument();
+    await user.hover(screen.getByLabelText("run-older observed spend"));
+    expect(
+      screen.getByText(`Observed spend: ${formatExactMoney(10_123)}`),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "Job infrastructure" }),
     ).toBeInTheDocument();
