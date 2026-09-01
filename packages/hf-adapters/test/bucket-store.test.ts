@@ -1,12 +1,11 @@
 import { ImmutableConflictError } from "@harbor-hf/control-core";
-import { HubApiError } from "@huggingface/hub";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hub = vi.hoisted(() => ({
-  downloadFile: vi.fn(),
   listFiles: vi.fn(),
   uploadFile: vi.fn(),
 }));
+const bucketFetch = vi.fn();
 
 vi.mock("@huggingface/hub", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@huggingface/hub")>()),
@@ -18,22 +17,30 @@ import { HuggingFaceBucketStore } from "../src/bucket-store.js";
 const token = ["hf", "not-a-real-credential"].join("_");
 
 function store(
-  options: { retryDelaysMs?: readonly number[]; listTimeoutMs?: number } = {},
+  options: {
+    retryDelaysMs?: readonly number[];
+    listTimeoutMs?: number;
+    cacheMaxBytes?: number;
+  } = {},
 ) {
   return new HuggingFaceBucketStore({
     bucketId: "example/control",
     accessToken: token,
+    fetch: bucketFetch as typeof fetch,
     ...options,
   });
 }
 
 describe("HuggingFaceBucketStore", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    bucketFetch.mockReset();
+  });
 
   it("creates an object and verifies the uploaded bytes", async () => {
-    hub.downloadFile
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(new Blob(["payload"]));
+    bucketFetch
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response("payload"));
     hub.uploadFile.mockResolvedValue(undefined);
     hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
       yield {
@@ -65,7 +72,7 @@ describe("HuggingFaceBucketStore", () => {
   });
 
   it("fails an upload when targeted metadata has no xet identity", async () => {
-    hub.downloadFile.mockResolvedValueOnce(null);
+    bucketFetch.mockResolvedValueOnce(new Response(null, { status: 404 }));
     hub.uploadFile.mockResolvedValue(undefined);
     hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
       yield {
@@ -90,9 +97,9 @@ describe("HuggingFaceBucketStore", () => {
   });
 
   it("adopts identical objects and rejects immutable conflicts", async () => {
-    hub.downloadFile
-      .mockResolvedValueOnce(new Blob(["payload"]))
-      .mockResolvedValueOnce(new Blob(["payload"]));
+    bucketFetch
+      .mockResolvedValueOnce(new Response("payload"))
+      .mockResolvedValueOnce(new Response("payload"));
     hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
       yield {
         type: "file",
@@ -108,7 +115,7 @@ describe("HuggingFaceBucketStore", () => {
       source_identity: `xet:${"a".repeat(64)}`,
     });
 
-    hub.downloadFile.mockResolvedValueOnce(new Blob(["different"]));
+    bucketFetch.mockResolvedValueOnce(new Response("different"));
     await expect(
       store().create("control/v1/object.json", new TextEncoder().encode("payload")),
     ).rejects.toBeInstanceOf(ImmutableConflictError);
@@ -116,9 +123,9 @@ describe("HuggingFaceBucketStore", () => {
   });
 
   it("rejects an overwrite between upload verification and metadata capture", async () => {
-    hub.downloadFile
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(new Blob(["payload"]));
+    bucketFetch
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response("payload"));
     hub.uploadFile.mockResolvedValue(undefined);
     let listing = 0;
     hub.listFiles.mockImplementation(async function* ({ path }: { path: string }) {
@@ -150,10 +157,29 @@ describe("HuggingFaceBucketStore", () => {
     const entries = await store().list("control/v1");
 
     expect(entries).toHaveLength(12);
-    expect(hub.downloadFile).not.toHaveBeenCalled();
+    expect(bucketFetch).not.toHaveBeenCalled();
     expect(hub.listFiles).toHaveBeenCalledWith(
       expect.objectContaining({ expand: true, fetch: expect.any(Function) }),
     );
+  });
+
+  it("downloads an encoded Bucket path without a metadata round trip", async () => {
+    bucketFetch.mockResolvedValueOnce(new Response("payload"));
+
+    await expect(store().read("control/v1/a b.json")).resolves.toEqual(
+      new TextEncoder().encode("payload"),
+    );
+
+    expect(bucketFetch).toHaveBeenCalledWith(
+      new URL(
+        "https://huggingface.co/buckets/example/control/resolve/control/v1/a%20b.json",
+      ),
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        redirect: "follow",
+      },
+    );
+    expect(hub.listFiles).not.toHaveBeenCalled();
   });
 
   it("invalidates cached bytes when listed source identity changes", async () => {
@@ -167,9 +193,9 @@ describe("HuggingFaceBucketStore", () => {
         xetHash: identity.repeat(64),
       };
     });
-    hub.downloadFile
-      .mockResolvedValueOnce(new Blob(["old"]))
-      .mockResolvedValueOnce(new Blob(["new"]));
+    bucketFetch
+      .mockResolvedValueOnce(new Response("old"))
+      .mockResolvedValueOnce(new Response("new"));
 
     await bucket.list("control/v1");
     await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
@@ -178,14 +204,30 @@ describe("HuggingFaceBucketStore", () => {
     await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
       new TextEncoder().encode("old"),
     );
-    expect(hub.downloadFile).toHaveBeenCalledTimes(1);
+    expect(bucketFetch).toHaveBeenCalledTimes(1);
 
     identity = "b";
     await bucket.list("control/v1");
     await expect(bucket.read("control/v1/object.json")).resolves.toEqual(
       new TextEncoder().encode("new"),
     );
-    expect(hub.downloadFile).toHaveBeenCalledTimes(2);
+    expect(bucketFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts least-recently-used bytes above the cache limit", async () => {
+    const bucket = store({ cacheMaxBytes: 3 });
+    bucketFetch
+      .mockResolvedValueOnce(new Response("one"))
+      .mockResolvedValueOnce(new Response("two"))
+      .mockResolvedValueOnce(new Response("one"));
+
+    await bucket.read("control/v1/one.json");
+    await bucket.read("control/v1/two.json");
+    await expect(bucket.read("control/v1/one.json")).resolves.toEqual(
+      new TextEncoder().encode("one"),
+    );
+
+    expect(bucketFetch).toHaveBeenCalledTimes(3);
   });
 
   it("retries transient Bucket listing failures", async () => {
@@ -215,56 +257,62 @@ describe("HuggingFaceBucketStore", () => {
     );
   });
 
+  it("rejects invalid Bucket cache limits", () => {
+    expect(() => store({ cacheMaxBytes: -1 })).toThrow(
+      "Bucket cache limit must be a nonnegative integer",
+    );
+  });
+
   it("retries transient fetch failures with bounded delays", async () => {
-    hub.downloadFile
+    bucketFetch
       .mockRejectedValueOnce(new TypeError("fetch failed"))
       .mockRejectedValueOnce(
         Object.assign(new Error("temporary timeout"), { code: "ETIMEDOUT" }),
       )
-      .mockResolvedValueOnce(new Blob(["payload"]));
+      .mockResolvedValueOnce(new Response("payload"));
 
     await expect(
       store({ retryDelaysMs: [0, 0] }).read("control/v1/object.json"),
     ).resolves.toEqual(new TextEncoder().encode("payload"));
-    expect(hub.downloadFile).toHaveBeenCalledTimes(3);
+    expect(bucketFetch).toHaveBeenCalledTimes(3);
   });
 
   it("keeps retrying transient fetch failures during a long rebuild", async () => {
     vi.useFakeTimers();
     try {
-      hub.downloadFile
+      bucketFetch
         .mockRejectedValueOnce(new TypeError("fetch failed"))
         .mockRejectedValueOnce(new TypeError("fetch failed"))
         .mockRejectedValueOnce(new TypeError("fetch failed"))
         .mockRejectedValueOnce(new TypeError("fetch failed"))
         .mockRejectedValueOnce(new TypeError("fetch failed"))
-        .mockResolvedValueOnce(new Blob(["payload"]));
+        .mockResolvedValueOnce(new Response("payload"));
 
       const reading = store().read("control/v1/object.json");
       await vi.runAllTimersAsync();
       await expect(reading).resolves.toEqual(new TextEncoder().encode("payload"));
-      expect(hub.downloadFile).toHaveBeenCalledTimes(6);
+      expect(bucketFetch).toHaveBeenCalledTimes(6);
     } finally {
       vi.useRealTimers();
     }
   });
 
   it("retries transient Hub API download failures", async () => {
-    hub.downloadFile
-      .mockRejectedValueOnce(
-        new HubApiError("https://huggingface.co/buckets/example", 504),
-      )
-      .mockResolvedValueOnce(new Blob(["payload"]));
+    bucketFetch
+      .mockResolvedValueOnce(new Response(null, { status: 504 }))
+      .mockResolvedValueOnce(new Response("payload"));
 
     await expect(
       store({ retryDelaysMs: [0] }).read("control/v1/object.json"),
     ).resolves.toEqual(new TextEncoder().encode("payload"));
-    expect(hub.downloadFile).toHaveBeenCalledTimes(2);
+    expect(bucketFetch).toHaveBeenCalledTimes(2);
   });
 
   it("retries transient failures while materializing a lazy Blob", async () => {
-    hub.downloadFile
+    bucketFetch
       .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
         arrayBuffer: async () => {
           throw new TypeError("terminated", {
             cause: Object.assign(new Error("socket closed"), {
@@ -272,29 +320,22 @@ describe("HuggingFaceBucketStore", () => {
             }),
           });
         },
-      })
-      .mockResolvedValueOnce(new Blob(["payload"]));
+      } as Response)
+      .mockResolvedValueOnce(new Response("payload"));
 
     await expect(
       store({ retryDelaysMs: [0] }).read("control/v1/object.json"),
     ).resolves.toEqual(new TextEncoder().encode("payload"));
-    expect(hub.downloadFile).toHaveBeenCalledTimes(2);
+    expect(bucketFetch).toHaveBeenCalledTimes(2);
   });
 
   it("does not retry non-transient download failures", async () => {
-    hub.downloadFile.mockRejectedValue(
-      new HubApiError(
-        "https://huggingface.co/buckets/example",
-        403,
-        undefined,
-        "authorization failed",
-      ),
-    );
+    bucketFetch.mockResolvedValue(new Response(null, { status: 403 }));
 
     await expect(
       store({ retryDelaysMs: [0, 0] }).read("control/v1/object.json"),
-    ).rejects.toThrow("authorization failed");
-    expect(hub.downloadFile).toHaveBeenCalledTimes(1);
+    ).rejects.toThrow("Bucket object download failed with HTTP 403");
+    expect(bucketFetch).toHaveBeenCalledTimes(1);
   });
 
   it("lists file keys and sizes in deterministic order", async () => {
@@ -327,7 +368,7 @@ describe("HuggingFaceBucketStore", () => {
         source_identity: `xet:${"a".repeat(64)}`,
       },
     ]);
-    expect(hub.downloadFile).not.toHaveBeenCalled();
+    expect(bucketFetch).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -355,6 +396,6 @@ describe("HuggingFaceBucketStore", () => {
     });
 
     await expect(store().list("control/v1")).rejects.toThrow();
-    expect(hub.downloadFile).not.toHaveBeenCalled();
+    expect(bucketFetch).not.toHaveBeenCalled();
   });
 });

@@ -308,7 +308,7 @@ export interface SystemView {
 
 export class ProjectionIntegrityError extends Error {}
 
-const REBUILD_IO_CONCURRENCY = 16;
+const REBUILD_IO_CONCURRENCY = 64;
 const PROJECTION_APPLY_BATCH_SIZE = 64;
 const RUN_NATIVE_CONTROL_PREFIXES = [
   "control/schema=v1/migrations/",
@@ -369,18 +369,6 @@ async function listProjectionEntries(
 ): Promise<ObjectEntry[]> {
   const prefixes = prefix ? [prefix] : RUN_NATIVE_CONTROL_PREFIXES;
   return (await Promise.all(prefixes.map((value) => store.list(value)))).flat();
-}
-
-async function readRebuildObjects(
-  store: ImmutableObjectStore,
-  entries: readonly ObjectEntry[],
-): Promise<Uint8Array[]> {
-  const objects: Uint8Array[] = [];
-  for (let offset = 0; offset < entries.length; offset += REBUILD_IO_CONCURRENCY) {
-    const batch = entries.slice(offset, offset + REBUILD_IO_CONCURRENCY);
-    objects.push(...(await Promise.all(batch.map((entry) => store.read(entry.key)))));
-  }
-  return objects;
 }
 
 async function verifyRebuildEvidence(
@@ -934,6 +922,17 @@ export class Projection {
     }
   }
 
+  private async writeTransaction(work: () => Promise<void>): Promise<void> {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      await work();
+      this.database.exec("COMMIT");
+    } catch (error) {
+      if (this.database.inTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   async rebuild(store: ImmutableObjectStore, prefix?: string): Promise<void> {
     // Local row order is rebuilt from immutable objects. A new epoch makes
     // clients with a prior cursor replay instead of skipping an object.
@@ -955,33 +954,47 @@ export class Projection {
           throw new ProjectionIntegrityError(`duplicate object listing: ${entry.key}`);
         seen.add(entry.key);
       }
-      // Fetch immutable objects concurrently, then apply them in deterministic key order.
-      const objects = await readRebuildObjects(store, entries);
       await this.clear();
-      const parsed = entries.map((entry, index) => {
-        const bytes = objects[index];
-        if (!bytes)
-          throw new ProjectionIntegrityError(`missing prefetched object: ${entry.key}`);
-        const verified = verifiedEntry(bytes, entry);
-        return { entry: verified, record: parseRecord(bytes, verified) };
-      });
-      await verifyRebuildEvidence(
-        store,
-        parsed.map(({ record }) => record),
-      );
       const supersessions: Array<{
         entry: VerifiedObjectEntry;
         record: PublicationSupersession;
       }> = [];
-      for (const [index, { entry, record }] of parsed.entries()) {
-        if (index > 0 && index % PROJECTION_APPLY_BATCH_SIZE === 0)
-          await yieldToEventLoop();
-        if (record.kind === "publication.supersession")
-          supersessions.push({ entry, record });
-        else await this.apply(entry, record);
+      const evidenceRecords: AttemptReceipt[] = [];
+      // Parse and apply one download batch at a time so replay memory stays
+      // bounded as the immutable Run history grows.
+      for (let offset = 0; offset < entries.length; offset += REBUILD_IO_CONCURRENCY) {
+        const batchEntries = entries.slice(offset, offset + REBUILD_IO_CONCURRENCY);
+        const objects = await Promise.all(
+          batchEntries.map((entry) => store.read(entry.key)),
+        );
+        const parsed = batchEntries.map((entry, index) => {
+          const bytes = objects[index];
+          if (!bytes)
+            throw new ProjectionIntegrityError(
+              `missing prefetched object: ${entry.key}`,
+            );
+          const verified = verifiedEntry(bytes, entry);
+          return { entry: verified, record: parseRecord(bytes, verified) };
+        });
+        // One transaction per batch avoids a durable SQLite flush for every
+        // derived row while keeping network reads outside the transaction.
+        await this.writeTransaction(async () => {
+          for (const { entry, record } of parsed) {
+            if (record.kind === "attempt.receipt" && record.actor.role !== "migration")
+              evidenceRecords.push(record);
+            if (record.kind === "publication.supersession")
+              supersessions.push({ entry, record });
+            else await this.apply(entry, record);
+          }
+        });
+        await yieldToEventLoop();
       }
-      for (const deferred of supersessions)
-        await this.apply(deferred.entry, deferred.record);
+      if (supersessions.length > 0)
+        await this.writeTransaction(async () => {
+          for (const deferred of supersessions)
+            await this.apply(deferred.entry, deferred.record);
+        });
+      await verifyRebuildEvidence(store, evidenceRecords);
       await this.verifyInvariants();
       const rebuiltAt = new Date().toISOString();
       this.state = {
