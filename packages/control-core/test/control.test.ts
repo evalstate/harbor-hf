@@ -715,6 +715,32 @@ describe("control service", () => {
       terminal_outcome: "infrastructure",
       selected_attempt_id: selectedAttempt.attempt_id,
     });
+    const repeatedLaunch = resumedLaunches[resumedLaunches.length - 1];
+    if (!repeatedLaunch) throw new Error("continued Job launch is missing");
+    const repeatedAttempt: AttemptReceipt = {
+      ...unselectedAttempt,
+      record_id: "attempt-receipt-legacy-repeated-exhaustion",
+      created_at: new Date().toISOString(),
+      attempt_id: "attempt-legacy-repeated-exhaustion",
+      action_id: repeatedLaunch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: false,
+      evidence_digest: sha256("legacy-repeated-exhaustion-evidence"),
+      evidence_path: "evidence/legacy-repeated-exhaustion",
+      cost_microusd: 1,
+    };
+    await control.service.append(repeatedAttempt);
+    await control.service.exhaustTask(
+      repeatedAttempt,
+      "historical task exhausted again after repair",
+      2,
+    );
+    expect(
+      (await control.projection.task(legacy.run_id, unresolvedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "invalid",
+      selected_attempt_id: null,
+    });
     const rebuilt = await Projection.open(
       join(control.root, "historical-continuation.sqlite"),
     );
@@ -732,6 +758,12 @@ describe("control service", () => {
     ).toMatchObject({
       terminal_outcome: "infrastructure",
       selected_attempt_id: selectedAttempt.attempt_id,
+    });
+    expect(
+      (await rebuilt.task(legacy.run_id, unresolvedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "invalid",
+      selected_attempt_id: null,
     });
     await expect(restarted.runExecution(legacy)).resolves.toMatchObject({
       contract_version: "v1",

@@ -826,6 +826,7 @@ export class Projection {
       .addColumn("reason", "text", (column) => column.notNull())
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("body", "text", (column) => column.notNull())
+      .addUniqueConstraint("task_exhaustions_run_task_unique", ["run_id", "task_id"])
       .execute();
     await this.db.schema
       .createTable("budgets")
@@ -1688,20 +1689,40 @@ export class Projection {
         attempt.outcome === "infrastructure" &&
         Number(attempt.replacement_eligible) > 0;
     }
-    await this.db
-      .insertInto("task_exhaustions")
-      .values({
-        record_id: record.record_id,
-        run_id: record.run_id,
-        task_id: record.task_id,
-        source_action_id: record.source_action_id,
-        last_attempt_id: record.last_attempt_id,
-        attempt_count: record.attempt_count,
-        reason: record.reason,
-        created_at: record.created_at,
-        body: body(record),
-      })
-      .execute();
+    const existing = await this.db
+      .selectFrom("task_exhaustions")
+      .select(["record_id", "created_at"])
+      .where("run_id", "=", record.run_id)
+      .where("task_id", "=", record.task_id)
+      .executeTakeFirst();
+    // Bucket listing order is not event order. Keep the latest immutable
+    // exhaustion so crash rebuilds and live projection produce the same task.
+    if (
+      existing &&
+      (existing.created_at > record.created_at ||
+        (existing.created_at === record.created_at &&
+          existing.record_id >= record.record_id))
+    )
+      return;
+    const values = {
+      record_id: record.record_id,
+      run_id: record.run_id,
+      task_id: record.task_id,
+      source_action_id: record.source_action_id,
+      last_attempt_id: record.last_attempt_id,
+      attempt_count: record.attempt_count,
+      reason: record.reason,
+      created_at: record.created_at,
+      body: body(record),
+    };
+    if (existing)
+      await this.db
+        .updateTable("task_exhaustions")
+        .set(values)
+        .where("run_id", "=", record.run_id)
+        .where("task_id", "=", record.task_id)
+        .execute();
+    else await this.db.insertInto("task_exhaustions").values(values).execute();
     const result = await this.db
       .updateTable("tasks")
       .set({
