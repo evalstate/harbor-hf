@@ -17,9 +17,9 @@ import {
 const MATRIX_WORKER_REVISION = "1d1346a2de44eac1a924d49da29459ccc0464bd0";
 const MATRIX_WORKER_IMAGE =
   "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:b0aa46621509a74be133e68c8858164b50dba57a48807353c0f3c7bd9a99d239";
-const OPENHANDS_WORKER_REVISION = "578c04dd5256695c8db8306eaaa84300137d58f1";
-const OPENHANDS_WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:fc3d236a883618d2280ca736a22bdfc5ba0984dd9043b0f8a6890c86acbc9ec2";
+const CONTINUATION_WORKER_REVISION = "5e67876ca27d1cd404c64d0bb545fe78a5976f83";
+const CONTINUATION_WORKER_IMAGE =
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:ef2f610ebc8b149f882095db8687c45fa7ebdb832c5b434bc99ea599e5b5cc2f";
 const PREVIOUS_WORKER_REVISION = "8fa3b80ee9da16f989cbef5f532a54f2ef375197";
 const PREVIOUS_WORKER_IMAGE =
   "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:56aae633c6cc9137a0a2366ebf3e52abcc2a43006f293c2bee888a0086913a2b";
@@ -623,15 +623,23 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "tb21-qwen3-8-27b-deepinfra-codex-providers",
       "tb21-glm-5-3-flash-together-providers",
     ]);
+    const continuationNames = new Set([
+      "tb21-gpt-oss-20b-hermes-providers",
+      "tb21-gpt-oss-20b-kimi-code-providers",
+      "tb21-gpt-oss-20b-mini-swe-agent-providers",
+      "tb21-gpt-oss-20b-openclaw-providers",
+      "tb21-gpt-oss-20b-openhands-providers",
+      "tb21-gpt-oss-20b-pi-providers",
+      "tb21-gpt-oss-20b-qwen-code-providers",
+    ]);
     for (const name of deploymentNames) {
       const spec = record((await profile("deployment", name)).spec);
       const template = record(spec.trial_job_template);
-      const [workerImage, workerRevision] =
-        name === "tb21-gpt-oss-20b-openhands-providers"
-          ? [OPENHANDS_WORKER_IMAGE, OPENHANDS_WORKER_REVISION]
-          : matrixNames.has(name)
-            ? [MATRIX_WORKER_IMAGE, MATRIX_WORKER_REVISION]
-            : [PREVIOUS_WORKER_IMAGE, PREVIOUS_WORKER_REVISION];
+      const [workerImage, workerRevision] = continuationNames.has(name)
+        ? [CONTINUATION_WORKER_IMAGE, CONTINUATION_WORKER_REVISION]
+        : matrixNames.has(name)
+          ? [MATRIX_WORKER_IMAGE, MATRIX_WORKER_REVISION]
+          : [PREVIOUS_WORKER_IMAGE, PREVIOUS_WORKER_REVISION];
       expect(spec.job_image).toBe(workerImage);
       expect(spec.worker_revision).toBe(workerRevision);
       expect(spec.preparation_job_command).toEqual(PREPARATION_COMMAND);
