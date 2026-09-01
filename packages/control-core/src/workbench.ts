@@ -356,10 +356,14 @@ export function compileAgentWorkbenchRecipe(value: unknown): AgentWorkbenchPrevi
     run_command: expandSimpleEnvironment(recipe.run_command, values),
     environment,
     harness_profile: {
+      contract_version: "v1",
       agent: "command-agent",
       revision: recipeDigest,
       reasoning_effort: "off",
       required_evidence: requiredEvidence,
+      capabilities: {
+        inference_apis: [recipe.route_api],
+      },
       harbor_agent: {
         import_path: "harbor_hf_agents.command_agent.agent:CommandAgent",
         override_setup_timeout_sec: recipe.setup_timeout_seconds,

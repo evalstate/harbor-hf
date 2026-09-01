@@ -117,24 +117,19 @@ def _expected_tasks(lock: dict[str, Any]) -> tuple[ExpectedTask, ...]:
 
 def _job_config(lock: dict[str, Any]) -> JobConfig:
     benchmark = run_lock_profile(lock, "benchmark")
-    model = run_lock_profile(lock, "model")
-    harness = run_lock_profile(lock, "harness")
-    deployment = run_lock_profile(lock, "deployment")
+    execution = _optional(lock, "execution")
+    if not isinstance(execution, dict) or execution.get("contract_version") != "v1":
+        raise RuntimeError("historical run locks cannot create prepared work")
+    deployment = _optional(execution, "deployment")
     raw_job = _optional(benchmark, "harbor_job")
-    raw_agent = _optional(harness, "harbor_agent")
-    if not isinstance(raw_job, dict) or not isinstance(raw_agent, dict):
-        raise RuntimeError("prepared run profiles must contain Harbor job data")
-    if deployment["preparation"] != "required":
-        raise RuntimeError("deployment does not require Harbor preparation")
+    if not isinstance(deployment, dict) or not isinstance(raw_job, dict):
+        raise RuntimeError("resolved execution contract is incomplete")
+    if deployment.get("preparation") != "required":
+        raise RuntimeError("locked deployment does not require Harbor preparation")
     for key in ("agents", "environment", "retry", "job_name", "jobs_dir"):
         if key in raw_job:
             raise RuntimeError(f"benchmark Harbor job cannot set control field {key}")
-    agent = copy.deepcopy(raw_agent)
-    configured_model = agent.get("model_name")
-    if configured_model is None:
-        agent["model_name"] = model["harbor_model_name"]
-    elif configured_model != model["harbor_model_name"]:
-        raise RuntimeError("Harbor agent model does not match the model profile")
+    agent = _locked_agent(execution)
     value = copy.deepcopy(raw_job)
     value.update(
         {
@@ -156,6 +151,23 @@ def _job_config(lock: dict[str, Any]) -> JobConfig:
     if len(config.agents) != 1 or config.retry.max_retries != 0:
         raise RuntimeError("prepared Harbor job must use one agent and no retries")
     return config
+
+
+def _locked_agent(execution: dict[str, Any]) -> dict[str, Any]:
+    model = _optional(execution, "model")
+    raw_agent = _optional(execution, "harbor_agent")
+    if not isinstance(model, dict) or not isinstance(raw_agent, dict):
+        raise RuntimeError("resolved execution contract is incomplete")
+    model_name = model.get("harbor_model_name")
+    if not isinstance(model_name, str) or not model_name:
+        raise RuntimeError("resolved execution contract has no Harbor model name")
+    agent = copy.deepcopy(raw_agent)
+    configured_model = agent.get("model_name")
+    if configured_model is None:
+        agent["model_name"] = model_name
+    elif configured_model != model_name:
+        raise RuntimeError("Harbor agent model does not match the model profile")
+    return agent
 
 
 def _parse_image(image: str) -> tuple[str, str, str]:

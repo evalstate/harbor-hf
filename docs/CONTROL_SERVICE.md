@@ -143,17 +143,50 @@ replacement. A timed-out Harbor process with no result instead seals
 `benchmark_timeout` and remains non-retryable. Other evidence-integrity
 failures remain non-retryable. There is no namespace or same-UID fallback.
 
-Deployment profiles contain Hugging Face infrastructure and safety limits. They
-do not contain copies of benchmark task catalogs. A new Harbor-supported
-benchmark or compatible model requires configuration and immutable data only.
-The same rule applies to a supported harness. A new harness implementation
-belongs in a Harbor agent plugin behind the common agent interface. Missing
-behavior is added as a general capability at the correct Harbor, agent,
-provider, or Hugging Face adapter boundary. Harbor-HF does not add name-based
-special cases.
+## Profile ownership and run composition
 
-One-time migration programs do not define run behavior and do not become
-the path for adding run support.
+A model profile owns the model ID, exact revision, canonical Harbor model route,
+and typed model-family compatibility. A harness profile owns only stable agent
+configuration and capabilities. It cannot contain a model route, provider
+suffix, price, context limit, output limit, or generated model registry. A
+deployment profile owns Hugging Face infrastructure, provider policy, prices,
+limits, worker provenance, and safety settings. It cannot contain a second
+manually maintained model route.
+
+Before admission, the TypeScript resolver validates the selected model, harness,
+and deployment. It builds one complete resolved execution contract and stores it
+in the immutable run lock before any reservation or action is written. The
+contract contains the exact Harbor `AgentConfig`, agent and bridge routes,
+provider and API, prices and limits, worker image and revision, Harbor version,
+and source profile IDs. Its values do not depend on a later catalog lookup.
+
+The resolver derives the root bridge route from the canonical Harbor model
+route. It verifies the first Harbor provider segment and the provider suffix,
+then removes only that first segment. Preparation and trial workers consume the
+locked result and do not reconstruct the profile relationship.
+
+Pi receives typed locked model runtime data and creates its private
+`models.json` from that data. Model-family facts such as reasoning format belong
+to the model compatibility contract and are checked against harness
+capabilities before admission. Real harness variants remain separate by
+behavior, version, reasoning mode, or capability, never by exact model route
+alone. A bounded profile alias can preserve an established public name, but it
+resolves to the same active profile and has a documented removal release.
+
+New run locks use only this composed form. Historical locks remain immutable and
+readable through a bounded read-only branch, but they cannot create, resume, or
+retry work after the profile cutover. The cutover requires every old-format run
+to have no active resource, pending action, cleanup work, or unfinished
+publication. The [reusable harness profile plan](2026-08-28-reusable-harness-profiles-plan.md)
+defines the implementation, migration, and rollback checks.
+
+A new Harbor-supported benchmark or compatible model requires configuration and
+immutable data only. A new harness implementation belongs in a Harbor agent
+plugin behind the common agent interface. Missing behavior is added as a general
+capability at the correct Harbor, agent, provider, or Hugging Face adapter
+boundary. Harbor-HF does not add name-based special cases. One-time migration
+programs do not define run behavior and do not become the path for adding run
+support.
 
 ## Agent Workbench
 
@@ -270,6 +303,14 @@ visible but cannot authorize a run. A run lock retains the selected alias,
 immutable profile digest, and complete spec even when that alias later moves.
 Canonical migration preserves profile objects and promotion records.
 
+A benchmark profile may require a profile-constrained launch policy. A
+constrained policy lists the canonical benchmark, model, harness, and deployment
+profile names it permits. Resolution compares the selected canonical profiles
+with all four lists before creating a run lock or reserving spend. A missing or
+mismatched constraint rejects the request. This lets measured policies be shared
+between identical cells without allowing a lower-cost policy to authorize a
+different workload.
+
 ### Capacity contracts
 
 Each capacity field has one meaning:
@@ -377,6 +418,27 @@ receives no operator-managed secret. The capability is scoped to one run,
 immutable lock digest, launch action, task, operation set, and expiration. It
 authorizes only the assigned lock read, evidence upload, and attempt submission,
 and it is never copied into the task rootfs or task environment.
+
+### Inference model route binding
+
+Provider-backed custom agents use two model strings for different interfaces.
+`harbor_agent.model_name` is the Harbor-facing name. It starts with the Harbor
+provider segment, such as `openai/<Hub-model>:<inference-provider>`.
+`trial_job_template.inference_model` is the root-bridge route. It removes exactly
+the first Harbor provider segment and keeps the complete Hub model path and
+inference-provider suffix, such as `<Hub-model>:<inference-provider>`.
+
+Checked-in profiles must keep these two forms aligned. Their profile tests load
+the bound harness and deployment records, confirm the expected Harbor provider
+segment, remove that segment once, and compare the result with the bridge route.
+A mismatch is an infrastructure failure because the root bridge cannot accept a
+model outside its lock. A shared mismatch stops affected new submissions until
+the profile is repaired and deployed.
+
+A built-in profile change produces a new content-derived profile record ID. New
+runs resolve the new ID. Existing run locks keep their original profile IDs and
+digests and remain readable without a compatibility writer or historical
+rewrite.
 
 Each execution Job runs one physical Harbor trial. The deployment profile locks
 the digest-pinned trusted worker image, hardware, timeout, resource limits,

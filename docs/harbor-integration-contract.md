@@ -32,10 +32,20 @@ historical evidence tools.
 
 ## Execution Input
 
-A run first locks its approved profiles and expected logical tasks. A
-secret-free preparation Job runs the pinned Harbor git commit and builds one
-normal `JobConfig`. Harbor resolves the dataset and task sources through its
-public `JobPlan` API. The preparation worker then writes:
+A new run first locks its approved profiles, expected logical tasks, and one
+complete resolved execution contract. The TypeScript control service builds the
+contract before reservation or admission. It contains the exact Harbor
+`AgentConfig`, selected model route, derived root bridge route, provider API,
+limits, worker provenance, Harbor version, and source profile IDs.
+
+The model profile supplies the canonical Harbor route. The harness profile
+supplies a model-independent custom-agent template and capabilities. The
+deployment profile supplies provider and execution policy without another model
+route. The resolver checks the combination and derives the final values. A
+secret-free preparation Job consumes those locked values, runs the pinned Harbor
+git commit, and builds one normal `JobConfig`. It does not bind the model again.
+Harbor resolves the dataset and task sources through its public `JobPlan` API.
+The preparation worker then writes:
 
 - one immutable `prepared.trial` record per logical task;
 - one final `prepared.job` record that binds the ordered trials;
@@ -44,7 +54,13 @@ public `JobPlan` API. The preparation worker then writes:
 Each prepared trial contains the exact Harbor `TrialLock`, source task digest,
 container image digest, resource request, and phase time limits. The control
 service checks the task against the run lock and selects compatible Hugging
-Face Job hardware from the deployment profile. The deployment profile sets
+Face Job hardware from the locked execution contract. Prepared and executed
+agent, route, API, limit, and worker values must match that contract exactly.
+
+Historical locks without the resolved execution contract remain readable and
+immutable. After the profile cutover, they cannot create, resume, or retry
+work. The [reusable harness profile plan](2026-08-28-reusable-harness-profiles-plan.md)
+defines the cutover and rollback gates. The deployment profile sets
 limits and prices but contains no benchmark task catalog.
 
 An execution worker receives the one task assigned to its physical Job. It
@@ -66,16 +82,51 @@ placeholder key.
 ## Custom Provider Agents
 
 Every provider-backed agent is loaded through Harbor's public
-`AgentConfig.import_path` field. Hermes, OpenClaw, OpenClaw Codex, Pi, DeepSeek
-Harness, OpenCode, and FX live in separate modules under the `harbor-hf-agents`
-package. New provider attempts do not select Harbor built-ins and have no
-fallback to them.
+`AgentConfig.import_path` field. Each custom adapter lives in a separate module
+under the `harbor-hf-agents` package. New provider attempts have no fallback to
+another harness or wire API.
 
 One internal registry validates the logical agent name, import path, required
 wire API, permitted non-secret parameters, trajectory schema, session
 requirement, and retry taxonomy. This registry is Python data, not another
 serialized protocol. Generic Harbor request, worker, and evidence code perform
 a registry lookup and contain no agent-name branches.
+
+Each agent module selects a runtime driver that matches its registered wire API.
+For an OpenCode Chat Completions route, the adapter-generated provider entry
+declares `npm: "@ai-sdk/openai-compatible"`. The same entry registers the exact
+locked model and the loopback bridge base URL. The adapter applies these
+route-owned fields after it copies caller `opencode_config`, so unrelated caller
+settings remain while conflicting driver, model, and base URL values are
+replaced. The bridge continues to reject Responses requests on a Chat
+Completions route.
+
+The standalone Codex adapter uses Harbor's pinned Codex implementation and its
+native Responses API. It preserves the complete namespaced model ID after
+removing only Harbor's provider prefix. It runs under the isolated agent account
+and remains distinct from OpenClaw with the Codex runtime.
+
+A deployment is eligible only when its inference API appears in both the model
+provider route's native API list and the harness capability list. The control
+service rejects an incompatible explicit selection before launch, including a
+stale promoted deployment, and automatic selection finds no deployment for an
+unsupported model-provider-harness combination. Matrix plans record that cell
+as unsupported and skip it without creating a run or treating it as a benchmark
+failure. Do not add request translation, response translation, fallback, or
+payload rewriting to force compatibility between different inference APIs.
+
+The Terminus profile keeps the public profile name `terminus` and Harbor's
+`terminus-2` result identity. Terminus is trusted in-process Harbor code. It
+validates the root-owned Job route before execution, uses the locked Chat
+Completions loopback route, and always stops the bridge before verifier
+execution. Its LiteLLM model information comes from the immutable model and
+deployment profiles.
+
+mini-swe-agent receives a finite task cost limit and an exact LiteLLM model
+registry derived from the immutable inference contract. The registry preserves
+model identity, token limits, and input, output, cache-read, and cache-write
+prices. The adapter does not use an unpriced fallback or disable the tool's
+cost limit.
 
 The existing pinned worker revision identifies the package implementation. The
 agent profile identifies the custom import path and exact underlying agent

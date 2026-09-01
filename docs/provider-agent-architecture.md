@@ -104,36 +104,54 @@ Harbor remains the unmodified benchmark engine. `harbor-hf` uses only its public
 configuration and custom-agent import APIs, together with its execution,
 result, and trajectory APIs.
 
-## Existing schemas
+## Run-native execution contract
 
-This design does not introduce another execution contract or runtime manifest.
-The existing records already cover the required identities:
+The Run-native control service selects independent model, harness, and
+deployment profiles. A harness profile is an agent template. It contains the
+custom import path, exact agent revision, reasoning mode, capabilities, stable
+non-secret settings, and evidence requirements. It does not contain the
+selected model or provider route.
 
-| Existing record | Authority |
+The model profile is the only checked-in owner of the canonical Harbor model
+route. The deployment profile owns provider and execution policy. Before any
+paid action, the TypeScript resolver checks compatibility and writes a complete
+resolved execution contract into the run lock. That contract contains the exact
+Harbor `AgentConfig`, bridge route, runtime limits, worker provenance, and source
+profile IDs.
+
+The preparation worker consumes the locked `AgentConfig` and does not bind a
+model for new runs. A later profile change cannot alter a locked run. Pi creates
+its private model registry from typed model runtime data in the contract. DSH
+uses typed model reasoning-format data only when its harness capability permits
+that format.
+
+The public Pi constructor accepts the older `models_json` input for the first
+release that contains this cutover. Active control profiles do not use it. The
+following minor release removes that input, while historical locks remain
+read-only.
+
+Older `ExperimentSpec`, `ExecutionLock`, and compatibility records remain the
+authority for their historical runs. They are not converted to the new form.
+The legacy reader can project and audit old locks, but old locks cannot create
+new work after the profile cutover.
+
+The active record authorities are:
+
+| Record | Authority |
 | --- | --- |
-| `ExperimentSpec` | Requested execution policy and its agent, model, provider, and source. |
-| `ExecutionLock` and run locks | Immutable resolved configuration and source revisions. |
-| `HarborExecutionRequest` | Exact Harbor job configuration and independent verification policy. |
+| Model profile | Model ID, revision, canonical Harbor route, and model compatibility. |
+| Harness profile | Agent implementation, revision, capabilities, stable settings, and evidence requirements. |
+| Deployment profile | Provider, API, prices, limits, hardware, worker provenance, and Harbor version. |
+| Run lock execution contract | Complete resolved agent and inference configuration before admission. |
+| Prepared Harbor records | Exact task and Harbor job locks derived from the resolved contract. |
 | Harbor `result.json` | Observed agent and model identity, usage, rewards, and exceptions. |
 | `HarborCompatibilityBundle` | Typed, checksummed compatibility view of Harbor output. |
-| Trial evidence manifest | Required workspace, session, trajectory, judge evidence, and logs. |
-| `private-artifacts.json` | Typed private artifact inventory. |
-| `checksums.json` | Content integrity for retained execution evidence. |
+| Trial evidence and checksum records | Required private artifacts and content integrity. |
 
-The only manifest changes are fields needed to select a custom agent through the
-existing `AgentProfile`:
-
-- `import_path`: the Harbor custom-agent class; and
-- `revision_kind: git` for an underlying agent pinned by a full Git commit.
-
-The custom-agent implementation itself is already pinned by
-`remote.worker.revision`. A Git agent revision must be a full commit. Package
-agents continue to use exact numeric versions. `HarborVerificationPolicy`
-records the expected import path in addition to the existing logical agent name
-and version, so config drift is rejected before output is accepted.
-
-These fields extend the current pre-release schema in place. They do not create
-a second lock, manifest, or identity system.
+Profiles remain complete and have no inheritance. The resolver uses fixed typed
+rules rather than placeholders or arbitrary binding expressions. The
+[reusable harness profile plan](2026-08-28-reusable-harness-profiles-plan.md)
+defines the schema migration and verification work.
 
 ## Generic agent registry
 
@@ -215,6 +233,37 @@ cannot substitute for isolation.
 
 ## Agent Requirements
 
+### Install-time interpreter contract
+
+An installed-agent plugin can declare immutable environment values for its
+installation. `JobChatCompletionsAgent` applies these values only while it runs
+`install_runtime_packages` and the public Harbor `install` method. The state is
+local to one agent instance and is cleared in a `finally` block after a
+successful or failed installation. A declared value takes precedence over a
+value supplied by the installation caller.
+
+Normal agent commands do not inherit the install environment. An agent that
+does not opt in receives no install environment. Route configuration and
+loopback credentials remain separate from this contract.
+
+The mini-swe-agent plugin declares `UV_PYTHON=3.12`. The public Harbor installer
+continues to own the `uv tool install` command, the exact mini-swe-agent package
+version, and its installation smoke check. Harbor-HF does not copy that command,
+pin a second dependency set, or patch Harbor internals. If uv cannot provide
+Python 3.12, installation fails as infrastructure setup. It does not fall back
+to an older task-image Python.
+
+The shared contract is implemented in
+`packages/harbor-hf-agents/src/harbor_hf_agents/support/job_chat_completions.py`.
+The plugin declaration is in
+`packages/harbor-hf-agents/src/harbor_hf_agents/mini_swe/agent.py`. Focused tests
+belong in `packages/harbor-hf-agents/tests/test_job_chat_completions.py` and
+`packages/harbor-hf-agents/tests/test_mini_swe.py`.
+
+This change does not add a schema, API, profile field, run-lock field, evidence
+format, retry rule, or publication rule. The private evidence that justified
+the interpreter requirement stays outside the public repository.
+
 ### Hermes
 
 Hermes is installed from commit
@@ -277,6 +326,7 @@ execution under the same logical trial:
 
 - immutable source preparation failure.
 - custom-agent package installation failure unrelated to its locked content.
+- failure to provision a plugin's declared install-time interpreter.
 - private ingress startup or authentication failure.
 - provider transport failure covered by the locked retry policy.
 - missing terminal evidence caused by worker or Job loss.
@@ -313,6 +363,12 @@ This is a hard replacement for new provider runs:
 No new provider run may use the old path after step 5. Historical evidence
 remains readable but cannot select the removed writer.
 
+The install-time interpreter contract is a hard cutover for future worker
+builds. Existing runs, attempts, exhaustion records, evidence, worker images,
+and deployment profiles do not change. No data migration is required. This
+change does not publish a worker image, update a profile, deploy the service,
+retry work, create a successor run, or verify live infrastructure.
+
 ## Verification matrix
 
 Local validation must cover:
@@ -321,6 +377,11 @@ Local validation must cover:
 - full-commit and exact-package revision enforcement;
 - deterministic run and run digests;
 - dependency-free `uv --with` installation without Harbor lock drift;
+- install environment delivery only to plugins that opt in;
+- install-state cleanup after successful and failed installation;
+- deterministic precedence for declared install environment values;
+- `UV_PYTHON=3.12` on mini-swe-agent installation and no later run command;
+- no interpreter override for an unaffected agent plugin;
 - custom-agent loading through unmodified Harbor;
 - registry rejection of unknown agents and unsupported APIs;
 - strict per-agent configuration validation;
@@ -339,3 +400,18 @@ Local validation must cover:
 Paid canaries must retain and verify the Harbor result, compatibility bundle,
 provider evidence, judge evidence, redacted session, ATIF trajectory, workspace,
 checksums, source revisions, model identity, and a zero-finding secret scan.
+
+For an interpreter-contract change, first run the focused and complete agent
+package tests. Then run its locked sync, Ruff check and format check, ty check,
+and mutation gate with a minimum 90% kill rate. Run the applicable root checks
+from `CONTRIBUTING.md`, including the public privacy check, Python coverage of at
+least 85%, TypeScript and browser checks, generated-file checks, dependency
+audits, the control-Space Docker build, Slophammer, and the root mutation gate.
+Do not run a benchmark, model inference, remote integration test, Job, Endpoint,
+deployment, or release as part of this local change.
+
+Before publication of the source branch, inspect the complete diff and public
+metadata, run the public privacy check again, and create only the intended
+Conventional Commit. Push the existing task branch, then verify that its local
+and remote heads match. Do not open a pull request or merge as part of this
+change.

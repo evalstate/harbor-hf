@@ -568,7 +568,19 @@ def test_provider_usage_overrides_untrusted_agent_token_counts(
             "agent",
             False,
             worker.InferenceUsage(requests=1, input_tokens=0, output_tokens=0),
-            ("agent", False),
+            ("infrastructure", True),
+        ),
+        (
+            "benchmark_timeout",
+            False,
+            worker.InferenceUsage(requests=0, input_tokens=0, output_tokens=0),
+            ("infrastructure", True),
+        ),
+        (
+            "benchmark_timeout",
+            False,
+            worker.InferenceUsage(requests=1, input_tokens=10, output_tokens=2),
+            ("benchmark_timeout", False),
         ),
         (
             "complete",

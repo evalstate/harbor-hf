@@ -1,19 +1,19 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-05b4bf2305ee2e7b1e9cebc3",
-  "created_at": "2026-08-23T20:44:00.000Z",
+  "record_id": "profile-100417edec3882fe2ae60db1",
+  "created_at": "2026-08-27T09:30:00.000Z",
   "actor": {
     "subject": "harbor-hf-source",
     "role": "service"
   },
   "profile_kind": "deployment",
-  "name": "tb21-deepseek-v4-flash-diagnostic-2",
+  "name": "tb21-qwen3-8-27b-deepinfra-providers",
   "spec": {
     "route": "hf_job",
-    "models": ["deepseek-v4-flash-0731-together"],
-    "harnesses": ["pi-0-84-2-high-deepseek-v4-flash-0731-together"],
-    "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:1bbd594ace63d8a30fcdc728235d405ee47c92b4ee53e11dbb20408b819bc2fa",
+    "models": ["qwen3-8-27b-deepinfra"],
+    "harnesses": ["pi-off", "mini-swe-agent", "terminus", "fx", "pi"],
+    "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:d3d122523eea6853424d56ecad1f2fdd5f9f50517bc4b890c93c7b8fda707ec4",
     "preparation_job_command": [
       "python",
       "-m",
@@ -29,12 +29,12 @@
     "trusted_worker": true,
     "inference_token": "forbidden",
     "preparation": "required",
-    "inference_provider": "together",
-    "input_price_microusd_per_million_tokens": 140000,
-    "output_price_microusd_per_million_tokens": 280000,
+    "inference_provider": "deepinfra",
+    "input_price_microusd_per_million_tokens": 400000,
+    "output_price_microusd_per_million_tokens": 3000000,
     "harbor_version": "0.22.0",
-    "worker_revision": "a689332f0cc7370b050813130b0d7d505e46ff6e",
-    "context_window": 131072,
+    "worker_revision": "a430d99ed7d6345917c3a477a89f03bd65a57d43",
+    "context_window": 262144,
     "timeout_seconds": 604800,
     "preparation_timeout_seconds": 7200,
     "trial_job_template": {
@@ -58,11 +58,9 @@
       ],
       "inference_token": "required",
       "inference_upstream": "https://router.huggingface.co/v1",
-      "inference_model": "deepseek-ai/DeepSeek-V4-Flash-0731:together",
       "inference_api": "chat-completions",
       "inference_max_requests": 512,
       "inference_max_concurrency": 1,
-      "inference_max_total_concurrency": 16,
       "inference_timeout_seconds": 1800,
       "inference_max_output_tokens": 32768,
       "root_bootstrap_command": [
@@ -79,6 +77,9 @@
       "max_image_bytes": 21474836480,
       "max_image_entries": 500000,
       "max_jobs": 16
-    }
+    },
+    "contract_version": "v1",
+    "cache_read_price_microusd_per_million_tokens": 400000,
+    "cache_write_price_microusd_per_million_tokens": 400000
   }
 }

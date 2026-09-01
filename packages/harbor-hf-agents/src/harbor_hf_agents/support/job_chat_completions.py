@@ -55,11 +55,22 @@ class JobChatCompletionsAgent(IsolatedProviderAgent):
         "passwd",
         "util-linux",
     )
+    install_environment: ClassVar[tuple[tuple[str, str], ...]] = ()
     inject_route_into_process: ClassVar[bool] = False
+    inference_api: ClassVar[str] = "chat-completions"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401 -- Harbor API
         super().__init__(*args, **kwargs)
         self._route_env: dict[str, str] | None = None
+        self._active_install_environment: dict[str, str] | None = None
+
+    def _resolved_install_environment(self) -> dict[str, str]:
+        resolved: dict[str, str] = {}
+        for name, value in self.install_environment:
+            if name in resolved:
+                raise RuntimeError(f"duplicate install environment key: {name}")
+            resolved[name] = value
+        return resolved
 
     def allowed_model_id(self) -> str:
         """Return the locked model id after the provider prefix."""
@@ -80,7 +91,7 @@ class JobChatCompletionsAgent(IsolatedProviderAgent):
             env,
             base_url_key=self.route_base_url_key,
             api_key_key=self.route_api_key_key,
-            api="chat-completions",
+            api=self.inference_api,
             allowed_model=self.allowed_model_id(),
         )
         if not bridged:
@@ -101,6 +112,8 @@ class JobChatCompletionsAgent(IsolatedProviderAgent):
         timeout_sec: int | None = None,
     ) -> Any:  # noqa: ANN401 -- Harbor API
         merged = dict(env or {})
+        if self._active_install_environment is not None:
+            merged.update(self._active_install_environment)
         if self._route_env is not None:
             merged.update(self._route_env)
         return await super().exec_as_agent(
@@ -124,8 +137,14 @@ class JobChatCompletionsAgent(IsolatedProviderAgent):
         )
 
     async def install(self, environment: BaseEnvironment) -> None:
-        await self.install_runtime_packages(environment)
-        await super().install(environment)
+        if self._active_install_environment is not None:
+            raise RuntimeError("agent installation is already active")
+        self._active_install_environment = self._resolved_install_environment()
+        try:
+            await self.install_runtime_packages(environment)
+            await super().install(environment)
+        finally:
+            self._active_install_environment = None
 
     @with_job_inference_bridge_cleanup
     async def run(

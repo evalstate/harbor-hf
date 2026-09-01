@@ -4,6 +4,7 @@ import type {
   AttemptReceipt,
   ProfileObject,
   ProfilePromotion,
+  RunLock,
   TerminalSelection,
 } from "@harbor-hf/contracts";
 import {
@@ -28,7 +29,11 @@ import {
   Reconciler,
 } from "../src/reconciler.js";
 import { runIdentity, runUnique } from "../src/run-id.js";
-import { ControlService, executionReservationCategory } from "../src/service.js";
+import {
+  ControlService,
+  executionReservationCategory,
+  jobStateIsTerminal,
+} from "../src/service.js";
 
 const controls: TestControl[] = [];
 afterEach(async () => {
@@ -46,6 +51,16 @@ const submission = {
   confirmed: true,
 } as const;
 const operator = { subject: "operator-1", role: "operator" as const };
+
+describe("profile cutover Job classification", () => {
+  it("treats suppressed launch outcomes as terminal", () => {
+    expect(jobStateIsTerminal("suppressed-paused")).toBe(true);
+    expect(jobStateIsTerminal("suppressed-cancelled")).toBe(true);
+    expect(jobStateIsTerminal("COMPLETED")).toBe(true);
+    expect(jobStateIsTerminal("RUNNING")).toBe(false);
+    expect(jobStateIsTerminal(null)).toBe(false);
+  });
+});
 
 async function settle(reconciler: Reconciler, rounds = 8): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await reconciler.tick();
@@ -159,6 +174,97 @@ describe("control service", () => {
     expect(() => control.service.requireCapacityProfile()).toThrow(
       "unapproved capacity profile",
     );
+  });
+
+  it("keeps historical run locks readable but unable to create work", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const legacy: RunLock = {
+      schema_version: "v1",
+      kind: "run.lock",
+      record_id: "lock-legacy-read-only",
+      created_at: "2026-08-16T00:00:00.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: "run-legacy-read-only",
+      profiles: [
+        {
+          kind: "benchmark",
+          name: "control-smoke",
+          profile_id: `sha256:${"a".repeat(64)}`,
+          spec: {
+            benchmark: "control-smoke",
+            revision: "legacy",
+            task_ids: ["task-legacy"],
+            task_digests: [`sha256:${"b".repeat(64)}`],
+          },
+        },
+        {
+          kind: "model",
+          name: "control-smoke",
+          profile_id: `sha256:${"c".repeat(64)}`,
+          spec: { model_id: "control-smoke", revision: "legacy" },
+        },
+        {
+          kind: "harness",
+          name: "control-smoke",
+          profile_id: `sha256:${"d".repeat(64)}`,
+          spec: {
+            agent: "control-smoke",
+            revision: "legacy",
+            required_evidence: [],
+          },
+        },
+        {
+          kind: "deployment",
+          name: "hf-cpu-smoke",
+          profile_id: `sha256:${"e".repeat(64)}`,
+          spec: {
+            route: "hf_job",
+            models: ["control-smoke"],
+            harnesses: ["control-smoke"],
+          },
+        },
+        {
+          kind: "launch_policy",
+          name: "control-smoke",
+          profile_id: `sha256:${"f".repeat(64)}`,
+          spec: {
+            max_infrastructure_attempts: 1,
+            reservation_microusd: 0,
+            success_without_worker_receipt: true,
+            publication_role: "diagnostic",
+          },
+        },
+      ],
+      tasks: [
+        {
+          task_id: "task-legacy",
+          input_digest: `sha256:${"b".repeat(64)}`,
+        },
+      ],
+      ceiling_microusd: 0,
+      source_revision: `sha256:${"0".repeat(64)}`,
+    };
+    await control.service.append(legacy);
+
+    await expect(
+      control.service.runAction(
+        legacy.run_id,
+        { action: "pause", confirmed: true },
+        "legacy-pause",
+        operator,
+      ),
+    ).rejects.toThrow("historical run locks cannot create work");
+    const restarted = new ControlService(
+      "test",
+      control.store,
+      control.projection,
+      control.profiles,
+    );
+    await expect(restarted.initialize(control.profiles)).rejects.toThrow(
+      "historical run is not ready for the profile cutover",
+    );
+    expect(await control.projection.runLock(legacy.run_id)).toEqual(legacy);
   });
 
   it("replaces the promoted namespace Job cap and start pacing", async () => {
@@ -470,6 +576,21 @@ describe("control service", () => {
       /^run-control-smoke-control-smoke-off-none-[a-f0-9]{12}$/,
     );
     expect(second).toMatchObject({ run_id: first.run_id, adopted: true });
+    const runLock = await control.projection.runLock(first.run_id);
+    expect(runLock).toMatchObject({
+      execution: {
+        contract_version: "v1",
+        source_profiles: {
+          model: { name: "control-smoke" },
+          harness: { name: "control-smoke" },
+          deployment: { name: "hf-cpu-smoke" },
+        },
+        deployment: {
+          job_image:
+            "example.invalid/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+      },
+    });
     const publisher = new ResultPublisher(
       control.store,
       control.projection,
@@ -482,13 +603,23 @@ describe("control service", () => {
       publisher,
       { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
+    const list = control.store.list.bind(control.store);
+    const catalogReads = vi
+      .spyOn(control.store, "list")
+      .mockImplementation(async (prefix) => {
+        if (prefix === "results/schema=v1/catalog/records/")
+          throw new Error("diagnostic publication read leaderboard catalogs");
+        return list(prefix);
+      });
     await settle(reconciler);
+    expect(catalogReads).not.toHaveBeenCalledWith("results/schema=v1/catalog/records/");
     expect(await control.projection.run(first.run_id)).toMatchObject({
       status: "completed",
       terminal_tasks: 1,
       successful_tasks: 1,
       total_tasks: 1,
       publication_status: "published",
+      pending_actions: 0,
     });
     const resultObjects = await control.store.list("results/schema=v1");
     expect(resultObjects.some((entry) => entry.key.endsWith(".parquet"))).toBe(true);
@@ -868,7 +999,7 @@ describe("control service", () => {
     expect(JSON.parse(launch.intent_body).payload).toMatchObject({
       inference_token: "required",
       inference_upstream: "https://router.huggingface.co/v1",
-      inference_model: "control-smoke",
+      inference_model: "example/model:provider",
       inference_api: "chat-completions",
       inference_max_requests: 64,
       inference_max_concurrency: 4,
@@ -4777,6 +4908,76 @@ describe("control service", () => {
       (await rebuilt.runAttempts(result.run_id)).map((attempt) => attempt.attempt_id),
     ).toEqual(["attempt-a", "attempt-z"]);
     await rebuilt.close();
+  });
+
+  it("adopts a durable diagnostic publication without reading leaderboard catalogs", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "diagnostic-publication-adoption-key",
+      operator,
+    );
+    const publisher = new ResultPublisher(
+      control.store,
+      control.projection,
+      control.service,
+    );
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      new NoopActions(),
+      publisher,
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    const receipt = control.service.receipt.bind(control.service);
+    const receiptWrite = vi
+      .spyOn(control.service, "receipt")
+      .mockImplementation(async (intent, actionResult) => {
+        if (intent.action_kind === "publication.publish")
+          throw new Error("simulated action receipt interruption");
+        return receipt(intent, actionResult);
+      });
+
+    await expect(settle(reconciler)).rejects.toThrow(
+      "simulated action receipt interruption",
+    );
+    receiptWrite.mockRestore();
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      publication_status: "published",
+      pending_actions: 1,
+    });
+    const action = (await control.projection.runActions(result.run_id)).find(
+      (candidate) => candidate.action_kind === "publication.publish",
+    );
+    expect(action?.receipt_body).toBeNull();
+    if (!action) throw new Error("publication action is missing");
+
+    const list = control.store.list.bind(control.store);
+    const catalogReads = vi
+      .spyOn(control.store, "list")
+      .mockImplementation(async (prefix) => {
+        if (prefix === "results/schema=v1/catalog/records/")
+          throw new Error("adopted diagnostic publication read leaderboard catalogs");
+        return list(prefix);
+      });
+    await reconciler.tick();
+
+    expect(catalogReads).not.toHaveBeenCalledWith("results/schema=v1/catalog/records/");
+    expect(await control.projection.action(action.action_id)).toMatchObject({
+      outcome: "completed",
+      observed_state: "published",
+    });
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      publication_status: "published",
+      pending_actions: 0,
+    });
+    const actionRecords = await control.store.list(
+      `control/schema=v1/runs/${result.run_id}/actions/${action.action_id}`,
+    );
+    const actionKeys = actionRecords.map((record) => record.key);
+    expect(actionKeys.some((key) => key.endsWith("/receipt.json"))).toBe(true);
+    expect(actionKeys.some((key) => key.endsWith("/zz-advanced.json"))).toBe(true);
   });
 
   it("recovers publication after a crash between terminal selection and intent", async () => {

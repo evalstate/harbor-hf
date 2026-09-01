@@ -591,7 +591,7 @@ def _outcome_with_usage(
     if (
         usage is not None
         and (usage.requests == 0 or usage.input_tokens == 0)
-        and outcome == "complete"
+        and outcome in {"agent", "benchmark_timeout", "complete"}
     ):
         return "infrastructure", True
     return outcome, replacement_eligible

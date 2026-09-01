@@ -24,6 +24,18 @@ def _run_lock() -> dict:
                 "input_digest": DIGEST,
             }
         ],
+        "execution": {
+            "contract_version": "v1",
+            "deployment": {"preparation": "required"},
+            "model": {
+                "harbor_model_name": "openai/example/model:provider",
+            },
+            "harbor_agent": {
+                "import_path": "example.agent:Agent",
+                "model_name": "openai/example/model:provider",
+                "kwargs": {"version": "1.0.0"},
+            },
+        },
         "profiles": [
             {
                 "kind": "benchmark",
@@ -76,7 +88,7 @@ def test_builds_generic_harbor_job_without_name_branches() -> None:
 
 def test_injects_the_locked_model_when_the_harness_is_model_independent() -> None:
     value = _run_lock()
-    del value["profiles"][2]["spec"]["harbor_agent"]["model_name"]
+    del value["execution"]["harbor_agent"]["model_name"]
 
     config = worker._job_config(value)
 
@@ -104,7 +116,7 @@ def test_preserves_nested_command_agent_configuration_during_preparation() -> No
         "outputs": [{"path": "result.json"}],
         "atif": {"path": "trajectory.json"},
     }
-    harbor_agent = value["profiles"][2]["spec"]["harbor_agent"]
+    harbor_agent = value["execution"]["harbor_agent"]
     del harbor_agent["model_name"]
     harbor_agent["import_path"] = "harbor_hf_agents.command_agent.agent:CommandAgent"
     harbor_agent["override_setup_timeout_sec"] = 1800
@@ -125,7 +137,7 @@ def test_preserves_nested_command_agent_configuration_during_preparation() -> No
 
 def test_rejects_a_harness_locked_to_a_different_model() -> None:
     value = _run_lock()
-    value["profiles"][2]["spec"]["harbor_agent"]["model_name"] = "other/model"
+    value["execution"]["harbor_agent"]["model_name"] = "other/model"
 
     with pytest.raises(RuntimeError, match="does not match"):
         worker._job_config(value)
