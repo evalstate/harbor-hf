@@ -668,11 +668,13 @@ outcome names and worker-supplied replacement flags cannot make an invalid recei
 selectable. A zero, missing, negative, fractional, or non-finite required metric
 makes the attempt invalid for selection.
 
-An invalid attempt remains in the Bucket with its evidence and cost. If the lock
-permits another attempt, the reconciler waits for cleanup and schedules the bounded
-replacement. If the attempt limit, reservation, or run ceiling prevents
-another attempt, the service writes an exhausted-task record. It does not select
-the last invalid receipt.
+An invalid physical execution remains in the Bucket with its evidence and cost.
+The logical task stays unresolved until it has a receipt that passes the locked
+evidence policy. After cleanup, the reconciler starts the task again from its
+original prepared input. Infrastructure retries have no fixed attempt-count
+limit and do not consume another benchmark trial. Cancellation, pause, an
+admission failure or the run cost ceiling can stop new Jobs. A repeated
+deterministic failure pauses the affected work for repair.
 
 A run is complete only when every locked logical task has exactly one selected
 attempt and every selection passes the locked evidence policy. Exhausted tasks stay
@@ -683,48 +685,35 @@ exhaustion remains replaceable. Historical records remain byte-for-byte unchange
 Projection replay may label an old run `completed-invalid` when its historical
 selection does not pass the current read-only audit.
 
-## Cooperative pause and resume
+## Task result persistence and retry
 
-Pause and resume use the control API, reconciler, Jobs, and existing private
-Bucket. A pause request is durable and prevents new Job admission. An active Job
-parks its logical attempt at the next completed model-response or tool-action
-boundary. The worker does not checkpoint a partial model response or a live
-process. If interruption occurs during a provider response, recovery returns to
-the last committed pre-request or post-response boundary.
+The unit of durable progress is a finished benchmark task. A worker uploads the
+complete task result, receipt, logs, trajectory, usage, cost and provenance to
+the existing private Bucket before the control service selects it. The service
+reads the objects back and verifies their digests. Once selected, that task is
+complete and later Jobs do not run it again.
 
-Each checkpoint contains the task workspace changes, full agent conversation,
-tool results and pending actions, logs and trajectory data, used and remaining
-token, cost, elapsed-time and deadline budgets, and the exact benchmark, model,
-harness, worker and task revisions. The worker writes the checkpoint bytes and
-an immutable manifest to the existing private artifact Bucket. The manifest
-binds their checksums, checkpoint format, logical attempt, physical Job and
-worker generation.
+A physical Job that ends before it produces a valid task receipt leaves the task
+unresolved. After cleanup, the reconciler starts the same prepared task from the
+beginning in a new Job. It keeps every failed execution and its observed cost.
+The new Job does not restore conversation state, workspace state, a partial
+model response or a live process.
 
-The service marks an attempt `parked` only after it reads back and verifies the
-checkpoint bytes and manifest and writes a control record that points to that
-exact checkpoint. A failed checkpoint upload never creates a resumable state.
-The worker keeps running when that is safe or records an infrastructure failure.
-Park and resume actions use deterministic identities, so repeated requests adopt
-the same matching objects and reject conflicting bytes.
+Retry actions use deterministic identities. A repeated request adopts the same
+matching action and rejects conflicting bytes. Infrastructure retries have no
+fixed count. They continue while the run is active and admission remains within
+its approved cost and resource limits. Cancellation or pause stops new Jobs. A
+repeated deterministic shared failure pauses the affected fleet until a
+reviewed repair is available.
 
-Resume starts a new physical Job for the same logical task attempt. The Job
-rejects a missing, corrupt, conflicting or incompatible checkpoint before agent
-work starts. It restores the workspace and agent state and continues without
-repeating completed work or consuming another benchmark trial. All physical
-Jobs share one cumulative token, cost, elapsed-time and deadline budget for the
-logical attempt.
+A reviewed worker repair may run an unresolved task with a new worker. Control
+records retain every physical Job, worker and repair generation, usage and cost.
+Valid completed-task receipts remain selected, so recovery schedules only the
+unresolved task IDs.
 
-A reviewed worker repair may resume a parked attempt only when the new worker
-explicitly supports and validates the checkpoint format. Control records retain
-every physical Job, worker and repair generation, checkpoint handoff, usage and
-cost. Valid completed-task receipts remain selected, and recovery schedules only
-unresolved tasks. A repeated deterministic shared failure pauses the affected
-fleet.
-
-Final publication retains the full physical Job, worker, checkpoint, usage,
-cost and repair history behind each logical result. Whole-process and
-whole-container snapshots are not part of this design. The
-[task-attempt checkpoint and resume plan](2026-09-01-task-attempt-checkpoint-resume-plan.md)
+Final publication selects one valid receipt for every logical task and retains
+the complete physical Job, worker, usage, cost and repair history. The
+[task result persistence and retry plan](2026-09-01-task-result-retry-plan.md)
 defines implementation and verification.
 
 ## Safe publication and supersession
@@ -787,9 +776,9 @@ awaits its exit before verifier execution.
 Runtime stop enumerates the dedicated real UID, sends `SIGSTOP` until the
 process set is stable, sends `SIGKILL`, and verifies that no process remains.
 This covers `setsid` descendants and processes that fork during cleanup. Trial
-evidence returns through content-addressed worker uploads. A locked
-infrastructure-attempt limit bounds replacement Jobs, and valid selected
-attempts are never rerun.
+evidence returns through content-addressed worker uploads. An unresolved task
+can receive another infrastructure execution while admission remains authorized.
+Valid selected tasks are never rerun.
 
 The reconciler uses `AbortController` for graceful shutdown. Shutdown stops new
 admissions, lets an in-flight Bucket write reach a safe boundary, closes SSE

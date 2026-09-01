@@ -86,39 +86,36 @@ metrics, and result tables.
 ### Trial Job isolation
 
 The TypeScript control service launches one Hugging Face Job for each physical
-trial execution. A logical task attempt can span more than one physical Job when
-it parks and resumes from a verified application checkpoint. Every launch uses
-immutable intent, admission, dispatch, observation, receipt, and advancement
-records. A lost create response becomes adoption-only and cannot issue a second
-create request.
+trial execution. Every Job starts its assigned task from the original prepared
+input. Every launch uses immutable intent, admission, dispatch, observation,
+receipt, and advancement records. A lost create response becomes adoption-only
+and cannot issue a second create request.
 
 The Job receives a short-lived capability scoped to its run, launch action, and
 task. It never receives `HF_TOKEN` or a writable Bucket mount. When inference is
 required, root bootstrap starts a credential-holding loopback bridge, removes
 the inference credential from the benchmark process environment, and drops
-privileges before Harbor starts. Evidence and checkpoints return through
-content-addressed uploads and verified manifests.
+privileges before Harbor starts. Complete task evidence returns through
+content-addressed uploads and a verified manifest.
 
-### Task-attempt checkpoints
+### Task result persistence
 
-A checkpoint records application state only after a complete model response or
-tool action. It contains the workspace changes, agent conversation, tool state,
-logs, trajectory, usage, cumulative budgets, and exact run provenance needed to
-continue the same logical attempt. It does not preserve a partial provider
-response, process memory or a whole container.
+The existing private artifact Bucket stores each finished task result, receipt,
+logs, trajectory, usage, cost and provenance. The control service selects a task
+only after it reads back the objects and verifies the manifest. A selected task
+is durable progress and later Jobs do not run it again.
 
-The existing private artifact Bucket stores checkpoint bytes and immutable
-manifests. A durable park record points to a checkpoint only after checksum
-verification. A later physical Job restores that checkpoint and continues the
-same logical attempt under the same cumulative token, cost, elapsed-time and
-deadline limits. Missing, corrupt, conflicting or worker-incompatible
-checkpoints fail before agent work starts.
+A physical Job that does not produce a valid task receipt leaves the task
+unresolved. The next execution starts that task again from the same prepared
+input. Harbor-HF does not save or restore the agent conversation, workspace,
+partial provider response, process memory or container state.
 
-Checkpoint and resume operations are idempotent. Every physical Job and worker
-generation remains visible in the result provenance. A repaired worker can
-restore a checkpoint only when it explicitly supports that checkpoint format.
-The [task-attempt checkpoint and resume
-plan](2026-09-01-task-attempt-checkpoint-resume-plan.md) defines the staged
+Infrastructure executions have no fixed retry count. The reconciler can keep
+starting the unresolved task while the run remains active and each launch
+passes the existing admission and cost checks. Every failed physical Job and
+worker generation remains visible in result provenance. A repeated
+deterministic failure pauses affected work for repair. The [task result
+persistence and retry plan](2026-09-01-task-result-retry-plan.md) defines the
 implementation and remote checks.
 
 ### Planner
@@ -289,15 +286,14 @@ The stable hierarchy is:
 
 1. An experiment groups a requested matrix.
 2. A run represents one homogeneous matrix cell.
-3. A trial represents one task and logical attempt.
-4. An execution represents one physical Job invocation. A parked trial can have
-   more than one execution.
-5. A checkpoint identifies one verified application boundary used to hand a
-   logical attempt from one execution to another.
+3. A trial represents one task and logical benchmark attempt.
+4. An execution represents one physical Job invocation. An unresolved trial can
+   have more than one infrastructure execution.
 
-A resumed execution continues the same trial and does not consume another
-benchmark attempt. Replacement attempts remain separate trials and never
-replace previous records. Composite or manually selected results must be
+An infrastructure retry starts the prepared task again and stays under the same
+trial. It does not consume another benchmark attempt. Failed executions remain
+immutable records. Replacement benchmark attempts remain separate trials and
+never replace previous records. Composite or manually selected results must be
 labeled explicitly and must not appear as single-run results.
 
 ## Reproducibility Boundary
