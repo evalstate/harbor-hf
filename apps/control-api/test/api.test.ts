@@ -1554,6 +1554,15 @@ describe("control API", () => {
       ).statusCode,
     ).toBe(404);
     expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/api/v1/runs/${submission.run_id}/continuation-repair`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
       (await app.inject({ method: "GET", url: "/api/v1/profiles", headers }))
         .statusCode,
     ).toBe(403);
