@@ -421,6 +421,17 @@ harbor-hf run continue-historical <run-id> \
 
 The service verifies the original lock, every prepared trial, launch resources, model, revision, harness, provider, limits, and pricing before attaching the current deployment. Resume then admits only tasks without a selected receipt. Selected infrastructure outcomes are not retryable through this path. The Run ID, original lock, selected outcomes, evidence, spend, and ceiling do not change.
 
+If a defect is found in that attached worker, add one immutable repair attachment:
+
+```bash
+harbor-hf run repair-continuation <run-id> \
+  --reason "replace the defective continuation worker" \
+  --idempotency-key <stable-request-key> \
+  --yes
+```
+
+The repair may change only the digest-pinned worker image and worker source revision. New Jobs attest both the original continuation and its repair. Existing Jobs remain observable so their reservations and evidence can be settled.
+
 ## Repair infrastructure failures
 
 Terminal benchmark outcomes stay sealed. Only a task recorded as an eligible infrastructure failure can receive a bounded replacement:

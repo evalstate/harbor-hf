@@ -169,6 +169,38 @@ def run_continue_historical(
     )
 
 
+@run_app.command("repair-continuation")
+def run_repair_continuation(
+    run_id: Annotated[str, typer.Argument()],
+    reason: Annotated[str, typer.Option("--reason")],
+    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            help="Confirm the immutable continuation worker repair.",
+        ),
+    ] = False,
+) -> None:
+    """Attach the reviewed worker image and revision to a historical continuation."""
+    if not yes:
+        typer.confirm(
+            f"Attach the reviewed worker repair to historical run {run_id}?",
+            abort=True,
+        )
+    key = idempotency_key or str(uuid4())
+    if not idempotency_key:
+        typer.echo(json.dumps({"idempotency_key": key}), err=True)
+    _echo(
+        _request(
+            "POST",
+            f"/api/v1/runs/{run_id}/continuation-repair",
+            payload={"reason": reason, "confirmed": True},
+            idempotency_key=key,
+        )
+    )
+
+
 @run_app.command("submit")
 def run_submit(
     benchmark: Annotated[str, typer.Option("--benchmark")],

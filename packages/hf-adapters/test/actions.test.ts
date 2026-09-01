@@ -67,6 +67,11 @@ function expectedEnvironment(intent: ActionIntent): Record<string, string> {
     ...(typeof payload.worker_revision === "string"
       ? { HARBOR_HF_WORKER_REVISION: payload.worker_revision }
       : {}),
+    ...(typeof payload.run_continuation_repair_id === "string"
+      ? {
+          HARBOR_HF_RUN_CONTINUATION_REPAIR_ID: payload.run_continuation_repair_id,
+        }
+      : {}),
     ...(typeof payload.prepared_job_digest === "string"
       ? { HARBOR_HF_PREPARED_JOB_DIGEST: payload.prepared_job_digest }
       : {}),
@@ -163,6 +168,40 @@ describe("HuggingFaceActions", () => {
     const firstCall = fetchMock.mock.calls[0];
     expect(firstCall).toBeDefined();
     expect((firstCall?.[1] as RequestInit | undefined)?.method).toBeUndefined();
+  });
+
+  it("binds a continued historical Job to its worker repair", async () => {
+    const intent: ActionIntent = {
+      ...base,
+      record_id: "action-test-repair",
+      action_id: "action-test-repair",
+      payload: {
+        ...base.payload,
+        run_continuation_id: "continuation-test",
+        run_continuation_repair_id: "continuation-repair-test",
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([apiJob(intent)]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      taskImageMirrorRepository,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.execute(intent)).resolves.toMatchObject({
+      outcome: "adopted",
+      resource_id: "job-1",
+    });
   });
 
   it("rejects reuse of the control credential as a worker inference credential", () => {

@@ -6,12 +6,12 @@ import {
   deterministicId,
   schemas,
   sha256,
-  validateRunContinuation,
-  validateRunSubmission,
   validateControlRecord,
   validateLeaderboardSnapshot,
   validatePreparedJobSubmission,
   validateResultCatalog,
+  validateRunContinuation,
+  validateRunSubmission,
   validateWorkerEvidenceManifest,
   workerEvidenceObjectPath,
 } from "../src/index.js";
@@ -555,6 +555,13 @@ describe("canonical contracts", () => {
         run_id: "run-1",
       }),
     ).toBe("control/schema=v1/runs/run-1/continuation.json");
+    expect(
+      controlRecordPath({
+        kind: "run.continuation.repair",
+        record_id: "continuation-repair-1",
+        run_id: "run-1",
+      }),
+    ).toBe("control/schema=v1/runs/run-1/continuation-repair.json");
   });
 
   it("validates run submission boundaries", () => {

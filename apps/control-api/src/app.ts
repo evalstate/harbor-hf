@@ -53,6 +53,7 @@ import {
   profileSchema,
   publicationSchema,
   runContinuationAcceptedSchema,
+  runContinuationRepairAcceptedSchema,
   runListSchema,
   runViewSchema,
   sessionSchema,
@@ -1263,6 +1264,30 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     },
   );
 
+  app.post(
+    "/api/v1/runs/:run_id/continuation-repair",
+    {
+      schema: {
+        tags: ["runs"],
+        body: cleanSchema(schemas.runContinuation),
+        response: { 202: runContinuationRepairAcceptedSchema },
+      },
+    },
+    async (request, reply) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("run writes are disabled before cutover");
+      const { run_id } = request.params as { run_id: string };
+      const result = await runtime.service.repairHistoricalContinuation(
+        run_id,
+        request.body,
+        idempotencyKey(request),
+        domainActor(request),
+      );
+      reply.header("Location", result.status_url);
+      return reply.code(202).send(result);
+    },
+  );
+
   app.get(
     "/api/v1/runs/:run_id",
     {
@@ -1388,6 +1413,27 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         "the worker capability does not match this run continuation",
       );
     return continuation;
+  });
+
+  app.get("/api/v1/runs/:run_id/continuation-repair", async (request, reply) => {
+    const { run_id } = request.params as { run_id: string };
+    requireWorkerOperation(request, "run.read");
+    if (request.workerCapability?.run_id !== run_id)
+      throw new WorkerScopeError("the worker capability does not authorize this run");
+    const repair = await runtime.projection.runContinuationRepair(run_id);
+    if (!repair)
+      return reply.code(404).send({
+        error: {
+          code: "not_found",
+          message: "run continuation repair was not found",
+          request_id: request.id,
+        },
+      });
+    if (repair.run_lock_digest !== request.workerCapability.run_lock_digest)
+      throw new WorkerScopeError(
+        "the worker capability does not match this run continuation repair",
+      );
+    return repair;
   });
 
   app.post(

@@ -19,6 +19,7 @@ import type {
   PublicationReceipt,
   PublicationSupersession,
   RunContinuation,
+  RunContinuationRepair,
   RunLock,
   RunRequest,
   TaskCancellation,
@@ -42,6 +43,7 @@ import { verifyEvidenceReference, verifyWorkerEvidence } from "./evidence.js";
 import {
   assertRunContinuationCompatible,
   isCurrentRunLock,
+  resolvedRunExecution,
 } from "./execution-contract.js";
 import type { PromotedProfile } from "./profiles.js";
 import type { ImmutableObjectStore, ObjectEntry } from "./store.js";
@@ -89,6 +91,13 @@ interface RunRow {
 }
 
 interface RunContinuationRow {
+  run_id: string;
+  record_id: string;
+  created_at: string;
+  body: string;
+}
+
+interface RunContinuationRepairRow {
   run_id: string;
   record_id: string;
   created_at: string;
@@ -267,6 +276,7 @@ interface DatabaseSchema {
   objects: ObjectRow;
   runs: RunRow;
   run_continuations: RunContinuationRow;
+  run_continuation_repairs: RunContinuationRepairRow;
   actions: ActionRow;
   jobs: JobRow;
   dispatches: DispatchRow;
@@ -692,6 +702,14 @@ export class Projection {
       .addColumn("body", "text", (column) => column.notNull())
       .execute();
     await this.db.schema
+      .createTable("run_continuation_repairs")
+      .ifNotExists()
+      .addColumn("run_id", "text", (column) => column.primaryKey())
+      .addColumn("record_id", "text", (column) => column.notNull().unique())
+      .addColumn("created_at", "text", (column) => column.notNull())
+      .addColumn("body", "text", (column) => column.notNull())
+      .execute();
+    await this.db.schema
       .createTable("actions")
       .ifNotExists()
       .addColumn("action_id", "text", (column) => column.primaryKey())
@@ -938,6 +956,7 @@ export class Projection {
       "dispatches",
       "jobs",
       "actions",
+      "run_continuation_repairs",
       "run_continuations",
       "runs",
       "objects",
@@ -1175,6 +1194,9 @@ export class Projection {
       case "run.continuation":
         await this.applyRunContinuation(record);
         break;
+      case "run.continuation.repair":
+        await this.applyRunContinuationRepair(record);
+        break;
       case "action.intent":
         await this.applyActionIntent(record);
         break;
@@ -1289,6 +1311,20 @@ export class Projection {
   private async applyRunContinuation(record: RunContinuation): Promise<void> {
     await this.db
       .insertInto("run_continuations")
+      .values({
+        run_id: record.run_id,
+        record_id: record.record_id,
+        created_at: record.created_at,
+        body: body(record),
+      })
+      .execute();
+  }
+
+  private async applyRunContinuationRepair(
+    record: RunContinuationRepair,
+  ): Promise<void> {
+    await this.db
+      .insertInto("run_continuation_repairs")
       .values({
         run_id: record.run_id,
         record_id: record.record_id,
@@ -1895,6 +1931,39 @@ export class Projection {
       }
     }
 
+    const repairRows = await this.db
+      .selectFrom("run_continuation_repairs")
+      .select(["run_id", "record_id", "body"])
+      .execute();
+    const continuations = new Map(
+      continuationRows.map((row) => [
+        row.run_id,
+        JSON.parse(row.body) as RunContinuation,
+      ]),
+    );
+    for (const row of repairRows) {
+      const lockBody = continuationLocks.get(row.run_id);
+      const continuation = continuations.get(row.run_id);
+      const repair = JSON.parse(row.body) as RunContinuationRepair;
+      if (!lockBody || !continuation)
+        throw new ProjectionIntegrityError(
+          `run continuation repair has no continuation: ${row.record_id}`,
+        );
+      if (repair.actor.role !== "operator")
+        throw new ProjectionIntegrityError(
+          `run continuation repair binding is invalid: ${row.record_id}`,
+        );
+      try {
+        resolvedRunExecution(JSON.parse(lockBody) as RunLock, continuation, repair);
+      } catch (error) {
+        throw new ProjectionIntegrityError(
+          `run continuation repair is incompatible: ${row.record_id}: ${
+            error instanceof Error ? error.message : "validation failed"
+          }`,
+        );
+      }
+    }
+
     const profileRows = await this.db
       .selectFrom("profiles")
       .select(["profile_id", "profile_kind", "spec_body"])
@@ -2366,6 +2435,15 @@ export class Projection {
       .where("run_id", "=", runId)
       .executeTakeFirst();
     return row ? (JSON.parse(row.body) as RunContinuation) : null;
+  }
+
+  async runContinuationRepair(runId: string): Promise<RunContinuationRepair | null> {
+    const row = await this.db
+      .selectFrom("run_continuation_repairs")
+      .select("body")
+      .where("run_id", "=", runId)
+      .executeTakeFirst();
+    return row ? (JSON.parse(row.body) as RunContinuationRepair) : null;
   }
 
   async budget(recordId: string): Promise<Selectable<BudgetRow> | null> {

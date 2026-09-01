@@ -11,6 +11,7 @@ import type {
   ResolvedModelProfile,
   ResolvedProfile,
   RunContinuation,
+  RunContinuationRepair,
   RunLock,
 } from "@harbor-hf/contracts";
 import { canonicalJson, sha256 } from "@harbor-hf/contracts";
@@ -448,14 +449,55 @@ export function assertRunContinuationCompatible(
   assertContinuationCompatibility(lock, execution);
 }
 
+export function assertRunContinuationRepairCandidate(
+  continuation: RunContinuation,
+  candidate: ResolvedExecutionContract,
+): void {
+  const expected = clone(continuation.execution);
+  const normalized = clone(candidate);
+  if (
+    normalized.source_profiles.deployment.name !==
+    expected.source_profiles.deployment.name
+  )
+    throw new ProfileResolutionError(
+      "continuation repair changes the deployment profile name",
+    );
+  normalized.source_profiles.deployment.profile_id =
+    expected.source_profiles.deployment.profile_id;
+  normalized.deployment.job_image = expected.deployment.job_image;
+  if (expected.deployment.worker_revision)
+    normalized.deployment.worker_revision = expected.deployment.worker_revision;
+  else delete normalized.deployment.worker_revision;
+  if (canonicalJson(normalized) !== canonicalJson(expected))
+    throw new ProfileResolutionError(
+      "continuation repair changes fields other than the worker image and revision",
+    );
+  if (
+    candidate.deployment.job_image === expected.deployment.job_image &&
+    candidate.deployment.worker_revision === expected.deployment.worker_revision
+  )
+    throw new ProfileResolutionError("continuation repair does not change the worker");
+}
+
+function repairedExecution(
+  continuation: RunContinuation,
+  repair: RunContinuationRepair,
+): ResolvedExecutionContract {
+  const execution = clone(continuation.execution);
+  execution.deployment.job_image = repair.job_image;
+  execution.deployment.worker_revision = repair.worker_revision;
+  return execution;
+}
+
 export function resolvedRunExecution(
   lock: RunLock,
   continuation: RunContinuation | null,
+  repair: RunContinuationRepair | null = null,
 ): ResolvedExecutionContract {
   if (isCurrentRunLock(lock)) {
-    if (continuation)
+    if (continuation || repair)
       throw new ProfileResolutionError(
-        "current run lock has an unexpected continuation attachment",
+        "current run lock has an unexpected continuation attachment or repair",
       );
     return lock.execution;
   }
@@ -471,5 +513,15 @@ export function resolvedRunExecution(
       "run continuation does not match the historical lock",
     );
   assertContinuationCompatibility(lock, continuation.execution);
-  return continuation.execution;
+  if (!repair) return continuation.execution;
+  if (
+    repair.run_id !== lock.run_id ||
+    repair.run_lock_digest !== continuation.run_lock_digest ||
+    repair.run_continuation_id !== continuation.record_id ||
+    repair.run_continuation_digest !== sha256(canonicalJson(continuation))
+  )
+    throw new ProfileResolutionError(
+      "run continuation repair does not match the immutable continuation",
+    );
+  return repairedExecution(continuation, repair);
 }

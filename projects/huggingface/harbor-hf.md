@@ -70,6 +70,7 @@ Admission-integrity repair amendment approved at: 2026-08-26T12:06:30Z
 GLM-5.3-Flash full-run amendment approved at: 2026-09-01T11:12:25Z
 GLM-5.3-Flash streaming-replacement amendment approved at: 2026-09-01T14:07:05Z
 Historical-Run continuation amendment approved at: 2026-09-01T18:11:42Z
+Historical-Run continuation worker-repair amendment approved at: 2026-09-01T22:13:57Z
 
 ### Scope
 
@@ -142,6 +143,7 @@ Historical-Run continuation amendment approved at: 2026-09-01T18:11:42Z
 - Run one final Terminal-Bench 2.1 full evaluation with all 89 tasks and one trial per task, using the existing promoted GLM-5.3-Flash Together deployment and Pi 0.84.2 with reasoning off.
 - Cancel only the GLM-5.3-Flash plus Pi full Run invalidated by the pre-streaming inference bridge after its admitted Jobs reach evidence boundaries, then launch exactly one clean 89-task replacement using the fixed streaming worker.
 - Add one append-only execution-continuation attachment to each of the seven approved historical gpt-oss 89-task Runs so the current TypeScript control service can finish only their unresolved tasks without changing Run IDs or rerunning selected outcomes.
+- Add one immutable worker-repair attachment to each of those seven continuation records. Bind each repair to its original continuation and permit only the digest-pinned worker image and source revision to change. Preserve Run IDs, ceilings, prepared inputs, harness, model, provider and inference settings, evidence, and selected outcomes. Prove the repair with one unresolved OpenHands task before admitting the remaining work.
 
 ### Limits
 

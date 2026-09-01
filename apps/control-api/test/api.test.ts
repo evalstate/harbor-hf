@@ -909,6 +909,19 @@ describe("control API", () => {
     expect(response.json()).toMatchObject({
       error: { message: "current run locks do not need continuation" },
     });
+    const repairResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/continuation-repair`,
+      headers: { "idempotency-key": "current-continuation-repair" },
+      payload: {
+        reason: "not a historical run",
+        confirmed: true,
+      },
+    });
+    expect(repairResponse.statusCode).toBe(422);
+    expect(repairResponse.json()).toMatchObject({
+      error: { message: "current run locks do not need continuation repair" },
+    });
     await app.close();
   });
 

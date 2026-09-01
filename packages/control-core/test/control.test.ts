@@ -528,6 +528,58 @@ describe("control service", () => {
       reason: "finish unresolved tasks",
     });
     if (!attached) throw new Error("run continuation is missing");
+    const repairedProfiles = control.profiles.map((item) => {
+      if (item.profile.profile_kind !== "deployment") return item;
+      const spec = {
+        ...item.profile.spec,
+        job_image:
+          "example.invalid/repaired@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        worker_revision: "repaired-worker",
+      };
+      const profile: ProfileObject = {
+        ...item.profile,
+        record_id: deterministicId(
+          "profile",
+          item.profile.profile_kind,
+          item.profile.name,
+          sha256(canonicalJson(spec)),
+        ),
+        spec,
+      };
+      return { profile, profile_id: sha256(canonicalJson(profile)) };
+    });
+    const repairService = new ControlService(
+      "test",
+      control.store,
+      control.projection,
+      repairedProfiles,
+    );
+    await repairService.initialize(repairedProfiles);
+    const repairResult = await repairService.repairHistoricalContinuation(
+      legacy.run_id,
+      { reason: "replace the broken historical worker", confirmed: true },
+      "legacy-continuation-repair",
+      operator,
+    );
+    expect(repairResult.adopted).toBe(false);
+    const repair = await control.projection.runContinuationRepair(legacy.run_id);
+    expect(repair).toMatchObject({
+      record_id: repairResult.continuation_repair_id,
+      run_continuation_id: attached.record_id,
+      run_continuation_digest: sha256(canonicalJson(attached)),
+      job_image:
+        "example.invalid/repaired@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      worker_revision: "repaired-worker",
+    });
+    if (!repair) throw new Error("run continuation repair is missing");
+    await expect(
+      repairService.repairHistoricalContinuation(
+        legacy.run_id,
+        { reason: "replace the broken historical worker", confirmed: true },
+        "legacy-continuation-repair",
+        operator,
+      ),
+    ).resolves.toMatchObject({ adopted: true });
     await control.service.exhaustTask(
       unselectedAttempt,
       "historical attempt has no valid selection",
@@ -538,6 +590,25 @@ describe("control service", () => {
     ).toMatchObject({
       terminal_outcome: "invalid",
       selected_attempt_id: null,
+    });
+    const failedUnpause = control.service.actionIntent(
+      legacy.run_id,
+      "run.resume",
+      "run",
+      1,
+      { reason: "historical failed state was not paused" },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:02:00.000Z",
+    );
+    await control.service.append(failedUnpause);
+    const failedUnpauseReceipt = await control.service.receipt(failedUnpause, {
+      outcome: "completed",
+      observed_state: "running",
+    });
+    await control.service.markAdvanced(failedUnpause, failedUnpauseReceipt);
+    expect(await control.projection.run(legacy.run_id)).toMatchObject({
+      paused: false,
+      status: "failed",
     });
     expect(() =>
       assertRunContinuationCompatible(legacy, {
@@ -616,9 +687,10 @@ describe("control service", () => {
     const resumedLaunch = resumedLaunches[0];
     expect(resumedLaunch?.payload).toMatchObject({
       job_image:
-        "example.invalid/worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      worker_revision: "abcdef0",
+        "example.invalid/repaired@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      worker_revision: "repaired-worker",
       run_continuation_id: attached.record_id,
+      run_continuation_repair_id: repair.record_id,
     });
     expect(attached.execution.harness.harbor_agent).toEqual({
       import_path: "example.agent:Agent",
@@ -663,6 +735,11 @@ describe("control service", () => {
     });
     await expect(restarted.runExecution(legacy)).resolves.toMatchObject({
       contract_version: "v1",
+      deployment: {
+        job_image:
+          "example.invalid/repaired@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        worker_revision: "repaired-worker",
+      },
     });
     await rebuilt.close();
 

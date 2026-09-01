@@ -186,6 +186,14 @@ binds a current worker and execution contract to the original lock digest. It
 does not rewrite the lock, reset cost, change the ceiling, reopen selected
 tasks, or retry a selected infrastructure outcome.
 
+If that continuation worker is defective, the Run may receive one append-only
+`run.continuation.repair` record. The repair is bound to the original lock and
+continuation digests and may change only the digest-pinned worker image and
+worker source revision. Every later Job launch carries the repair record ID.
+Jobs created before the repair remain observable for reservation and evidence
+settlement. Run identity, prepared inputs, model and harness settings, provider
+settings, selected outcomes, evidence, spend, and ceiling remain unchanged.
+
 A new Harbor-supported benchmark or compatible model requires configuration and
 immutable data only. A new harness implementation belongs in a Harbor agent
 plugin behind the common agent interface. Missing behavior is added as a general
@@ -341,6 +349,8 @@ GET  /api/v1/runs/{run_id}
 GET  /api/v1/runs/{run_id}/lock
 GET  /api/v1/runs/{run_id}/continuation
 POST /api/v1/runs/{run_id}/continuation
+GET  /api/v1/runs/{run_id}/continuation-repair
+POST /api/v1/runs/{run_id}/continuation-repair
 GET  /api/v1/runs/{run_id}/prepared-job
 GET  /api/v1/runs/{run_id}/prepared-job/trials/{task_id}
 GET  /api/v1/runs/{run_id}/tasks

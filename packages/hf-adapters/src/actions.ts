@@ -133,6 +133,12 @@ function jobEnvironment(
     ...(typeof intent.payload.worker_revision === "string"
       ? { HARBOR_HF_WORKER_REVISION: intent.payload.worker_revision }
       : {}),
+    ...(typeof intent.payload.run_continuation_repair_id === "string"
+      ? {
+          HARBOR_HF_RUN_CONTINUATION_REPAIR_ID:
+            intent.payload.run_continuation_repair_id,
+        }
+      : {}),
     ...(typeof intent.payload.prepared_job_digest === "string"
       ? { HARBOR_HF_PREPARED_JOB_DIGEST: intent.payload.prepared_job_digest }
       : {}),
