@@ -7,6 +7,16 @@ tags: [control, checkpoints, recovery, workers]
 
 # Add task-attempt checkpoint and resume
 
+## In short
+
+An infrastructure failure can currently force an unfinished benchmark task to
+start over. The planned change will save the task after each complete model
+response or tool action, so another Job can continue from that point.
+
+The resumed Job will keep the same task attempt and its original token, cost,
+time and deadline limits. Harbor-HF will resume only from checkpoint files that
+were uploaded to the existing private Bucket and verified.
+
 **Status.** Approved implementation plan. The feature is not implemented yet.
 This document records the selected design and its verification gates. The
 current work is documentation-only.
@@ -38,14 +48,14 @@ contracts. Preserve enough immutable evidence to audit the complete result.
 Create an application checkpoint after each completed model response or tool
 action. Save all state needed to continue the attempt:
 
-- task workspace changes;
-- the full agent conversation;
-- completed tool results and pending actions;
-- logs and trajectory data;
-- used and remaining tokens;
-- observed cost;
-- elapsed time and remaining deadline;
-- exact benchmark, model, harness, worker and task revisions.
+- task workspace changes
+- the full agent conversation
+- completed tool results and pending actions
+- logs and trajectory data
+- used and remaining tokens
+- observed cost
+- elapsed time and remaining deadline
+- exact benchmark, model, harness, worker and task revisions
 
 A checkpoint must describe one complete application boundary. Do not save a
 partial model response, a request that is still streaming or a live process. If
@@ -61,11 +71,11 @@ selection unit for a completed logical task.
 Store checkpoint bytes in the existing private artifact Bucket. Store an
 immutable manifest that binds:
 
-- the logical attempt and physical Job;
-- the checkpoint format version;
-- every checkpoint object and checksum;
-- the complete provenance and cumulative budget state;
-- the worker generation that wrote the checkpoint.
+- the logical attempt and physical Job
+- the checkpoint format version
+- every checkpoint object and checksum
+- the complete provenance and cumulative budget state
+- the worker generation that wrote the checkpoint
 
 Mark an attempt `parked` only after the worker uploads the checkpoint and
 manifest, reads them back, verifies every checksum, and the control service
@@ -82,12 +92,12 @@ manifest or object.
 A resume creates a new physical Job for the same logical task attempt. Before
 agent work starts, the Job must:
 
-1. fetch the exact immutable checkpoint manifest;
-2. verify each object and checksum;
-3. verify that the worker supports the checkpoint format;
-4. verify the task, benchmark, model, harness and worker provenance;
-5. restore the workspace, conversation, tool state, logs and trajectory;
-6. restore the cumulative budget and deadline state.
+1. Fetch the exact immutable checkpoint manifest.
+2. Verify each object and checksum.
+3. Verify that the worker supports the checkpoint format.
+4. Verify the task, benchmark, model, harness and worker provenance.
+5. Restore the workspace, conversation, tool state, logs and trajectory.
+6. Restore the cumulative budget and deadline state.
 
 The resumed Job continues after the saved boundary. It does not repeat completed
 agent work. It does not consume another benchmark trial. It does not reset any
@@ -104,12 +114,12 @@ A reviewed worker repair may resume a parked attempt only when the new worker
 explicitly supports and validates the checkpoint format. The control record must
 retain:
 
-- every physical Job;
-- every worker generation;
-- every repair generation;
-- the exact checkpoint used for each handoff;
-- cumulative token use, cost and elapsed time;
-- the outcome and evidence for each physical execution.
+- every physical Job
+- every worker generation
+- every repair generation
+- the exact checkpoint used for each handoff
+- cumulative token use, cost and elapsed time
+- the outcome and evidence for each physical execution
 
 Keep valid completed-task receipts. After a repair, schedule only unresolved
 tasks. If the same deterministic shared failure repeats, pause the affected
@@ -129,7 +139,7 @@ task, model, harness, benchmark and worker chain.
 
 ## Implementation plan
 
-### 1. Add portable checkpoint contracts
+### Portable checkpoint contracts
 
 Update `packages/contracts` with versioned checkpoint manifest, park, resume and
 worker-compatibility records. Update generated JSON Schema, TypeScript types and
@@ -141,7 +151,7 @@ worker and repair generations, provenance, checksums and cumulative budgets.
 They must reject unknown required fields, invalid digests and conflicting
 identities.
 
-### 2. Add control-service state transitions
+### Control-service state transitions
 
 Update `packages/control-core` so a running logical attempt can become parked
 only after a verified checkpoint record exists. Add idempotent park and resume
@@ -156,7 +166,7 @@ Update `apps/control-api` with the matching protected control routes and safe
 read models. Keep the TypeScript service as the only shared control authority.
 Do not add a Python reconciler or a direct browser-to-Bucket path.
 
-### 3. Add worker checkpoint and restore support
+### Worker checkpoint and restore support
 
 Update the reviewed trial worker in `packages/harbor-hf-agents` so it can export
 and restore application state at completed model-response and tool-action
@@ -173,7 +183,7 @@ It must reconstruct the same prepared Harbor trial and continue from the saved
 agent boundary. Do not use process-memory, virtual-machine or whole-container
 snapshots.
 
-### 4. Preserve one cumulative budget
+### Cumulative budget
 
 Carry token use, provider cost, elapsed time and the absolute deadline through
 every checkpoint and resume. Admission must use the cumulative values before it
@@ -183,7 +193,7 @@ new physical Job starts.
 All physical Job costs remain observed costs for the run. Reservations remain
 temporary exposure and are reconciled through the existing budget rules.
 
-### 5. Keep complete evidence
+### Complete evidence
 
 Extend private evidence and normalized internal records with physical Job,
 worker, repair, checkpoint and handoff history. Keep existing completed task
@@ -194,29 +204,29 @@ Do not publish private checkpoint contents, full conversations, task workspaces
 or operator-specific infrastructure. Public result rows may include only the
 approved normalized provenance fields.
 
-### 6. Verify local failure cases
+### Local failure checks
 
 Add state-machine, contract and worker tests for:
 
-- a checkpoint after several completed agent steps;
-- interruption during checkpoint upload;
-- missing or corrupt checkpoint bytes;
-- duplicate park and resume requests;
-- conflicting immutable manifests;
-- unsupported worker checkpoint formats;
-- a repaired worker handoff;
-- interruption during a provider response;
-- cumulative token, cost, elapsed-time and deadline continuity;
-- preserved completed task receipts;
-- scheduling only unresolved tasks;
-- a repeated shared defect that pauses the affected fleet;
-- final publication with all physical provenance.
+- a checkpoint after several completed agent steps
+- interruption during checkpoint upload
+- missing or corrupt checkpoint bytes
+- duplicate park and resume requests
+- conflicting immutable manifests
+- unsupported worker checkpoint formats
+- a repaired worker handoff
+- interruption during a provider response
+- cumulative token, cost, elapsed-time and deadline continuity
+- preserved completed task receipts
+- scheduling only unresolved tasks
+- a repeated shared defect that pauses the affected fleet
+- final publication with all physical provenance
 
 Inject process exits at every external action boundary. Replay Bucket records in
 different orders and with duplicates. The selected result, next action and
 budget state must remain the same.
 
-### 7. Run a real pause and resume canary
+### Remote pause and resume canary
 
 Use the existing control Space and private artifact Bucket. Start one bounded
 remote task and let it complete several agent steps. Request parking, verify the
