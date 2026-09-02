@@ -18,12 +18,13 @@ default_branch: main
 
 ## Current authorization
 
-Status: completed
+Status: approved
 Approved at: 2026-08-17T06:48:55Z
 Amended at: 2026-09-02
 Direct-inference documentation amendment approved at: 2026-09-02
 Harbor-first implementation amendment approved at: 2026-09-02T12:17:25Z
 Harbor-first implementation amendment completed at: 2026-09-02T13:09:16Z
+Harbor-first commit-and-push amendment approved at: 2026-09-02T13:20:28Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -92,6 +93,12 @@ Mutation-tooling retirement amendment approved: 2026-08-26
 
 ### Scope
 
+- Commit the completed and locally verified Harbor-first refactor, including
+  its source, tests, profiles, generated artifacts, documentation, and
+  instruction updates, then push the current `feat/agent-workbench` branch to
+  its tracked `origin` branch. Do not deploy, publish an image or package, run
+  inference, use credentials beyond Git transport, merge, or mutate hosted
+  runtime resources.
 - Complete the already-started Harbor-first code refactor,
   remove the remaining active root Python provider proxy and its scoped routes,
   placeholder credential, request enforcement, isolation evidence, and cleanup,
@@ -290,6 +297,10 @@ authorization effect.
 
 ### 2026-09-02
 
+- Approved at 2026-09-02T13:20:28Z: commit the completed Harbor-first refactor
+  and push only the current `feat/agent-workbench` branch to its tracked
+  `origin` branch. No deployment, image or package publication, inference,
+  merge, paid work, or hosted runtime mutation is authorized.
 - Approved at 2026-09-02T12:17:25Z: complete the local Harbor-first implementation,
   including removal of the remaining active root Python custom provider proxy,
   integration-test repairs, generated-file refreshes, and local validation only.
