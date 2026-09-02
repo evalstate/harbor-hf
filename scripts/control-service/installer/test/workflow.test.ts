@@ -1233,6 +1233,118 @@ describe("installer workflows", () => {
     });
   });
 
+  it.each(["enabled", "disabled"] as const)(
+    "disables an exact recorded %s old-revision installation to the new target",
+    async (writeMode) => {
+      const setupResult = await setup(OLD_REVISION, {
+        HARBOR_HF_WRITE_MODE: writeMode,
+      });
+      const recorded = setupResult.planned.plan.observed_preconditions.space;
+      expect(recorded?.variables.HARBOR_HF_SOURCE_REVISION).toBe(OLD_REVISION);
+      expect(recorded?.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST).not.toBe(
+        setupResult.planned.plan.bundle.manifest_digest,
+      );
+      expect(setupResult.planned.plan.expected_variables).toMatchObject({
+        HARBOR_HF_SOURCE_REVISION: REVISION,
+        HARBOR_HF_BUNDLE_MANIFEST_DIGEST:
+          setupResult.planned.plan.bundle.manifest_digest,
+        HARBOR_HF_WRITE_MODE: "disabled",
+      });
+      setupResult.hf.calls.length = 0;
+
+      await expect(
+        disableInstall(
+          {
+            planPath: setupResult.planPath,
+          },
+          setupResult.dependencies,
+        ),
+      ).resolves.toEqual({
+        production_ready: false,
+        space_url: ORIGIN,
+        write_mode: "disabled",
+        runtime: "paused",
+        authenticated_system: "not_required",
+      });
+      expect(setupResult.hf.state.space?.variables).toEqual(
+        setupResult.planned.plan.expected_variables,
+      );
+      expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+      expect(
+        setupResult.hf.calls.filter((call) => ["pause", "setVariables"].includes(call)),
+      ).toEqual(["pause", "setVariables", "pause"]);
+    },
+  );
+
+  it.each([
+    [
+      "provider source SHA",
+      (state: RemoteState) => {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.sha = "d".repeat(40);
+      },
+    ],
+    [
+      "runtime stage",
+      (state: RemoteState) => {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.runtimeStage = "PAUSED";
+      },
+    ],
+    [
+      "installed source revision",
+      (state: RemoteState) => {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.variables.HARBOR_HF_SOURCE_REVISION = REVISION;
+      },
+    ],
+    [
+      "installed manifest digest",
+      (state: RemoteState) => {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST = `sha256:${"e".repeat(64)}`;
+      },
+    ],
+    [
+      "installer ownership",
+      (state: RemoteState) => {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.variables.HARBOR_HF_BOOTSTRAP_OPERATOR_SUBJECTS =
+          "different-subject";
+      },
+    ],
+    [
+      "secret names",
+      (state: RemoteState) => {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.secretNames = ["HF_TOKEN"];
+      },
+    ],
+    [
+      "Bucket privacy",
+      (state: RemoteState) => {
+        if (!state.bucket) throw new Error("test Bucket is missing");
+        state.bucket.private = false;
+      },
+    ],
+  ])("rejects recorded install disable after %s drift", async (_name, mutate) => {
+    const setupResult = await setup(OLD_REVISION, {
+      HARBOR_HF_WRITE_MODE: "enabled",
+    });
+    mutate(setupResult.hf.state);
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      disableInstall(
+        {
+          planPath: setupResult.planPath,
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("remote preconditions drifted after planning");
+    expect(setupResult.hf.calls).toEqual(["observe"]);
+  });
+
   it("persists Bucket proof before returning the bootstrap result", async () => {
     const setupResult = await setup();
     let persisted: Awaited<ReturnType<typeof bootstrap>>["receipt"] | undefined;

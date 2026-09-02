@@ -1283,6 +1283,49 @@ function assertInstalledActivationState(
   return state.space;
 }
 
+function assertRecordedInstalledDisableState(
+  plan: InstallPlan,
+  state: RemoteState,
+  writeMode: WriteMode,
+): SpaceState {
+  assertPreconditionsEqual(plan.observed_preconditions, state);
+  const space = state.space;
+  if (!space || !state.bucket || observedPhase(space) !== "installed") {
+    throw new Error("disable preconditions are not an installed target");
+  }
+  const sourceRevision = space.variables.HARBOR_HF_SOURCE_REVISION;
+  const manifestDigest = space.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST;
+  if (!sourceRevision || !manifestDigest) {
+    throw new Error("disable preconditions have an invalid install binding");
+  }
+  const variables = expectedVariables(
+    plan.targets.namespace,
+    plan.targets.bucket_id,
+    space.origin,
+    plan.principal.subject,
+    sourceRevision,
+    {
+      installId: plan.install_id,
+      manifestDigest,
+      phase: "installed",
+    },
+    workbenchVariables(plan.expected_variables),
+  );
+  assertRemoteSafe(
+    state,
+    {
+      spaceId: plan.targets.space_id,
+      bucketId: plan.targets.bucket_id,
+      variables: {
+        ...variables,
+        HARBOR_HF_WRITE_MODE: writeMode,
+      },
+    },
+    { requireRunning: false, requireAllSecrets: true },
+  );
+  return space;
+}
+
 async function forceDisabledAndPaused(
   plan: InstallPlan,
   dependencies: InstallerDependencies,
@@ -1441,7 +1484,12 @@ export async function disableInstall(
   );
   if (!observed.space) throw new Error("disable Space is missing");
   const currentMode = writeModeOf(observed.space);
-  const currentSpace = assertInstalledActivationState(plan, observed, currentMode);
+  let currentSpace: SpaceState;
+  try {
+    currentSpace = assertInstalledActivationState(plan, observed, currentMode);
+  } catch {
+    currentSpace = assertRecordedInstalledDisableState(plan, observed, currentMode);
+  }
   const tempDirectory = await mkdtemp(resolve(tmpdir(), "harbor-hf-disable-"));
   try {
     const disabledFile = await writePrivateEnvironmentFile(
