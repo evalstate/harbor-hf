@@ -72,6 +72,12 @@ function expectedEnvironment(intent: ActionIntent): Record<string, string> {
           HARBOR_HF_RUN_CONTINUATION_REPAIR_ID: payload.run_continuation_repair_id,
         }
       : {}),
+    ...(typeof payload.run_continuation_repair_successor_id === "string"
+      ? {
+          HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID:
+            payload.run_continuation_repair_successor_id,
+        }
+      : {}),
     ...(typeof payload.prepared_job_digest === "string"
       ? { HARBOR_HF_PREPARED_JOB_DIGEST: payload.prepared_job_digest }
       : {}),
@@ -179,6 +185,7 @@ describe("HuggingFaceActions", () => {
         ...base.payload,
         run_continuation_id: "continuation-test",
         run_continuation_repair_id: "continuation-repair-test",
+        run_continuation_repair_successor_id: "continuation-repair-successor-test",
       },
     };
     vi.stubGlobal(

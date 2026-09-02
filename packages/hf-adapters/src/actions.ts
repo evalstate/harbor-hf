@@ -139,6 +139,12 @@ function jobEnvironment(
             intent.payload.run_continuation_repair_id,
         }
       : {}),
+    ...(typeof intent.payload.run_continuation_repair_successor_id === "string"
+      ? {
+          HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID:
+            intent.payload.run_continuation_repair_successor_id,
+        }
+      : {}),
     ...(typeof intent.payload.prepared_job_digest === "string"
       ? { HARBOR_HF_PREPARED_JOB_DIGEST: intent.payload.prepared_job_digest }
       : {}),

@@ -562,6 +562,13 @@ describe("canonical contracts", () => {
         run_id: "run-1",
       }),
     ).toBe("control/schema=v1/runs/run-1/continuation-repair.json");
+    expect(
+      controlRecordPath({
+        kind: "run.continuation.repair.successor",
+        record_id: "continuation-repair-successor-1",
+        run_id: "run-1",
+      }),
+    ).toBe("control/schema=v1/runs/run-1/continuation-repair-successor.json");
   });
 
   it("validates run submission boundaries", () => {

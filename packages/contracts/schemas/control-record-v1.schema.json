@@ -28,6 +28,9 @@
       "$ref": "#/$defs/RunContinuationRepair"
     },
     {
+      "$ref": "#/$defs/RunContinuationRepairSuccessor"
+    },
+    {
       "$ref": "#/$defs/PreparedTrial"
     },
     {
@@ -692,6 +695,91 @@
               "$ref": "#/$defs/Id"
             },
             "run_continuation_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "idempotency_key_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "idempotency_payload_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "job_image": {
+              "type": "string",
+              "pattern": "^.+@sha256:[0-9a-f]{64}$",
+              "maxLength": 1024
+            },
+            "worker_revision": {
+              "type": "string",
+              "minLength": 7,
+              "maxLength": 160
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          }
+        }
+      ]
+    },
+    "RunContinuationRepairSuccessor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "kind",
+            "record_id",
+            "created_at",
+            "actor",
+            "run_id",
+            "run_lock_digest",
+            "run_continuation_id",
+            "run_continuation_digest",
+            "run_continuation_repair_id",
+            "run_continuation_repair_digest",
+            "idempotency_key_digest",
+            "idempotency_payload_digest",
+            "job_image",
+            "worker_revision",
+            "reason"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "v1"
+            },
+            "kind": {
+              "const": "run.continuation.repair.successor"
+            },
+            "record_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            },
+            "run_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "run_lock_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "run_continuation_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "run_continuation_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "run_continuation_repair_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "run_continuation_repair_digest": {
               "$ref": "#/$defs/Digest"
             },
             "idempotency_key_digest": {
@@ -2510,6 +2598,9 @@
           "$ref": "#/$defs/Id"
         },
         "run_continuation_repair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "run_continuation_repair_successor_id": {
           "$ref": "#/$defs/Id"
         },
         "worker_role": {

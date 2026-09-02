@@ -232,6 +232,18 @@ export const runContinuationRepairAcceptedSchema = {
   },
 } as const;
 
+export const runContinuationRepairSuccessorAcceptedSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["run_id", "continuation_repair_successor_id", "status_url", "adopted"],
+  properties: {
+    run_id: { type: "string" },
+    continuation_repair_successor_id: { type: "string" },
+    status_url: { type: "string" },
+    adopted: { type: "boolean" },
+  },
+} as const;
+
 export const evidenceUploadSchema = {
   type: "object",
   additionalProperties: false,

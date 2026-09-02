@@ -432,6 +432,17 @@ harbor-hf run repair-continuation <run-id> \
 
 The repair may change only the digest-pinned worker image and worker source revision. New Jobs attest both the original continuation and its repair. Existing Jobs remain observable so their reservations and evidence can be settled.
 
+If that repaired worker is defective, add its one allowed immutable successor:
+
+```bash
+harbor-hf run repair-continuation-successor <run-id> \
+  --reason "replace the defective repaired worker" \
+  --idempotency-key <stable-request-key> \
+  --yes
+```
+
+The successor also changes only the worker image and revision. It binds to both prior attachments, and every later Job attests the complete chain.
+
 ## Repair infrastructure failures
 
 Terminal benchmark outcomes stay sealed. Only a task recorded as an eligible infrastructure failure can receive a bounded replacement:

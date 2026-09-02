@@ -580,6 +580,63 @@ describe("control service", () => {
         operator,
       ),
     ).resolves.toMatchObject({ adopted: true });
+    const successorProfiles = repairedProfiles.map((item) => {
+      if (item.profile.profile_kind !== "deployment") return item;
+      const spec = {
+        ...item.profile.spec,
+        job_image:
+          "example.invalid/successor@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        worker_revision: "successor-worker",
+      };
+      const profile: ProfileObject = {
+        ...item.profile,
+        record_id: deterministicId(
+          "profile",
+          item.profile.profile_kind,
+          item.profile.name,
+          sha256(canonicalJson(spec)),
+        ),
+        spec,
+      };
+      return { profile, profile_id: sha256(canonicalJson(profile)) };
+    });
+    const successorService = new ControlService(
+      "test",
+      control.store,
+      control.projection,
+      successorProfiles,
+    );
+    await successorService.initialize(successorProfiles);
+    const successorResult =
+      await successorService.repairHistoricalContinuationSuccessor(
+        legacy.run_id,
+        { reason: "replace the digest-defective repaired worker", confirmed: true },
+        "legacy-continuation-repair-successor",
+        operator,
+      );
+    expect(successorResult.adopted).toBe(false);
+    const successor = await control.projection.runContinuationRepairSuccessor(
+      legacy.run_id,
+    );
+    expect(successor).toMatchObject({
+      record_id: successorResult.continuation_repair_successor_id,
+      run_continuation_id: attached.record_id,
+      run_continuation_digest: sha256(canonicalJson(attached)),
+      run_continuation_repair_id: repair.record_id,
+      run_continuation_repair_digest: sha256(canonicalJson(repair)),
+      job_image:
+        "example.invalid/successor@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      worker_revision: "successor-worker",
+    });
+    if (!successor) throw new Error("run continuation repair successor is missing");
+    await expect(
+      successorService.repairHistoricalContinuationSuccessor(
+        legacy.run_id,
+        { reason: "replace the digest-defective repaired worker", confirmed: true },
+        "legacy-continuation-repair-successor",
+        operator,
+      ),
+    ).resolves.toMatchObject({ adopted: true });
     await control.service.exhaustTask(
       unselectedAttempt,
       "historical attempt has no valid selection",
@@ -687,10 +744,11 @@ describe("control service", () => {
     const resumedLaunch = resumedLaunches[0];
     expect(resumedLaunch?.payload).toMatchObject({
       job_image:
-        "example.invalid/repaired@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      worker_revision: "repaired-worker",
+        "example.invalid/successor@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      worker_revision: "successor-worker",
       run_continuation_id: attached.record_id,
       run_continuation_repair_id: repair.record_id,
+      run_continuation_repair_successor_id: successor.record_id,
     });
     expect(attached.execution.harness.harbor_agent).toEqual({
       import_path: "example.agent:Agent",
@@ -769,8 +827,8 @@ describe("control service", () => {
       contract_version: "v1",
       deployment: {
         job_image:
-          "example.invalid/repaired@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        worker_revision: "repaired-worker",
+          "example.invalid/successor@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        worker_revision: "successor-worker",
       },
     });
     await rebuilt.close();

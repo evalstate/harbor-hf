@@ -1153,6 +1153,101 @@
         }
       }
     },
+    "/api/v1/runs/{run_id}/continuation-repair-successor": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "Harbor-HF run continuation v1",
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reason",
+                  "confirmed"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "confirmed": {
+                    "enum": [
+                      true
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "run_id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "run_id",
+                    "continuation_repair_successor_id",
+                    "status_url",
+                    "adopted"
+                  ],
+                  "properties": {
+                    "run_id": {
+                      "type": "string"
+                    },
+                    "continuation_repair_successor_id": {
+                      "type": "string"
+                    },
+                    "status_url": {
+                      "type": "string"
+                    },
+                    "adopted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "run_id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/v1/runs/{run_id}": {
       "get": {
         "tags": [

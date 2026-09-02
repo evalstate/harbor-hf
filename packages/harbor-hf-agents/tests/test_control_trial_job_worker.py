@@ -286,7 +286,9 @@ def test_applies_capability_bound_historical_worker_repair(
                 "run_id": "run-1",
                 "run_lock_digest": lock_digest,
                 "run_continuation_id": "continuation-1",
-                "run_continuation_digest": worker.digest_json(continuation),
+                "run_continuation_digest": worker.digest_bytes(
+                    worker._canonical_json(continuation)
+                ),
                 "job_image": repaired_image,
                 "worker_revision": "repaired-worker",
             }
@@ -303,6 +305,83 @@ def test_applies_capability_bound_historical_worker_repair(
         "worker_revision"
     ]
     assert expected == execution
+
+
+def test_applies_capability_bound_historical_worker_repair_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = _lock()
+    execution = lock.pop("execution")
+    lock_digest = worker.digest_bytes(worker._canonical_json(lock))
+    continuation = {
+        "record_id": "continuation-1",
+        "run_id": "run-1",
+        "run_lock_digest": lock_digest,
+        "execution": execution,
+    }
+    repaired_image = f"example.invalid/repaired@sha256:{'c' * 64}"
+    successor_image = f"example.invalid/successor@sha256:{'d' * 64}"
+    repair = {
+        "record_id": "repair-1",
+        "run_id": "run-1",
+        "run_lock_digest": lock_digest,
+        "run_continuation_id": "continuation-1",
+        "run_continuation_digest": worker.digest_bytes(
+            worker._canonical_json(continuation)
+        ),
+        "job_image": repaired_image,
+        "worker_revision": "repaired-worker",
+    }
+    monkeypatch.setenv("HARBOR_HF_ACTION_ID", "action-1")
+    monkeypatch.setenv("HARBOR_HF_RUN_LOCK_DIGEST", lock_digest)
+    monkeypatch.setenv("HARBOR_HF_RUN_CONTINUATION_REPAIR_ID", "repair-1")
+    monkeypatch.setenv(
+        "HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID",
+        "successor-1",
+    )
+
+    class SuccessorClient:
+        def request_sync(
+            self,
+            method: str,
+            path: str,
+            *,
+            idempotency_key: str,
+        ) -> dict:
+            assert method == "GET"
+            if path == "/api/v1/runs/run-1/continuation":
+                assert idempotency_key == "control-worker-continuation-action-1"
+                return continuation
+            if path == "/api/v1/runs/run-1/continuation-repair":
+                assert idempotency_key == "control-worker-continuation-repair-action-1"
+                return repair
+            assert path == "/api/v1/runs/run-1/continuation-repair-successor"
+            assert (
+                idempotency_key
+                == "control-worker-continuation-repair-successor-action-1"
+            )
+            return {
+                "record_id": "successor-1",
+                "run_id": "run-1",
+                "run_lock_digest": lock_digest,
+                "run_continuation_id": "continuation-1",
+                "run_continuation_digest": worker.digest_bytes(
+                    worker._canonical_json(continuation)
+                ),
+                "run_continuation_repair_id": "repair-1",
+                "run_continuation_repair_digest": worker.digest_bytes(
+                    worker._canonical_json(repair)
+                ),
+                "job_image": successor_image,
+                "worker_revision": "successor-worker",
+            }
+
+    monkeypatch.setattr(worker, "_control_client", lambda _run_id: SuccessorClient())
+
+    repaired = worker._read_execution(lock, "run-1")
+
+    assert repaired["deployment"]["job_image"] == successor_image
+    assert repaired["deployment"]["worker_revision"] == "successor-worker"
 
 
 def test_evidence_chunks_fit_the_encoded_api_limit() -> None:

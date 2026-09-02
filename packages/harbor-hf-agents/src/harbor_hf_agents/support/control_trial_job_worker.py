@@ -231,44 +231,68 @@ def _read_lock(run_id: str) -> dict[str, Any]:
 
 def _read_execution(lock: dict[str, Any], run_id: str) -> dict[str, Any]:
     """Read the immutable execution bound to a current or continued Run."""
-    try:
+    if "execution" in lock:
         execution = lock["execution"]
-    except KeyError:
-        continuation = _control_client(run_id).request_sync(
-            "GET",
-            f"/api/v1/runs/{quote(run_id, safe='')}/continuation",
-            idempotency_key=(
-                f"control-worker-continuation-{_required('HARBOR_HF_ACTION_ID')}"
-            ),
-        )
-        try:
-            continuation_record_id = continuation["record_id"]
-            continuation_run_id = continuation["run_id"]
-            continuation_lock_digest = continuation["run_lock_digest"]
-            execution = continuation["execution"]
-        except KeyError as error:
-            raise PreparedDataError(
-                "run continuation is missing its immutable execution binding"
-            ) from error
-        if continuation_run_id != run_id or continuation_lock_digest != _required(
-            "HARBOR_HF_RUN_LOCK_DIGEST"
+        if (
+            "HARBOR_HF_RUN_CONTINUATION_REPAIR_ID" in os.environ
+            or "HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID" in os.environ
         ):
-            raise PreparedDataError(
-                "run continuation does not match the worker capability"
-            ) from None
-    if not isinstance(execution, dict) or execution["contract_version"] != "v1":
-        raise PreparedDataError("run execution contract is invalid")
-    if "HARBOR_HF_RUN_CONTINUATION_REPAIR_ID" in os.environ:
-        if "execution" in lock:
             raise PreparedDataError(
                 "current run cannot carry a continuation worker repair"
             )
-        execution = _apply_continuation_repair(
+    else:
+        execution = _read_historical_execution(run_id)
+    if not isinstance(execution, dict) or execution["contract_version"] != "v1":
+        raise PreparedDataError("run execution contract is invalid")
+    return execution
+
+
+def _read_historical_execution(run_id: str) -> dict[str, Any]:
+    """Read a historical continuation and its complete worker repair chain."""
+    continuation = _control_client(run_id).request_sync(
+        "GET",
+        f"/api/v1/runs/{quote(run_id, safe='')}/continuation",
+        idempotency_key=(
+            f"control-worker-continuation-{_required('HARBOR_HF_ACTION_ID')}"
+        ),
+    )
+    try:
+        continuation_record_id = continuation["record_id"]
+        continuation_run_id = continuation["run_id"]
+        continuation_lock_digest = continuation["run_lock_digest"]
+        execution = continuation["execution"]
+    except KeyError as error:
+        raise PreparedDataError(
+            "run continuation is missing its immutable execution binding"
+        ) from error
+    if continuation_run_id != run_id or continuation_lock_digest != _required(
+        "HARBOR_HF_RUN_LOCK_DIGEST"
+    ):
+        raise PreparedDataError(
+            "run continuation does not match the worker capability"
+        ) from None
+    repair_id = os.environ.get("HARBOR_HF_RUN_CONTINUATION_REPAIR_ID")
+    successor_id = os.environ.get("HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID")
+    if repair_id:
+        execution, repair = _apply_continuation_repair(
             run_id,
             continuation,
             continuation_record_id,
             execution,
-            os.environ["HARBOR_HF_RUN_CONTINUATION_REPAIR_ID"],
+            repair_id,
+        )
+        if successor_id:
+            execution = _apply_continuation_repair_successor(
+                run_id,
+                continuation,
+                continuation_record_id,
+                repair,
+                execution,
+                successor_id,
+            )
+    elif successor_id:
+        raise PreparedDataError(
+            "continuation worker repair successor has no prior repair"
         )
     return execution
 
@@ -279,7 +303,7 @@ def _apply_continuation_repair(
     continuation_record_id: object,
     execution: dict[str, Any],
     repair_id: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Apply the capability-bound worker repair to a historical execution."""
     repair = _control_client(run_id).request_sync(
         "GET",
@@ -308,7 +332,7 @@ def _apply_continuation_repair(
         run_id,
         _required("HARBOR_HF_RUN_LOCK_DIGEST"),
         continuation_record_id,
-        digest_json(continuation),
+        digest_bytes(_canonical_json(continuation)),
     )
     if values[:5] != expected:
         raise PreparedDataError(
@@ -319,6 +343,65 @@ def _apply_continuation_repair(
     repaired = copy.deepcopy(execution)
     deployment = copy.deepcopy(repaired["deployment"])
     deployment["job_image"], deployment["worker_revision"] = values[5:]
+    repaired["deployment"] = deployment
+    return repaired, repair
+
+
+def _apply_continuation_repair_successor(
+    run_id: str,
+    continuation: dict[str, Any],
+    continuation_record_id: object,
+    repair: dict[str, Any],
+    execution: dict[str, Any],
+    successor_id: str,
+) -> dict[str, Any]:
+    """Apply one capability-bound successor to a continuation worker repair."""
+    successor = _control_client(run_id).request_sync(
+        "GET",
+        f"/api/v1/runs/{quote(run_id, safe='')}/continuation-repair-successor",
+        idempotency_key=(
+            "control-worker-continuation-repair-successor-"
+            f"{_required('HARBOR_HF_ACTION_ID')}"
+        ),
+    )
+    required_fields = (
+        "record_id",
+        "run_id",
+        "run_lock_digest",
+        "run_continuation_id",
+        "run_continuation_digest",
+        "run_continuation_repair_id",
+        "run_continuation_repair_digest",
+        "job_image",
+        "worker_revision",
+    )
+    try:
+        values = tuple(successor[field] for field in required_fields)
+        repair_id = repair["record_id"]
+    except KeyError as error:
+        raise PreparedDataError(
+            "run continuation repair successor is missing its immutable binding"
+        ) from error
+    expected = (
+        successor_id,
+        run_id,
+        _required("HARBOR_HF_RUN_LOCK_DIGEST"),
+        continuation_record_id,
+        digest_bytes(_canonical_json(continuation)),
+        repair_id,
+        digest_bytes(_canonical_json(repair)),
+    )
+    if values[:7] != expected:
+        raise PreparedDataError(
+            "run continuation repair successor does not match the worker capability"
+        )
+    if not isinstance(values[7], str) or not isinstance(values[8], str):
+        raise PreparedDataError(
+            "run continuation repair successor worker fields are invalid"
+        )
+    repaired = copy.deepcopy(execution)
+    deployment = copy.deepcopy(repaired["deployment"])
+    deployment["job_image"], deployment["worker_revision"] = values[7:]
     repaired["deployment"] = deployment
     return repaired
 

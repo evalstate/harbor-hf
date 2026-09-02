@@ -187,6 +187,52 @@ def test_historical_run_continuation_uses_stable_idempotency(
     assert headers["Idempotency-Key"] == "continuation-key-0001"
 
 
+def test_historical_run_repair_successor_uses_stable_idempotency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure(monkeypatch)
+    observed: dict[str, object] = {}
+
+    def request(method: str, url: str, **kwargs: object) -> httpx.Response:
+        observed.update({"method": method, "url": url, **kwargs})
+        return response(
+            202,
+            {
+                "run_id": "run-one",
+                "continuation_repair_successor_id": "successor-one",
+                "adopted": False,
+            },
+        )
+
+    monkeypatch.setattr("harbor_hf.cli.httpx.request", request)
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "repair-continuation-successor",
+            "run-one",
+            "--reason",
+            "replace the digest-defective worker",
+            "--idempotency-key",
+            "successor-key-0001",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert observed["method"] == "POST"
+    assert (
+        observed["url"]
+        == "https://control.example/api/v1/runs/run-one/continuation-repair-successor"
+    )
+    assert observed["json"] == {
+        "reason": "replace the digest-defective worker",
+        "confirmed": True,
+    }
+    headers = cast(dict[str, str], observed["headers"])
+    assert headers["Idempotency-Key"] == "successor-key-0001"
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected"),
     [

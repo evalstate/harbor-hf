@@ -815,6 +815,9 @@ export class Reconciler {
         const repair = historical
           ? await this.projection.runContinuationRepair(intent.run_id)
           : null;
+        const successor = historical
+          ? await this.projection.runContinuationRepairSuccessor(intent.run_id)
+          : null;
         if (historical) {
           if (!continuation)
             throw new PolicyError(
@@ -881,7 +884,10 @@ export class Reconciler {
             continuation &&
             (source.payload.run_continuation_id !== continuation.record_id ||
               (repair &&
-                source.payload.run_continuation_repair_id !== repair.record_id))
+                source.payload.run_continuation_repair_id !== repair.record_id) ||
+              (successor &&
+                source.payload.run_continuation_repair_successor_id !==
+                  successor.record_id))
           ) {
             freshTaskIds.push(taskId);
             continue;
@@ -1139,6 +1145,9 @@ export class Reconciler {
     const repair = historical
       ? await this.projection.runContinuationRepair(lock.run_id)
       : null;
+    const successor = historical
+      ? await this.projection.runContinuationRepairSuccessor(lock.run_id)
+      : null;
     if (historical && !continuation)
       throw new PolicyError("historical run has no execution continuation attachment");
     const policy = profile(lock, "launch_policy");
@@ -1225,6 +1234,9 @@ export class Reconciler {
           run_lock_digest: sha256(canonicalJson(lock.source_lock)),
           ...(continuation ? { run_continuation_id: continuation.record_id } : {}),
           ...(repair ? { run_continuation_repair_id: repair.record_id } : {}),
+          ...(successor
+            ? { run_continuation_repair_successor_id: successor.record_id }
+            : {}),
           ...(prepared ? { prepared_job_digest: sha256(canonicalJson(prepared)) } : {}),
         },
       );
@@ -1603,6 +1615,9 @@ export class Reconciler {
       const repair = isCurrentRunLock(lock.source_lock)
         ? null
         : await this.projection.runContinuationRepair(attempt.run_id);
+      const successor = isCurrentRunLock(lock.source_lock)
+        ? null
+        : await this.projection.runContinuationRepairSuccessor(attempt.run_id);
       const retry = this.service.actionIntent(
         attempt.run_id,
         "job.launch",
@@ -1615,6 +1630,13 @@ export class Reconciler {
                 job_image: lock.execution.deployment.job_image,
                 worker_revision: lock.execution.deployment.worker_revision,
                 run_continuation_repair_id: repair.record_id,
+              }
+            : {}),
+          ...(successor
+            ? {
+                job_image: lock.execution.deployment.job_image,
+                worker_revision: lock.execution.deployment.worker_revision,
+                run_continuation_repair_successor_id: successor.record_id,
               }
             : {}),
           task_id: attempt.task_id,

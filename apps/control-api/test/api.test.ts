@@ -922,6 +922,21 @@ describe("control API", () => {
     expect(repairResponse.json()).toMatchObject({
       error: { message: "current run locks do not need continuation repair" },
     });
+    const successorResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/continuation-repair-successor`,
+      headers: { "idempotency-key": "current-continuation-repair-successor" },
+      payload: {
+        reason: "not a historical run",
+        confirmed: true,
+      },
+    });
+    expect(successorResponse.statusCode).toBe(422);
+    expect(successorResponse.json()).toMatchObject({
+      error: {
+        message: "current run locks do not need continuation repair successors",
+      },
+    });
     await app.close();
   });
 
@@ -1549,6 +1564,15 @@ describe("control API", () => {
         await app.inject({
           method: "GET",
           url: `/api/v1/runs/${submission.run_id}/continuation`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/api/v1/runs/${submission.run_id}/continuation-repair-successor`,
           headers,
         })
       ).statusCode,

@@ -194,6 +194,12 @@ Jobs created before the repair remain observable for reservation and evidence
 settlement. Run identity, prepared inputs, model and harness settings, provider
 settings, selected outcomes, evidence, spend, and ceiling remain unchanged.
 
+If the repaired worker is defective, the Run may receive one append-only
+`run.continuation.repair.successor` record. It binds to the lock, continuation,
+and first repair digests and may again change only the worker image and source
+revision. Later Job launches carry both repair IDs. No further successor is
+allowed.
+
 A new Harbor-supported benchmark or compatible model requires configuration and
 immutable data only. A new harness implementation belongs in a Harbor agent
 plugin behind the common agent interface. Missing behavior is added as a general
@@ -351,6 +357,8 @@ GET  /api/v1/runs/{run_id}/continuation
 POST /api/v1/runs/{run_id}/continuation
 GET  /api/v1/runs/{run_id}/continuation-repair
 POST /api/v1/runs/{run_id}/continuation-repair
+GET  /api/v1/runs/{run_id}/continuation-repair-successor
+POST /api/v1/runs/{run_id}/continuation-repair-successor
 GET  /api/v1/runs/{run_id}/prepared-job
 GET  /api/v1/runs/{run_id}/prepared-job/trials/{task_id}
 GET  /api/v1/runs/{run_id}/tasks

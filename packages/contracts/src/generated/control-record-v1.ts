@@ -1,6 +1,6 @@
 /* Generated from JSON Schema. Do not edit. */
 
-export type HarborHFControlRecordV1 = (ProfileObject | LegacyProfileObject | ProfilePromotion | OperatorAcl | RunRequest | RunLock | RunContinuation | RunContinuationRepair | PreparedTrial | PreparedJob | ActionIntent | ActionDispatch | JobAdmissionGrant | JobCapacityRelease | ActionReceipt | ActionAdvanced | AttemptReceipt | TerminalSelection | TaskExhaustion | TaskCancellation | BudgetEvent | EndpointResource | PublicationReceipt | PublicationSupersession | MigrationRecord)
+export type HarborHFControlRecordV1 = (ProfileObject | LegacyProfileObject | ProfilePromotion | OperatorAcl | RunRequest | RunLock | RunContinuation | RunContinuationRepair | RunContinuationRepairSuccessor | PreparedTrial | PreparedJob | ActionIntent | ActionDispatch | JobAdmissionGrant | JobCapacityRelease | ActionReceipt | ActionAdvanced | AttemptReceipt | TerminalSelection | TaskExhaustion | TaskCancellation | BudgetEvent | EndpointResource | PublicationReceipt | PublicationSupersession | MigrationRecord)
 export type ProfileObject = (BenchmarkProfileObject | ModelProfileObject | HarnessProfileObject | DeploymentProfileObject | LaunchPolicyProfileObject | CapacityProfileObject)
 export type BenchmarkProfileObject = (Base & {
 schema_version: "v1"
@@ -296,6 +296,24 @@ run_id: Id
 run_lock_digest: Digest
 run_continuation_id: Id
 run_continuation_digest: Digest
+idempotency_key_digest: Digest
+idempotency_payload_digest: Digest
+job_image: string
+worker_revision: string
+reason: string
+})
+export type RunContinuationRepairSuccessor = (Base & {
+schema_version: "v1"
+kind: "run.continuation.repair.successor"
+record_id: Id
+created_at: Timestamp
+actor: Actor
+run_id: Id
+run_lock_digest: Digest
+run_continuation_id: Id
+run_continuation_digest: Digest
+run_continuation_repair_id: Id
+run_continuation_repair_digest: Digest
 idempotency_key_digest: Digest
 idempotency_payload_digest: Digest
 job_image: string
@@ -919,6 +937,7 @@ watchdog_verified?: boolean
 run_lock_digest?: Digest
 run_continuation_id?: Id
 run_continuation_repair_id?: Id
+run_continuation_repair_successor_id?: Id
 worker_role?: ("preparation" | "execution")
 prepared_job_digest?: Digest
 preparation_attempt?: number

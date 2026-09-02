@@ -28,6 +28,7 @@ import type {
   RunActionV1,
   RunContinuation,
   RunContinuationRepair,
+  RunContinuationRepairSuccessor,
   RunLock,
   RunRequest,
   RunSubmissionV1,
@@ -60,6 +61,7 @@ import {
 import {
   assertRunContinuationCompatible,
   assertRunContinuationRepairCandidate,
+  assertRunContinuationRepairSuccessorCandidate,
   composeExecutionContract,
   isCurrentRunLock,
   resolvedRunExecution,
@@ -138,6 +140,13 @@ export interface RunContinuationResult {
 export interface RunContinuationRepairResult {
   run_id: string;
   continuation_repair_id: string;
+  status_url: string;
+  adopted: boolean;
+}
+
+export interface RunContinuationRepairSuccessorResult {
+  run_id: string;
+  continuation_repair_successor_id: string;
   status_url: string;
   adopted: boolean;
 }
@@ -819,6 +828,7 @@ export class ControlService {
       lock,
       continuation,
       await this.projection.runContinuationRepair(lock.run_id),
+      await this.projection.runContinuationRepairSuccessor(lock.run_id),
     );
   }
 
@@ -833,18 +843,29 @@ export class ControlService {
         "historical Job launch is not bound to the execution continuation",
       );
     const repair = await this.projection.runContinuationRepair(lock.run_id);
-    if (!repair || launch.payload.run_continuation_repair_id === repair.record_id)
-      return;
-    // A Job created before the append-only repair remains valid for observation
-    // and evidence settlement, but every later launch must attest the repair.
     if (
-      launch.payload.run_continuation_repair_id === undefined &&
-      Date.parse(launch.created_at) <= Date.parse(repair.created_at)
+      repair &&
+      launch.payload.run_continuation_repair_id !== repair.record_id &&
+      !(
+        launch.payload.run_continuation_repair_id === undefined &&
+        Date.parse(launch.created_at) <= Date.parse(repair.created_at)
+      )
     )
-      return;
-    throw new PolicyError(
-      "historical Job launch is not bound to the continuation worker repair",
-    );
+      throw new PolicyError(
+        "historical Job launch is not bound to the continuation worker repair",
+      );
+    const successor = await this.projection.runContinuationRepairSuccessor(lock.run_id);
+    if (
+      successor &&
+      launch.payload.run_continuation_repair_successor_id !== successor.record_id &&
+      !(
+        launch.payload.run_continuation_repair_successor_id === undefined &&
+        Date.parse(launch.created_at) <= Date.parse(successor.created_at)
+      )
+    )
+      throw new PolicyError(
+        "historical Job launch is not bound to the continuation worker repair successor",
+      );
   }
 
   async assertReusableHistoricalPreparation(
@@ -1681,6 +1702,138 @@ export class ControlService {
     };
   }
 
+  async repairHistoricalContinuationSuccessor(
+    runId: string,
+    raw: unknown,
+    idempotencyKey: string,
+    actor: Actor,
+  ): Promise<RunContinuationRepairSuccessorResult> {
+    const operation = this.submitQueue.then(() =>
+      this.repairHistoricalContinuationSuccessorSerialized(
+        runId,
+        raw,
+        idempotencyKey,
+        actor,
+      ),
+    );
+    this.submitQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async repairHistoricalContinuationSuccessorSerialized(
+    runId: string,
+    raw: unknown,
+    idempotencyKey: string,
+    actor: Actor,
+  ): Promise<RunContinuationRepairSuccessorResult> {
+    this.assertReady();
+    if (actor.role !== "operator")
+      throw new PolicyError("run continuation repair successor requires an operator");
+    if (!idempotencyKey || idempotencyKey.length > 256)
+      throw new IdempotencyConflictError("a bounded idempotency key is required");
+    const input = validateRunContinuation<HarborHFRunContinuationV1>(raw);
+    const lock = await this.projection.runLock(runId);
+    if (!lock) throw new PolicyError("run lock does not exist");
+    if (isCurrentRunLock(lock))
+      throw new PolicyError(
+        "current run locks do not need continuation repair successors",
+      );
+    const continuation = await this.projection.runContinuation(runId);
+    const repair = await this.projection.runContinuationRepair(runId);
+    if (!continuation || !repair)
+      throw new PolicyError(
+        "historical run has no continuation worker repair to supersede",
+      );
+    const keyDigest = sha256(idempotencyKey);
+    const payloadDigest = sha256(canonicalJson(input));
+    const existing = await this.projection.runContinuationRepairSuccessor(runId);
+    if (existing) {
+      if (
+        existing.idempotency_key_digest !== keyDigest ||
+        existing.idempotency_payload_digest !== payloadDigest ||
+        canonicalJson(existing.actor) !== canonicalJson(actor)
+      )
+        throw new IdempotencyConflictError(
+          "run continuation repair successor already exists with different authorization",
+        );
+      return {
+        run_id: runId,
+        continuation_repair_successor_id: existing.record_id,
+        status_url: `/api/v1/runs/${runId}`,
+        adopted: true,
+      };
+    }
+    const run = await this.projection.run(runId);
+    if (!run) throw new PolicyError("run does not exist");
+    if (
+      run.pending_actions > 0 ||
+      run.cleanup_pending ||
+      (await this.projection.runHasUnadvancedActions(runId)) ||
+      (await this.projection.runHasRunningJobs(runId))
+    )
+      throw new PolicyError(
+        "historical run must have no pending action, unadvanced action, running Job, or cleanup before continuation repair successor",
+      );
+    if (!run.paused && run.status !== "failed")
+      throw new PolicyError(
+        "historical run must be paused or failed before continuation repair successor",
+      );
+    const profiles = this.resolver.resolve({
+      benchmark: lockedProfileName(lock, "benchmark"),
+      model: lockedProfileName(lock, "model"),
+      harness: lockedProfileName(lock, "harness"),
+      deployment: lockedProfileName(lock, "deployment"),
+      launch_policy: lockedProfileName(lock, "launch_policy"),
+    });
+    const candidate = composeExecutionContract(profiles);
+    try {
+      assertRunContinuationRepairSuccessorCandidate(continuation, repair, candidate);
+    } catch (error) {
+      throw new PolicyError(
+        error instanceof Error
+          ? error.message
+          : "run continuation repair successor is invalid",
+      );
+    }
+    const workerRevision = candidate.deployment.worker_revision;
+    if (!workerRevision)
+      throw new PolicyError(
+        "continuation repair successor deployment has no worker revision",
+      );
+    const record: RunContinuationRepairSuccessor = {
+      schema_version: "v1",
+      kind: "run.continuation.repair.successor",
+      record_id: deterministicId("continuation-repair-successor", runId),
+      created_at: this.clock.now().toISOString(),
+      actor,
+      run_id: runId,
+      run_lock_digest: continuation.run_lock_digest,
+      run_continuation_id: continuation.record_id,
+      run_continuation_digest: sha256(canonicalJson(continuation)),
+      run_continuation_repair_id: repair.record_id,
+      run_continuation_repair_digest: sha256(canonicalJson(repair)),
+      idempotency_key_digest: keyDigest,
+      idempotency_payload_digest: payloadDigest,
+      job_image: candidate.deployment.job_image,
+      worker_revision: workerRevision,
+      reason: input.reason,
+    };
+    const appended = await this.appendAdopting(record, (recorded) => {
+      const { created_at: _recordedAt, ...recordedValue } = recorded;
+      const { created_at: _candidateAt, ...candidateValue } = record;
+      return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+    });
+    return {
+      run_id: runId,
+      continuation_repair_successor_id: appended.record.record_id,
+      status_url: `/api/v1/runs/${runId}`,
+      adopted: !appended.created,
+    };
+  }
+
   private async submitSerialized(
     raw: unknown,
     idempotencyKey: string,
@@ -1948,6 +2101,16 @@ export class ControlService {
       if (repair && intent.payload.run_continuation_repair_id !== repair.record_id)
         throw new PolicyError(
           "new historical Job launch is not bound to the continuation worker repair",
+        );
+      const successor = await this.projection.runContinuationRepairSuccessor(
+        intent.run_id,
+      );
+      if (
+        successor &&
+        intent.payload.run_continuation_repair_successor_id !== successor.record_id
+      )
+        throw new PolicyError(
+          "new historical Job launch is not bound to the continuation worker repair successor",
         );
     }
     const taskId =
@@ -3221,6 +3384,9 @@ export class ControlService {
       const repair = historical
         ? await this.projection.runContinuationRepair(runId)
         : null;
+      const successor = historical
+        ? await this.projection.runContinuationRepairSuccessor(runId)
+        : null;
       if (!run.paused && !(historical && repair && run.status === "failed"))
         throw new PolicyError("run is not paused");
       if (run.pending_actions > 0)
@@ -3294,7 +3460,11 @@ export class ControlService {
                 : null;
             if (
               launch?.payload.run_continuation_id !== continuation.record_id ||
-              (repair && launch.payload.run_continuation_repair_id !== repair.record_id)
+              (repair &&
+                launch.payload.run_continuation_repair_id !== repair.record_id) ||
+              (successor &&
+                launch.payload.run_continuation_repair_successor_id !==
+                  successor.record_id)
             )
               freshTaskIds.push(taskId);
           }
