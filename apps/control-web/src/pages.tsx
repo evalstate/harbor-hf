@@ -40,11 +40,13 @@ import { useControlState } from "./control-state";
 import { hints } from "./hints";
 import {
   approvedAlias,
+  compatibleBenchmarks,
   counted,
   doubleReservationMicrousd,
   firstCompatibleLaunchSelection,
   labeledHarness,
   profileLabel,
+  selectCompatibleBenchmarkAlias,
   selectDeploymentAlias,
   selectHarnessAlias,
 } from "./launch";
@@ -1011,11 +1013,6 @@ function LaunchPanel({
       approved
         .filter((profile) => profile.profile_kind === kind)
         .map((profile) => profile.approved_alias);
-    const benchmarks = aliases("benchmark");
-    if (!benchmarks.includes(form.getValues("benchmark")) && benchmarks[0]) {
-      form.setValue("benchmark", benchmarks[0]);
-      replacedSelection = true;
-    }
     const launchPolicies = aliases("launch_policy");
     if (
       form.getValues("launchPolicy") &&
@@ -1058,6 +1055,69 @@ function LaunchPanel({
     if (replacedSelection) form.setValue("confirmed", false);
   }, [approved, approvedSignature, compatibleDefault, form]);
   const resetConfirmation = () => form.setValue("confirmed", false);
+  const benchmarkProfiles = useMemo(
+    () =>
+      approved
+        .filter((profile) => profile.profile_kind === "benchmark")
+        .map((profile) => ({
+          alias: profile.approved_alias,
+          spec: profile.spec,
+        })),
+    [approved],
+  );
+  const deploymentProfiles = useMemo(
+    () =>
+      approved
+        .filter((profile) => profile.profile_kind === "deployment")
+        .map((profile) => ({
+          alias: profile.approved_alias,
+          spec: profile.spec,
+        })),
+    [approved],
+  );
+  let selectedHarness: string | undefined;
+  let selectedDeployment: (typeof deploymentProfiles)[number] | undefined;
+  try {
+    selectedHarness = selectHarnessAlias(
+      ofKind("harness").map((profile) => ({
+        alias: profile.approved_alias,
+        spec: profile.spec,
+      })),
+      values.harness,
+    );
+    const deploymentAlias = selectDeploymentAlias(
+      deploymentProfiles,
+      values.deploymentKind,
+      values.model,
+      selectedHarness,
+    );
+    selectedDeployment = deploymentProfiles.find(
+      (profile) => profile.alias === deploymentAlias,
+    );
+  } catch {
+    selectedHarness = undefined;
+    selectedDeployment = undefined;
+  }
+  const benchmarkChoices = selectedDeployment
+    ? compatibleBenchmarks(benchmarkProfiles, selectedDeployment.spec)
+    : [];
+  useEffect(() => {
+    if (!selectedDeployment) return;
+    let benchmark = "";
+    try {
+      benchmark = selectCompatibleBenchmarkAlias(
+        benchmarkProfiles,
+        selectedDeployment.spec,
+        form.getValues("benchmark"),
+      );
+    } catch {
+      // A valid deployment with no compatible benchmark remains visibly unresolved.
+    }
+    if (form.getValues("benchmark") !== benchmark) {
+      form.setValue("benchmark", benchmark);
+      form.setValue("confirmed", false);
+    }
+  }, [benchmarkProfiles, form, selectedDeployment]);
   let resolved:
     | {
         harness: string;
@@ -1069,7 +1129,7 @@ function LaunchPanel({
   try {
     approvedAlias(
       values.benchmark,
-      ofKind("benchmark").map((profile) => profile.approved_alias),
+      benchmarkChoices.map((profile) => profile.alias),
       "benchmark",
     );
     approvedAlias(
@@ -1078,29 +1138,29 @@ function LaunchPanel({
       "model",
     );
     resolved = {
-      harness: selectHarnessAlias(
-        ofKind("harness").map((profile) => ({
-          alias: profile.approved_alias,
-          spec: profile.spec,
-        })),
-        values.harness,
-      ),
-      deployment: "",
+      harness:
+        selectedHarness ??
+        selectHarnessAlias(
+          ofKind("harness").map((profile) => ({
+            alias: profile.approved_alias,
+            spec: profile.spec,
+          })),
+          values.harness,
+        ),
+      deployment: selectedDeployment?.alias ?? "",
       launch_policy: approvedAlias(
         values.launchPolicy,
         ofKind("launch_policy").map((profile) => profile.approved_alias),
         "launch policy",
       ),
     };
-    resolved.deployment = selectDeploymentAlias(
-      ofKind("deployment").map((profile) => ({
-        alias: profile.approved_alias,
-        spec: profile.spec,
-      })),
-      values.deploymentKind,
-      values.model,
-      resolved.harness,
-    );
+    if (!resolved.deployment)
+      resolved.deployment = selectDeploymentAlias(
+        deploymentProfiles,
+        values.deploymentKind,
+        values.model,
+        resolved.harness,
+      );
   } catch (error) {
     resolvedError = error instanceof Error ? error.message : String(error);
   }
@@ -1193,9 +1253,9 @@ function LaunchPanel({
               aria-label="Benchmark"
               {...form.register("benchmark", { onChange: resetConfirmation })}
             >
-              {ofKind("benchmark").map((profile) => (
-                <option key={profile.profile_id} value={profile.approved_alias}>
-                  {profileLabel("benchmark", profile.approved_alias, profile.spec)}
+              {benchmarkChoices.map((profile) => (
+                <option key={profile.alias} value={profile.alias}>
+                  {profileLabel("benchmark", profile.alias, profile.spec)}
                 </option>
               ))}
             </select>

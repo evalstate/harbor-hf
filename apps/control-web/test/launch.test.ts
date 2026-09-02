@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   approvedAlias,
+  compatibleBenchmarks,
+  deploymentRequiresPreparation,
   doubleReservationMicrousd,
   firstCompatibleLaunchSelection,
   labeledHarness,
   profileLabel,
+  selectCompatibleBenchmarkAlias,
   selectDeploymentAlias,
   selectHarnessAlias,
 } from "../src/launch";
@@ -111,6 +114,88 @@ describe("launch helpers", () => {
       harness: "second-harness",
       deploymentKind: "providers",
     });
+  });
+
+  it("offers only Harbor-backed benchmarks to deployments that require preparation", () => {
+    const benchmarks = [
+      {
+        alias: "internal-smoke",
+        spec: { task_ids: ["smoke"] },
+      },
+      {
+        alias: "prepared-canary",
+        spec: {
+          task_ids: ["alpha-trial-1", "beta-trial-1"],
+          source_task_ids: ["alpha", "beta"],
+          trial_indices: [1, 1],
+          harbor_job: { datasets: [{ path: "tasks" }] },
+        },
+      },
+    ];
+    const preparedDeployment = {
+      route: "hf_job",
+      preparation: "required",
+    };
+
+    expect(deploymentRequiresPreparation(preparedDeployment)).toBe(true);
+    expect(
+      compatibleBenchmarks(benchmarks, preparedDeployment).map(
+        (benchmark) => benchmark.alias,
+      ),
+    ).toEqual(["prepared-canary"]);
+    expect(
+      selectCompatibleBenchmarkAlias(benchmarks, preparedDeployment, "internal-smoke"),
+    ).toBe("prepared-canary");
+    expect(
+      compatibleBenchmarks(benchmarks, {
+        route: "hf_job",
+        preparation: "not_required",
+      }).map((benchmark) => benchmark.alias),
+    ).toEqual(["internal-smoke", "prepared-canary"]);
+  });
+
+  it("rejects incomplete or duplicate prepared benchmark mappings", () => {
+    expect(
+      compatibleBenchmarks(
+        [
+          {
+            alias: "incomplete",
+            spec: {
+              task_ids: ["alpha", "beta"],
+              source_task_ids: ["alpha"],
+              trial_indices: [1],
+              harbor_job: { datasets: [] },
+            },
+          },
+          {
+            alias: "duplicate",
+            spec: {
+              task_ids: ["alpha-one", "alpha-two"],
+              source_task_ids: ["alpha", "alpha"],
+              trial_indices: [1, 1],
+              harbor_job: { datasets: [] },
+            },
+          },
+        ],
+        { route: "hf_job", preparation: "required" },
+      ),
+    ).toEqual([]);
+  });
+
+  it("distinguishes Pi harness reasoning while leaving unknown reasoning unlabeled", () => {
+    expect(
+      profileLabel("harness", "pi-high", {
+        agent: "pi",
+        reasoning_effort: "high",
+      }),
+    ).toBe("Pi · High reasoning");
+    expect(
+      profileLabel("harness", "pi-off", {
+        agent: "pi",
+        reasoning_effort: "off",
+      }),
+    ).toBe("Pi · No reasoning");
+    expect(profileLabel("harness", "pi", { agent: "pi" })).toBe("Pi");
   });
 
   it("labels DeepSeek Harness instead of the dsh alias", () => {

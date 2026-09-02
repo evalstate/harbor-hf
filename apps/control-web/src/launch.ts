@@ -23,6 +23,10 @@ type ApprovedProfile = {
   spec: Record<string, unknown>;
 };
 
+function objectValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export function approvedAlias(
   selected: string,
   available: readonly string[],
@@ -53,6 +57,53 @@ export function deploymentKind(
   if (upstream.includes("router.huggingface.co")) return "providers";
   if (upstream === "<redacted>") return "other";
   return "endpoints";
+}
+
+export function deploymentRequiresPreparation(spec: Record<string, unknown>): boolean {
+  return spec.route === "hf_job" && spec.preparation === "required";
+}
+
+function preparedBenchmark(spec: Record<string, unknown>): boolean {
+  if (!objectValue(spec.harbor_job)) return false;
+  const taskIds = spec.task_ids;
+  const sourceTaskIds = spec.source_task_ids;
+  const trialIndices = spec.trial_indices;
+  if (
+    !Array.isArray(taskIds) ||
+    !Array.isArray(sourceTaskIds) ||
+    !Array.isArray(trialIndices) ||
+    sourceTaskIds.length !== taskIds.length ||
+    trialIndices.length !== taskIds.length
+  )
+    return false;
+  return (
+    new Set(
+      sourceTaskIds.map(
+        (sourceTaskId, index) =>
+          `${String(sourceTaskId)}:${String(trialIndices[index])}`,
+      ),
+    ).size === taskIds.length
+  );
+}
+
+export function compatibleBenchmarks(
+  benchmarks: ReadonlyArray<ApprovedProfile>,
+  deployment: Record<string, unknown>,
+): ApprovedProfile[] {
+  if (!deploymentRequiresPreparation(deployment)) return [...benchmarks];
+  return benchmarks.filter((benchmark) => preparedBenchmark(benchmark.spec));
+}
+
+export function selectCompatibleBenchmarkAlias(
+  benchmarks: ReadonlyArray<ApprovedProfile>,
+  deployment: Record<string, unknown>,
+  selected: string,
+): string {
+  const compatible = compatibleBenchmarks(benchmarks, deployment);
+  if (compatible.some((benchmark) => benchmark.alias === selected)) return selected;
+  const fallback = compatible[0];
+  if (fallback) return fallback.alias;
+  throw new Error("no compatible approved benchmark is available for this deployment");
 }
 
 export function harnessAgent(spec: Record<string, unknown>): string {
@@ -99,7 +150,13 @@ export function profileLabel(
     if (agent === "dsh" || agent.startsWith("dsh-") || alias.startsWith("dsh"))
       return "DeepSeek Harness";
     if (agent === "opencode") return "OpenCode";
-    if (agent === "pi") return "Pi";
+    if (agent === "pi") {
+      const reasoning = REASONING_OPTIONS.find(
+        ([option]) => option === spec.reasoning_effort,
+      )?.[1];
+      if (!reasoning) return "Pi";
+      return `Pi · ${reasoning === "None" ? "No" : reasoning} reasoning`;
+    }
     if (agent === "control-smoke") return "Control smoke";
     return humanize(agent);
   }

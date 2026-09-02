@@ -108,10 +108,13 @@ function launchProfiles() {
   });
   return {
     items: [
-      approved("terminal-bench-2-1-diagnostic-1", "benchmark", {
+      approved("control-smoke", "benchmark", { task_ids: ["task-001"] }),
+      approved("terminal-bench-2-1-canary", "benchmark", {
         benchmark: "terminal-bench-2-1",
         task_ids: ["task-a", "task-b"],
+        source_task_ids: ["task-a", "task-b"],
         trial_indices: [1, 1],
+        harbor_job: { datasets: [{ path: "tasks" }] },
       }),
       approved("gpt-oss-20b", "model", {
         model_id: "openai/gpt-oss-20b",
@@ -125,18 +128,30 @@ function launchProfiles() {
         ...reviewedFastAgentPreview.harness_profile,
       }),
       approved("tb21-gpt-oss-20b-opencode-providers", "deployment", {
+        route: "hf_job",
         models: ["gpt-oss-20b"],
         harnesses: ["opencode"],
+        preparation: "required",
         trial_job_template: {
           inference_upstream: "https://router.huggingface.co/v1",
         },
       }),
       approved("tb21-gpt-oss-20b-command-providers", "deployment", {
+        route: "hf_job",
         models: ["gpt-oss-20b"],
         harnesses: ["fast-agent-0-10-11-command"],
+        preparation: "required",
         inference_provider: "together",
         trial_job_template: {
           inference_upstream: "https://router.huggingface.co/v1",
+        },
+      }),
+      approved("tb21-gpt-oss-20b-opencode-endpoint", "deployment", {
+        route: "hf_job",
+        models: ["gpt-oss-20b"],
+        harnesses: ["opencode"],
+        trial_job_template: {
+          inference_upstream: "https://endpoint.example.test/v1",
         },
       }),
       approved("tb21-diagnostic-1", "launch_policy", {
@@ -144,7 +159,6 @@ function launchProfiles() {
         reservation_microusd: 5_100_000,
         publication_role: "diagnostic",
       }),
-      approved("control-smoke", "benchmark", { task_ids: ["task-001"] }),
       approved("control-smoke", "model", { revision: "sha256:model" }),
       approved("control-smoke", "harness", { agent: "control-smoke" }),
       approved("hf-cpu-smoke", "deployment", {
@@ -162,7 +176,10 @@ function launchProfiles() {
   };
 }
 
-function stubLaunchPage(onSubmit?: (value: Record<string, unknown>) => void) {
+function stubLaunchPage(
+  onSubmit?: (value: Record<string, unknown>) => void,
+  profiles = launchProfiles(),
+) {
   vi.stubGlobal("EventSource", FakeEventSource);
   vi.stubGlobal(
     "fetch",
@@ -175,7 +192,7 @@ function stubLaunchPage(onSubmit?: (value: Record<string, unknown>) => void) {
         return new Promise<Response>(() => undefined);
       }
       if (path.includes("/runs")) return json({ items: [], next_cursor: null });
-      if (path.includes("/profiles")) return json(launchProfiles());
+      if (path.includes("/profiles")) return json(profiles);
       throw new Error(`unexpected request: ${path}`);
     }),
   );
@@ -1160,6 +1177,106 @@ describe("control web", () => {
         hidden: true,
       }),
     ).toBeInTheDocument();
+  });
+
+  it("filters and reselects benchmarks when the runtime preparation mode changes", async () => {
+    stubLaunchPage();
+    renderApp("/runs");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Start a run" }));
+
+    const benchmark = screen.getByRole("combobox", { name: "Benchmark" });
+    const runtime = screen.getByRole("combobox", { name: "Runtime" });
+    await waitFor(() => expect(benchmark).toHaveValue("terminal-bench-2-1-canary"));
+    expect(
+      screen.queryByRole("option", { name: "Control Smoke · 1 task" }),
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(runtime, "endpoints");
+    expect(
+      await screen.findByRole("option", { name: "Control Smoke · 1 task" }),
+    ).toBeInTheDocument();
+    await user.selectOptions(benchmark, "control-smoke");
+    expect(benchmark).toHaveValue("control-smoke");
+
+    await user.selectOptions(runtime, "providers");
+    await waitFor(() => expect(benchmark).toHaveValue("terminal-bench-2-1-canary"));
+    expect(
+      screen.queryByRole("option", { name: "Control Smoke · 1 task" }),
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Launch policy" }),
+      "tb21-diagnostic-1",
+    );
+    expect(screen.getByText("Locked reasoning")).toBeInTheDocument();
+    expect(screen.getByText("Locked harness")).toBeInTheDocument();
+  });
+
+  it("allows a temporarily invalid selection to reach a disconnected valid combination", async () => {
+    const profiles = launchProfiles();
+    profiles.items = profiles.items.filter(
+      (profile) => !["model", "harness", "deployment"].includes(profile.profile_kind),
+    );
+    const createdAt = "2026-08-16T00:00:00.000Z";
+    const approved = (alias: string, kind: string, spec: Record<string, unknown>) => ({
+      source: "built-in",
+      promotion_state: "approved",
+      alias,
+      approved_aliases: [alias],
+      created_at: createdAt,
+      profile_id: `sha256:${kind}-${alias}`,
+      profile_kind: kind,
+      name: alias,
+      spec,
+    });
+    profiles.items.push(
+      approved("model-a", "model", {
+        model_id: "example/model-a",
+        revision: "a".repeat(40),
+      }),
+      approved("model-b", "model", {
+        model_id: "example/model-b",
+        revision: "b".repeat(40),
+      }),
+      approved("harness-a", "harness", { agent: "alpha" }),
+      approved("harness-b", "harness", { agent: "beta" }),
+      approved("deployment-a", "deployment", {
+        inference_provider: "provider-a",
+        models: ["model-a"],
+        harnesses: ["harness-a"],
+      }),
+      approved("deployment-b", "deployment", {
+        inference_provider: "provider-b",
+        models: ["model-b"],
+        harnesses: ["harness-b"],
+      }),
+    );
+    stubLaunchPage(undefined, profiles);
+    renderApp("/runs");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Start a run" }));
+
+    const model = screen.getByRole("combobox", { name: "Model" });
+    const harness = screen.getByRole("combobox", { name: "Harness" });
+    await waitFor(() => {
+      expect(model).toHaveValue("model-a");
+      expect(harness).toHaveValue("harness-a");
+    });
+
+    await user.selectOptions(model, "model-b");
+    expect(model).toHaveValue("model-b");
+    expect(harness).toHaveValue("harness-a");
+    expect(screen.getByRole("combobox", { name: "Benchmark" })).toBeEmptyDOMElement();
+
+    await user.selectOptions(harness, "harness-b");
+    await waitFor(() => {
+      expect(model).toHaveValue("model-b");
+      expect(harness).toHaveValue("harness-b");
+    });
+    expect(
+      screen.getByRole("combobox", { name: "Benchmark" }).querySelectorAll("option"),
+    ).not.toHaveLength(0);
   });
 
   it("requires confirmation and submits the selected promoted launch policy", async () => {

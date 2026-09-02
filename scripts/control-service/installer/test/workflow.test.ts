@@ -192,7 +192,12 @@ class FakeHf implements HfAdapter {
   readonly calls: string[] = [];
   readonly temporaryPaths: string[] = [];
   readonly uploadedBundleDirectories: string[] = [];
+  readonly uploadedRevisions: string[] = [];
   readonly secretWriteNames: string[][] = [];
+  readonly mutationWriteModes: Array<{
+    call: string;
+    writeMode: string | undefined;
+  }> = [];
   failCreateBucket = false;
   createBucketFailureCategory: "forbidden" | null = null;
   failCreateBucketResponse = false;
@@ -209,6 +214,16 @@ class FakeHf implements HfAdapter {
   versionValue = "1.23.0";
   waitGate: Promise<void> | undefined;
   waitFailure: Error | undefined;
+  afterSetProtected: ((state: RemoteState) => void) | undefined;
+  afterUploadMirror: ((state: RemoteState) => void) | undefined;
+  afterSetVariables: ((state: RemoteState) => void) | undefined;
+
+  private recordMutation(call: string): void {
+    this.mutationWriteModes.push({
+      call,
+      writeMode: this.state.space?.variables.HARBOR_HF_WRITE_MODE,
+    });
+  }
 
   async version(): Promise<string> {
     return this.versionValue;
@@ -292,6 +307,7 @@ class FakeHf implements HfAdapter {
 
   async setVariables(_spaceId: string, variablesFile: string): Promise<void> {
     this.calls.push("setVariables");
+    this.recordMutation("setVariables");
     this.temporaryPaths.push(variablesFile);
     if (!this.state.space) throw new Error("missing Space");
     if (this.failSetVariablesAfterUpload && this.calls.includes("uploadMirror")) {
@@ -311,10 +327,12 @@ class FakeHf implements HfAdapter {
     ) {
       this.state.space.runtimeStage = "BUILDING";
     }
+    this.afterSetVariables?.(this.state);
   }
 
   async setSecrets(_spaceId: string, secretsFile: string): Promise<void> {
     this.calls.push("setSecrets");
+    this.recordMutation("setSecrets");
     this.temporaryPaths.push(secretsFile);
     if (!this.state.space) throw new Error("missing Space");
     const values = parseEnvironmentFile(await readFile(secretsFile, "utf8"));
@@ -338,17 +356,21 @@ class FakeHf implements HfAdapter {
 
   async setProtected(): Promise<void> {
     this.calls.push("setProtected");
+    this.recordMutation("setProtected");
     if (!this.state.space) throw new Error("missing Space");
     this.state.space.private = true;
+    this.afterSetProtected?.(this.state);
   }
 
   async uploadMirror(
     _spaceId: string,
     _bundleDirectory: string,
-    _revision: string,
+    revision: string,
   ): Promise<string> {
     this.calls.push("uploadMirror");
+    this.recordMutation("uploadMirror");
     this.uploadedBundleDirectories.push(_bundleDirectory);
+    this.uploadedRevisions.push(revision);
     if (this.failUpload) {
       if (this.mutateBindingOnUploadFailure && this.state.space) {
         this.state.space.variables.HARBOR_HF_SOURCE_REVISION = "d".repeat(40);
@@ -359,11 +381,13 @@ class FakeHf implements HfAdapter {
     if (!this.state.space) throw new Error("missing Space");
     this.state.space.sha = UPLOAD_SHA;
     this.state.space.runtimeStage = "BUILDING";
+    this.afterUploadMirror?.(this.state);
     return UPLOAD_SHA;
   }
 
   async wait(): Promise<void> {
     this.calls.push("wait");
+    this.recordMutation("wait");
     await this.waitGate;
     if (this.waitFailure) throw this.waitFailure;
     if (!this.state.space) throw new Error("missing Space");
@@ -373,11 +397,13 @@ class FakeHf implements HfAdapter {
 
   async pause(): Promise<void> {
     this.calls.push("pause");
+    this.recordMutation("pause");
     if (this.state.space) this.state.space.runtimeStage = "PAUSED";
   }
 
   async restart(): Promise<void> {
     this.calls.push("restart");
+    this.recordMutation("restart");
     if (!this.state.space) throw new Error("missing Space");
     this.state.space.runtimeStage = "BUILDING";
   }
@@ -2134,22 +2160,344 @@ describe("installer workflows", () => {
     expect(bootstrapResult.receipt.uploaded_sha).toBe(UPLOAD_SHA);
   });
 
-  it("reasserts an existing installation without replacing secrets", async () => {
-    const setupResult = await setup(REVISION);
+  it("upgrades an eligible running disabled installation online in exact order", async () => {
+    const setupResult = await setup(OLD_REVISION);
+    setupResult.dependencies.environment = {
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "verify-placeholder",
+    };
     setupResult.hf.calls.length = 0;
-    await applyInstall(
+    setupResult.hf.mutationWriteModes.length = 0;
+    const result = await applyInstall(
       {
         planPath: setupResult.planPath,
       },
       setupResult.dependencies,
     );
-    expect(setupResult.hf.calls).toContain("pause");
-    expect(setupResult.hf.calls).toContain("setProtected");
-    expect(setupResult.hf.calls).toContain("setVariables");
+    expect(setupResult.hf.calls).toEqual([
+      "observe",
+      "setProtected",
+      "observe",
+      "uploadMirror",
+      "observe",
+      "observe",
+      "setVariables",
+      "observe",
+      "wait",
+      "observe",
+    ]);
+    expect(setupResult.hf.calls).not.toContain("pause");
+    expect(setupResult.hf.calls).not.toContain("restart");
     expect(setupResult.hf.calls).not.toContain("setSecrets");
+    expect(setupResult.hf.uploadedRevisions).toEqual([REVISION]);
+    expect(setupResult.hf.uploadedBundleDirectories).toHaveLength(1);
+    expect(setupResult.hf.uploadedBundleDirectories[0]).not.toBe(setupResult.bundle);
+    expect(setupResult.hf.mutationWriteModes).toEqual([
+      { call: "setProtected", writeMode: "disabled" },
+      { call: "uploadMirror", writeMode: "disabled" },
+      { call: "setVariables", writeMode: "disabled" },
+      { call: "wait", writeMode: "disabled" },
+    ]);
+    expect(setupResult.hf.state.space?.variables).toEqual(
+      setupResult.planned.plan.expected_variables,
+    );
+    expect(setupResult.hf.state.space?.sha).toBe(UPLOAD_SHA);
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("RUNNING");
+    expect(result).toMatchObject({
+      status: "installed",
+      verification: {
+        authenticated_system: "passed",
+        source_upload_revision: "passed",
+      },
+    });
+    expect(setupResult.http.requests).toContainEqual({
+      path: "/api/v1/system",
+      bearer: "verify-placeholder",
+    });
+  });
+
+  it("reasserts an exact installed binding online from the reviewed mirror", async () => {
+    const setupResult = await setup(REVISION);
+    alignInstalledStateWithPlan(setupResult);
+    setupResult.hf.calls.length = 0;
+    await expect(
+      applyInstall(
+        {
+          planPath: setupResult.planPath,
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toMatchObject({
+      status: "installed",
+      verification: { source_upload_revision: "passed" },
+    });
+    expect(setupResult.hf.calls).not.toContain("pause");
+    expect(setupResult.hf.calls).not.toContain("restart");
     expect(setupResult.hf.calls).toContain("uploadMirror");
+    expect(setupResult.hf.calls).not.toContain("setSecrets");
+    expect(
+      setupResult.hf.calls.filter((call) =>
+        ["setProtected", "uploadMirror", "setVariables", "wait"].includes(call),
+      ),
+    ).toEqual(["setProtected", "uploadMirror", "setVariables", "wait"]);
+  });
+
+  it("falls back to the paused completion path when online upgrade is ineligible", async () => {
+    const setupResult = await setup(OLD_REVISION);
+    if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+    setupResult.hf.state.space.runtimeStage = "PAUSED";
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      configureInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+    ).resolves.toMatchObject({ status: "installed" });
+
+    expect(
+      setupResult.hf.calls.filter((call) =>
+        ["pause", "uploadMirror", "setVariables", "restart", "wait"].includes(call),
+      ),
+    ).toEqual(["pause", "uploadMirror", "pause", "setVariables", "restart", "wait"]);
+  });
+
+  it("uses the paused path when credential names are missing", async () => {
+    const setupResult = await setup(OLD_REVISION);
+    if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+    setupResult.hf.state.space.secretNames = ["HF_TOKEN"];
+    const recovery = await planInstall(
+      {
+        space: "example/control",
+        bundleDirectory: resolve(setupResult.directory, "recovery", "bundle"),
+        planPath: resolve(setupResult.directory, "recovery", "plan.json"),
+      },
+      setupResult.dependencies,
+    );
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      configureInstall({ planPath: recovery.path }, setupResult.dependencies),
+    ).resolves.toMatchObject({ status: "installed" });
+
+    expect(setupResult.hf.calls).toContain("pause");
+    expect(setupResult.hf.calls).toContain("setSecrets");
     expect(setupResult.hf.calls).toContain("restart");
-    expect(setupResult.hf.calls).toContain("wait");
+    expect(setupResult.hf.calls.indexOf("pause")).toBeLessThan(
+      setupResult.hf.calls.indexOf("uploadMirror"),
+    );
+  });
+
+  it("uses the paused path when credential replacement is requested", async () => {
+    const setupResult = await setup(OLD_REVISION);
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      configureInstall(
+        {
+          planPath: setupResult.planPath,
+          replaceCredentials: true,
+        },
+        setupResult.dependencies,
+      ),
+    ).resolves.toMatchObject({ status: "installed" });
+
+    expect(setupResult.hf.calls).toContain("pause");
+    expect(setupResult.hf.calls).toContain("setSecrets");
+    expect(setupResult.hf.calls).toContain("restart");
+    expect(setupResult.hf.calls.indexOf("pause")).toBeLessThan(
+      setupResult.hf.calls.indexOf("uploadMirror"),
+    );
+  });
+
+  it("does not use the online path while writes are enabled", async () => {
+    const setupResult = await setup(OLD_REVISION, {
+      HARBOR_HF_WRITE_MODE: "enabled",
+    });
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      configureInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+    ).rejects.toThrow("existing Space variables do not match");
+
+    expect(setupResult.hf.calls).toEqual(["observe"]);
+    expect(setupResult.hf.state.space?.variables.HARBOR_HF_WRITE_MODE).toBe("enabled");
+  });
+
+  it("rejects resource drift before selecting the online path", async () => {
+    const setupResult = await setup(OLD_REVISION);
+    if (!setupResult.hf.state.bucket) throw new Error("test Bucket is missing");
+    setupResult.hf.state.bucket.private = false;
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      configureInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+    ).rejects.toThrow("remote preconditions drifted after planning");
+
+    expect(setupResult.hf.calls).toEqual(["observe"]);
+  });
+
+  it.each([
+    {
+      name: "source and manifest binding",
+      mutate(state: RemoteState) {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.variables.HARBOR_HF_SOURCE_REVISION = "d".repeat(40);
+        state.space.variables.HARBOR_HF_BUNDLE_MANIFEST_DIGEST = `sha256:${"d".repeat(64)}`;
+      },
+      failSafePause: false,
+    },
+    {
+      name: "secret removal",
+      mutate(state: RemoteState) {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.secretNames = ["HF_TOKEN"];
+      },
+      failSafePause: true,
+    },
+    {
+      name: "runtime transition",
+      mutate(state: RemoteState) {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.runtimeStage = "BUILDING";
+      },
+      failSafePause: true,
+    },
+    {
+      name: "Bucket privacy",
+      mutate(state: RemoteState) {
+        if (!state.bucket) throw new Error("test Bucket is missing");
+        state.bucket.private = false;
+      },
+      failSafePause: false,
+    },
+  ])(
+    "rejects $name drift after protection reassertion before online upload",
+    async ({ mutate, failSafePause }) => {
+      const setupResult = await setup(OLD_REVISION);
+      setupResult.hf.afterSetProtected = mutate;
+      setupResult.hf.calls.length = 0;
+
+      await expect(
+        configureInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+      ).rejects.toThrow("installation failed after remote mutation began");
+
+      expect(setupResult.hf.calls).not.toContain("uploadMirror");
+      expect(setupResult.hf.calls).not.toContain("setVariables");
+      expect(setupResult.hf.calls.includes("pause")).toBe(failSafePause);
+      expect(
+        setupResult.hf.calls.filter((call) =>
+          ["setProtected", "uploadMirror", "setVariables", "pause"].includes(call),
+        ),
+      ).toEqual(failSafePause ? ["setProtected", "pause"] : ["setProtected"]);
+    },
+  );
+
+  it.each([
+    {
+      name: "secret",
+      mutate(state: RemoteState) {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.secretNames = ["HF_TOKEN"];
+      },
+      failSafePause: true,
+    },
+    {
+      name: "old variable",
+      mutate(state: RemoteState) {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.variables.HARBOR_HF_SOURCE_REVISION = "d".repeat(40);
+      },
+      failSafePause: false,
+    },
+    {
+      name: "returned SHA",
+      mutate(state: RemoteState) {
+        if (!state.space) throw new Error("test Space is missing");
+        state.space.sha = "d".repeat(40);
+      },
+      failSafePause: true,
+    },
+  ])(
+    "rejects post-upload $name drift before the online variable update",
+    async ({ mutate, failSafePause }) => {
+      const setupResult = await setup(OLD_REVISION);
+      setupResult.hf.afterUploadMirror = mutate;
+      setupResult.hf.calls.length = 0;
+
+      await expect(
+        configureInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+      ).rejects.toThrow("installation failed after remote mutation began");
+
+      expect(setupResult.hf.calls).toContain("uploadMirror");
+      expect(setupResult.hf.calls).not.toContain("setVariables");
+      expect(setupResult.hf.calls.includes("pause")).toBe(failSafePause);
+    },
+  );
+
+  it("requires the exact concrete variables after the online variable update", async () => {
+    const setupResult = await setup(OLD_REVISION);
+    setupResult.hf.afterSetVariables = (state) => {
+      if (!state.space) throw new Error("test Space is missing");
+      state.space.variables.HARBOR_HF_SOURCE_REVISION = "d".repeat(40);
+    };
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      configureInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+    ).rejects.toThrow("installation failed after remote mutation began");
+
+    expect(setupResult.hf.calls).toContain("setVariables");
+    expect(setupResult.hf.calls).not.toContain("wait");
+    expect(setupResult.hf.calls).not.toContain("pause");
+  });
+
+  it("re-attests after receipt persistence before the online variable update", async () => {
+    const setupResult = await setup(OLD_REVISION);
+    const receipt: BootstrapReceipt = {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+      install_id: setupResult.planned.plan.install_id,
+      plan_digest: setupResult.planned.digest,
+      space_id: setupResult.planned.plan.targets.space_id,
+      bucket_id: setupResult.planned.plan.targets.bucket_id,
+      source_revision: setupResult.planned.plan.source.revision,
+      manifest_digest: setupResult.planned.plan.bundle.manifest_digest,
+    };
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      configureInstall(
+        {
+          planPath: setupResult.planPath,
+          bootstrapReceipt: receipt,
+          persistBootstrapReceipt: async () => {
+            if (!setupResult.hf.state.space) throw new Error("test Space is missing");
+            setupResult.hf.state.space.variables.HARBOR_HF_SOURCE_REVISION =
+              "d".repeat(40);
+          },
+        },
+        setupResult.dependencies,
+      ),
+    ).rejects.toThrow("installation failed after remote mutation began");
+
+    expect(setupResult.hf.calls).toContain("uploadMirror");
+    expect(setupResult.hf.calls).not.toContain("setVariables");
+    expect(setupResult.hf.calls).not.toContain("wait");
+    expect(setupResult.hf.calls).not.toContain("pause");
+  });
+
+  it("pauses and remains disabled when an online upgrade fails", async () => {
+    const setupResult = await setup(OLD_REVISION);
+    setupResult.http.readyResponses.push({
+      status: 503,
+      body: { status: "unavailable" },
+    });
+    setupResult.hf.calls.length = 0;
+
+    await expect(
+      configureInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
+    ).rejects.toThrow("installation failed after remote mutation began");
+
+    expect(setupResult.hf.calls).not.toContain("restart");
+    expect(setupResult.hf.calls).toContain("pause");
+    expect(setupResult.hf.state.space?.runtimeStage).toBe("PAUSED");
+    expect(setupResult.hf.state.space?.variables.HARBOR_HF_WRITE_MODE).toBe("disabled");
   });
 
   it("preserves the exact reviewed Workbench pair through the existing-install lifecycle", async () => {
@@ -2382,7 +2730,10 @@ describe("installer workflows", () => {
     await expect(
       applyInstall({ planPath: setupResult.planPath }, setupResult.dependencies),
     ).rejects.toThrow("after remote mutation began");
-    expect(setupResult.hf.calls.filter((call) => call === "pause")).toHaveLength(1);
+    expect(setupResult.hf.calls).not.toContain("pause");
+    expect(setupResult.hf.state.space?.variables.HARBOR_HF_SOURCE_REVISION).toBe(
+      "d".repeat(40),
+    );
   });
 
   it("replans and resumes after a lost fresh Space create response", async () => {
