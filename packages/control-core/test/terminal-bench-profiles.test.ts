@@ -19,15 +19,9 @@ import {
   fastAgentWorkbenchStarter,
 } from "../src/workbench.js";
 
-const MATRIX_WORKER_REVISION = "a430d99ed7d6345917c3a477a89f03bd65a57d43";
-const MATRIX_WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:d3d122523eea6853424d56ecad1f2fdd5f9f50517bc4b890c93c7b8fda707ec4";
-const PREVIOUS_WORKER_REVISION = "8fa3b80ee9da16f989cbef5f532a54f2ef375197";
-const PREVIOUS_WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:56aae633c6cc9137a0a2366ebf3e52abcc2a43006f293c2bee888a0086913a2b";
-const COMMAND_WORKER_REVISION = "8d56439745c6139e6decaba1e74234d748e281d6";
-const COMMAND_WORKER_IMAGE =
-  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:7a390c4264c010e6a6008deff606271332a953b960e18125ab6efcb5fde85013";
+const WORKER_REVISION = "d5e1c8850477fa64f4bcb4e0023492ba27178a1e";
+const WORKER_IMAGE =
+  "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:dd0dac768b7113d50a505a3b811b5c9f4bd9e6e142852a158c71d4db21873636";
 const PREPARATION_COMMAND = [
   "python",
   "-m",
@@ -634,8 +628,8 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(template.inference_api).toBe("chat-completions");
       expect(template.inference_max_output_tokens).toBe(32_768);
       expect(hasKey(spec, "inference_model")).toBe(false);
-      expect(spec.job_image).toBe(MATRIX_WORKER_IMAGE);
-      expect(spec.worker_revision).toBe(MATRIX_WORKER_REVISION);
+      expect(spec.job_image).toBe(WORKER_IMAGE);
+      expect(spec.worker_revision).toBe(WORKER_REVISION);
       expect(spec.harbor_version).toBe("0.22.0");
     }
 
@@ -651,36 +645,19 @@ describe("Terminal-Bench 2.1 profiles", () => {
     expect(codexSpec.context_window).toBe(262_144);
     expect(codexTemplate.inference_api).toBe("responses");
     expect(codexTemplate.inference_max_output_tokens).toBe(32_768);
-    expect(codexSpec.job_image).toBe(MATRIX_WORKER_IMAGE);
-    expect(codexSpec.worker_revision).toBe(MATRIX_WORKER_REVISION);
+    expect(codexSpec.job_image).toBe(WORKER_IMAGE);
+    expect(codexSpec.worker_revision).toBe(WORKER_REVISION);
   });
 
   it("keeps all Terminal-Bench workers self-contained and digest-pinned", async () => {
     const deploymentNames = (await readdir("profiles/deployment"))
       .filter((name) => name.startsWith("tb21-") && name.endsWith(".json"))
       .map((name) => name.replace(/\.json$/, ""));
-    const matrixNames = new Set([
-      "tb21-qwen3-8-27b-deepinfra-providers",
-      "tb21-qwen3-8-27b-deepinfra-codex-providers",
-      "tb21-glm-5-3-flash-together-providers",
-    ]);
     for (const name of deploymentNames) {
       const spec = record((await profile("deployment", name)).spec);
       const template = record(spec.trial_job_template);
-      const expectedImage =
-        name === "tb21-gpt-oss-20b-fast-agent-command-providers"
-          ? COMMAND_WORKER_IMAGE
-          : matrixNames.has(name)
-            ? MATRIX_WORKER_IMAGE
-            : PREVIOUS_WORKER_IMAGE;
-      const expectedRevision =
-        name === "tb21-gpt-oss-20b-fast-agent-command-providers"
-          ? COMMAND_WORKER_REVISION
-          : matrixNames.has(name)
-            ? MATRIX_WORKER_REVISION
-            : PREVIOUS_WORKER_REVISION;
-      expect(spec.job_image).toBe(expectedImage);
-      expect(spec.worker_revision).toBe(expectedRevision);
+      expect(spec.job_image).toBe(WORKER_IMAGE);
+      expect(spec.worker_revision).toBe(WORKER_REVISION);
       expect(spec.preparation_job_command).toEqual(PREPARATION_COMMAND);
       expect(spec.job_command).toEqual(EXECUTION_COMMAND);
       expect(template.inference_model).toBeUndefined();
