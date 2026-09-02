@@ -594,6 +594,31 @@ function installedState(revision: string, principal: Principal): RemoteState {
   };
 }
 
+async function planExistingState(
+  mutateSpace: (space: SpaceState) => void,
+): Promise<Awaited<ReturnType<typeof planInstall>>> {
+  const directory = await temporaryDirectory();
+  const identity = new FakeIdentity();
+  const hf = new FakeHf();
+  hf.state = installedState(REVISION, identity.principal);
+  if (!hf.state.space) throw new Error("test Space is missing");
+  mutateSpace(hf.state.space);
+  return await planInstall(
+    {
+      space: "example/control",
+      bundleDirectory: resolve(directory, "private", "bundle"),
+      planPath: resolve(directory, "private", "plan.json"),
+    },
+    {
+      hf,
+      source: new FakeSource(resolve(directory, "repository")),
+      identity,
+      http: new FakeHttp(),
+      clock: new FakeClock(),
+    },
+  );
+}
+
 function legacyInstalledState(revision: string, principal: Principal): RemoteState {
   return {
     namespaceListingsComplete: true,
@@ -659,6 +684,50 @@ describe("installer workflows", () => {
     expect(second.planned.plan.install_id).toMatch(/^[a-f0-9]{64}$/);
     expect(first.planned.plan.install_id).not.toBe(second.planned.plan.install_id);
   });
+
+  it.each(["enabled", "disabled"] as const)(
+    "plans an existing installed Space in %s write mode while keeping the plan disabled",
+    async (writeMode) => {
+      const planned = await planExistingState((space) => {
+        space.variables.HARBOR_HF_WRITE_MODE = writeMode;
+      });
+
+      expect(
+        planned.plan.observed_preconditions.space?.variables.HARBOR_HF_WRITE_MODE,
+      ).toBe(writeMode);
+      expect(planned.plan.expected_variables.HARBOR_HF_WRITE_MODE).toBe("disabled");
+    },
+  );
+
+  it.each([
+    ["missing", null],
+    ["invalid", "read-only"],
+  ] as const)(
+    "rejects an existing installed Space with a %s write mode",
+    async (_name, writeMode) => {
+      await expect(
+        planExistingState((space) => {
+          if (writeMode === null) {
+            delete space.variables.HARBOR_HF_WRITE_MODE;
+          } else {
+            space.variables.HARBOR_HF_WRITE_MODE = writeMode;
+          }
+        }),
+      ).rejects.toThrow("variables do not match");
+    },
+  );
+
+  it.each(["credentials_required", "source_staged"] as const)(
+    "does not allow enabled write mode while planning a %s Space",
+    async (phase) => {
+      await expect(
+        planExistingState((space) => {
+          space.variables.HARBOR_HF_INSTALL_PHASE = phase;
+          space.variables.HARBOR_HF_WRITE_MODE = "enabled";
+        }),
+      ).rejects.toThrow("variables do not match");
+    },
+  );
 
   it("keeps provisioning and credential configuration as explicit boundaries", async () => {
     const setupResult = await setup();

@@ -709,7 +709,7 @@ export async function planInstall(
     workbench,
   );
   const phase = observed.space ? observedPhase(observed.space) : null;
-  const variablesForObserved =
+  let variablesForObserved =
     phase && phase !== "installed"
       ? expectedVariables(
           ids.namespace,
@@ -725,6 +725,16 @@ export async function planInstall(
           workbench,
         )
       : variables;
+  const observedWriteMode = observed.space?.variables.HARBOR_HF_WRITE_MODE;
+  if (
+    phase === "installed" &&
+    (observedWriteMode === "enabled" || observedWriteMode === "disabled")
+  ) {
+    variablesForObserved = {
+      ...variablesForObserved,
+      HARBOR_HF_WRITE_MODE: observedWriteMode,
+    };
+  }
   if (observed.space && isLegacySpace(observed.space)) {
     assertLegacyInstalledSafe(observed, {
       spaceId: ids.spaceId,
