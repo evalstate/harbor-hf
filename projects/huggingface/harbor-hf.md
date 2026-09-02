@@ -18,7 +18,7 @@ default_branch: main
 
 ## Current authorization
 
-Status: completed
+Status: approved
 Approved at: 2026-08-17T06:48:55Z
 Amended at: 2026-09-02
 Direct-inference documentation amendment approved at: 2026-09-02
@@ -28,6 +28,7 @@ Harbor-first commit-and-push amendment approved at: 2026-09-02T13:20:28Z
 Harbor-first commit-and-push amendment completed at: 2026-09-02T13:21:41Z
 Harbor-first deployment amendment approved at: 2026-09-02T13:53:54Z
 Harbor-first deployment amendment completed at: 2026-09-02T14:39:30Z
+Canonical Bucket reset amendment approved at: 2026-09-02T14:59:25Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -96,6 +97,19 @@ Mutation-tooling retirement amendment approved: 2026-08-26
 
 ### Scope
 
+- Disable control writes, delete all application objects
+  from the one live canonical artifact Bucket while preserving its single
+  installer ownership marker and the Bucket resource, then use the supported
+  existing-install npm sequence (`install:plan`, `install:configure`,
+  `install:verify`, and `install:activate`) to deploy the exact latest
+  `feat/agent-workbench` revision. Do not run `install:provision`, replace or
+  retrieve existing secrets, change hardware or protection, republish the
+  worker image, launch setup or benchmark Jobs, call inference, publish
+  results, create resources, merge, or update the default branch. Verify a
+  fresh projection, enabled write mode, and visibility of the 21 pinned
+  deployment profiles. The deleted application records are intentionally not
+  recoverable; if installation fails after deletion, leave writes disabled and
+  stop rather than creating replacement resources.
 - Publish one immutable `linux/amd64` trial-worker image
   from the reviewed Harbor-first branch, pin its real digest and source revision
   in every active compatible deployment profile, recompute profile identities,
@@ -311,6 +325,15 @@ authorization effect.
 
 ### 2026-09-02
 
+- Approved at 2026-09-02T14:59:25Z after inventory: disable
+  writes, irreversibly deleting the 1,143 application objects from the one live
+  canonical artifact Bucket while preserving its installer ownership marker
+  and resource, and running the existing-install npm
+  plan/configure/verify/activate sequence for the exact latest branch revision.
+  Preserve existing secret values, hardware, protection, Space, and Bucket; do
+  not provision resources, publish another image, launch Jobs or Runs, call
+  inference, publish results, merge, or update the default branch. If the fresh
+  installation fails, leave writes disabled and stop.
 - Approved at 2026-09-02T13:53:54Z: publish one bridge-free worker image,
   refresh immutable deployment-profile pins, commit and push on
   `feat/agent-workbench`, exact control-Space deployment, profile-visibility
