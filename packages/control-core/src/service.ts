@@ -109,6 +109,7 @@ export interface AttemptInput {
   action_id: string;
   outcome: AttemptReceipt["outcome"];
   replacement_eligible: boolean;
+  failure_fingerprint?: string;
   evidence_digest: string;
   evidence_path: string;
   cost_microusd: number;
@@ -150,6 +151,9 @@ export interface RunContinuationRepairSuccessorResult {
   status_url: string;
   adopted: boolean;
 }
+
+export const repeatedInfrastructureFailureReason =
+  "repeated deterministic infrastructure failure";
 
 export interface PreparedJobSubmissionResult {
   phase: PreparedJobSubmissionV1["phase"];
@@ -1194,6 +1198,9 @@ export class ControlService {
         priorAttemptId,
         intent.created_at,
         amount,
+        typeof intent.payload.replacement_reservation_key === "string"
+          ? intent.payload.replacement_reservation_key
+          : priorAttemptId,
       );
     const taskIds = stringArrayValue(intent.payload.task_ids, "Job action task IDs");
     const category =
@@ -2363,7 +2370,7 @@ export class ControlService {
     actor: Actor,
   ): Promise<{ receipt: AttemptReceipt; adopted: boolean }> {
     const { completed_at, ...fields } = input;
-    const candidate: AttemptReceipt = {
+    const submittedCandidate: AttemptReceipt = {
       schema_version: "v1",
       kind: "attempt.receipt",
       record_id: deterministicId("attempt-receipt", input.attempt_id),
@@ -2371,15 +2378,6 @@ export class ControlService {
       actor,
       ...fields,
     };
-    const existing = await this.projection.attemptById(input.attempt_id);
-    if (existing) {
-      const record = JSON.parse(existing.body) as AttemptReceipt;
-      if (canonicalJson(record) !== canonicalJson(candidate))
-        throw new IdempotencyConflictError(
-          `attempt identity conflict: ${input.attempt_id}`,
-        );
-      return { receipt: record, adopted: true };
-    }
     const action = await this.projection.action(input.action_id);
     if (
       !action ||
@@ -2390,6 +2388,37 @@ export class ControlService {
         `attempt does not reference an eligible run action: ${input.action_id}`,
       );
     const launch = JSON.parse(action.intent_body) as ActionIntent;
+    const fallbackFingerprint =
+      input.outcome === "infrastructure" &&
+      input.replacement_eligible &&
+      !input.failure_fingerprint
+        ? sha256(
+            canonicalJson({
+              kind: "legacy-worker-infrastructure-failure",
+              worker_revision: launch.payload.worker_revision ?? "unknown",
+            }),
+          )
+        : null;
+    const candidate: AttemptReceipt = {
+      ...submittedCandidate,
+      ...(fallbackFingerprint ? { failure_fingerprint: fallbackFingerprint } : {}),
+    };
+    const existing = await this.projection.attemptById(input.attempt_id);
+    if (existing) {
+      const record = JSON.parse(existing.body) as AttemptReceipt;
+      const matchesPreFingerprintRecord =
+        !input.failure_fingerprint &&
+        !record.failure_fingerprint &&
+        canonicalJson(record) === canonicalJson(submittedCandidate);
+      if (
+        canonicalJson(record) !== canonicalJson(candidate) &&
+        !matchesPreFingerprintRecord
+      )
+        throw new IdempotencyConflictError(
+          `attempt identity conflict: ${input.attempt_id}`,
+        );
+      return { receipt: record, adopted: true };
+    }
     const launchTasks = stringArrayValue(
       launch.payload.task_ids,
       "attempt Job action task IDs",
@@ -2747,9 +2776,18 @@ export class ControlService {
     const amountMicrousd = intent.payload.reservation_microusd;
     if (typeof amountMicrousd !== "number" || amountMicrousd <= 0) return false;
     const priorAttemptId = intent.payload.prior_attempt_id;
+    const replacementReservationKey =
+      typeof intent.payload.replacement_reservation_key === "string"
+        ? intent.payload.replacement_reservation_key
+        : priorAttemptId;
     const reserveId =
-      typeof priorAttemptId === "string"
-        ? deterministicId("budget", intent.run_id, "replacement", priorAttemptId)
+      typeof replacementReservationKey === "string"
+        ? deterministicId(
+            "budget",
+            intent.run_id,
+            "replacement",
+            replacementReservationKey,
+          )
         : deterministicId(
             "budget",
             intent.run_id,
@@ -2873,14 +2911,15 @@ export class ControlService {
     priorAttemptId: string,
     priorAttemptCompletedAt: string,
     amountMicrousd: number,
+    reservationKey = priorAttemptId,
   ): Promise<boolean> {
     await this.reconcileTerminalJobReservations(runId);
     const operation = this.budgetQueue.then(() =>
       this.reserveReplacementSerialized(
         runId,
-        priorAttemptId,
         priorAttemptCompletedAt,
         amountMicrousd,
+        reservationKey,
       ),
     );
     this.budgetQueue = operation.then(
@@ -2892,12 +2931,12 @@ export class ControlService {
 
   private async reserveReplacementSerialized(
     runId: string,
-    priorAttemptId: string,
     priorAttemptCompletedAt: string,
     amountMicrousd: number,
+    reservationKey: string,
   ): Promise<boolean> {
     if (amountMicrousd <= 0) return true;
-    const recordId = deterministicId("budget", runId, "replacement", priorAttemptId);
+    const recordId = deterministicId("budget", runId, "replacement", reservationKey);
     const existing = await this.projection.budget(recordId);
     if (existing) {
       if (
@@ -2921,7 +2960,7 @@ export class ControlService {
       const catchUp: BudgetEvent = {
         schema_version: "v1",
         kind: "budget.event",
-        record_id: deterministicId("budget", runId, "observed-overage", priorAttemptId),
+        record_id: deterministicId("budget", runId, "observed-overage", reservationKey),
         created_at: priorAttemptCompletedAt,
         actor: serviceActor(),
         run_id: runId,
@@ -3000,15 +3039,6 @@ export class ControlService {
     if (prior?.outcome !== "infrastructure" || prior.replacement_eligible !== 1)
       return null;
     return prior;
-  }
-
-  private consumedInfrastructureAttempts(
-    attempts: ReadonlyArray<{ outcome: string; replacement_eligible: number }>,
-  ): number {
-    return attempts.filter(
-      (attempt) =>
-        attempt.outcome === "infrastructure" && attempt.replacement_eligible === 1,
-    ).length;
   }
 
   private launchStillRunning(
@@ -3102,8 +3132,6 @@ export class ControlService {
       const prior = this.selectedInfrastructureAttempt(detail);
       if (
         !prior ||
-        this.consumedInfrastructureAttempts(detail.attempts) >=
-          policy.max_infrastructure_attempts ||
         (await this.projection.retryActionForAttempt(runId, prior.attempt_id)) ||
         (await this.laterExecutionLaunchExists(runId, task.task_id, prior.action_id))
       )
@@ -3183,6 +3211,11 @@ export class ControlService {
       if (sourceRow?.action_kind !== "job.launch")
         throw new PolicyError("bulk retry attempt has no physical Job launch");
       const source = JSON.parse(sourceRow.intent_body) as ActionIntent;
+      const replacementReservationKey = deterministicId(
+        "replacement-reservation",
+        attemptId,
+        String(command.generation),
+      );
       const child = this.actionIntent(
         command.run_id,
         "job.launch",
@@ -3193,6 +3226,7 @@ export class ControlService {
           task_id: taskId,
           task_ids: [taskId],
           prior_attempt_id: attemptId,
+          replacement_reservation_key: replacementReservationKey,
           reason: command.payload.reason ?? null,
         },
         command.actor,
@@ -3205,6 +3239,7 @@ export class ControlService {
           attemptId,
           attempt.created_at,
           reservation,
+          replacementReservationKey,
         ))
       )
         return { actionIds, complete: false };
@@ -3355,6 +3390,7 @@ export class ControlService {
       attemptId: string;
       completedAt: string;
       amountMicrousd: number;
+      reservationKey: string;
     } | null = null;
     if (input.action === "cancel") {
       if (runStatusIsTerminal(run.status))
@@ -3387,6 +3423,23 @@ export class ControlService {
       const successor = historical
         ? await this.projection.runContinuationRepairSuccessor(runId)
         : null;
+      const repeatedDefectPause = (await this.projection.runActions(runId)).find(
+        (action) => {
+          if (action.action_kind !== "run.pause") return false;
+          const pause = JSON.parse(action.intent_body) as ActionIntent;
+          return pause.payload.reason === repeatedInfrastructureFailureReason;
+        },
+      );
+      const latestRepair = successor ?? repair;
+      if (
+        repeatedDefectPause &&
+        (!latestRepair ||
+          Date.parse(latestRepair.created_at) <=
+            Date.parse(repeatedDefectPause.created_at))
+      )
+        throw new PolicyError(
+          "repeated infrastructure failure requires a reviewed worker repair",
+        );
       if (!run.paused && !(historical && repair && run.status === "failed"))
         throw new PolicyError("run is not paused");
       if (run.pending_actions > 0)
@@ -3582,15 +3635,16 @@ export class ControlService {
       if (deployment.route !== "hf_job")
         throw new PolicyError("imported deployment profiles cannot launch retries");
       const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
-      if (
-        this.consumedInfrastructureAttempts(task.attempts) >=
-        policy.max_infrastructure_attempts
-      )
-        throw new PolicyError("infrastructure retry budget is exhausted");
+      const replacementReservationKey = deterministicId(
+        "replacement-reservation",
+        priorAttempt.attempt_id,
+        idempotency.key_digest,
+      );
       retryReservation = {
         attemptId: priorAttempt.attempt_id,
         completedAt: priorAttempt.created_at,
         amountMicrousd: policy.reservation_microusd,
+        reservationKey: replacementReservationKey,
       };
       const sourceRow = await this.projection.action(priorAttempt.action_id);
       if (sourceRow?.action_kind !== "job.launch")
@@ -3603,6 +3657,7 @@ export class ControlService {
         task_ids: [input.task_id],
         reason: input.reason ?? null,
         prior_attempt_id: priorAttempt.attempt_id,
+        replacement_reservation_key: replacementReservationKey,
       };
     }
     payload = {
@@ -3617,6 +3672,7 @@ export class ControlService {
         retryReservation.attemptId,
         retryReservation.completedAt,
         retryReservation.amountMicrousd,
+        retryReservation.reservationKey,
       ))
     )
       throw new PolicyError("replacement Job would exceed the run ceiling");

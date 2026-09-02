@@ -459,6 +459,7 @@ task_id: Id
 attempt_id: Id
 outcome: ("complete" | "invalid" | "infrastructure" | "semantic" | "refusal" | "verifier" | "agent" | "benchmark_timeout" | "cancelled" | "policy")
 evidence_digest: Digest
+failure_fingerprint?: Digest
 evidence_path: string
 cost_microusd: number
 replacement_eligible: boolean
@@ -711,7 +712,7 @@ source_run_ids: [string, ...(string)[]]
 source_revisions: [string, ...(string)[]]
 }
 export interface LaunchPolicySpec {
-max_infrastructure_attempts: number
+max_infrastructure_attempts?: number
 reservation_microusd: number
 max_run_ceiling_microusd?: number
 success_without_worker_receipt: boolean
@@ -932,6 +933,7 @@ launch_action_id?: Id
 not_before?: Timestamp
 worker_receipt_deadline?: Timestamp
 prior_attempt_id?: Id
+replacement_reservation_key?: Id
 endpoint_id?: string
 watchdog_verified?: boolean
 run_lock_digest?: Digest

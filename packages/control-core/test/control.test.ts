@@ -33,6 +33,7 @@ import {
   ExternalActionNotFoundError,
   type ExternalActionPort,
   type ExternalActionResult,
+  nextAvailableActionGeneration,
   Reconciler,
 } from "../src/reconciler.js";
 import { runIdentity, runUnique } from "../src/run-id.js";
@@ -66,6 +67,12 @@ describe("profile cutover Job classification", () => {
     expect(jobStateIsTerminal("COMPLETED")).toBe(true);
     expect(jobStateIsTerminal("RUNNING")).toBe(false);
     expect(jobStateIsTerminal(null)).toBe(false);
+  });
+
+  it("selects an unused action generation without treating it as an ordinal", () => {
+    expect(nextAvailableActionGeneration([1_000_000])).toBe(0);
+    expect(nextAvailableActionGeneration([0, 2], 2)).toBe(1);
+    expect(nextAvailableActionGeneration([0, 1, 2], 2)).toBeNull();
   });
 });
 
@@ -3261,7 +3268,7 @@ describe("control service", () => {
     });
   });
 
-  it("turns failed Job launches into bounded infrastructure attempts", async () => {
+  it("retries unresolved infrastructure failures without a fixed attempt limit", async () => {
     const control = await createTestControl();
     controls.push(control);
     const result = await control.service.submit(
@@ -3275,10 +3282,16 @@ describe("control service", () => {
         if (intent.action_kind !== "job.launch")
           return new NoopActions().execute(intent);
         launches += 1;
+        if (launches <= 3)
+          return {
+            outcome: "failed",
+            observed_state: `job-create-failed-${launches}`,
+            error_code: "jobs-api-unavailable",
+          };
         return {
-          outcome: "failed",
-          observed_state: "job-create-failed",
-          error_code: "jobs-api-unavailable",
+          outcome: "created",
+          observed_state: "RUNNING",
+          resource_id: "job-after-infrastructure-retries",
         };
       },
     };
@@ -3289,29 +3302,168 @@ describe("control service", () => {
       new ResultPublisher(control.store, control.projection, control.service),
       { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
-    await settle(reconciler, 10);
-    expect(launches).toBe(1);
-    expect(await control.projection.unadvancedActions()).toHaveLength(0);
-    expect(await control.projection.runAttempts(result.run_id)).toMatchObject([
-      { outcome: "infrastructure", replacement_eligible: 1 },
-    ]);
+    await settle(reconciler, 16);
+    expect(launches).toBe(4);
+    expect(await control.projection.runAttempts(result.run_id)).toHaveLength(3);
     expect(await control.projection.run(result.run_id)).toMatchObject({
-      status: "failed",
-      terminal_tasks: 1,
-      exhausted_tasks: 1,
+      status: "active",
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
       publication_status: null,
     });
     const detail = await control.projection.task(result.run_id, "task-001");
-    expect(detail?.attempts).toMatchObject([
-      { outcome: "infrastructure", replacement_eligible: 1 },
-    ]);
+    expect(detail?.attempts).toHaveLength(3);
     expect(detail?.task).toMatchObject({
-      terminal_outcome: "infrastructure",
+      terminal_outcome: null,
       selected_attempt_id: null,
     });
   });
 
-  it("keeps a run active when one task is exhausted and others remain", async () => {
+  it("retries with a free generation after a hash-derived generation", async () => {
+    const control = await createTestControl(1, 2, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 12 },
+      "retry-generation-gap-key",
+      operator,
+    );
+    const launchGenerations: number[] = [];
+    let sentinelWritten = false;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: String(intent.payload.resource_id),
+          };
+        if (intent.action_kind !== "job.launch")
+          return new NoopActions().execute(intent);
+        launchGenerations.push(intent.generation);
+        if (!sentinelWritten) {
+          sentinelWritten = true;
+          const sentinel = control.service.actionIntent(
+            result.run_id,
+            "job.launch",
+            "task-001",
+            1_000_000,
+            { ...intent.payload },
+          );
+          await control.service.writeAction(sentinel);
+          await control.service.markAdvanced(
+            sentinel,
+            await control.service.receipt(sentinel, {
+              outcome: "completed",
+              observed_state: "suppressed-generation-sentinel",
+            }),
+          );
+          return {
+            outcome: "failed",
+            observed_state: "job-create-failed",
+            error_code: "jobs-api-unavailable",
+          };
+        }
+        return {
+          outcome: "created",
+          observed_state: "RUNNING",
+          resource_id: "replacement-job",
+        };
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 12);
+
+    expect(launchGenerations).toHaveLength(2);
+    expect(launchGenerations[1]).not.toBe(1_000_000);
+    expect(launchGenerations[1]).not.toBe(launchGenerations[0]);
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      status: "active",
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
+    });
+  });
+
+  it("pauses sibling tasks after a shared infrastructure failure repeats", async () => {
+    const control = await createTestControl(2, 1, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 100 },
+      "shared-failure-across-tasks-key",
+      operator,
+    );
+    let launches = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind !== "job.launch")
+          return new NoopActions().execute(intent);
+        launches += 1;
+        return {
+          outcome: "failed",
+          observed_state: "shared-worker-failure",
+          error_code: "worker-start-failed",
+        };
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 12);
+    const launchesAtPause = launches;
+    expect(launchesAtPause).toBeGreaterThanOrEqual(2);
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      status: "paused",
+      reserved_microusd: 0,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
+    });
+    await settle(reconciler, 5);
+    expect(launches).toBe(launchesAtPause);
+    expect(
+      (await control.projection.runActions(result.run_id)).some(
+        (action) =>
+          action.action_kind === "job.launch" &&
+          action.observed_state === "suppressed-paused",
+      ),
+    ).toBe(true);
+
+    await expect(
+      control.service.runAction(
+        result.run_id,
+        {
+          action: "resume",
+          reason: "no worker repair attached",
+          task_limit: 1,
+          confirmed: true,
+        },
+        "resume-shared-failure-across-tasks-key",
+        operator,
+      ),
+    ).rejects.toThrow(
+      "repeated infrastructure failure requires a reviewed worker repair",
+    );
+    await settle(reconciler, 12);
+    expect(launches).toBe(launchesAtPause);
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      status: "paused",
+      reserved_microusd: 0,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
+    });
+  });
+
+  it("keeps unresolved tasks active while their replacement Jobs run", async () => {
     const control = await createTestControl(2, 1, 0, true, "forbidden", undefined, []);
     controls.push(control);
     const result = await control.service.submit(
@@ -3353,16 +3505,16 @@ describe("control service", () => {
       { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
     await settle(reconciler, 12);
-    expect(launches).toBe(2);
+    expect(launches).toBe(3);
     expect(await control.projection.run(result.run_id)).toMatchObject({
       status: "active",
-      terminal_tasks: 1,
-      exhausted_tasks: 1,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
       publication_status: null,
     });
     expect(
       (await control.projection.task(result.run_id, "task-001"))?.task.terminal_outcome,
-    ).toBe("infrastructure");
+    ).toBeNull();
     expect(
       (await control.projection.task(result.run_id, "task-002"))?.task.terminal_outcome,
     ).toBeNull();
@@ -3377,14 +3529,17 @@ describe("control service", () => {
       operator,
     );
     let failObservation = true;
+    let launchSequence = 0;
     const external: ExternalActionPort = {
       execute: async (intent): Promise<ExternalActionResult> => {
-        if (intent.action_kind === "job.launch")
+        if (intent.action_kind === "job.launch") {
+          launchSequence += 1;
           return {
             outcome: "created",
             observed_state: "SCHEDULING",
-            resource_id: "job-broken-observe-chain",
+            resource_id: `job-broken-observe-chain-${launchSequence}`,
           };
+        }
         if (intent.action_kind === "job.observe" && failObservation)
           return {
             outcome: "failed",
@@ -3395,7 +3550,7 @@ describe("control service", () => {
           return {
             outcome: "completed",
             observed_state: "ERROR",
-            resource_id: "job-broken-observe-chain",
+            resource_id: String(intent.payload.resource_id),
           };
         return new NoopActions().execute(intent);
       },
@@ -3422,7 +3577,7 @@ describe("control service", () => {
     await control.service.receipt(JSON.parse(observe?.intent_body ?? "null"), {
       outcome: "completed",
       observed_state: "SCHEDULING",
-      resource_id: "job-broken-observe-chain",
+      resource_id: "job-broken-observe-chain-1",
     });
     await settle(reconciler, 3);
     expect(
@@ -4040,6 +4195,51 @@ describe("control service", () => {
     }
   });
 
+  it("rejects a repeated attempt that omits an explicit failure fingerprint", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "explicit-fingerprint-idempotency-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.run_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_id: "task-001",
+        task_ids: ["task-001"],
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "explicit-fingerprint-evidence",
+    );
+    const input = {
+      run_id: result.run_id,
+      task_id: "task-001",
+      attempt_id: "attempt-explicit-fingerprint",
+      action_id: launch.action_id,
+      outcome: "infrastructure" as const,
+      replacement_eligible: true,
+      failure_fingerprint: sha256("explicit-failure"),
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    };
+    await control.service.attempt(input);
+    const { failure_fingerprint: _omitted, ...withoutFingerprint } = input;
+
+    await expect(control.service.attempt(withoutFingerprint)).rejects.toThrow(
+      "attempt identity conflict",
+    );
+  });
+
   it("adopts a repeated infrastructure retry request", async () => {
     const control = await createTestControl(1, 2);
     controls.push(control);
@@ -4065,18 +4265,32 @@ describe("control service", () => {
       control,
       "retry-idempotency-evidence",
     );
-    await control.service.attempt({
+    const infrastructureAttemptInput = {
       run_id: result.run_id,
       task_id: "task-001",
       attempt_id: "attempt-retry-idempotency",
       action_id: launch.action_id,
-      outcome: "infrastructure",
+      outcome: "infrastructure" as const,
       replacement_eligible: true,
       ...retryEvidence,
       cost_microusd: 0,
       metrics: {},
       completed_at: "2026-08-16T00:00:01.000Z",
-    });
+    };
+    const infrastructureAttempt = await control.service.attempt(
+      infrastructureAttemptInput,
+    );
+    expect(infrastructureAttempt.failure_fingerprint).toBe(
+      sha256(
+        canonicalJson({
+          kind: "legacy-worker-infrastructure-failure",
+          worker_revision: "unknown",
+        }),
+      ),
+    );
+    await expect(
+      control.service.attemptWithStatus(infrastructureAttemptInput),
+    ).resolves.toMatchObject({ adopted: true });
     const action = {
       action: "retry_infrastructure",
       task_id: "task-001",
@@ -4136,6 +4350,104 @@ describe("control service", () => {
     ).rejects.toThrow(
       "idempotency key belongs to a different retry_infrastructure action",
     );
+  });
+
+  it("reuses a manual retry reservation after an interrupted intent write", async () => {
+    const control = await createTestControl(1, 2, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 12 },
+      "interrupted-retry-intent-run-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.run_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_id: "task-001",
+        task_ids: ["task-001"],
+        reservation_microusd: 6,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "interrupted-retry-intent-evidence",
+    );
+    await control.service.attempt({
+      run_id: result.run_id,
+      task_id: "task-001",
+      attempt_id: "attempt-interrupted-retry-intent",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    const action = {
+      action: "retry_infrastructure",
+      task_id: "task-001",
+      reason: "retry after interrupted intent write",
+      confirmed: true,
+    } as const;
+    const writeAction = control.service.writeAction.bind(control.service);
+    let interruptedIntent: ActionIntent | null = null;
+    const interruptedWrite = vi
+      .spyOn(control.service, "writeAction")
+      .mockImplementation(async (intent) => {
+        if (
+          intent.action_kind === "job.launch" &&
+          intent.payload.prior_attempt_id === "attempt-interrupted-retry-intent"
+        ) {
+          interruptedIntent = intent;
+          throw new Error("simulated retry intent write interruption");
+        }
+        return writeAction(intent);
+      });
+
+    await expect(
+      control.service.runAction(
+        result.run_id,
+        action,
+        "interrupted-retry-intent-key",
+        operator,
+      ),
+    ).rejects.toThrow("simulated retry intent write interruption");
+    interruptedWrite.mockRestore();
+    if (!interruptedIntent) throw new Error("interrupted retry intent is missing");
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      reserved_microusd: 6,
+    });
+    const collision = control.service.actionIntent(
+      result.run_id,
+      "publication.publish",
+      "generation-collision",
+      interruptedIntent.generation,
+      {},
+    );
+    await control.service.writeAction(collision);
+
+    const repeated = await control.service.runAction(
+      result.run_id,
+      action,
+      "interrupted-retry-intent-key",
+      operator,
+    );
+    const repeatedRow = await control.projection.action(repeated.action_id);
+    if (!repeatedRow) throw new Error("repeated retry intent is missing");
+    const repeatedIntent = JSON.parse(repeatedRow.intent_body) as ActionIntent;
+
+    expect(repeatedIntent.generation).not.toBe(interruptedIntent.generation);
+    expect(repeatedIntent.payload.replacement_reservation_key).toBe(
+      interruptedIntent.payload.replacement_reservation_key,
+    );
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      reserved_microusd: 6,
+    });
   });
 
   it("serializes concurrent infrastructure retry admissions", async () => {
@@ -4744,7 +5056,7 @@ describe("control service", () => {
     });
   });
 
-  it("releases each failed Job reservation before reserving its replacement", async () => {
+  it("releases failed Job reservations before pausing a repeated defect", async () => {
     const control = await createTestControl(1, 2, 6);
     controls.push(control);
     const result = await control.service.submit(
@@ -4777,10 +5089,29 @@ describe("control service", () => {
 
     expect(launches).toBe(2);
     expect(await control.projection.run(result.run_id)).toMatchObject({
-      status: "failed",
+      status: "paused",
       reserved_microusd: 0,
-      terminal_tasks: 1,
-      exhausted_tasks: 1,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
+    });
+
+    await expect(
+      control.service.runAction(
+        result.run_id,
+        { action: "resume", reason: "no worker repair attached", confirmed: true },
+        "resume-after-shared-defect-key",
+        operator,
+      ),
+    ).rejects.toThrow(
+      "repeated infrastructure failure requires a reviewed worker repair",
+    );
+    await settle(reconciler, 10);
+    expect(launches).toBe(2);
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      status: "paused",
+      reserved_microusd: 0,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
     });
   });
 

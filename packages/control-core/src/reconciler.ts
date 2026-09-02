@@ -29,6 +29,7 @@ import {
   infrastructureSealReplaceable,
   type JobBudgetReservation,
   PolicyError,
+  repeatedInfrastructureFailureReason,
 } from "./service.js";
 
 export interface ExternalActionResult {
@@ -73,6 +74,19 @@ interface ExecutableRun {
   profiles: RunLock["profiles"];
   execution: ResolvedExecutionContract;
   source_lock: RunLock;
+}
+
+const maximumActionGeneration = 1_000_000;
+
+export function nextAvailableActionGeneration(
+  generations: readonly number[],
+  maximum = maximumActionGeneration,
+): number | null {
+  const used = new Set(generations);
+  for (let generation = 0; generation <= maximum; generation += 1) {
+    if (!used.has(generation)) return generation;
+  }
+  return null;
 }
 
 const terminalJobStates = new Set([
@@ -1217,11 +1231,6 @@ export class Reconciler {
             "success_without_worker_receipt",
             "boolean",
           ),
-          max_infrastructure_attempts: profileScalar<number>(
-            policy,
-            "max_infrastructure_attempts",
-            "number",
-          ),
           required_positive_metrics: optionalProfileStrings(
             policy,
             "required_positive_metrics",
@@ -1505,6 +1514,17 @@ export class Reconciler {
         action_id: launchActionId,
         outcome: fallback,
         replacement_eligible: replacementEligible,
+        ...(replacementEligible
+          ? {
+              failure_fingerprint: sha256(
+                canonicalJson({
+                  kind: "job-terminal-without-worker-receipt",
+                  observed_state: receipt.observed_state,
+                  worker_revision: intent.payload.worker_revision ?? "unknown",
+                }),
+              ),
+            }
+          : {}),
         evidence_digest: sha256(canonicalJson(receipt)),
         evidence_path: controlRecordPath(receipt),
         cost_microusd: 0,
@@ -1531,9 +1551,8 @@ export class Reconciler {
       attempt,
       requiredPositiveMetrics(lock.source_lock),
     );
-    const attempts = (await this.projection.runAttempts(attempt.run_id)).filter(
-      (item) => item.task_id === attempt.task_id,
-    );
+    const runAttempts = await this.projection.runAttempts(attempt.run_id);
+    const attempts = runAttempts.filter((item) => item.task_id === attempt.task_id);
     if (source.payload.worker_role === "preparation") {
       await this.service.exhaustTask(
         attempt,
@@ -1560,21 +1579,40 @@ export class Reconciler {
         await this.projection.retryActionForAttempt(attempt.run_id, attempt.attempt_id)
       )
         return;
-      const infrastructureAttempts = attempts.filter(
-        (item) => item.outcome === "infrastructure",
-      );
-      const maxAttempts = scalar<number>(
-        source.payload,
-        "max_infrastructure_attempts",
-        "number",
-      );
-      if (infrastructureAttempts.length >= maxAttempts) {
-        await this.service.exhaustTask(
-          attempt,
-          `attempt limit exhausted: ${validity.reason}`,
-          attempts.length,
+      if (attempt.failure_fingerprint) {
+        const matchingFailures = runAttempts.filter((item) => {
+          const receipt = JSON.parse(item.body) as AttemptReceipt;
+          return (
+            receipt.outcome === "infrastructure" &&
+            receipt.failure_fingerprint === attempt.failure_fingerprint
+          );
+        });
+        const repair = await this.projection.runContinuationRepair(attempt.run_id);
+        const successor = await this.projection.runContinuationRepairSuccessor(
+          attempt.run_id,
         );
-        return;
+        const latestRepair = successor ?? repair;
+        const repairedAfterAttempt =
+          latestRepair !== null &&
+          Date.parse(latestRepair.created_at) > Date.parse(attempt.created_at);
+        if (matchingFailures.length >= 2 && !repairedAfterAttempt) {
+          const latestResume = (await this.projection.runActions(attempt.run_id)).find(
+            (action) =>
+              action.action_kind === "run.resume" &&
+              Date.parse(action.created_at) > Date.parse(attempt.created_at),
+          );
+          const pauseCycle = latestResume?.action_id ?? attempt.attempt_id;
+          await this.service.writeAction(
+            this.service.actionIntent(
+              attempt.run_id,
+              "run.pause",
+              `repeated-defect:${attempt.task_id}:${pauseCycle}`,
+              0,
+              { reason: repeatedInfrastructureFailureReason },
+            ),
+          );
+          return;
+        }
       }
       if (
         await this.service.laterExecutionLaunchExists(
@@ -1590,12 +1628,51 @@ export class Reconciler {
         "reservation_microusd",
         "number",
       );
+      const runActions = await this.projection.runActions(attempt.run_id);
+      const taskLaunches = runActions.filter((action) => {
+        if (action.action_kind !== "job.launch") return false;
+        const launch = JSON.parse(action.intent_body) as ActionIntent;
+        return launch.payload.task_id === attempt.task_id;
+      });
+      const retryGeneration = nextAvailableActionGeneration(
+        taskLaunches.map((launch) => launch.generation),
+      );
+      if (retryGeneration === null) {
+        await this.service.writeAction(
+          this.service.actionIntent(
+            attempt.run_id,
+            "run.pause",
+            `retry-generation-limit:${attempt.task_id}`,
+            maximumActionGeneration,
+            { reason: "automatic retry generation limit reached" },
+          ),
+        );
+        return;
+      }
+      const latestResume = runActions.find(
+        (action) =>
+          action.action_kind === "run.resume" &&
+          Date.parse(action.created_at) > Date.parse(attempt.created_at),
+      );
+      const repair = await this.projection.runContinuationRepair(attempt.run_id);
+      const successor = await this.projection.runContinuationRepairSuccessor(
+        attempt.run_id,
+      );
+      const replacementReservationKey = deterministicId(
+        "replacement-reservation",
+        attempt.attempt_id,
+        latestResume?.action_id ??
+          successor?.record_id ??
+          repair?.record_id ??
+          "initial",
+      );
       if (
         !(await this.service.reserveReplacement(
           attempt.run_id,
           attempt.attempt_id,
           attempt.created_at,
           reservation,
+          replacementReservationKey,
         ))
       ) {
         await this.service.exhaustTask(
@@ -1609,15 +1686,6 @@ export class Reconciler {
       if (priorLaunch?.action_kind !== "job.launch")
         throw new PolicyError("attempt does not identify its physical Job launch");
       const launch = JSON.parse(priorLaunch.intent_body) as ActionIntent;
-      const retryGeneration = isCurrentRunLock(lock.source_lock)
-        ? infrastructureAttempts.length
-        : await this.projection.nextExecutionLaunchGeneration(attempt.run_id);
-      const repair = isCurrentRunLock(lock.source_lock)
-        ? null
-        : await this.projection.runContinuationRepair(attempt.run_id);
-      const successor = isCurrentRunLock(lock.source_lock)
-        ? null
-        : await this.projection.runContinuationRepairSuccessor(attempt.run_id);
       const retry = this.service.actionIntent(
         attempt.run_id,
         "job.launch",
@@ -1642,6 +1710,7 @@ export class Reconciler {
           task_id: attempt.task_id,
           task_ids: [attempt.task_id],
           prior_attempt_id: attempt.attempt_id,
+          replacement_reservation_key: replacementReservationKey,
         },
       );
       await this.service.writeAction(retry);
