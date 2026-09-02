@@ -18,7 +18,7 @@ default_branch: main
 
 ## Current authorization
 
-Status: completed
+Status: approved
 Approved at: 2026-08-17T06:48:55Z
 Amended at: 2026-09-02
 Direct-inference documentation amendment approved at: 2026-09-02
@@ -26,6 +26,7 @@ Harbor-first implementation amendment approved at: 2026-09-02T12:17:25Z
 Harbor-first implementation amendment completed at: 2026-09-02T13:09:16Z
 Harbor-first commit-and-push amendment approved at: 2026-09-02T13:20:28Z
 Harbor-first commit-and-push amendment completed at: 2026-09-02T13:21:41Z
+Harbor-first deployment amendment approved at: 2026-09-02T13:53:54Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -94,6 +95,17 @@ Mutation-tooling retirement amendment approved: 2026-08-26
 
 ### Scope
 
+- Publish one immutable `linux/amd64` trial-worker image
+  from the reviewed Harbor-first branch, pin its real digest and source revision
+  in every active compatible deployment profile, recompute profile identities,
+  commit and push those pins to `feat/agent-workbench`, deploy that exact final
+  revision to the existing canonical control Space, and verify service health
+  plus approved profile visibility. Use only the existing Space, Bucket,
+  secrets, image package, and branch. Do not launch a Workbench setup Job or
+  benchmark Run, call inference, publish benchmark results, create resources,
+  change hardware, merge, or update the default branch. If the control service
+  fails health checks, restore only the immediately preceding known-good
+  control revision.
 - Commit the completed and locally verified Harbor-first refactor, including
   its source, tests, profiles, generated artifacts, documentation, and
   instruction updates, then push the current `feat/agent-workbench` branch to
@@ -298,6 +310,13 @@ authorization effect.
 
 ### 2026-09-02
 
+- Approved at 2026-09-02T13:53:54Z: publish one bridge-free worker image,
+  refresh immutable deployment-profile pins, commit and push on
+  `feat/agent-workbench`, exact control-Space deployment, profile-visibility
+  verification, and bounded rollback to the immediately preceding control
+  revision if health checks fail. This excludes setup or benchmark Jobs,
+  inference, result publication, new resources, hardware changes, merge, and
+  default-branch updates.
 - Approved at 2026-09-02T13:20:28Z: commit the completed Harbor-first refactor
   and push only the current `feat/agent-workbench` branch to its tracked
   `origin` branch. No deployment, image or package publication, inference,
