@@ -18,11 +18,12 @@ default_branch: main
 
 ## Current authorization
 
-Status: approved
+Status: completed
 Approved at: 2026-08-17T06:48:55Z
 Amended at: 2026-09-02
 Direct-inference documentation amendment approved at: 2026-09-02
 Harbor-first implementation amendment approved at: 2026-09-02T12:17:25Z
+Harbor-first implementation amendment completed at: 2026-09-02T13:09:16Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -294,6 +295,10 @@ authorization effect.
   integration-test repairs, generated-file refreshes, and local validation only.
   This amendment excludes credentials, local or remote inference, deployment,
   publication, spending, push, merge, hosted mutation, and resource changes.
+- Completed at 2026-09-02T13:09:16Z: removed the active custom inference
+  intermediary paths, migrated execution to direct Harbor agent configuration,
+  refreshed tests and generated artifacts, and passed the approved local
+  verification gates. No remote action or credential use occurred.
 
 ### 2026-08-17
 
