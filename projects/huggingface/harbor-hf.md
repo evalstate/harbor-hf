@@ -18,7 +18,7 @@ default_branch: main
 
 ## Current authorization
 
-Status: approved
+Status: completed
 Approved at: 2026-08-17T06:48:55Z
 Amended at: 2026-09-02
 Direct-inference documentation amendment approved at: 2026-09-02
@@ -27,6 +27,7 @@ Harbor-first implementation amendment completed at: 2026-09-02T13:09:16Z
 Harbor-first commit-and-push amendment approved at: 2026-09-02T13:20:28Z
 Harbor-first commit-and-push amendment completed at: 2026-09-02T13:21:41Z
 Harbor-first deployment amendment approved at: 2026-09-02T13:53:54Z
+Harbor-first deployment amendment completed at: 2026-09-02T14:39:30Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -317,6 +318,17 @@ authorization effect.
   revision if health checks fail. This excludes setup or benchmark Jobs,
   inference, result publication, new resources, hardware changes, merge, and
   default-branch updates.
+- Completed at 2026-09-02T14:39:30Z: published and verified the worker image,
+  pinned and pushed all active compatible deployment profiles, and attempted
+  the exact control deployment. Startup rejected one immutable historical
+  action record under the stricter current schema, so the authorized rollback
+  restored the immediately preceding control revision with healthy readiness,
+  unchanged write mode, zero control-owned active Jobs, and a clean projection.
+  No setup or benchmark Job, inference call, result publication, resource
+  creation, hardware change, merge, or default-branch update occurred. During
+  diagnostics, one private Space identifier and one historical Run identifier
+  appeared in local tool output; no credential or private identifier was
+  committed or pushed, and the local captured files were removed.
 - Approved at 2026-09-02T13:20:28Z: commit the completed Harbor-first refactor
   and push only the current `feat/agent-workbench` branch to its tracked
   `origin` branch. No deployment, image or package publication, inference,
