@@ -615,8 +615,6 @@ test("shows complete run Jobs with sticky, filterable table headers", async ({
         namespace_limit: 128,
         hardware_active: 4,
         hardware_limit: 128,
-        provider_reserved: 4,
-        provider_limit: 16,
         start_tokens: 120,
         start_burst: 128,
         queued: 0,

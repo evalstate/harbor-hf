@@ -362,19 +362,49 @@ describe("control API", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.setup_command).toContain("fast-agent-mcp==0.10.11");
-    expect(body.run_command).toContain("http://127.0.0.1:18080/v1");
+    expect(body.run_command).toContain("<injected-model-base-url>");
     expect(body.environment).toContainEqual(
       expect.objectContaining({
         name: "OPENAI_API_KEY",
-        value: "<injected-placeholder>",
+        value: "<injected-model-api-key>",
         redacted: true,
       }),
     );
+    expect(body.harness_profile).toMatchObject({
+      required_evidence: ["workspace", "verifier", "trajectory"],
+      harbor_agent: {
+        kwargs: {
+          config: {
+            run: {
+              bindings: {
+                OPENAI_API_KEY: "model_api_key",
+                MODEL_BASE_URL: "model_base_url",
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(body.harness_profile)).not.toContain("route_base_url");
+    expect(JSON.stringify(body.harness_profile)).not.toContain("route_api_key");
     expect(JSON.stringify(body)).not.toContain("test-token-not-a-real-credential");
   });
 
-  it("rejects credential-like Workbench literals and disabled setup execution", async () => {
+  it("rejects reserved and credential-like Workbench literals and disabled setup execution", async () => {
     const { app } = await setup();
+    const reserved = await app.inject({
+      method: "POST",
+      url: "/api/v1/workbench/preview",
+      payload: {
+        ...structuredClone(fastAgentWorkbenchStarter),
+        environment: [
+          { name: "HF_INFERENCE_TOKEN", source: "literal", value: "value" },
+        ],
+      },
+    });
+    expect(reserved.statusCode).toBe(422);
+    expect(reserved.json().error.code).toBe("policy_rejected");
+
     const invalid = await app.inject({
       method: "POST",
       url: "/api/v1/workbench/preview",
@@ -989,8 +1019,9 @@ describe("control API", () => {
       configured: true,
       run_limit: 1,
       run_active: 0,
-      provider_limit: 0,
     });
+    expect(response.json()).not.toHaveProperty("provider_limit");
+    expect(response.json()).not.toHaveProperty("provider_reserved");
     await app.close();
   });
 

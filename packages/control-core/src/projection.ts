@@ -120,7 +120,6 @@ interface AdmissionRow {
   namespace: string;
   capacity_profile_id: string;
   hardware: string;
-  reserved_provider_requests: number;
   tokens_remaining: number;
   refill_cursor_at: string;
   previous_grant_id: string | null;
@@ -733,7 +732,6 @@ export class Projection {
       .addColumn("namespace", "text", (column) => column.notNull())
       .addColumn("capacity_profile_id", "text", (column) => column.notNull())
       .addColumn("hardware", "text", (column) => column.notNull())
-      .addColumn("reserved_provider_requests", "integer", (column) => column.notNull())
       .addColumn("tokens_remaining", "integer", (column) => column.notNull())
       .addColumn("refill_cursor_at", "text", (column) => column.notNull())
       .addColumn("previous_grant_id", "text")
@@ -1318,7 +1316,6 @@ export class Projection {
         namespace: record.namespace,
         capacity_profile_id: record.capacity_profile_id,
         hardware: record.hardware,
-        reserved_provider_requests: record.reserved_provider_requests,
         tokens_remaining: record.tokens_remaining,
         refill_cursor_at: record.refill_cursor_at,
         previous_grant_id: record.previous_grant_id,

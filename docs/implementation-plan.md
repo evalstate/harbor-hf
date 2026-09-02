@@ -1,5 +1,10 @@
 # Production Run Implementation Plan
 
+> **Historical record — superseded 2026-09-02.** This document preserves the
+> implementation plan reviewed at the time. Its imperative language and former
+> inference design are not current guidance. New work follows
+> [`CONTROL_SERVICE.md`](CONTROL_SERVICE.md) and Harbor-first direct inference.
+
 **Status.** Superseded implementation record. Sandbox references below describe
 the pre-reset runtime and are retained as history, not current guidance.
 

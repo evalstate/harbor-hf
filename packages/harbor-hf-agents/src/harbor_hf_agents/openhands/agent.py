@@ -1,28 +1,22 @@
-"""OpenHands over the Harbor-HF Job inference route."""
+"""OpenHands using Harbor's direct model connection."""
 
 from typing import override
 
 from harbor.agents.installed.openhands import OpenHands
 from harbor.environments.base import BaseEnvironment
 
-from harbor_hf_agents.support.isolated_user import AGENT_USER
-from harbor_hf_agents.support.job_chat_completions import (
-    JobChatCompletionsAgent,
+from harbor_hf_agents.support.direct_inference import (
+    DirectChatCompletionsAgent,
 )
+from harbor_hf_agents.support.isolated_user import AGENT_USER
 
 
-class OpenHandsAgent(JobChatCompletionsAgent, OpenHands):
-    """Harbor OpenHands bound to the locked Job loopback inference route.
+class OpenHandsAgent(DirectChatCompletionsAgent, OpenHands):
+    """Harbor OpenHands with direct OpenAI-compatible inference settings."""
 
-    Upstream OpenHands reads ``LLM_API_KEY`` and ``LLM_BASE_URL`` from the Job
-    process before it starts. Execution Jobs do not receive those values. This
-    wrapper loads ``/run/harbor-hf-inference.json`` and injects the placeholder
-    Chat Completions route.
-    """
-
-    route_base_url_key = "LLM_BASE_URL"
-    route_api_key_key = "LLM_API_KEY"
-    route_label = "OpenHands"
+    base_url_key = "LLM_BASE_URL"
+    api_key_key = "LLM_API_KEY"
+    agent_label = "OpenHands"
     install_packages = (
         "ca-certificates",
         "curl",
@@ -30,7 +24,7 @@ class OpenHandsAgent(JobChatCompletionsAgent, OpenHands):
         "passwd",
         "util-linux",
     )
-    inject_route_into_process = True
+    inject_environment_into_process = True
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:

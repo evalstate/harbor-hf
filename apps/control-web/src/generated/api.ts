@@ -1166,12 +1166,10 @@ export interface paths {
                             run_active: number;
                             hardware_limit: number | null;
                             hardware_active: number;
-                            provider_limit: number;
-                            provider_reserved: number;
                             start_tokens: number | null;
                             start_burst: number | null;
                             queued: number;
-                            limiting_factor: string | null;
+                            limiting_factor: ("run_job_capacity" | "namespace_job_capacity" | "hardware_job_capacity" | "start_rate" | "run_cancelled") | null;
                             not_before: string | null;
                         };
                     };

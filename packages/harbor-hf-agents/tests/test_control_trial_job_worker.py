@@ -537,67 +537,26 @@ def test_computes_conservative_token_cost(monkeypatch: pytest.MonkeyPatch) -> No
     assert worker._cost_microusd(config, result) == 200_000
 
 
-def test_provider_usage_overrides_untrusted_agent_token_counts(
+def test_metrics_and_cost_use_harbor_agent_result_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(monkeypatch)
-    result = {"agent_result": {"n_input_tokens": 1, "n_output_tokens": 1}}
-    usage = worker.InferenceUsage(
-        requests=2,
-        input_tokens=1_000_000,
-        output_tokens=500_000,
-    )
+    result = {
+        "agent_result": {
+            "n_input_tokens": 1_000_000,
+            "n_output_tokens": 500_000,
+        },
+        "inference_usage": {
+            "input_tokens": 1,
+            "output_tokens": 1,
+        },
+    }
 
-    assert worker._metrics(result, usage) == {
+    assert worker._metrics(result) == {
         "input_tokens": 1_000_000.0,
         "output_tokens": 500_000.0,
     }
-    assert worker._cost_microusd(config, result, usage) == 200_000
-
-
-@pytest.mark.parametrize(
-    ("outcome", "replacement", "usage", "expected"),
-    [
-        (
-            "complete",
-            False,
-            worker.InferenceUsage(requests=0, input_tokens=0, output_tokens=0),
-            ("infrastructure", True),
-        ),
-        (
-            "agent",
-            False,
-            worker.InferenceUsage(requests=1, input_tokens=0, output_tokens=0),
-            ("infrastructure", True),
-        ),
-        (
-            "benchmark_timeout",
-            False,
-            worker.InferenceUsage(requests=0, input_tokens=0, output_tokens=0),
-            ("infrastructure", True),
-        ),
-        (
-            "benchmark_timeout",
-            False,
-            worker.InferenceUsage(requests=1, input_tokens=10, output_tokens=2),
-            ("benchmark_timeout", False),
-        ),
-        (
-            "complete",
-            False,
-            worker.InferenceUsage(requests=1, input_tokens=10, output_tokens=2),
-            ("complete", False),
-        ),
-        ("policy", False, None, ("policy", False)),
-    ],
-)
-def test_missing_provider_usage_is_retryable_infrastructure(
-    outcome: str,
-    replacement: bool,
-    usage: worker.InferenceUsage | None,
-    expected: tuple[str, bool],
-) -> None:
-    assert worker._outcome_with_usage(outcome, replacement, usage) == expected
+    assert worker._cost_microusd(config, result) == 200_000
 
 
 @pytest.mark.parametrize(
@@ -655,6 +614,7 @@ def test_harbor_child_environment_is_allowlisted() -> None:
         "HOME": "/tmp/home",
         "HARBOR_HF_RUN_ID": "run-1",
         "HARBOR_HF_WORKER_CAPABILITY": "private-capability",
+        "HF_INFERENCE_TOKEN": "private-inference-token",
         "UNRELATED_SECRET": "must-not-enter",
         "ARBITRARY_VALUE": "must-not-enter",
     }
@@ -667,6 +627,7 @@ def test_harbor_child_environment_is_allowlisted() -> None:
         "HOME": "/tmp/home",
         "HARBOR_HF_RUN_ID": "run-1",
         "HARBOR_HF_WORKER_CAPABILITY": "private-capability",
+        "HF_INFERENCE_TOKEN": "private-inference-token",
         "HARBOR_HF_AGENT_TIMEOUT_SECONDS": "900",
     }
 
@@ -889,10 +850,6 @@ def test_missing_harbor_result_preserves_timeout_provenance(
         ),
         (
             worker.JobEnvironmentPreflightError("dedicated task UID unavailable"),
-            ("infrastructure", True),
-        ),
-        (
-            worker.InferenceUsageError("invalid provider usage"),
             ("infrastructure", True),
         ),
     ],

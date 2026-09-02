@@ -1849,13 +1849,6 @@ export function RunPage() {
               </dd>
             </div>
             <div>
-              <dt className="text-slate-500">Provider requests</dt>
-              <dd className="mt-1">
-                {capacity.data.provider_reserved}/{capacity.data.provider_limit}{" "}
-                reserved
-              </dd>
-            </div>
-            <div>
               <dt className="text-slate-500">Start tokens</dt>
               <dd className="mt-1">
                 {capacity.data.start_tokens ?? "unconfigured"}/

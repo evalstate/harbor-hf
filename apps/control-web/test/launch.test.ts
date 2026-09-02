@@ -124,11 +124,6 @@ describe("launch helpers", () => {
     expect(labeledHarness(null)).toBe("—");
   });
 
-  it("labels FX instead of title-casing the alias", () => {
-    expect(profileLabel("harness", "fx", { agent: "fx" })).toBe("FX");
-    expect(labeledHarness("fx")).toBe("FX");
-  });
-
   it("labels Terminal-Bench 2.1 by source tasks and trials, not logical attempts", () => {
     expect(
       profileLabel("benchmark", "terminal-bench-2-1-official-5", {

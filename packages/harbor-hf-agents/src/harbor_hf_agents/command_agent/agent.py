@@ -23,15 +23,13 @@ from pydantic import (
     model_validator,
 )
 
+from harbor_hf_agents.support.direct_inference import (
+    with_agent_environment_cleanup,
+)
 from harbor_hf_agents.support.isolated_user import (
     AGENT_HOME,
     AGENT_USER,
     IsolatedProviderAgent,
-)
-from harbor_hf_agents.support.job_chat_completions import allowed_model_id
-from harbor_hf_agents.support.job_inference_route import (
-    use_job_inference_route,
-    with_job_inference_bridge_cleanup,
 )
 
 type CommandBinding = Literal[
@@ -40,8 +38,8 @@ type CommandBinding = Literal[
     "logs_path",
     "agent_home",
     "model_name",
-    "route_base_url",
-    "route_api_key",
+    "model_base_url",
+    "model_api_key",
     "agent_version",
 ]
 type RouteApi = Literal["chat-completions", "responses"]
@@ -49,8 +47,6 @@ type RouteApi = Literal["chat-completions", "responses"]
 _WORKSPACE_PATH = "/app"
 _LOGS_PATH = "/logs/agent"
 _INSTRUCTION_PATH = f"{_LOGS_PATH}/instruction.txt"
-_BASE_URL_KEY = "HARBOR_COMMAND_INTERNAL_BASE_URL"
-_API_KEY_KEY = "HARBOR_COMMAND_INTERNAL_API_KEY"
 _MAX_ATIF_BYTES = 64 * 1024 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -82,7 +78,7 @@ _RESERVED_ENV_NAMES = frozenset(
 def _validate_environment_name(
     name: str,
     *,
-    allow_route_placeholder: bool = False,
+    allow_model_credential: bool = False,
 ) -> None:
     if _ENV_NAME.fullmatch(name) is None:
         raise ValueError(f"binding environment name {name!r} is not a portable name")
@@ -90,7 +86,7 @@ def _validate_environment_name(
         raise ValueError(
             f"binding environment name {name!r} is reserved or credential-like"
         )
-    if is_sensitive_env_key(name) and not allow_route_placeholder:
+    if is_sensitive_env_key(name) and not allow_model_credential:
         raise ValueError(
             f"binding environment name {name!r} is reserved or credential-like"
         )
@@ -119,7 +115,7 @@ class CommandSpec(_StrictModel):
         for name, binding in self.bindings.items():
             _validate_environment_name(
                 name,
-                allow_route_placeholder=binding == "route_api_key",
+                allow_model_credential=binding == "model_api_key",
             )
         for name in self.literals:
             _validate_environment_name(name)
@@ -181,8 +177,8 @@ class CommandAgentConfig(_StrictModel):
             return self
         unavailable = {
             "instruction_path",
-            "route_base_url",
-            "route_api_key",
+            "model_base_url",
+            "model_api_key",
         }.intersection(self.setup.bindings.values())
         if unavailable:
             names = ", ".join(sorted(unavailable))
@@ -219,17 +215,19 @@ class CommandAgent(IsolatedProviderAgent):
         config: Path | str | dict[str, Any] | None = None,
         **kwargs: Any,  # noqa: ANN401 -- Harbor API
     ) -> None:
-        if extra_env:
-            names = ", ".join(sorted(extra_env))
+        allowed_environment = {"OPENAI_API_KEY", "OPENAI_BASE_URL"}
+        unexpected = set(extra_env or {}) - allowed_environment
+        if unexpected:
+            names = ", ".join(sorted(unexpected))
             raise ValueError(
-                "Command agent does not accept arbitrary ambient environment "
+                "Command agent does not accept unsupported environment "
                 f"variables: {names}"
             )
         super().__init__(
             logs_dir=logs_dir,
             prompt_template_path=prompt_template_path,
             version=version,
-            extra_env=None,
+            extra_env=extra_env,
             config=config,
             **kwargs,
         )
@@ -302,7 +300,7 @@ class CommandAgent(IsolatedProviderAgent):
         self,
         spec: CommandSpec,
         *,
-        route: dict[CommandBinding, str] | None = None,
+        model_connection: dict[CommandBinding, str] | None = None,
     ) -> dict[str, str]:
         values: dict[CommandBinding, str | None] = {
             "instruction_path": _INSTRUCTION_PATH,
@@ -310,12 +308,12 @@ class CommandAgent(IsolatedProviderAgent):
             "logs_path": _LOGS_PATH,
             "agent_home": AGENT_HOME,
             "model_name": self.model_name,
-            "route_base_url": None,
-            "route_api_key": None,
+            "model_base_url": None,
+            "model_api_key": None,
             "agent_version": self.version() or "unknown",
         }
-        if route is not None:
-            values.update(route)
+        if model_connection is not None:
+            values.update(model_connection)
         env: dict[str, str] = {}
         env.update(spec.literals)
         for name, binding in spec.bindings.items():
@@ -331,7 +329,7 @@ class CommandAgent(IsolatedProviderAgent):
         spec: CommandSpec,
         *,
         phase: Literal["setup", "run"],
-        route: dict[CommandBinding, str] | None = None,
+        model_connection: dict[CommandBinding, str] | None = None,
     ) -> None:
         await self._ensure_isolated_agent_user(environment)
         body = await self._command_body(environment, spec, phase=phase)
@@ -343,7 +341,7 @@ class CommandAgent(IsolatedProviderAgent):
         await self.exec_as_agent_clean(
             environment,
             command=command,
-            env=self._binding_values(spec, route=route),
+            env=self._binding_values(spec, model_connection=model_connection),
             cwd=_WORKSPACE_PATH,
         )
 
@@ -356,35 +354,24 @@ class CommandAgent(IsolatedProviderAgent):
                 phase="setup",
             )
 
-    def _uses_route(self) -> bool:
+    def _uses_model_connection(self) -> bool:
         return any(
-            binding in {"route_base_url", "route_api_key"}
+            binding in {"model_base_url", "model_api_key"}
             for binding in self.command_config.run.bindings.values()
         )
 
-    async def _prepare_route(
-        self,
-        environment: BaseEnvironment,
-    ) -> dict[CommandBinding, str] | None:
-        if not self._uses_route():
+    def _prepare_model_connection(self) -> dict[CommandBinding, str] | None:
+        if not self._uses_model_connection():
             return None
         if self.model_name is None:
-            raise ValueError("Route bindings require model_name")
-        env: dict[str, str] = {}
-        bridged = await use_job_inference_route(
-            self,
-            environment,
-            env,
-            base_url_key=_BASE_URL_KEY,
-            api_key_key=_API_KEY_KEY,
-            api=self.command_config.route_api,
-            allowed_model=allowed_model_id(self.model_name),
-        )
-        if not bridged:
-            raise RuntimeError("Command agent requires the Job inference route")
+            raise ValueError("Model bindings require model_name")
+        base_url = self._get_env("OPENAI_BASE_URL")
+        api_key = self._get_env("OPENAI_API_KEY")
+        if not base_url or not api_key:
+            raise RuntimeError("Command agent requires direct model settings")
         return {
-            "route_base_url": env[_BASE_URL_KEY],
-            "route_api_key": env[_API_KEY_KEY],
+            "model_base_url": base_url,
+            "model_api_key": api_key,
         }
 
     async def _download_atif(
@@ -493,20 +480,20 @@ class CommandAgent(IsolatedProviderAgent):
         self._write_canonical_atif(trajectory)
         self._ingest_atif_metrics(trajectory, context)
 
-    @with_job_inference_bridge_cleanup
-    async def _run_with_route_cleanup(
+    @with_agent_environment_cleanup
+    async def _run_with_environment_cleanup(
         self,
         instruction: str,
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
         del instruction, context
-        route = await self._prepare_route(environment)
+        model_connection = self._prepare_model_connection()
         await self._execute(
             environment,
             self.command_config.run,
             phase="run",
-            route=route,
+            model_connection=model_connection,
         )
 
     @override
@@ -523,7 +510,7 @@ class CommandAgent(IsolatedProviderAgent):
             remote_path=_INSTRUCTION_PATH,
             content=instruction,
         )
-        await self._run_with_route_cleanup(
+        await self._run_with_environment_cleanup(
             instruction,
             environment,
             context,

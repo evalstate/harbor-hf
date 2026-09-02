@@ -53,8 +53,8 @@ Environment sources are:
 | `agent_home` | yes | yes | Managed agent installation and runtime home. |
 | `model_name` | yes | yes | Model selected by the immutable Run lock. |
 | `instruction_path` | no | yes | File containing the task instruction. |
-| `model_base_url` | no | yes | Root-owned loopback inference bridge URL. |
-| `model_api_key` | no | yes | Non-secret placeholder accepted by the bridge. |
+| `model_base_url` | no | yes | Direct model endpoint from the immutable execution contract. |
+| `model_api_key` | no | yes | Runtime model credential injected by the worker. |
 
 Setup compilation rejects references to run-only bindings. Commands receive
 instructions by file path; the instruction text is never interpolated into a
@@ -80,21 +80,19 @@ The command agent:
 - starts commands with an empty ambient environment and only declared
   bindings;
 - stages instructions as a mode-0600 file;
-- obtains inference only through the root-owned Job bridge;
+- obtains inference directly from the model endpoint in the immutable execution
+  contract;
 - collects required declared output files from `/logs/agent`;
 - optionally validates, canonicalizes, and ingests a declared ATIF document;
   and
 - writes bounded setup and run process logs.
 
-The compiler derives evidence requirements from capabilities rather than the
-agent name. Route bindings require provider-usage evidence. A declared ATIF
-path requires trajectory evidence.
+The compiler always requires workspace and verifier evidence. A declared ATIF
+path additionally requires trajectory evidence.
 
 Recipe setup failures and client-configuration failures after agent setup
-begins are sealed as non-retryable agent outcomes. Missing trusted provider
-usage can reclassify only an otherwise successful attempt as infrastructure;
-it does not turn an explicit agent failure into a replacement. Typed task
-environment failures and typed transient provider failures remain the bounded
+begins are sealed as non-retryable agent outcomes. Typed task environment
+failures and typed transient provider failures remain the bounded
 replacement-eligible infrastructure cases.
 
 The harness profile omits a fixed model name. During normal Harbor preparation,
@@ -226,33 +224,16 @@ managed environment. It does not depend on an ambient task-image Python, venv,
 or pip. Download diagnostics remain beneath the non-browsable managed agent
 home.
 
-Its run command uses typed bindings for model name, loopback base URL,
-`OPENAI_API_KEY` as the non-secret route placeholder, instruction file,
-workspace, managed home, results, and trajectory output. Fast-Agent and its
-toolchain remain recipe data; neither the Workbench compiler nor the
-command-agent plugin branches on their names.
+Its run command uses typed bindings for model name, direct model base URL,
+runtime `OPENAI_API_KEY`, instruction file, workspace, managed home, results,
+and trajectory output. Fast-Agent and its toolchain remain recipe data; neither
+the Workbench compiler nor the command-agent plugin branches on their names.
 
 The checked-in `fast-agent-0-10-11-command` harness profile is derived from the
 same compiler output returned by the Workbench preview. After setup passes, the
 Workbench compares the complete canonical harness spec rather than the recipe
 name. A different command, binding, output, timeout, or version produces a
 different spec and cannot use that reviewed alias.
-
-## FX starter
-
-The FX starter installs the pinned `v0.0.6` Linux release beneath the managed
-agent home using Python's standard library, then verifies `fx --version`. Its
-run command uses `fx ask --yolo --json`, the locked Chat Completions route, the
-task instruction file, and a declared `/logs/agent/fx-results.json` output. FX
-is recipe data and uses the same generic command-agent path as Fast-Agent.
-
-FX v0.0.6 selects a process model with `FX_MODEL` and reads a Vercel AI Gateway
-credential from `AI_GATEWAY_API_KEY`. The Workbench binds those names to the
-locked model and the non-secret model-key placeholder; users do not paste an
-API key into the recipe. FX v0.0.6 does not expose a documented custom Gateway
-base-URL override, so this starter currently verifies setup only. Benchmark
-handoff remains disabled until the inference bridge has reviewed FX v0.0.6
-route compatibility.
 
 ## Benchmark handoff
 

@@ -649,10 +649,8 @@
         "provider",
         "upstream",
         "agent_model",
-        "bridge_model",
+        "provider_model",
         "api",
-        "max_requests",
-        "max_concurrency",
         "timeout_seconds",
         "max_output_tokens",
         "context_window",
@@ -678,28 +676,13 @@
           "minLength": 1,
           "maxLength": 512
         },
-        "bridge_model": {
+        "provider_model": {
           "type": "string",
           "minLength": 1,
           "maxLength": 512
         },
         "api": {
           "enum": ["chat-completions", "responses"]
-        },
-        "max_requests": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 4096
-        },
-        "max_concurrency": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 64
-        },
-        "max_total_concurrency": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65536
         },
         "timeout_seconds": {
           "type": "integer",
@@ -1627,6 +1610,28 @@
           "minLength": 1,
           "maxLength": 512
         },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "extra_allowed_hosts": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        },
         "kwargs": {
           "type": "object",
           "properties": {
@@ -1659,6 +1664,11 @@
           "minLength": 1,
           "maxLength": 512
         },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
         "model_name": {
           "type": "string",
           "minLength": 1,
@@ -1667,6 +1677,23 @@
         "kwargs": {
           "type": "object",
           "additionalProperties": true
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "extra_allowed_hosts": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
         },
         "override_setup_timeout_sec": {
           "type": "integer",
@@ -1788,9 +1815,6 @@
         "trusted_worker": {
           "type": "boolean"
         },
-        "inference_token": {
-          "enum": ["forbidden", "required"]
-        },
         "inference_upstream": {
           "type": "string",
           "pattern": "^https://(?:router\\.huggingface\\.co|[a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.endpoints\\.huggingface\\.cloud|[a-z0-9-]+\\.hf\\.jobs/scopes/[A-Za-z0-9._~/-]+)(?:/v1)?$",
@@ -1798,16 +1822,6 @@
         },
         "inference_api": {
           "enum": ["chat-completions", "responses"]
-        },
-        "inference_max_requests": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 4096
-        },
-        "inference_max_concurrency": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 64
         },
         "inference_timeout_seconds": {
           "type": "integer",
@@ -1882,19 +1896,14 @@
       "allOf": [
         {
           "if": {
-            "required": ["inference_token"],
+            "required": ["inference_upstream"],
             "properties": {
-              "inference_token": {
-                "const": "required"
-              }
+              "inference_upstream": {}
             }
           },
           "then": {
             "required": [
-              "inference_upstream",
               "inference_api",
-              "inference_max_requests",
-              "inference_max_concurrency",
               "inference_timeout_seconds",
               "inference_max_output_tokens",
               "inference_provider",
@@ -1907,10 +1916,7 @@
               "worker_revision"
             ],
             "properties": {
-              "inference_upstream": {},
               "inference_api": {},
-              "inference_max_requests": {},
-              "inference_max_concurrency": {},
               "inference_timeout_seconds": {},
               "inference_max_output_tokens": {},
               "inference_provider": {},
@@ -2377,29 +2383,6 @@
         "trusted_worker": {
           "type": "boolean"
         },
-        "inference_token": {
-          "enum": ["forbidden", "required"]
-        },
-        "inference_max_requests": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 4096
-        },
-        "inference_max_concurrency": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 64
-        },
-        "inference_timeout_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 3600
-        },
-        "inference_max_output_tokens": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1048576
-        },
         "resource_id": {
           "type": "string",
           "minLength": 1,
@@ -2478,12 +2461,6 @@
         },
         "inference_api": {
           "enum": ["chat-completions", "responses"]
-        },
-        "inference_max_total_concurrency": {
-          "description": "Maximum provider request units reserved across active trial Jobs in one Run.",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65536
         }
       }
     },
@@ -3536,7 +3513,6 @@
             "namespace",
             "capacity_profile_id",
             "hardware",
-            "reserved_provider_requests",
             "tokens_remaining",
             "refill_cursor_at",
             "previous_grant_id"
@@ -3575,11 +3551,6 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 160
-            },
-            "reserved_provider_requests": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 65536
             },
             "tokens_remaining": {
               "type": "integer",
@@ -3715,8 +3686,7 @@
         "max_timeout_seconds",
         "lifetime_overhead_seconds",
         "max_image_bytes",
-        "max_image_entries",
-        "root_bootstrap_command"
+        "max_image_entries"
       ],
       "properties": {
         "flavors": {
@@ -3727,9 +3697,6 @@
             "$ref": "#/$defs/TrialJobFlavor"
           }
         },
-        "inference_token": {
-          "enum": ["forbidden", "required"]
-        },
         "inference_upstream": {
           "type": "string",
           "pattern": "^https://(?:router\\.huggingface\\.co|[a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.endpoints\\.huggingface\\.cloud|[a-z0-9-]+\\.hf\\.jobs/scopes/[A-Za-z0-9._~/-]+)(?:/v1)?$",
@@ -3737,22 +3704,6 @@
         },
         "inference_api": {
           "enum": ["chat-completions", "responses"]
-        },
-        "inference_max_requests": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 4096
-        },
-        "inference_max_concurrency": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 64
-        },
-        "inference_max_total_concurrency": {
-          "description": "Maximum provider request units reserved across active trial Jobs in one Run.",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65536
         },
         "inference_timeout_seconds": {
           "type": "integer",
@@ -3763,15 +3714,6 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1048576
-        },
-        "root_bootstrap_command": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": {
-            "type": "string",
-            "maxLength": 4096
-          }
         },
         "default_cpus": {
           "type": "integer",
@@ -3822,32 +3764,21 @@
       "allOf": [
         {
           "if": {
-            "required": ["inference_token"],
+            "required": ["inference_upstream"],
             "properties": {
-              "inference_token": {
-                "const": "required"
-              }
+              "inference_upstream": {}
             }
           },
           "then": {
             "required": [
-              "inference_upstream",
               "inference_api",
-              "inference_max_requests",
-              "inference_max_concurrency",
               "inference_timeout_seconds",
-              "inference_max_output_tokens",
-              "root_bootstrap_command"
+              "inference_max_output_tokens"
             ],
             "properties": {
-              "inference_upstream": {},
               "inference_api": {},
-              "inference_max_requests": {},
-              "inference_max_concurrency": {},
-              "inference_max_total_concurrency": {},
               "inference_timeout_seconds": {},
-              "inference_max_output_tokens": {},
-              "root_bootstrap_command": {}
+              "inference_max_output_tokens": {}
             }
           }
         }

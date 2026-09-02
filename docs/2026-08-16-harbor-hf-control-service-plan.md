@@ -7,6 +7,11 @@ tags: [harbor, hugging-face, runs, control, storage]
 
 # Harbor-HF control service plan
 
+> **Historical record — superseded 2026-09-02.** This plan preserves the design
+> and terminology reviewed at the time. Its imperative language is not current
+> guidance for inference or harness support. New work follows
+> [`CONTROL_SERVICE.md`](CONTROL_SERVICE.md) and Harbor-first direct inference.
+
 Launching a supported benchmark should require a benchmark, a model, a harness,
 and a budget. It should not require a new manifest generator, a new Hub
 repository, a new Bucket, or manual recovery after completed model work.

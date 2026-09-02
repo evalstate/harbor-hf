@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   compileAgentWorkbenchRecipe,
   fastAgentWorkbenchStarter,
-  fxWorkbenchStarter,
 } from "../src/workbench.js";
 
 describe("Agent Workbench recipe compiler", () => {
@@ -17,10 +16,10 @@ describe("Agent Workbench recipe compiler", () => {
     expect(preview.setup_command).toContain("fast-agent-mcp==0.10.11");
     expect(preview.setup_command).not.toContain('python -m venv "$AGENT_HOME/venv"');
     expect(preview.run_command).toContain("--base-url");
-    expect(preview.run_command).toContain("http://127.0.0.1:18080/v1");
+    expect(preview.run_command).toContain("<injected-model-base-url>");
     expect(preview.environment.find((item) => item.name === "OPENAI_API_KEY")).toEqual(
       expect.objectContaining({
-        value: "<injected-placeholder>",
+        value: "<injected-model-api-key>",
         redacted: true,
       }),
     );
@@ -29,7 +28,7 @@ describe("Agent Workbench recipe compiler", () => {
     ).toBeUndefined();
     expect(preview.harness_profile).toMatchObject({
       agent: "command-agent",
-      required_evidence: ["workspace", "verifier", "provider-usage", "trajectory"],
+      required_evidence: ["workspace", "verifier", "trajectory"],
       harbor_agent: {
         import_path: "harbor_hf_agents.command_agent.agent:CommandAgent",
         override_setup_timeout_sec: 1800,
@@ -37,31 +36,18 @@ describe("Agent Workbench recipe compiler", () => {
           config: {
             route_api: "chat-completions",
             outputs: [{ path: "fast-agent-results.json" }],
+            run: {
+              bindings: {
+                OPENAI_API_KEY: "model_api_key",
+                MODEL_BASE_URL: "model_base_url",
+              },
+            },
           },
         },
       },
     });
-  });
-
-  it("compiles the FX starter through the same generic command-agent path", () => {
-    const preview = compileAgentWorkbenchRecipe(fxWorkbenchStarter);
-    expect(preview.recipe.name).toBe("fx");
-    expect(preview.setup_command).toContain("https://releases.fx.sh/v0.0.6/fx-linux-");
-    expect(preview.run_command).toContain('fx" ask --yolo --json --');
-    expect(preview.harness_profile).toMatchObject({
-      agent: "command-agent",
-      required_evidence: ["workspace", "verifier", "provider-usage"],
-      harbor_agent: {
-        import_path: "harbor_hf_agents.command_agent.agent:CommandAgent",
-        override_setup_timeout_sec: 600,
-        kwargs: {
-          config: {
-            route_api: "chat-completions",
-            outputs: [{ path: "fx-results.json" }],
-          },
-        },
-      },
-    });
+    expect(JSON.stringify(preview.harness_profile)).not.toContain("route_base_url");
+    expect(JSON.stringify(preview.harness_profile)).not.toContain("route_api_key");
   });
 
   it("produces stable identities and changes them with behavior", () => {
@@ -93,6 +79,14 @@ describe("Agent Workbench recipe compiler", () => {
       compileAgentWorkbenchRecipe({
         ...structuredClone(fastAgentWorkbenchStarter),
         environment: [{ name: "HF_TOKEN", source: "literal", value: "value" }],
+      }),
+    ).toThrow("reserved");
+    expect(() =>
+      compileAgentWorkbenchRecipe({
+        ...structuredClone(fastAgentWorkbenchStarter),
+        environment: [
+          { name: "HF_INFERENCE_TOKEN", source: "literal", value: "value" },
+        ],
       }),
     ).toThrow("reserved");
     expect(() =>

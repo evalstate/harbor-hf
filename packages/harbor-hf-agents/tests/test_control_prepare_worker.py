@@ -95,6 +95,23 @@ def test_injects_the_locked_model_when_the_harness_is_model_independent() -> Non
     assert config.agents[0].model_name == "openai/example/model:provider"
 
 
+def test_preserves_direct_inference_agent_environment() -> None:
+    value = _run_lock()
+    value["execution"]["harbor_agent"]["env"] = {
+        "OPENAI_API_KEY": "${HF_INFERENCE_TOKEN}",
+        "OPENAI_BASE_URL": "https://router.huggingface.co/v1",
+        "HARBOR_HF_MAX_OUTPUT_TOKENS": "32768",
+    }
+
+    config = worker._job_config(value)
+
+    assert config.agents[0].env == {
+        "OPENAI_API_KEY": "${HF_INFERENCE_TOKEN}",
+        "OPENAI_BASE_URL": "https://router.huggingface.co/v1",
+        "HARBOR_HF_MAX_OUTPUT_TOKENS": "32768",
+    }
+
+
 def test_preserves_nested_command_agent_configuration_during_preparation() -> None:
     value = _run_lock()
     command_config = {
@@ -107,8 +124,8 @@ def test_preserves_nested_command_agent_configuration_during_preparation() -> No
         "run": {
             "script": "run-agent",
             "bindings": {
-                "MODEL_BASE_URL": "route_base_url",
-                "GENERIC_API_KEY": "route_api_key",
+                "MODEL_BASE_URL": "model_base_url",
+                "GENERIC_API_KEY": "model_api_key",
             },
             "literals": {"OUTPUT_PATH": "/logs/agent/result.json"},
         },

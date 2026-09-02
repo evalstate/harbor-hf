@@ -269,8 +269,6 @@ export const capacitySchema = {
     "run_active",
     "hardware_limit",
     "hardware_active",
-    "provider_limit",
-    "provider_reserved",
     "start_tokens",
     "start_burst",
     "queued",
@@ -286,12 +284,23 @@ export const capacitySchema = {
     run_active: integer,
     hardware_limit: nullableInteger,
     hardware_active: integer,
-    provider_limit: integer,
-    provider_reserved: integer,
     start_tokens: nullableInteger,
     start_burst: nullableInteger,
     queued: integer,
-    limiting_factor: nullableString,
+    limiting_factor: {
+      anyOf: [
+        {
+          enum: [
+            "run_job_capacity",
+            "namespace_job_capacity",
+            "hardware_job_capacity",
+            "start_rate",
+            "run_cancelled",
+          ],
+        },
+        { type: "null" },
+      ],
+    },
     not_before: nullableString,
   },
 } as const;

@@ -7,6 +7,11 @@ tags: [harbor, jobs, campaigns]
 
 # General Harbor job path plan
 
+> **Historical record — superseded 2026-09-02.** This plan preserves the design
+> and terminology reviewed at the time. Its imperative language is not current
+> guidance for inference or harness support. New work follows
+> [`CONTROL_SERVICE.md`](CONTROL_SERVICE.md) and Harbor-first direct inference.
+
 **Status.** Superseded implementation record. Campaign and Sandbox references
 below describe the pre-reset design and remain only as dated history. The
 [control service specification](CONTROL_SERVICE.md) defines the current

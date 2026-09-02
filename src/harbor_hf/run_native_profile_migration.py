@@ -43,11 +43,6 @@ TRIAL_COMMAND = (
     "-m",
     "harbor_hf_agents.support.control_trial_job_worker",
 )
-ROOT_BRIDGE_COMMAND = (
-    "python",
-    "-m",
-    "harbor_hf_agents.support.job_root_bridge",
-)
 
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9]*(?:[._-][a-z0-9]+)*$")
@@ -397,13 +392,8 @@ _LEGACY_SANDBOX_OPTIONAL_FIELDS = {
 }
 _TRIAL_TEMPLATE_PRESERVED_FIELDS = (
     "flavors",
-    "inference_token",
     "inference_upstream",
-    "inference_model",
     "inference_api",
-    "inference_max_requests",
-    "inference_max_concurrency",
-    "inference_max_total_concurrency",
     "inference_timeout_seconds",
     "inference_max_output_tokens",
     "default_cpus",
@@ -412,6 +402,12 @@ _TRIAL_TEMPLATE_PRESERVED_FIELDS = (
     "default_gpus",
     "max_timeout_seconds",
     "lifetime_overhead_seconds",
+)
+_RETIRED_DEPLOYMENT_INFERENCE_FIELDS = (
+    "inference_token",
+    "inference_model",
+    "inference_max_requests",
+    "inference_max_concurrency",
 )
 
 
@@ -1436,10 +1432,12 @@ def _transform_deployment_spec(
     transformed["job_command"] = list(TRIAL_COMMAND)
     transformed["trial_job_template"] = template
     del transformed["sandbox_template"]
-    if "worker_concurrency" in transformed:
-        del transformed["worker_concurrency"]
-    if "worker_max_tasks_per_job" in transformed:
-        del transformed["worker_max_tasks_per_job"]
+    for field in (
+        "worker_concurrency",
+        "worker_max_tasks_per_job",
+        *_RETIRED_DEPLOYMENT_INFERENCE_FIELDS,
+    ):
+        transformed.pop(field, None)
     return transformed
 
 
@@ -1457,6 +1455,8 @@ def _transform_sandbox_delegating_deployment(spec: JsonObject) -> JsonObject:
     _validate_legacy_single_sandbox(_object(spec["sandbox"]))
     transformed = dict(spec)
     del transformed["sandbox"]
+    for field in _RETIRED_DEPLOYMENT_INFERENCE_FIELDS:
+        transformed.pop(field, None)
     return transformed
 
 
@@ -1534,7 +1534,6 @@ def _trial_job_template(sandbox: JsonObject) -> JsonObject:
     template: JsonObject = {
         key: sandbox[key] for key in _TRIAL_TEMPLATE_PRESERVED_FIELDS if key in sandbox
     }
-    template["root_bootstrap_command"] = list(ROOT_BRIDGE_COMMAND)
     template["max_image_bytes"] = MAX_IMAGE_BYTES
     template["max_image_entries"] = MAX_IMAGE_ENTRIES
     template["max_jobs"] = sandbox["max_sandboxes"]

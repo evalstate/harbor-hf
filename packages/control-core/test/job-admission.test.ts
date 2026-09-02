@@ -15,7 +15,6 @@ const capacity: CapacityProfileSpec = {
 const state: JobAdmissionState = {
   active_jobs: 0,
   active_hardware: 0,
-  active_provider_requests: 0,
   tokens: 2,
   refill_cursor_at: "2026-08-22T00:00:00.000Z",
 };
@@ -79,8 +78,6 @@ describe("Job admission", () => {
         capacity,
         state,
         "cpu-basic",
-        1,
-        2,
         3,
         0,
         new Date("2026-08-22T00:00:00.000Z"),
@@ -100,8 +97,6 @@ describe("Job admission", () => {
         { ...capacity, start_burst: 1 },
         { ...state, tokens: 2 },
         "cpu-basic",
-        1,
-        2,
         3,
         0,
         new Date("2026-08-22T00:00:09.000Z"),
@@ -116,7 +111,6 @@ describe("Job admission", () => {
   it.each([
     [{ active_jobs: 4 }, "namespace_job_capacity"],
     [{ active_hardware: 2 }, "hardware_job_capacity"],
-    [{ active_provider_requests: 2 }, "provider_request_capacity"],
     [{ tokens: 0 }, "start_rate"],
   ] as const)("defers when %s reaches its limit", (change, limitingFactor) => {
     expect(
@@ -124,8 +118,6 @@ describe("Job admission", () => {
         capacity,
         { ...state, ...change },
         "cpu-basic",
-        1,
-        2,
         3,
         0,
         new Date("2026-08-22T00:00:00.000Z"),
@@ -139,8 +131,6 @@ describe("Job admission", () => {
         capacity,
         state,
         "cpu-basic",
-        1,
-        2,
         3,
         3,
         new Date("2026-08-22T00:00:00.000Z"),

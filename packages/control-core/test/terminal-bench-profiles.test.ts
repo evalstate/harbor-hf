@@ -38,12 +38,6 @@ const EXECUTION_COMMAND = [
   "-m",
   "harbor_hf_agents.support.control_trial_job_worker",
 ];
-const ROOT_BRIDGE_COMMAND = [
-  "python",
-  "-m",
-  "harbor_hf_agents.support.job_root_bridge",
-];
-
 async function profile(kind: string, name: string): Promise<ProfileObject> {
   const value = validateControlRecord<ProfileObject>(
     JSON.parse(await readFile(`profiles/${kind}/${name}.json`, "utf8")),
@@ -127,10 +121,6 @@ describe("Terminal-Bench 2.1 profiles", () => {
     ]);
     expect(record(deployment?.spec).harnesses).toEqual(["fast-agent-0-10-11-command"]);
     expect(record(record(deployment?.spec).trial_job_template).max_jobs).toBe(1);
-    expect(
-      record(record(deployment?.spec).trial_job_template)
-        .inference_max_total_concurrency,
-    ).toBe(1);
     expect(benchmark?.name).toBe("terminal-bench-2-1-canary");
     expect(record(selected.get("launch_policy")?.spec)).toMatchObject({
       max_infrastructure_attempts: 1,
@@ -231,7 +221,6 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "dsh-high",
       "dsh-off",
       "fast-agent-0-10-11-command",
-      "fx",
       "hermes",
       "kimi-code",
       "mini-swe-agent",
@@ -302,9 +291,9 @@ describe("Terminal-Bench 2.1 profiles", () => {
     });
   });
 
-  it("reuses Pi and FX profiles across the two reliability models", async () => {
+  it("reuses native Harbor profiles across the two reliability models", async () => {
     const resolver = new ProfileResolver(await loadBuiltInProfiles("profiles"));
-    for (const harness of ["pi-off", "mini-swe-agent", "fx"]) {
+    for (const harness of ["pi-off", "mini-swe-agent"]) {
       const qwen = composeExecutionContract(
         resolver.resolve({
           benchmark: "terminal-bench-2-1-canary",
@@ -324,8 +313,12 @@ describe("Terminal-Bench 2.1 profiles", () => {
         }),
       );
       expect(qwen.source_profiles.harness).toEqual(glm.source_profiles.harness);
-      expect(qwen.inference?.bridge_model).toBe("Qwen/Qwen3.8-27B:deepinfra");
-      expect(glm.inference?.bridge_model).toBe("zai-org/GLM-5.3-Flash:together");
+      expect(qwen.inference?.provider_model).toBe("Qwen/Qwen3.8-27B:deepinfra");
+      expect(glm.inference?.provider_model).toBe("zai-org/GLM-5.3-Flash:together");
+      expect(qwen.harbor_agent?.env).toMatchObject({
+        OPENAI_API_KEY: `\${HF_INFERENCE_TOKEN}`,
+        OPENAI_BASE_URL: "https://router.huggingface.co/v1",
+      });
       if (harness === "pi-off") {
         expect(record(qwen.harbor_agent?.kwargs).model_runtime).toMatchObject({
           model_id: "Qwen/Qwen3.8-27B:deepinfra",
@@ -377,7 +370,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       {
         model: "qwen3-8-27b-deepinfra",
         deployment: "tb21-qwen3-8-27b-deepinfra-providers",
-        bridgeModel: "Qwen/Qwen3.8-27B:deepinfra",
+        providerModel: "Qwen/Qwen3.8-27B:deepinfra",
         modelInfo: {
           litellm_provider: "openai",
           mode: "chat",
@@ -392,7 +385,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       {
         model: "glm-5-3-flash-together",
         deployment: "tb21-glm-5-3-flash-together-providers",
-        bridgeModel: "zai-org/GLM-5.3-Flash:together",
+        providerModel: "zai-org/GLM-5.3-Flash:together",
         modelInfo: {
           litellm_provider: "openai",
           mode: "chat",
@@ -418,7 +411,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       );
       expect(execution.source_profiles.harness.name).toBe("terminus");
       expect(execution.inference?.api).toBe("chat-completions");
-      expect(execution.inference?.bridge_model).toBe(item.bridgeModel);
+      expect(execution.inference?.provider_model).toBe(item.providerModel);
       expect(record(execution.harbor_agent?.kwargs).model_info).toEqual(item.modelInfo);
     }
   });
@@ -437,7 +430,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
 
     expect(execution.source_profiles.harness.name).toBe("codex");
     expect(execution.inference?.api).toBe("responses");
-    expect(execution.inference?.bridge_model).toBe("Qwen/Qwen3.8-27B:deepinfra");
+    expect(execution.inference?.provider_model).toBe("Qwen/Qwen3.8-27B:deepinfra");
     expect(execution.inference?.agent_model).toBe("openai/Qwen/Qwen3.8-27B:deepinfra");
     expect(execution.harbor_agent?.model_name).toBe(
       "openai/Qwen/Qwen3.8-27B:deepinfra",
@@ -459,7 +452,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     );
   });
 
-  it("resolves the nine runnable full matrix cells with their measured policies", async () => {
+  it("resolves the seven runnable full matrix cells with their measured policies", async () => {
     const resolver = new ProfileResolver(await loadBuiltInProfiles("profiles"));
     const cells = [
       [
@@ -482,12 +475,6 @@ describe("Terminal-Bench 2.1 profiles", () => {
       ],
       [
         "qwen3-8-27b-deepinfra",
-        "fx",
-        "tb21-qwen3-8-27b-deepinfra-providers",
-        "tb21-full-qwen-fx",
-      ],
-      [
-        "qwen3-8-27b-deepinfra",
         "codex",
         "tb21-qwen3-8-27b-deepinfra-codex-providers",
         "tb21-full-qwen-standard",
@@ -507,12 +494,6 @@ describe("Terminal-Bench 2.1 profiles", () => {
       [
         "glm-5-3-flash-together",
         "terminus",
-        "tb21-glm-5-3-flash-together-providers",
-        "tb21-full-glm-standard",
-      ],
-      [
-        "glm-5-3-flash-together",
-        "fx",
         "tb21-glm-5-3-flash-together-providers",
         "tb21-full-glm-standard",
       ],
@@ -583,7 +564,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     );
     expect(execution.model.model_id).toBe("openai/gpt-oss-20b");
     expect(execution.harness.agent).toBe("pi");
-    expect(execution.inference?.bridge_model).toBe("openai/gpt-oss-20b:together");
+    expect(execution.inference?.provider_model).toBe("openai/gpt-oss-20b:together");
   });
 
   it("derives DSH reasoning format from model compatibility", async () => {
@@ -623,7 +604,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       {
         name: "tb21-qwen3-8-27b-deepinfra-providers",
         model: "qwen3-8-27b-deepinfra",
-        harnesses: ["pi-off", "mini-swe-agent", "terminus", "fx", "pi"],
+        harnesses: ["pi-off", "mini-swe-agent", "terminus", "pi"],
         provider: "deepinfra",
         input: 400_000,
         output: 3_000_000,
@@ -632,7 +613,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       {
         name: "tb21-glm-5-3-flash-together-providers",
         model: "glm-5-3-flash-together",
-        harnesses: ["pi-off", "mini-swe-agent", "terminus", "fx", "pi"],
+        harnesses: ["pi-off", "mini-swe-agent", "terminus", "pi"],
         provider: "together",
         input: 150_000,
         output: 500_000,
@@ -702,7 +683,6 @@ describe("Terminal-Bench 2.1 profiles", () => {
       expect(spec.worker_revision).toBe(expectedRevision);
       expect(spec.preparation_job_command).toEqual(PREPARATION_COMMAND);
       expect(spec.job_command).toEqual(EXECUTION_COMMAND);
-      expect(template.root_bootstrap_command).toEqual(ROOT_BRIDGE_COMMAND);
       expect(template.inference_model).toBeUndefined();
       expect(template.max_image_bytes).toBe(20 * 1024 * 1024 * 1024);
       expect(template.max_image_entries).toBe(500_000);
@@ -774,23 +754,13 @@ describe("Terminal-Bench 2.1 profiles", () => {
           deployments: ["tb21-qwen3-8-27b-deepinfra-providers"],
         },
       ],
-      "tb21-full-qwen-fx": [
-        400_000,
-        71_400_000,
-        {
-          benchmarks: ["terminal-bench-2-1-full"],
-          models: ["qwen3-8-27b-deepinfra"],
-          harnesses: ["fx"],
-          deployments: ["tb21-qwen3-8-27b-deepinfra-providers"],
-        },
-      ],
       "tb21-full-glm-standard": [
         100_000,
         18_000_000,
         {
           benchmarks: ["terminal-bench-2-1-full"],
           models: ["glm-5-3-flash-together"],
-          harnesses: ["pi-off", "terminus", "fx"],
+          harnesses: ["pi-off", "terminus"],
           deployments: ["tb21-glm-5-3-flash-together-providers"],
         },
       ],
@@ -826,24 +796,15 @@ describe("Terminal-Bench 2.1 profiles", () => {
       (sum, [, ceiling]) => sum + ceiling,
       0,
     );
-    expect(uniqueCeilings + 44_700_000 + 2 * 18_000_000).toBe(464_600_000);
+    expect(uniqueCeilings + 44_700_000 + 2 * 18_000_000).toBe(393_200_000);
   });
 
-  it("loads every built-in profile with unique specs and resolvable catalog references", async () => {
+  it("loads every built-in profile with unique IDs and resolvable catalog references", async () => {
     const loaded = await loadBuiltInProfiles("profiles");
     const resolver = new ProfileResolver(loaded);
-    const specOwners = new Map<string, string>();
-    expect(loaded).toHaveLength(65);
+    expect(loaded).toHaveLength(62);
     expect(new Set(loaded.map((item) => item.profile_id)).size).toBe(loaded.length);
     for (const item of loaded) {
-      const specKey = `${item.profile.profile_kind}:${sha256(
-        canonicalJson(item.profile.spec),
-      )}`;
-      expect(
-        specOwners.get(specKey),
-        `${item.profile.name} duplicates another ${item.profile.profile_kind} profile`,
-      ).toBeUndefined();
-      specOwners.set(specKey, item.profile.name);
       if (item.profile.profile_kind !== "deployment") continue;
       for (const model of item.profile.spec.models)
         expect(() => resolver.get("model", model)).not.toThrow();

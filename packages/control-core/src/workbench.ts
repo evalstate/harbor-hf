@@ -29,8 +29,8 @@ export const workbenchRuntimeValues = {
   logs_path: "/logs/agent",
   agent_home: "/logs/agent/home",
   model_name: "<locked-model-route>",
-  model_base_url: "http://127.0.0.1:18080/v1",
-  model_api_key: "<injected-placeholder>",
+  model_base_url: "<injected-model-base-url>",
+  model_api_key: "<injected-model-api-key>",
 } as const;
 
 export interface WorkbenchPreviewEnvironment {
@@ -145,58 +145,6 @@ export const fastAgentWorkbenchStarter: AgentWorkbenchRecipeV1 = {
   },
 };
 
-export const fxWorkbenchStarter: AgentWorkbenchRecipeV1 = {
-  schema_version: "v1",
-  name: "fx",
-  setup_command: [
-    'mkdir -p "$AGENT_HOME/bin"',
-    "python - <<'PY'",
-    "import os",
-    "import platform",
-    "import tarfile",
-    "import tempfile",
-    "from pathlib import Path",
-    "from urllib.request import urlopen",
-    "",
-    'architecture = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[platform.machine().lower()]',
-    'url = f"https://releases.fx.sh/v0.0.6/fx-linux-{architecture}.tar.gz"',
-    'destination = Path(os.environ["AGENT_HOME"]) / "bin" / "fx"',
-    "with tempfile.TemporaryDirectory() as directory:",
-    '    archive = Path(directory) / "fx.tar.gz"',
-    "    archive.write_bytes(urlopen(url, timeout=60).read())",
-    '    with tarfile.open(archive, "r:gz") as bundle:',
-    '        bundle.extract("fx", path=directory, filter="data")',
-    '    destination.write_bytes((Path(directory) / "fx").read_bytes())',
-    "destination.chmod(0o755)",
-    "PY",
-    '"$AGENT_HOME/bin/fx" --version',
-  ].join("\n"),
-  run_command: [
-    'cd "$TASK_WORKSPACE"',
-    '"$AGENT_HOME/bin/fx" ask --yolo --json -- "$(cat "$TASK_INSTRUCTION_PATH")"',
-    '  > "$AGENT_RESULTS_PATH"',
-  ].join(" \\\n"),
-  route_api: "chat-completions",
-  setup_timeout_seconds: 600,
-  environment: [
-    { name: "AGENT_HOME", source: "agent_home" },
-    { name: "FX_MODEL", source: "model_name" },
-    { name: "AI_GATEWAY_API_KEY", source: "model_api_key" },
-    { name: "FX_AUTO_UPGRADE", source: "literal", value: "0" },
-    {
-      name: "AGENT_RESULTS_PATH",
-      source: "literal",
-      value: "/logs/agent/fx-results.json",
-    },
-    { name: "TASK_INSTRUCTION_PATH", source: "instruction_path" },
-    { name: "TASK_WORKSPACE", source: "workspace_path" },
-  ],
-  outputs: {
-    results_path: "/logs/agent/fx-results.json",
-    trajectory_path: null,
-  },
-};
-
 function quoteShell(value: string): string {
   if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
@@ -283,8 +231,8 @@ function commandAgentConfig(recipe: AgentWorkbenchRecipeV1): Record<string, unkn
     logs_path: "logs_path",
     agent_home: "agent_home",
     model_name: "model_name",
-    model_base_url: "route_base_url",
-    model_api_key: "route_api_key",
+    model_base_url: "model_base_url",
+    model_api_key: "model_api_key",
   } as const;
   for (const item of recipe.environment) {
     if (item.source === "literal") literals[item.name] = item.value ?? "";
@@ -343,10 +291,7 @@ export function compileAgentWorkbenchRecipe(value: unknown): AgentWorkbenchPrevi
     .sort((left, right) => left.name.localeCompare(right.name));
   const values = new Map(environment.map((item) => [item.name, item.value]));
   const recipeDigest = sha256(canonicalJson(recipe));
-  const runSources = new Set(recipe.environment.map((binding) => binding.source));
   const requiredEvidence = ["workspace", "verifier"];
-  if (runSources.has("model_base_url") || runSources.has("model_api_key"))
-    requiredEvidence.push("provider-usage");
   if (recipe.outputs.trajectory_path) requiredEvidence.push("trajectory");
   return {
     recipe,

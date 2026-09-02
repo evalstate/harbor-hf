@@ -26,8 +26,8 @@ import {
   type WorkbenchSetup,
 } from "./api";
 import { useControlState } from "./control-state";
-import { PageHeader } from "./layout";
 import { firstCompatibleLaunchSelection } from "./launch";
+import { PageHeader } from "./layout";
 import { cn, formatDate } from "./lib";
 import { useAllProfiles } from "./queries";
 import { Badge, Button, Card, ErrorNotice } from "./ui";
@@ -134,58 +134,6 @@ const fastAgentStarter: WorkbenchRecipe = {
   outputs: {
     results_path: "/logs/agent/fast-agent-results.json",
     trajectory_path: "/logs/agent/trajectory.json",
-  },
-};
-
-const fxStarter: WorkbenchRecipe = {
-  schema_version: "v1",
-  name: "fx",
-  setup_command: [
-    'mkdir -p "$AGENT_HOME/bin"',
-    "python - <<'PY'",
-    "import os",
-    "import platform",
-    "import tarfile",
-    "import tempfile",
-    "from pathlib import Path",
-    "from urllib.request import urlopen",
-    "",
-    'architecture = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[platform.machine().lower()]',
-    'url = f"https://releases.fx.sh/v0.0.6/fx-linux-{architecture}.tar.gz"',
-    'destination = Path(os.environ["AGENT_HOME"]) / "bin" / "fx"',
-    "with tempfile.TemporaryDirectory() as directory:",
-    '    archive = Path(directory) / "fx.tar.gz"',
-    "    archive.write_bytes(urlopen(url, timeout=60).read())",
-    '    with tarfile.open(archive, "r:gz") as bundle:',
-    '        bundle.extract("fx", path=directory, filter="data")',
-    '    destination.write_bytes((Path(directory) / "fx").read_bytes())',
-    "destination.chmod(0o755)",
-    "PY",
-    '"$AGENT_HOME/bin/fx" --version',
-  ].join("\n"),
-  run_command: [
-    'cd "$TASK_WORKSPACE"',
-    '"$AGENT_HOME/bin/fx" ask --yolo --json -- "$(cat "$TASK_INSTRUCTION_PATH")"',
-    '  > "$AGENT_RESULTS_PATH"',
-  ].join(" \\\n"),
-  route_api: "chat-completions",
-  setup_timeout_seconds: 600,
-  environment: [
-    { name: "AGENT_HOME", source: "agent_home" },
-    { name: "FX_MODEL", source: "model_name" },
-    { name: "AI_GATEWAY_API_KEY", source: "model_api_key" },
-    { name: "FX_AUTO_UPGRADE", source: "literal", value: "0" },
-    {
-      name: "AGENT_RESULTS_PATH",
-      source: "literal",
-      value: "/logs/agent/fx-results.json",
-    },
-    { name: "TASK_INSTRUCTION_PATH", source: "instruction_path" },
-    { name: "TASK_WORKSPACE", source: "workspace_path" },
-  ],
-  outputs: {
-    results_path: "/logs/agent/fx-results.json",
-    trajectory_path: null,
   },
 };
 
@@ -459,28 +407,16 @@ export function WorkbenchPage() {
         title="Agent Workbench"
         description="Configure, test, publish, then run a command-line agent. Setup tests are private: passing setup does not publish a profile or start a benchmark Run."
         action={
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setRecipe(copyStarter());
-                setSetup(null);
-                setConfirmed(false);
-              }}
-            >
-              <RotateCcw size={16} /> Fast-Agent 0.10.11
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setRecipe(copyStarter(fxStarter));
-                setSetup(null);
-                setConfirmed(false);
-              }}
-            >
-              <RotateCcw size={16} /> FX 0.0.6
-            </Button>
-          </div>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setRecipe(copyStarter());
+              setSetup(null);
+              setConfirmed(false);
+            }}
+          >
+            <RotateCcw size={16} /> Fast-Agent 0.10.11
+          </Button>
         }
       />
 

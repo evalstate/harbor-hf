@@ -2,136 +2,131 @@
 
 ## Public repository privacy
 
-- This repository is public. Treat all operator-specific information as private
-  before writing or publishing anything here.
-- Never publish personal names, usernames, account namespaces, email addresses,
-  home-directory paths, machine names, private repository names, private Space
-  or Bucket names, endpoint IDs, token display names, credential aliases, or
-  private infrastructure topology.
-- This applies to tracked files, documentation, examples, tests, fixtures,
-  generated artifacts, logs, commit messages, branch names, issues, pull
-  requests, review comments, and release notes. Platform-assigned authorship
-  required to submit a contribution is the only exception; do not repeat that
-  identity in repository content.
+- Treat operator identity and private deployment topology as confidential.
+- Do not publish real account names, organization names, emails, usernames,
+  home paths, Space or Bucket names, Endpoint IDs, credential display names,
+  private URLs, or local aliases.
+- Apply this rule to source, tests, fixtures, generated files, logs,
+  screenshots, commit messages, branch names, issues, pull requests, review
+  comments, and release notes.
 - Use placeholders such as `<namespace>`, `<control-space>`,
-  `<artifact-bucket>`, and `<service-token>`.
+  `<artifact-bucket>`, `<endpoint-id>`, and `<service-token>`.
 - Public availability elsewhere does not grant permission to repeat an
-  identifier here. Do not infer permission from local configuration,
-  conversation history, existing files, or general approval to commit or open a
-  pull request.
-- Publishing any operator-specific identifier requires explicit approval for
-  that exact value and exact public destination.
+  identifier here. Publishing any operator-specific value requires explicit
+  approval for that exact value and destination.
 - Before every public commit, push, issue, pull request, review comment, or
-  release, run `uv run python scripts/check_public_privacy.py .` and inspect the
-  complete diff and public metadata for operator-specific information. Stop and
-  redact it before publishing.
-- If operator-specific information is published accidentally, stop immediately,
-  report exactly what was exposed and where, remove it from the current version,
-  and ask before rewriting public history or rotating credentials.
+  release, run `uv run python scripts/check_public_privacy.py .` and inspect
+  the complete diff and public metadata.
+- If private information is published accidentally, stop, report exactly what
+  was exposed and where, remove it from the current version, and ask before
+  rewriting public history or rotating credentials.
 
-## General run architecture
+## Harbor-first run architecture
 
-- Keep Harbor-HF independent of specific benchmarks and models. Keep its core
-  independent of harness names too. These names may appear in configuration,
-  immutable records, tests and fixtures, or display text, but control and worker
-  code must treat them as data.
-- Harbor is the only component that reads and resolves benchmark formats. Run
-  the pinned Harbor version in an isolated preparation Job without persistent
-  secrets, store its exact `lock.json`, and use that same lock for execution and
-  all later recovery work.
-- Do not add benchmark-specific scripts, parsers, generators, workers, API
-  routes, schema fields, or control branches. Derive tasks, trial counts, task
-  and image digests, resources and timeouts, plus verifier settings from the
-  Harbor lock.
-- Do not add model-specific scripts, workers, API routes, schema fields, or
-  control branches. Keep model IDs, revisions, providers, prices, context
-  limits, reasoning settings, and inference parameters in immutable profiles
-  and run locks. Represent behavior through general capabilities such as
-  protocol, tool use, reasoning, structured output, and context size.
-- Keep Harbor-HF control and worker code independent of harness names. A
-  supported Harbor harness must need only configuration. Code for a new harness
-  belongs in a Harbor agent plugin behind the common agent interface and must
-  not change run, API, schema, or infrastructure logic.
-- If a benchmark or model needs unsupported behavior, add a general capability
-  at the correct Harbor or provider boundary, or reject it as unsupported.
-  Apply the same rule to harnesses at the agent boundary. Never add a
-  name-based special case in Harbor-HF.
-- Keep one-time migration tools outside the normal run path. Never use a
-  migration script to add run support.
-- Before merging support for a benchmark or model, verify that another
-  compatible value can use the same path without implementation changes or a
-  new package script. Apply the same test to harness support.
+- Harbor owns benchmark resolution, task environments, agents, verification,
+  trajectories, locks, and native trial results. Harbor-HF owns profile
+  composition, Hugging Face lifecycle, Run and physical-attempt identity,
+  admission, immutable evidence, cleanup, and publication.
+- Use the pinned Harbor revision in a credential-free preparation Job and
+  store its exact `JobLock` and prepared trials. Execution, retry, and recovery
+  must reuse those records and must not resolve the benchmark again.
+- Keep core control and worker code independent of benchmark, model, and
+  harness names. These names are immutable data, not dispatch branches.
+- A new benchmark or compatible model must need profile changes only. A new
+  harness belongs in a Harbor agent plugin behind the common agent interface
+  and must not add core API, schema, infrastructure, or worker branches.
+- If support requires a missing behavior, add a general capability at the
+  Harbor, agent, model, or Hugging Face adapter boundary, or reject the
+  combination as unsupported.
+- Use only public Harbor APIs. Never monkeypatch Harbor internals.
+
+## Direct inference contract
+
+- For inference-backed Jobs, compose one immutable Harbor `AgentConfig` from
+  model, harness, and deployment profiles.
+- The model profile is the only model-identity source. The deployment provides
+  the HF inference upstream and native API; the harness provides its import
+  path and capabilities.
+- Require exact compatibility among the Harbor model provider suffix, the
+  deployment provider, the model API list, and the harness API list.
+- Supply the upstream URL, `${HF_INFERENCE_TOKEN}`, timeout, and output-token
+  limit through `AgentConfig.env`, and add the upstream hostname to
+  `extra_allowed_hosts`.
+- The selected reviewed agent calls the upstream directly. Do not add an
+  intermediate transport layer, request or response translation, alternate
+  model binding, or fallback route.
+- `HF_TOKEN` is the fine-grained control credential and must never leave the
+  control Space. `HF_INFERENCE_TOKEN` may enter only an execution Job whose
+  immutable deployment resolves an inference upstream.
+- Preparation and no-inference Jobs receive no inference credential. Jobs
+  never receive a writable canonical Bucket mount.
+- Direct inference makes the reviewed agent an intended credential consumer.
+  Arbitrary user-authored recipes remain setup-only unless their exact
+  compiled form is promoted as a reviewed immutable harness.
+
+## Durable control and evidence
+
+- The steady-state inventory is one protected control Space and one private
+  `<artifact-bucket>` Bucket.
+- Do not create a per-Run repository, Bucket, Space, Dataset, schedule, lease
+  store, status store, backup store, or result service.
+- The TypeScript control service is the only shared Run authority. Python
+  workers may upload assigned evidence and attempt receipts but must not become
+  a second reconciler or shared control path.
+- Versioned JSON Schema is authoritative for durable Bucket records. Generate
+  TypeScript types and the browser API client; do not maintain handwritten
+  copies of portable contracts.
+- SQLite is disposable. Replaying immutable Bucket records must reconstruct
+  the same projection and next action.
+- Workers use short-lived signed capabilities scoped to a Run, launch action,
+  task set, operation set, and expiration.
+- Required evidence is profile-driven and includes the Harbor result and
+  prepared lock plus required workspace, session, trajectory, verifier, and
+  provenance records.
+- Retry only typed replacement-eligible infrastructure failures. Model
+  refusals, benchmark timeouts, agent outcomes, verifier outcomes, and valid
+  zero scores are semantic and terminal.
+- Endpoint cleanup has priority over new work. A Run cannot complete while an
+  owned Endpoint lacks a durable paused, zero-ready-replica observation.
 
 ## Development
 
-- Use Python 3.12+, uv, Pydantic, Typer, Ruff and ty, plus pytest for the
-  existing CLI and remote workers.
-- Implement the new control service and web application in TypeScript as
-  specified in `docs/CONTROL_SERVICE.md`. Use the current Node.js LTS release,
-  npm workspaces, one root npm lockfile, Fastify, React, Vite, Tailwind CSS,
-  shadcn/ui, strict TypeScript, Biome, Vitest and Playwright.
-- Keep versioned JSON Schema authoritative for durable Bucket records. Generate
-  TypeScript types and the browser API client. Do not maintain handwritten
-  copies of portable contracts.
-- Run `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run ty check`, and `uv run pytest --cov=src/harbor_hf --cov-fail-under=85`
-  before finishing Python code changes.
-- Run the root npm formatting, lint, type, test, build, dependency and browser
-  checks before finishing TypeScript or web changes.
-- Run `uv run slophammer-py check . --baseline` after changing project structure or CI.
-- Run `uv run slophammer-py dry .` before finishing behavior changes.
-- Mutation testing is intentionally unsupported. Do not add mutmut, mutation
-  workflows, mutation release gates, or mutation configuration.
-- Keep domain planning separate from Hugging Face, Harbor, filesystem and clock
-  adapters, plus process-state adapters.
-- Use only public Harbor APIs. Do not monkeypatch Harbor internals.
-- Do not load models or run inference locally. Remote integration tests must be
-  explicit and leave every Inference Endpoint paused.
-- Never write secret values to manifests, logs, tests, locks, or artifacts.
-- Treat Hugging Face repositories and Buckets as shared namespace
-  infrastructure. Spaces and schedules are shared too. Endpoints follow the
-  same rule. Reuse the canonical configured resources.
-- Never create a repository, Bucket, Space, or schedule for one run,
-  repair, profile, lease, status record, result subset, or temporary workflow.
-- The complete steady-state Harbor-HF runtime inventory is one private control
-  Space and one private `<artifact-bucket>` Bucket. Store control objects,
-  profiles, evidence, receipts, reassessments, normalized results, and the
-  result catalog under stable prefixes in that Bucket.
-- Do not add another Harbor-HF repository, Bucket, Space, Dataset, result
-  service, backup store, lease store, or status store. Any exception requires an
-  inventory, a reason the two canonical resources cannot meet the requirement,
-  lifecycle and cost records, and explicit approval.
-- The control Space has exactly two operator-managed persistent secrets.
-  `HF_TOKEN` is the approved fine-grained control credential and must never
-  leave the control Space. `HF_INFERENCE_TOKEN` is the separate inference-only
-  credential and may be passed only to reviewed workers whose immutable
-  deployment profile requires it. Do not publish either token's display name or
-  local alias. Do not create another Harbor-HF credential for a migration,
-  run, repair, worker, backup, or result reader.
-- Treat any other Harbor-HF service credential as a deprecation candidate. Do
-  not revoke it until a private consumer audit and a canary using only the
-  retained credential prove that control writes, evidence upload, endpoint
-  cleanup, and publication still work.
-- Follow `docs/CONTROL_SERVICE.md` and
-  `docs/2026-08-16-harbor-hf-control-service-plan.md` when changing run
-  control, the web application, profiles, storage, recovery, or publication
-  architecture.
-- The TypeScript control service is the only planned shared control authority.
-  Python workers may write their assigned attempt and evidence records, but do
-  not add a Python control-service fallback, dual-write path, or second
-  reconciler.
-- Never pass a locally configured personal or broad account credential, including
-  the output of `gh auth token`, to a Hugging Face Job, Sandbox, Endpoint, or
-  other remote runtime. Never copy any credential between stores without the
-  user's explicit approval for that exact source and destination. Use a
-  purpose-scoped credential approved for the remote workload instead.
-- Add tests for every behavior change and preserve at least 85% coverage.
-- Avoid `Any`; validate untrusted provider data at the adapter boundary.
-- Use Conventional Commits.
-- Apply the Slophammer standards configured for this repository.
-- Before starting implementation or an external mutation, read and follow
-  `.agents/skills/project-authorization/SKILL.md`. Verify that the requested
-  scope is approved in the repository-indexed project file before continuing.
-- Before planning, launching, monitoring, reconciling, recovering, verifying,
-  or publishing a Harbor HF run, read and follow
-  `.agents/skills/harbor-hf/SKILL.md`.
+- Before implementation or external mutation, read
+  `.agents/skills/project-authorization/SKILL.md` and verify the request against
+  the repository-indexed project file.
+- Before planning, launching, monitoring, recovering, verifying, or publishing
+  a Harbor-HF Run, read `.agents/skills/harbor-hf/SKILL.md`.
+- Use Python 3.12+, uv, Pydantic, Typer, Ruff, ty, and pytest for Python.
+- Use Node.js `>=22.12.0`, npm workspaces, the root lockfile, Fastify, React,
+  Vite, Tailwind CSS, shadcn/ui, strict TypeScript, Biome, Vitest, and
+  Playwright for the control service and web application.
+- Keep domain planning separate from Hugging Face, Harbor, filesystem, clock,
+  and process-state adapters.
+- Validate untrusted Hugging Face data at adapter boundaries and avoid `Any`.
+- Never load models or run inference locally.
+- Remote integration tests require explicit authorization and must leave every
+  managed Endpoint paused.
+- Never pass a locally configured personal or broad account credential to a
+  Job, task environment, model service, or other remote runtime.
+- Never write credential values to manifests, logs, tests, locks, evidence, or
+  repository content.
+- Add tests for every behavior change and preserve at least 85% Python
+  coverage where that gate applies.
+- Run relevant Python checks:
+
+  ```bash
+  uv run ruff check .
+  uv run ruff format --check .
+  uv run ty check
+  uv run pytest --cov=src/harbor_hf --cov-fail-under=85
+  ```
+
+- Run the root npm format, lint, type, test, build, generated-file, dependency,
+  and browser checks for TypeScript or web changes.
+- Run `uv run slophammer-py check . --baseline` after project-structure or CI
+  changes and `uv run slophammer-py dry .` for behavior changes.
+- Mutation testing is intentionally unsupported. Do not add mutation tooling,
+  workflows, release gates, or configuration.
+- Use Conventional Commits and follow the repository's Slophammer standards.
+- Do not modify `docs/agent-workbench.md` unless the task explicitly assigns
+  that document.

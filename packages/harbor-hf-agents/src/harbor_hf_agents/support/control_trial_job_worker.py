@@ -41,11 +41,6 @@ from harbor_hf_agents.support.control_job_environment import (
     ControlJobEnvironment,
     JobEnvironmentPreflightError,
 )
-from harbor_hf_agents.support.hf_inference_bridge import (
-    InferenceUsage,
-    InferenceUsageError,
-    read_job_inference_usage,
-)
 from harbor_hf_agents.support.provider_outcome import (
     ProviderPolicyError,
     TerminalProviderError,
@@ -88,6 +83,7 @@ _HARBOR_CHILD_ENVIRONMENT = frozenset(
         "HARBOR_HF_WORKER_CAPABILITY",
         "HARBOR_HF_WORKER_REVISION",
         "HARBOR_HF_WORKER_ROLE",
+        "HF_INFERENCE_TOKEN",
         "HOME",
         "HTTPS_PROXY",
         "HTTP_PROXY",
@@ -582,21 +578,6 @@ def _phase_started(result: dict[str, Any], name: str) -> bool:
     )
 
 
-def _outcome_with_usage(
-    outcome: str,
-    replacement_eligible: bool,
-    usage: InferenceUsage | None,
-) -> tuple[str, bool]:
-    """Treat missing trusted provider usage as infrastructure only after success."""
-    if (
-        usage is not None
-        and (usage.requests == 0 or usage.input_tokens == 0)
-        and outcome in {"agent", "benchmark_timeout", "complete"}
-    ):
-        return "infrastructure", True
-    return outcome, replacement_eligible
-
-
 def _agent_result(result: dict[str, Any] | None) -> dict[str, Any]:
     if result is None or "agent_result" not in result:
         return {}
@@ -611,7 +592,6 @@ def _token_count(agent: dict[str, Any], name: str) -> int:
 
 def _metrics(
     result: dict[str, Any] | None,
-    usage: InferenceUsage | None = None,
 ) -> dict[str, float]:
     if result is None:
         return {}
@@ -627,35 +607,18 @@ def _metrics(
             if isinstance(value, (int, float)) and math.isfinite(float(value)):
                 metrics[name] = float(value)
     agent = _agent_result(result)
-    metrics["input_tokens"] = float(
-        usage.input_tokens
-        if usage is not None
-        else _token_count(agent, "n_input_tokens")
-    )
-    metrics["output_tokens"] = float(
-        usage.output_tokens
-        if usage is not None
-        else _token_count(agent, "n_output_tokens")
-    )
+    metrics["input_tokens"] = float(_token_count(agent, "n_input_tokens"))
+    metrics["output_tokens"] = float(_token_count(agent, "n_output_tokens"))
     return metrics
 
 
 def _cost_microusd(
     config: WorkerConfig,
     result: dict[str, Any] | None,
-    usage: InferenceUsage | None = None,
 ) -> int:
     agent = _agent_result(result)
-    input_tokens = (
-        usage.input_tokens
-        if usage is not None
-        else _token_count(agent, "n_input_tokens")
-    )
-    output_tokens = (
-        usage.output_tokens
-        if usage is not None
-        else _token_count(agent, "n_output_tokens")
-    )
+    input_tokens = _token_count(agent, "n_input_tokens")
+    output_tokens = _token_count(agent, "n_output_tokens")
     return math.ceil(
         input_tokens * config.input_price / 1_000_000
         + output_tokens * config.output_price / 1_000_000
@@ -915,14 +878,12 @@ def _submit_attempt(
     outcome_override: tuple[str, bool] | None = None,
 ) -> None:
     task = config.task
-    usage = read_job_inference_usage()
     outcome, replacement = outcome_override or _exception_outcome(
         result,
         output,
         timed_out=timed_out,
     )
-    outcome, replacement = _outcome_with_usage(outcome, replacement, usage)
-    metrics = _metrics(result, usage)
+    metrics = _metrics(result)
     client = _control_client(config.run_id)
     client.request_sync(
         "POST",
@@ -933,7 +894,7 @@ def _submit_attempt(
             "replacement_eligible": replacement,
             "evidence_digest": evidence_digest,
             "evidence_path": evidence_path,
-            "cost_microusd": _cost_microusd(config, result, usage),
+            "cost_microusd": _cost_microusd(config, result),
             "metrics": metrics,
             "completed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "confirmed": True,
@@ -982,7 +943,6 @@ def _worker_failure_outcome(error: BaseException) -> tuple[str, bool]:
         error,
         (
             ControlClientTransientError,
-            InferenceUsageError,
             JobEnvironmentPreflightError,
         ),
     ):
@@ -1358,7 +1318,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if _required("HARBOR_HF_WORKER_ROLE") != "execution":
         raise RuntimeError("control worker role is invalid")
-    for name in ("HF_TOKEN", "HF_INFERENCE_TOKEN"):
+    for name in ("HF_TOKEN",):
         if name in os.environ and os.environ[name]:
             raise RuntimeError(f"control worker must not retain {name}")
     task_id = _assigned_task_id()

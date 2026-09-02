@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-93169d6b01674ab156672abd",
+  "record_id": "profile-db83dc948a089d58f380b3ad",
   "created_at": "2026-08-28T15:38:33.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -14,9 +14,15 @@
     "agent": "command-agent",
     "revision": "sha256:b301485d6e143ebf7862f7cfbdb042e53fa26da151a4bc578521e514dece456c",
     "reasoning_effort": "off",
-    "required_evidence": ["workspace", "verifier", "provider-usage", "trajectory"],
+    "required_evidence": [
+      "workspace",
+      "verifier",
+      "trajectory"
+    ],
     "capabilities": {
-      "inference_apis": ["chat-completions"]
+      "inference_apis": [
+        "chat-completions"
+      ]
     },
     "harbor_agent": {
       "import_path": "harbor_hf_agents.command_agent.agent:CommandAgent",
@@ -41,8 +47,8 @@
             "bindings": {
               "AGENT_HOME": "agent_home",
               "AGENT_MODEL": "model_name",
-              "OPENAI_API_KEY": "route_api_key",
-              "MODEL_BASE_URL": "route_base_url",
+              "OPENAI_API_KEY": "model_api_key",
+              "MODEL_BASE_URL": "model_base_url",
               "TASK_INSTRUCTION_PATH": "instruction_path",
               "TASK_WORKSPACE": "workspace_path"
             },

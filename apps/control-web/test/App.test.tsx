@@ -267,17 +267,15 @@ describe("control web", () => {
     ).toHaveLength(2);
     expect(await screen.findByText("Preview ready")).toBeVisible();
     expect(screen.getByText("<injected placeholder>")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /FX/ })).not.toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Environment variable OPENAI_API_KEY source"),
+    ).toHaveValue("model_api_key");
+    expect(
+      screen.getByLabelText("Environment variable MODEL_BASE_URL source"),
+    ).toHaveValue("model_base_url");
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "FX 0.0.6" }));
-    expect(screen.getByLabelText("Configuration name")).toHaveValue("fx");
-    expect(
-      (screen.getByLabelText("Setup command") as HTMLTextAreaElement).value,
-    ).toContain("https://releases.fx.sh/v0.0.6/");
-    expect(
-      (screen.getByLabelText("Run command") as HTMLTextAreaElement).value,
-    ).toContain('fx" ask --yolo --json --');
-    await user.click(screen.getByRole("button", { name: "Fast-Agent 0.10.11" }));
     await user.click(
       screen.getByRole("checkbox", {
         name: /launch this exact setup recipe/i,
@@ -735,8 +733,6 @@ describe("control web", () => {
             run_limit: 8,
             namespace_active: 1,
             namespace_limit: 8,
-            provider_reserved: 0,
-            provider_limit: 0,
             queued: 2,
             cleanup_held: 0,
             limiting_factor: null,
@@ -802,8 +798,6 @@ describe("control web", () => {
             run_limit: 1,
             namespace_active: 0,
             namespace_limit: 1,
-            provider_reserved: 0,
-            provider_limit: 0,
             queued: 0,
             cleanup_held: 0,
             limiting_factor: null,
@@ -1250,8 +1244,6 @@ describe("control web", () => {
             run_active: 2,
             hardware_limit: null,
             hardware_active: 0,
-            provider_limit: 4,
-            provider_reserved: 2,
             start_tokens: 1,
             start_burst: 2,
             queued: 1,
@@ -1313,6 +1305,7 @@ describe("control web", () => {
     expect(screen.getByText("Job capacity")).toBeInTheDocument();
     expect(await screen.findByText("Namespace Job Capacity")).toBeInTheDocument();
     expect(screen.getByText(/3\/8 reserved, 5 available/)).toBeInTheDocument();
+    expect(screen.queryByText("Provider requests")).not.toBeInTheDocument();
   });
 
   it("queues eligible infrastructure retries from a finished run", async () => {
@@ -1334,8 +1327,6 @@ describe("control web", () => {
             run_active: 0,
             hardware_limit: null,
             hardware_active: 0,
-            provider_limit: 0,
-            provider_reserved: 0,
             start_tokens: null,
             start_burst: null,
             queued: 0,
@@ -1428,8 +1419,6 @@ describe("control web", () => {
             run_active: 0,
             hardware_limit: null,
             hardware_active: 0,
-            provider_limit: 0,
-            provider_reserved: 0,
             start_tokens: null,
             start_burst: null,
             queued: 0,

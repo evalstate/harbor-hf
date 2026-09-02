@@ -1,5 +1,11 @@
 # Trial evidence bundle implementation plan
 
+> **Historical record — superseded 2026-09-02.** This document preserves the
+> implementation plan and terminology reviewed at the time. Its imperative
+> language is not current inference or evidence guidance. New work follows the
+> [`trial evidence bundle specification`](trial-evidence-bundle.md) and
+> [`Harbor compatibility contract`](harbor-integration-contract.md).
+
 ## Status
 
 Superseded implementation record. The [trial evidence bundle

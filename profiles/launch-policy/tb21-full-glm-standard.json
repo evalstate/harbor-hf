@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-ee2980af9aebde91b62539ca",
+  "record_id": "profile-e58e703b3f63d5f90bfc6bea",
   "created_at": "2026-08-31T00:00:00.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -17,12 +17,24 @@
     "max_preparation_attempts": 2,
     "success_without_worker_receipt": false,
     "publication_role": "final",
-    "required_positive_metrics": ["input_tokens", "output_tokens"],
+    "required_positive_metrics": [
+      "input_tokens",
+      "output_tokens"
+    ],
     "profile_constraints": {
-      "benchmarks": ["terminal-bench-2-1-full"],
-      "models": ["glm-5-3-flash-together"],
-      "harnesses": ["pi-off", "terminus", "fx"],
-      "deployments": ["tb21-glm-5-3-flash-together-providers"]
+      "benchmarks": [
+        "terminal-bench-2-1-full"
+      ],
+      "models": [
+        "glm-5-3-flash-together"
+      ],
+      "harnesses": [
+        "pi-off",
+        "terminus"
+      ],
+      "deployments": [
+        "tb21-glm-5-3-flash-together-providers"
+      ]
     }
   }
 }

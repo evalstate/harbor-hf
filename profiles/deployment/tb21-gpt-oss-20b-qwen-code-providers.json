@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-96245adf2eeae59be1469849",
+  "record_id": "profile-5ec8592a832e7a0676fb5375",
   "created_at": "2026-08-22T00:00:00.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -11,8 +11,13 @@
   "name": "tb21-gpt-oss-20b-qwen-code-providers",
   "spec": {
     "route": "hf_job",
-    "models": ["gpt-oss-20b-together", "gpt-oss-20b"],
-    "harnesses": ["qwen-code"],
+    "models": [
+      "gpt-oss-20b-together",
+      "gpt-oss-20b"
+    ],
+    "harnesses": [
+      "qwen-code"
+    ],
     "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:56aae633c6cc9137a0a2366ebf3e52abcc2a43006f293c2bee888a0086913a2b",
     "preparation_job_command": [
       "python",
@@ -27,7 +32,6 @@
     "hardware": "cpu-upgrade",
     "active_hourly_cost_microusd": 30000,
     "trusted_worker": true,
-    "inference_token": "forbidden",
     "preparation": "required",
     "inference_provider": "together",
     "input_price_microusd_per_million_tokens": 50000,
@@ -56,18 +60,10 @@
           "active_hourly_cost_microusd": 30000
         }
       ],
-      "inference_token": "required",
       "inference_upstream": "https://router.huggingface.co/v1",
       "inference_api": "chat-completions",
-      "inference_max_requests": 512,
-      "inference_max_concurrency": 1,
       "inference_timeout_seconds": 1800,
       "inference_max_output_tokens": 32768,
-      "root_bootstrap_command": [
-        "python",
-        "-m",
-        "harbor_hf_agents.support.job_root_bridge"
-      ],
       "default_cpus": 1,
       "default_memory_mb": 2048,
       "default_storage_mb": 10240,

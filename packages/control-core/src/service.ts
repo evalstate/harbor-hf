@@ -139,8 +139,6 @@ export interface JobCapacityView {
   run_active: number;
   hardware_limit: number | null;
   hardware_active: number;
-  provider_limit: number;
-  provider_reserved: number;
   start_tokens: number | null;
   start_burst: number | null;
   queued: number;
@@ -1086,7 +1084,6 @@ export class ControlService {
     intent: ActionIntent,
     profileId: string,
     hardware: string,
-    reservedProviderRequests: number,
     previousGrantId: string | null,
     decision: JobAdmissionDecision,
   ): Promise<JobAdmissionGrant> {
@@ -1101,7 +1098,6 @@ export class ControlService {
       namespace: this.namespace,
       capacity_profile_id: profileId,
       hardware,
-      reserved_provider_requests: reservedProviderRequests,
       tokens_remaining: decision.tokens_remaining,
       refill_cursor_at: decision.refill_cursor_at,
       previous_grant_id: previousGrantId,
@@ -1172,24 +1168,15 @@ export class ControlService {
     if (!existingGrant) {
       const active = await this.projection.activeJobAdmissions(this.namespace);
       const latest = await this.projection.latestJobAdmission(this.namespace);
-      const providerRequests = intent.payload.inference_max_concurrency ?? 0;
-      const providerLimit =
-        intent.payload.inference_max_total_concurrency ??
-        Math.max(providerRequests, runMaxJobs * providerRequests);
       const decision = decideJobAdmission(
         capacity.spec,
         {
           active_jobs: active.length,
           active_hardware: active.filter((grant) => grant.hardware === hardware).length,
-          active_provider_requests: active
-            .filter((grant) => grant.run_id === intent.run_id)
-            .reduce((total, grant) => total + grant.reserved_provider_requests, 0),
           tokens: latest?.tokens_remaining ?? capacity.spec.start_burst,
           refill_cursor_at: latest?.refill_cursor_at ?? this.clock.now().toISOString(),
         },
         hardware,
-        providerRequests,
-        providerLimit,
         runMaxJobs,
         active.filter((grant) => grant.run_id === intent.run_id).length,
         this.clock.now(),
@@ -1213,7 +1200,6 @@ export class ControlService {
         intent,
         capacity.profile_id,
         hardware,
-        providerRequests,
         latest?.record_id ?? null,
         decision,
       );
@@ -1260,13 +1246,6 @@ export class ControlService {
     const hardwareActive = hardware
       ? active.filter((grant) => grant.hardware === hardware).length
       : 0;
-    const providerReserved = runActive.reduce(
-      (total, grant) => total + grant.reserved_provider_requests,
-      0,
-    );
-    const providerLimit =
-      template?.inference_max_total_concurrency ??
-      runLimit * (template?.inference_max_concurrency ?? 0);
     let startTokens: number | null = null;
     let notBefore: string | null = null;
     if (capacity) {
@@ -1288,8 +1267,6 @@ export class ControlService {
       limitingFactor = "namespace_job_capacity";
     else if (hardwareLimit !== null && hardwareActive >= hardwareLimit)
       limitingFactor = "hardware_job_capacity";
-    else if (providerLimit > 0 && providerReserved >= providerLimit)
-      limitingFactor = "provider_request_capacity";
     else if (capacity && startTokens !== null && startTokens < 1)
       limitingFactor = "start_rate";
     return {
@@ -1301,8 +1278,6 @@ export class ControlService {
       run_active: runActive.length,
       hardware_limit: hardwareLimit,
       hardware_active: hardwareActive,
-      provider_limit: providerLimit,
-      provider_reserved: providerReserved,
       start_tokens: startTokens,
       start_burst: capacity?.spec.start_burst ?? null,
       queued,

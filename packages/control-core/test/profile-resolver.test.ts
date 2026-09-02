@@ -41,7 +41,7 @@ describe("ProfileResolver", () => {
         route: "hf_job",
         models: ["model"],
         harnesses: ["harness"],
-        inference_token: "required",
+        inference_upstream: "https://router.huggingface.co/v1",
         inference_api: api,
       });
     const supported = deployment("supported", "chat-completions");

@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-4bc1f872e062fc16bceabbf6",
+  "record_id": "profile-10d9af699acec2b5e1119eaf",
   "created_at": "2026-08-16T00:00:00.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -11,8 +11,12 @@
   "name": "hf-cpu-smoke",
   "spec": {
     "route": "hf_job",
-    "models": ["control-smoke"],
-    "harnesses": ["control-smoke"],
+    "models": [
+      "control-smoke"
+    ],
+    "harnesses": [
+      "control-smoke"
+    ],
     "job_image": "node:22.22.0-bookworm-slim@sha256:7cc56ef285a8568121537d17b05e72128f01b89c54607b51acf084a50ef483f3",
     "job_command": [
       "node",
@@ -25,7 +29,6 @@
     "active_hourly_cost_microusd": 10000,
     "timeout_seconds": 300,
     "trusted_worker": true,
-    "inference_token": "forbidden",
     "contract_version": "v1"
   }
 }

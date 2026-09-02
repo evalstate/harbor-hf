@@ -71,11 +71,8 @@ hardware: string
 active_hourly_cost_microusd?: number
 timeout_seconds: number
 trusted_worker: boolean
-inference_token?: ("forbidden" | "required")
 inference_upstream?: string
 inference_api?: ("chat-completions" | "responses")
-inference_max_requests?: number
-inference_max_concurrency?: number
 inference_timeout_seconds?: number
 inference_max_output_tokens?: number
 inference_provider?: string
@@ -103,22 +100,10 @@ export type TrialJobTemplate = ({
  * @maxItems 32
  */
 flavors: [TrialJobFlavor, ...(TrialJobFlavor)[]]
-inference_token?: ("forbidden" | "required")
 inference_upstream?: string
 inference_api?: ("chat-completions" | "responses")
-inference_max_requests?: number
-inference_max_concurrency?: number
-/**
- * Maximum provider request units reserved across active trial Jobs in one Run.
- */
-inference_max_total_concurrency?: number
 inference_timeout_seconds?: number
 inference_max_output_tokens?: number
-/**
- * @minItems 1
- * @maxItems 128
- */
-root_bootstrap_command: [string, ...(string)[]]
 default_cpus: number
 default_memory_mb: number
 default_storage_mb: number
@@ -369,7 +354,6 @@ run_id: Id
 namespace: string
 capacity_profile_id: Digest
 hardware: string
-reserved_provider_requests: number
 tokens_remaining: number
 refill_cursor_at: Timestamp
 previous_grant_id: (Id | null)
@@ -627,6 +611,14 @@ provider_max_attempts?: number
 }
 export interface HarborAgentTemplate {
 import_path: string
+name?: string
+env?: {
+[k: string]: string
+}
+/**
+ * @maxItems 64
+ */
+extra_allowed_hosts?: string[]
 kwargs: {
 model_name?: never
 models_json?: never
@@ -817,10 +809,18 @@ profile_id: Digest
 }
 export interface HarborAgentConfig {
 import_path: string
+name?: string
 model_name: string
 kwargs?: {
 [k: string]: unknown
 }
+env?: {
+[k: string]: string
+}
+/**
+ * @maxItems 64
+ */
+extra_allowed_hosts?: string[]
 override_setup_timeout_sec?: number
 }
 export interface ResolvedInferenceContract {
@@ -828,11 +828,8 @@ harbor_provider: "openai"
 provider: Id
 upstream: string
 agent_model: string
-bridge_model: string
+provider_model: string
 api: ("chat-completions" | "responses")
-max_requests: number
-max_concurrency: number
-max_total_concurrency?: number
 timeout_seconds: number
 max_output_tokens: number
 context_window: number
@@ -899,11 +896,6 @@ max_infrastructure_attempts?: number
 reservation_microusd?: number
 active_hourly_cost_microusd?: number
 trusted_worker?: boolean
-inference_token?: ("forbidden" | "required")
-inference_max_requests?: number
-inference_max_concurrency?: number
-inference_timeout_seconds?: number
-inference_max_output_tokens?: number
 resource_id?: string
 launch_action_id?: Id
 not_before?: Timestamp
@@ -926,8 +918,4 @@ max_jobs?: number
 inference_upstream?: string
 inference_model?: string
 inference_api?: ("chat-completions" | "responses")
-/**
- * Maximum provider request units reserved across active trial Jobs in one Run.
- */
-inference_max_total_concurrency?: number
 }

@@ -86,32 +86,6 @@ function objectValue(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function shellQuote(argument: string): string {
-  return `'${argument.replaceAll("'", `'"'"'`)}'`;
-}
-
-function shellCommand(arguments_: string[]): string {
-  if (arguments_.length === 0)
-    throw new ProfileResolutionError("job command must not be empty");
-  return arguments_.map(shellQuote).join(" ");
-}
-
-function trialJobCommand(
-  rootBootstrapCommand: string[],
-  workerCommand: string[],
-): [string, string, string] {
-  return [
-    "/bin/sh",
-    "-c",
-    [
-      "set -eu",
-      shellCommand(rootBootstrapCommand),
-      "unset HF_INFERENCE_TOKEN HARBOR_HF_INFERENCE_TOKEN",
-      `exec ${shellCommand(workerCommand)}`,
-    ].join("\n"),
-  ];
-}
-
 export function preparationRequired(deployment: DeploymentProfileSpec): boolean {
   return deployment.route === "hf_job" && deployment.preparation === "required";
 }
@@ -198,15 +172,9 @@ export interface PreparedTrialJobLaunch {
   max_jobs: number;
   max_image_bytes: number;
   max_image_entries: number;
-  inference_token: "forbidden" | "required";
   inference_upstream?: string;
   inference_model?: string;
   inference_api?: "chat-completions" | "responses";
-  inference_max_requests?: number;
-  inference_max_concurrency?: number;
-  inference_max_total_concurrency?: number;
-  inference_timeout_seconds?: number;
-  inference_max_output_tokens?: number;
 }
 
 export function preparedTrialJobLaunch(
@@ -239,40 +207,19 @@ export function preparedTrialJobLaunch(
   return {
     job_image: deployment.job_image,
     task_image: trial.image,
-    job_command: trialJobCommand(
-      template.root_bootstrap_command,
-      deployment.job_command,
-    ),
+    job_command: deployment.job_command,
     hardware: flavor.hardware,
     timeout_seconds: timeoutSeconds,
     active_hourly_cost_microusd: flavor.active_hourly_cost_microusd,
     max_jobs: template.max_jobs,
     max_image_bytes: template.max_image_bytes,
     max_image_entries: template.max_image_entries,
-    inference_token: template.inference_token ?? "forbidden",
     ...(execution.inference
       ? {
           inference_upstream: execution.inference.upstream,
-          inference_model: execution.inference.bridge_model,
+          inference_model: execution.inference.provider_model,
           inference_api: execution.inference.api,
         }
-      : {}),
-    ...(template.inference_max_requests
-      ? { inference_max_requests: template.inference_max_requests }
-      : {}),
-    ...(template.inference_max_concurrency
-      ? { inference_max_concurrency: template.inference_max_concurrency }
-      : {}),
-    ...(template.inference_max_total_concurrency
-      ? {
-          inference_max_total_concurrency: template.inference_max_total_concurrency,
-        }
-      : {}),
-    ...(template.inference_timeout_seconds
-      ? { inference_timeout_seconds: template.inference_timeout_seconds }
-      : {}),
-    ...(template.inference_max_output_tokens
-      ? { inference_max_output_tokens: template.inference_max_output_tokens }
       : {}),
   };
 }
@@ -319,10 +266,7 @@ function deploymentInferenceApi(
 ): "chat-completions" | "responses" | "" | null {
   if (spec.route !== "hf_job") return null;
   const source = spec.trial_job_template ?? spec;
-  const inferenceRequired =
-    spec.inference_token === "required" ||
-    spec.trial_job_template?.inference_token === "required";
-  if (!inferenceRequired) return null;
+  if (!source.inference_upstream) return null;
   return source.inference_api ?? "";
 }
 

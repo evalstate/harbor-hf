@@ -188,7 +188,6 @@ describe("canonical contracts", () => {
       namespace: "test",
       capacity_profile_id: `sha256:${"a".repeat(64)}`,
       hardware: "cpu-basic",
-      reserved_provider_requests: 1,
       tokens_remaining: 1,
       refill_cursor_at: "2026-08-22T00:00:00.000Z",
       previous_grant_id: null,
@@ -209,6 +208,9 @@ describe("canonical contracts", () => {
     expect(validateControlRecord(profile)).toEqual(profile);
     expect(validateControlRecord(grant)).toEqual(grant);
     expect(validateControlRecord(release)).toEqual(release);
+    expect(() =>
+      validateControlRecord({ ...grant, reserved_provider_requests: 1 }),
+    ).toThrow(ContractValidationError);
     expect(controlRecordPath(grant)).toContain("/p-admission.json");
     expect(controlRecordPath(release)).toContain("/zy-capacity-release.json");
     expect(() =>
@@ -347,11 +349,8 @@ describe("canonical contracts", () => {
         hardware: "cpu-basic",
         timeout_seconds: 300,
         trusted_worker: true,
-        inference_token: "required",
         inference_upstream: "https://router.huggingface.co/v1",
         inference_api: "chat-completions",
-        inference_max_requests: 64,
-        inference_max_concurrency: 4,
         inference_timeout_seconds: 600,
         inference_max_output_tokens: 32768,
         inference_provider: "provider",
@@ -368,7 +367,7 @@ describe("canonical contracts", () => {
     expect(() =>
       validateControlRecord({
         ...inferenceDeployment,
-        spec: { ...inferenceDeployment.spec, inference_token: "optional" },
+        spec: { ...inferenceDeployment.spec, unsupported_setup_command: ["false"] },
       }),
     ).toThrow(ContractValidationError);
     expect(() =>

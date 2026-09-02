@@ -2575,8 +2575,6 @@
                     "run_active",
                     "hardware_limit",
                     "hardware_active",
-                    "provider_limit",
-                    "provider_reserved",
                     "start_tokens",
                     "start_burst",
                     "queued",
@@ -2629,12 +2627,6 @@
                     "hardware_active": {
                       "type": "integer"
                     },
-                    "provider_limit": {
-                      "type": "integer"
-                    },
-                    "provider_reserved": {
-                      "type": "integer"
-                    },
                     "start_tokens": {
                       "anyOf": [
                         {
@@ -2661,7 +2653,13 @@
                     "limiting_factor": {
                       "anyOf": [
                         {
-                          "type": "string"
+                          "enum": [
+                            "run_job_capacity",
+                            "namespace_job_capacity",
+                            "hardware_job_capacity",
+                            "start_rate",
+                            "run_cancelled"
+                          ]
                         },
                         {
                           "type": "null"

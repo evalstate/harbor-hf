@@ -99,7 +99,6 @@ export function profileLabel(
     if (agent === "dsh" || agent.startsWith("dsh-") || alias.startsWith("dsh"))
       return "DeepSeek Harness";
     if (agent === "opencode") return "OpenCode";
-    if (agent === "fx") return "FX";
     if (agent === "pi") return "Pi";
     if (agent === "control-smoke") return "Control smoke";
     return humanize(agent);

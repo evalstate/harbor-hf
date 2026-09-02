@@ -17,6 +17,9 @@
     "max_preparation_attempts": 2,
     "success_without_worker_receipt": false,
     "publication_role": "diagnostic",
-    "required_positive_metrics": ["input_tokens", "output_tokens"]
+    "required_positive_metrics": [
+      "input_tokens",
+      "output_tokens"
+    ]
   }
 }

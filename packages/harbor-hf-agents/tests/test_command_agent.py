@@ -15,7 +15,6 @@ from harbor_hf_agents.command_agent import (
     CommandAgent,
     CommandAgentConfig,
 )
-from harbor_hf_agents.command_agent import agent as command_agent_module
 
 
 def _config(
@@ -109,16 +108,16 @@ def test_config_rejects_reserved_and_credential_environment_names(name: str) -> 
         )
 
 
-def test_config_allows_a_credential_name_only_for_the_route_placeholder() -> None:
+def test_config_allows_a_credential_name_only_for_the_model_credential() -> None:
     config = CommandAgentConfig.model_validate(
         _config(
             run={
                 "argv": ["agent"],
-                "bindings": {"GENERIC_API_KEY": "route_api_key"},
+                "bindings": {"GENERIC_API_KEY": "model_api_key"},
             }
         )
     )
-    assert config.run.bindings == {"GENERIC_API_KEY": "route_api_key"}
+    assert config.run.bindings == {"GENERIC_API_KEY": "model_api_key"}
 
     for source in ("workspace_path", "model_name"):
         with pytest.raises(ValidationError, match="credential"):
@@ -148,8 +147,8 @@ def test_config_accepts_only_the_declared_binding_types() -> None:
         "LOG_DIRECTORY": "logs_path",
         "AGENT_DIRECTORY": "agent_home",
         "MODEL": "model_name",
-        "ROUTE_URL": "route_base_url",
-        "ROUTE_VALUE": "route_api_key",
+        "MODEL_URL": "model_base_url",
+        "MODEL_CREDENTIAL": "model_api_key",
         "VERSION": "agent_version",
     }
     config = CommandAgentConfig.model_validate(
@@ -187,7 +186,7 @@ def test_config_accepts_non_secret_literals_and_rejects_duplicates() -> None:
 
 
 def test_setup_rejects_bindings_that_exist_only_during_run() -> None:
-    for binding in ("instruction_path", "route_base_url", "route_api_key"):
+    for binding in ("instruction_path", "model_base_url", "model_api_key"):
         with pytest.raises(ValidationError, match="run-only"):
             CommandAgentConfig.model_validate(
                 _config(
@@ -223,7 +222,7 @@ def test_declared_outputs_are_relative_unique_and_separate_from_atif() -> None:
 
 
 def test_rejects_arbitrary_extra_env(temp_dir: Path) -> None:
-    with pytest.raises(ValueError, match="does not accept arbitrary ambient"):
+    with pytest.raises(ValueError, match="does not accept unsupported environment"):
         CommandAgent(
             logs_dir=temp_dir,
             config=_config(),
@@ -340,44 +339,20 @@ async def test_scripts_are_staged_verbatim_and_process_logs_are_bounded(
 
 
 @pytest.mark.asyncio
-async def test_route_bindings_use_locked_job_route_and_cleanup(
-    temp_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    events: list[str] = []
-
-    async def use_route(_agent, _environment, env, **kwargs):
-        assert kwargs == {
-            "base_url_key": "HARBOR_COMMAND_INTERNAL_BASE_URL",
-            "api_key_key": "HARBOR_COMMAND_INTERNAL_API_KEY",
-            "api": "chat-completions",
-            "allowed_model": "example/model",
-        }
-        env["HARBOR_COMMAND_INTERNAL_BASE_URL"] = "http://127.0.0.1:18080/v1"
-        env["HARBOR_COMMAND_INTERNAL_API_KEY"] = "local-placeholder"
-        return True
-
-    async def stop_bridge(_agent, _environment):
-        events.append("stopped")
-
-    monkeypatch.setattr(command_agent_module, "use_job_inference_route", use_route)
-    monkeypatch.setattr(
-        "harbor_hf_agents.support.job_inference_route.hf_inference_bridge_is_active",
-        lambda _agent: True,
-    )
-    monkeypatch.setattr(
-        "harbor_hf_agents.support.job_inference_route.stop_hf_inference_bridge",
-        stop_bridge,
-    )
+async def test_model_bindings_use_direct_agent_environment(temp_dir: Path) -> None:
     agent = CommandAgent(
         logs_dir=temp_dir,
         model_name="openai/example/model",
+        extra_env={
+            "OPENAI_BASE_URL": "https://router.huggingface.co/v1",
+            "OPENAI_API_KEY": "direct-token",
+        },
         config=_config(
             run={
                 "argv": ["agent"],
                 "bindings": {
-                    "ROUTE_URL": "route_base_url",
-                    "ROUTE_VALUE": "route_api_key",
+                    "MODEL_URL": "model_base_url",
+                    "MODEL_CREDENTIAL": "model_api_key",
                     "MODEL": "model_name",
                 },
             }
@@ -390,34 +365,27 @@ async def test_route_bindings_use_locked_job_route_and_cleanup(
     run = _phase_call(environment, "run")
     assert run.kwargs["env"] == {
         "MODEL": "openai/example/model",
-        "ROUTE_URL": "http://127.0.0.1:18080/v1",
-        "ROUTE_VALUE": "local-placeholder",
+        "MODEL_URL": "https://router.huggingface.co/v1",
+        "MODEL_CREDENTIAL": "direct-token",
     }
-    assert events == ["stopped"]
 
 
 @pytest.mark.asyncio
-async def test_route_binding_fails_closed_without_locked_route(
+async def test_model_binding_fails_closed_without_direct_settings(
     temp_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        command_agent_module,
-        "use_job_inference_route",
-        AsyncMock(return_value=False),
-    )
     agent = CommandAgent(
         logs_dir=temp_dir,
         model_name="openai/example/model",
         config=_config(
             run={
                 "argv": ["agent"],
-                "bindings": {"ROUTE_URL": "route_base_url"},
+                "bindings": {"MODEL_URL": "model_base_url"},
             }
         ),
     )
 
-    with pytest.raises(RuntimeError, match="requires the Job inference route"):
+    with pytest.raises(RuntimeError, match="requires direct model settings"):
         await agent.run("solve", _environment(temp_dir), AgentContext())
 
 
@@ -554,8 +522,8 @@ def _fast_agent_0_10_11_starter() -> dict[str, object]:
             "bindings": {
                 "AGENT_DIRECTORY": "agent_home",
                 "MODEL": "model_name",
-                "ROUTE_URL": "route_base_url",
-                "ROUTE_VALUE": "route_api_key",
+                "MODEL_BASE_URL": "model_base_url",
+                "OPENAI_API_KEY": "model_api_key",
                 "TASK_FILE": "instruction_path",
             },
         },
@@ -566,4 +534,4 @@ def test_fast_agent_0_10_11_starter_uses_the_generic_recipe() -> None:
     config = CommandAgentConfig.model_validate(_fast_agent_0_10_11_starter())
     assert config.setup is not None
     assert config.setup.argv[-1] == "fast-agent-mcp==0.10.11"
-    assert config.run.bindings["ROUTE_URL"] == "route_base_url"
+    assert config.run.bindings["MODEL_BASE_URL"] == "model_base_url"

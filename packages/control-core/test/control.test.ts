@@ -521,50 +521,6 @@ describe("control service", () => {
     });
   });
 
-  it("applies provider request reservations per Run", async () => {
-    const control = await createTestControl();
-    controls.push(control);
-    await configureCapacity(control, {
-      maximum: 3,
-      hardwareMaximum: 3,
-      burst: 3,
-    });
-    const firstRun = await control.service.submit(
-      { ...submission, start_paused: true },
-      "provider-capacity-first-run",
-      operator,
-    );
-    const secondRun = await control.service.submit(
-      { ...submission, start_paused: true },
-      "provider-capacity-second-run",
-      operator,
-    );
-    const launch = (runId: string, generation: number) =>
-      control.service.actionIntent(runId, "job.launch", "task-001", generation, {
-        worker_role: "execution",
-        task_id: "task-001",
-        task_ids: ["task-001"],
-        hardware: "cpu-basic",
-        max_jobs: 3,
-        inference_max_concurrency: 1,
-        inference_max_total_concurrency: 1,
-      });
-    const first = launch(firstRun.run_id, 0);
-    const second = launch(secondRun.run_id, 0);
-    const sameRun = launch(firstRun.run_id, 1);
-
-    await expect(control.service.admitJobLaunch(first)).resolves.toMatchObject({
-      status: "admitted",
-    });
-    await expect(control.service.admitJobLaunch(second)).resolves.toMatchObject({
-      status: "admitted",
-    });
-    await expect(control.service.admitJobLaunch(sameRun)).resolves.toMatchObject({
-      status: "deferred",
-      limiting_factor: "provider_request_capacity",
-    });
-  });
-
   it("adopts idempotent submissions and completes a control smoke run", async () => {
     const control = await createTestControl();
     controls.push(control);
@@ -805,7 +761,6 @@ describe("control service", () => {
     const launchPayload = JSON.parse(initialLaunch.intent_body).payload;
     expect(launchPayload).toMatchObject({
       trusted_worker: true,
-      inference_token: "forbidden",
     });
     expect(launchPayload).not.toHaveProperty("requires_hf_token");
     expect(launchPayload).not.toHaveProperty("mount_bucket");
@@ -980,7 +935,7 @@ describe("control service", () => {
     });
   });
 
-  it("copies locked inference limits into the worker launch", async () => {
+  it("copies locked direct-inference route identity into the worker launch", async () => {
     const control = await createTestControl(1, 1, 0, true, "required");
     controls.push(control);
     await control.service.submit(submission, "inference-worker-launch-key", operator);
@@ -997,14 +952,9 @@ describe("control service", () => {
     );
     if (!launch) throw new Error("inference Job launch is missing");
     expect(JSON.parse(launch.intent_body).payload).toMatchObject({
-      inference_token: "required",
       inference_upstream: "https://router.huggingface.co/v1",
       inference_model: "example/model:provider",
       inference_api: "chat-completions",
-      inference_max_requests: 64,
-      inference_max_concurrency: 4,
-      inference_timeout_seconds: 600,
-      inference_max_output_tokens: 32768,
     });
   });
 
