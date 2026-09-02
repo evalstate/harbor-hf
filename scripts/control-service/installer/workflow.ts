@@ -28,6 +28,7 @@ import {
   SECRET_NAMES,
   type SpaceState,
   validateOrigin,
+  workbenchVariables,
   writePrivatePlan,
 } from "./model.js";
 import type { SourceAdapter } from "./source.js";
@@ -334,6 +335,7 @@ function variablesForPhase(
       manifestDigest: plan.bundle.manifest_digest,
       phase,
     },
+    workbenchVariables(plan.expected_variables),
   );
 }
 
@@ -511,6 +513,7 @@ function assertManagedVariablesForPause(plan: InstallPlan, space: SpaceState): v
       manifestDigest: bundleDigest as string,
       phase,
     },
+    workbenchVariables(plan.expected_variables),
   );
   if (
     canonicalJson(space.variables) !== canonicalJson(variables) &&
@@ -691,6 +694,7 @@ export async function planInstall(
     throw new Error("existing Space install ID is invalid");
   }
   const origin = observed.space?.origin ?? null;
+  const workbench = workbenchVariables(observed.space?.variables ?? {});
   const variables = expectedVariables(
     ids.namespace,
     ids.bucketId,
@@ -702,6 +706,7 @@ export async function planInstall(
       manifestDigest: bundleManifestDigest,
       phase: "installed",
     },
+    workbench,
   );
   const phase = observed.space ? observedPhase(observed.space) : null;
   const variablesForObserved =
@@ -717,6 +722,7 @@ export async function planInstall(
             manifestDigest: bundleManifestDigest,
             phase,
           },
+          workbench,
         )
       : variables;
   if (observed.space && isLegacySpace(observed.space)) {
@@ -1553,6 +1559,7 @@ function assertCredentialRebindSafe(plan: InstallPlan, state: RemoteState): void
           manifestDigest: manifest,
           phase: "credentials_required",
         },
+        workbenchVariables(plan.expected_variables),
       ),
     },
     { requireRunning: false, requireAllSecrets: false },

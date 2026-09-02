@@ -49,6 +49,11 @@ const REVISION = "a".repeat(40);
 const OLD_REVISION = "c".repeat(40);
 const UPLOAD_SHA = "b".repeat(40);
 const ORIGIN = "https://placeholder-control.hf.space";
+const WORKBENCH_IMAGE = `example.invalid/workbench@sha256:${"d".repeat(64)}`;
+const WORKBENCH_VARIABLES = {
+  HARBOR_HF_WORKBENCH_RUNNER: "hf-jobs",
+  HARBOR_HF_WORKBENCH_IMAGE: WORKBENCH_IMAGE,
+} as const;
 const temporaryDirectories: string[] = [];
 
 async function temporaryDirectory(): Promise<string> {
@@ -482,7 +487,10 @@ class FakeInferenceTokenScope implements InferenceTokenScopeAdapter {
   }
 }
 
-async function setup(existingRevision?: string) {
+async function setup(
+  existingRevision?: string,
+  extraVariables: Record<string, string> = {},
+) {
   const directory = await temporaryDirectory();
   const repository = resolve(directory, "repository");
   const bundle = resolve(directory, "private", "bundle");
@@ -500,6 +508,8 @@ async function setup(existingRevision?: string) {
   });
   if (existingRevision) {
     hf.state = installedState(existingRevision, identity.principal);
+    if (!hf.state.space) throw new Error("test Space is missing");
+    Object.assign(hf.state.space.variables, extraVariables);
   }
   const dependencies: InstallerDependencies = {
     hf,
@@ -1959,6 +1969,94 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls).toContain("uploadMirror");
     expect(setupResult.hf.calls).toContain("restart");
     expect(setupResult.hf.calls).toContain("wait");
+  });
+
+  it("preserves the exact reviewed Workbench pair through the existing-install lifecycle", async () => {
+    const setupResult = await setup(OLD_REVISION, WORKBENCH_VARIABLES);
+    const expectedDisabled = {
+      ...setupResult.planned.plan.expected_variables,
+      HARBOR_HF_WRITE_MODE: "disabled",
+    };
+    expect(setupResult.planned.plan.expected_variables).toMatchObject(
+      WORKBENCH_VARIABLES,
+    );
+
+    await configureInstall(
+      { planPath: setupResult.planPath },
+      setupResult.dependencies,
+    );
+    expect(setupResult.hf.state.space?.variables).toEqual(expectedDisabled);
+
+    await expect(
+      verifyInstall(setupResult.planPath, setupResult.dependencies),
+    ).resolves.toMatchObject({
+      anonymous_live: "passed",
+      anonymous_ready: "passed",
+    });
+    expect(setupResult.hf.state.space?.variables).toEqual(expectedDisabled);
+
+    setupResult.dependencies.environment = {
+      HARBOR_HF_CONTROL_BEARER_TOKEN: "operator-bearer-placeholder",
+    };
+    const receipt: BootstrapReceipt = {
+      schema_version: "harbor-hf.install-bootstrap-receipt.v1",
+      install_id: setupResult.planned.plan.install_id,
+      plan_digest: setupResult.planned.digest,
+      space_id: setupResult.planned.plan.targets.space_id,
+      bucket_id: setupResult.planned.plan.targets.bucket_id,
+      source_revision: setupResult.planned.plan.source.revision,
+      manifest_digest: setupResult.planned.plan.bundle.manifest_digest,
+      uploaded_sha: UPLOAD_SHA,
+    };
+    await activateInstall(
+      { planPath: setupResult.planPath, bootstrapReceipt: receipt },
+      setupResult.dependencies,
+    );
+    expect(setupResult.hf.state.space?.variables).toEqual({
+      ...expectedDisabled,
+      HARBOR_HF_WRITE_MODE: "enabled",
+    });
+
+    await disableInstall({ planPath: setupResult.planPath }, setupResult.dependencies);
+    expect(setupResult.hf.state.space?.variables).toEqual(expectedDisabled);
+  });
+
+  it.each([
+    [
+      "unknown extra variable",
+      {
+        ...WORKBENCH_VARIABLES,
+        HARBOR_HF_WORKBENCH_UNREVIEWED: "unexpected",
+      },
+    ],
+    [
+      "invalid runner",
+      {
+        HARBOR_HF_WORKBENCH_RUNNER: "unreviewed",
+        HARBOR_HF_WORKBENCH_IMAGE: WORKBENCH_IMAGE,
+      },
+    ],
+    [
+      "missing image",
+      {
+        HARBOR_HF_WORKBENCH_RUNNER: "hf-jobs",
+      },
+    ],
+    [
+      "missing runner",
+      {
+        HARBOR_HF_WORKBENCH_IMAGE: WORKBENCH_IMAGE,
+      },
+    ],
+    [
+      "mutable hosted image",
+      {
+        HARBOR_HF_WORKBENCH_RUNNER: "hf-jobs",
+        HARBOR_HF_WORKBENCH_IMAGE: "example.invalid/workbench:latest",
+      },
+    ],
+  ])("rejects an existing Space with %s", async (_name, variables) => {
+    await expect(setup(REVISION, variables)).rejects.toThrow();
   });
 
   it("updates only the release variable and exact mirror for a marked target", async () => {
