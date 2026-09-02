@@ -30,6 +30,7 @@ Harbor-first deployment amendment approved at: 2026-09-02T13:53:54Z
 Harbor-first deployment amendment completed at: 2026-09-02T14:39:30Z
 Canonical Bucket reset amendment approved at: 2026-09-02T14:59:25Z
 Workbench installer-variable amendment approved at: 2026-09-02T15:03:05Z
+Post-reset installation-repair amendment approved at: 2026-09-02T16:00:27Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -98,6 +99,20 @@ Mutation-tooling retirement amendment approved: 2026-08-26
 
 ### Scope
 
+- Diagnose the failed post-reset installation using sanitized read-only
+  provider state and logs, implement and test any general installer or control
+  startup repair required, commit and push the reviewed repair only to
+  `feat/agent-workbench`, and retry the existing-resource
+  `install:plan`/`install:configure`/`install:verify`/`install:activate`
+  sequence. The repair may upload source, pause, restart, and update
+  installer-owned variables on the existing canonical `<control-space>`, but
+  must preserve its existing secrets, reviewed Workbench variables, hardware,
+  protection, and canonical `<artifact-bucket>`. Keep writes disabled until
+  verification succeeds. Do not provision or create resources, replace or
+  retrieve credentials, publish an image, launch a setup or benchmark Job or
+  Run, call inference, publish results, merge, or update the default branch.
+  If the repaired installation cannot be verified, leave writes disabled and
+  the Space paused.
 - Preserve the existing reviewed `HARBOR_HF_WORKBENCH_RUNNER` and
   digest-pinned `HARBOR_HF_WORKBENCH_IMAGE` values in installer plans and
   phase transitions so the supported npm existing-install workflow accepts
@@ -334,6 +349,15 @@ authorization effect.
 
 ### 2026-09-02
 
+- Approved at 2026-09-02T16:00:27Z under the instruction to try and repair the
+  failed post-reset installation: inspect sanitized provider diagnostics,
+  implement and push a general repair on `feat/agent-workbench`, and retry the
+  existing-resource installer sequence through activation. Preserve the
+  existing secrets, Workbench variables, hardware, protection, Space, and
+  Bucket; keep writes disabled until verification; do not provision resources,
+  launch Jobs or Runs, call inference, publish results or images, merge, or
+  update the default branch. On another unverifiable failure, leave the Space
+  disabled and paused.
 - Approved at 2026-09-02T15:03:05Z under the instruction to proceed with
   getting the reset installation working: model and preserve only the two
   existing reviewed Workbench variables across installer planning and phase
