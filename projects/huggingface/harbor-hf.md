@@ -29,6 +29,7 @@ Harbor-first commit-and-push amendment completed at: 2026-09-02T13:21:41Z
 Harbor-first deployment amendment approved at: 2026-09-02T13:53:54Z
 Harbor-first deployment amendment completed at: 2026-09-02T14:39:30Z
 Canonical Bucket reset amendment approved at: 2026-09-02T14:59:25Z
+Workbench installer-variable amendment approved at: 2026-09-02T15:03:05Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -97,6 +98,14 @@ Mutation-tooling retirement amendment approved: 2026-08-26
 
 ### Scope
 
+- Preserve the existing reviewed `HARBOR_HF_WORKBENCH_RUNNER` and
+  digest-pinned `HARBOR_HF_WORKBENCH_IMAGE` values in installer plans and
+  phase transitions so the supported npm existing-install workflow accepts
+  and retains the hosted Workbench configuration. Add deterministic tests,
+  commit and push the repair before continuing the approved Bucket reset.
+  Do not expose variable values, broaden accepted variable names, change the
+  values remotely, or alter secrets, hardware, protection, resources, or Run
+  state.
 - Disable control writes, delete all application objects
   from the one live canonical artifact Bucket while preserving its single
   installer ownership marker and the Bucket resource, then use the supported
@@ -325,6 +334,11 @@ authorization effect.
 
 ### 2026-09-02
 
+- Approved at 2026-09-02T15:03:05Z under the instruction to proceed with
+  getting the reset installation working: model and preserve only the two
+  existing reviewed Workbench variables across installer planning and phase
+  transitions, add tests, commit, and push the repair. Do not expose or change
+  their values or broaden the installer variable allowlist.
 - Approved at 2026-09-02T14:59:25Z after inventory: disable
   writes, irreversibly deleting the 1,143 application objects from the one live
   canonical artifact Bucket while preserving its installer ownership marker
