@@ -214,6 +214,7 @@ class FakeHf implements HfAdapter {
   versionValue = "1.23.0";
   waitGate: Promise<void> | undefined;
   waitFailure: Error | undefined;
+  transitionOnSetProtected = false;
   afterSetProtected: ((state: RemoteState) => void) | undefined;
   afterUploadMirror: ((state: RemoteState) => void) | undefined;
   afterSetVariables: ((state: RemoteState) => void) | undefined;
@@ -359,6 +360,7 @@ class FakeHf implements HfAdapter {
     this.recordMutation("setProtected");
     if (!this.state.space) throw new Error("missing Space");
     this.state.space.private = true;
+    if (this.transitionOnSetProtected) this.state.space.runtimeStage = "BUILDING";
     this.afterSetProtected?.(this.state);
   }
 
@@ -391,7 +393,9 @@ class FakeHf implements HfAdapter {
     await this.waitGate;
     if (this.waitFailure) throw this.waitFailure;
     if (!this.state.space) throw new Error("missing Space");
-    this.state.space.runtimeStage = "RUNNING";
+    if (this.state.space.runtimeStage !== "PAUSED") {
+      this.state.space.runtimeStage = "RUNNING";
+    }
     this.state.space.hardware = "cpu-basic";
   }
 
@@ -2162,6 +2166,7 @@ describe("installer workflows", () => {
 
   it("upgrades an eligible running disabled installation online in exact order", async () => {
     const setupResult = await setup(OLD_REVISION);
+    setupResult.hf.transitionOnSetProtected = true;
     setupResult.dependencies.environment = {
       HARBOR_HF_CONTROL_BEARER_TOKEN: "verify-placeholder",
     };
@@ -2176,6 +2181,7 @@ describe("installer workflows", () => {
     expect(setupResult.hf.calls).toEqual([
       "observe",
       "setProtected",
+      "wait",
       "observe",
       "uploadMirror",
       "observe",
@@ -2193,6 +2199,7 @@ describe("installer workflows", () => {
     expect(setupResult.hf.uploadedBundleDirectories[0]).not.toBe(setupResult.bundle);
     expect(setupResult.hf.mutationWriteModes).toEqual([
       { call: "setProtected", writeMode: "disabled" },
+      { call: "wait", writeMode: "disabled" },
       { call: "uploadMirror", writeMode: "disabled" },
       { call: "setVariables", writeMode: "disabled" },
       { call: "wait", writeMode: "disabled" },
@@ -2238,7 +2245,7 @@ describe("installer workflows", () => {
       setupResult.hf.calls.filter((call) =>
         ["setProtected", "uploadMirror", "setVariables", "wait"].includes(call),
       ),
-    ).toEqual(["setProtected", "uploadMirror", "setVariables", "wait"]);
+    ).toEqual(["setProtected", "wait", "uploadMirror", "setVariables", "wait"]);
   });
 
   it("falls back to the paused completion path when online upgrade is ineligible", async () => {
@@ -2355,7 +2362,7 @@ describe("installer workflows", () => {
       name: "runtime transition",
       mutate(state: RemoteState) {
         if (!state.space) throw new Error("test Space is missing");
-        state.space.runtimeStage = "BUILDING";
+        state.space.runtimeStage = "PAUSED";
       },
       failSafePause: true,
     },
@@ -2444,7 +2451,7 @@ describe("installer workflows", () => {
     ).rejects.toThrow("installation failed after remote mutation began");
 
     expect(setupResult.hf.calls).toContain("setVariables");
-    expect(setupResult.hf.calls).not.toContain("wait");
+    expect(setupResult.hf.calls.filter((call) => call === "wait")).toHaveLength(1);
     expect(setupResult.hf.calls).not.toContain("pause");
   });
 
@@ -2478,7 +2485,7 @@ describe("installer workflows", () => {
 
     expect(setupResult.hf.calls).toContain("uploadMirror");
     expect(setupResult.hf.calls).not.toContain("setVariables");
-    expect(setupResult.hf.calls).not.toContain("wait");
+    expect(setupResult.hf.calls.filter((call) => call === "wait")).toHaveLength(1);
     expect(setupResult.hf.calls).not.toContain("pause");
   });
 

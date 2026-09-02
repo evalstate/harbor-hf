@@ -1890,6 +1890,7 @@ async function completeOnlineDisabledUpgrade(
   let current = observed;
 
   await dependencies.hf.setProtected(plan.targets.space_id);
+  await dependencies.hf.wait(plan.targets.space_id);
   current = await observePlan(plan, dependencies);
   assertExactOnlineState(
     accepted,
