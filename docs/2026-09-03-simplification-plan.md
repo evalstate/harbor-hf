@@ -265,39 +265,46 @@ openclaw.
 The fourth is a per-trial cost ceiling as a `JobConfig` field. Until Harbor
 accepts it, the job plugin described above does the work here.
 
-## Deletion plan
+## Cutover
 
-Work proceeds in four phases. Each phase leaves the repository deployable.
+The change lands as one cutover. A staged rollout would keep the profile
+catalog, the old workers and the new run record alive at the same time, and the
+compatibility code between them would outlive the rollout. Harbor-HF has no
+external users of its API yet, and the historical runs in the Bucket stay
+readable without any new code, so there is nothing that a staged path would
+protect.
 
-The first phase has no runtime risk and can happen now. It removes every module
-in `src/harbor_hf` except `cli.py`, the Python tests for those modules, the 85%
+The cutover starts only after the open questions below are answered, because
+the execution part cannot be finished without them. Answering them is a day of
+checks against the Terminal-Bench task registry and a local `hf-sandbox` run,
+and it happens before any code is written.
+
+The cutover itself removes and adds the following in one change. Every module in
+`src/harbor_hf` except `cli.py` goes, together with its Python tests, the 85%
 coverage gate in `.github/workflows/ci.yml`, the ten unreferenced files in
 `schemas/`, the empty `space/` and `apps/results-web` directories,
-`scripts/build_space_release.py`, and the one-shot migration scripts. It also
-rewrites `docs/architecture.md` and retires `docs/run-spec.md`, both of which
-describe the deleted Python design. The untracked `mutants/` directories, about
-774 MB, go as well.
+`scripts/build_space_release.py`, and the one-shot migration scripts. The five
+profile kinds and the four compatibility implementations are replaced by the run
+record and the two preset kinds, and the launch form shrinks to the fields
+listed above. The Space starts calling `harbor run` with `hf-sandbox`, so the
+proot runtime and both workers in `packages/harbor-hf-agents` go, together with
+the inference bridge and the retry and continuation machinery in
+`control-core`. The Bucket receives Harbor job directories and the leaderboard
+reads `result.json` from them, so the Parquet publication path goes as well.
+`docs/architecture.md` is rewritten and `docs/run-spec.md` is retired in the
+same change. The untracked `mutants/` directories, about 774 MB, can be deleted
+at any time.
 
-The second phase changes the data model. It introduces the run record and the
-two preset kinds in place of the five profile kinds, and the four compatibility
-implementations go with them. The launch form shrinks to the fields listed
-above. This is the phase that fixes the submission page.
-
-The third phase changes execution. The Space starts calling `harbor run` with
-`hf-sandbox`. The proot runtime and both workers in `packages/harbor-hf-agents`
-are deleted, together with the inference bridge and the retry and continuation
-machinery in `control-core`. The open questions below must be answered before
-this phase.
-
-The fourth phase changes results. The Bucket receives Harbor job directories and
-the leaderboard reads `result.json` from them, so the Parquet publication path
-is deleted.
+The change is large, so it should be one pull request with a reviewable
+sequence of commits rather than one commit. Each commit can leave the tree
+uncompilable as long as the final state passes the checks. Nothing deploys until
+the whole pull request merges.
 
 ## Open questions
 
 Every Terminal-Bench 2.1 task must have a prebuilt `docker_image`, because
 `hf-sandbox` cannot build one. This needs a check against the task registry
-before the third phase.
+before the cutover.
 
 No task may need user switching or a network policy inside the sandbox. The
 proot runtime enforced both, and `hf-sandbox` does neither.
@@ -318,7 +325,7 @@ This plan supersedes the design in [architecture](architecture.md) and the [run
 specification](run-spec.md). It also supersedes the [reusable harness profiles
 plan](2026-08-28-reusable-harness-profiles-plan.md). The [control service
 specification](CONTROL_SERVICE.md) remains the reference for the Space runtime,
-authentication, the Bucket store, and the projection until the second phase
-updates its profile and run sections. The [task result retry
+authentication, the Bucket store, and the projection until the cutover updates
+its profile and run sections. The [task result retry
 plan](2026-09-01-task-result-retry-plan.md) describes the retry mechanism that
-the third phase removes.
+the cutover removes.
