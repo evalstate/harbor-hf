@@ -12,9 +12,7 @@
   "spec": {
     "agent": "control-smoke",
     "revision": "sha256:449a13dde082b5f1ddb59149e8547e61f6145dc77612af52e6da728ae763a2dd",
-    "required_evidence": [
-      "job-status"
-    ],
+    "required_evidence": ["job-status"],
     "contract_version": "v1",
     "capabilities": {
       "inference_apis": []

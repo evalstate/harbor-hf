@@ -6,6 +6,7 @@ import pytest
 from harbor.models.agent.context import AgentContext
 
 from harbor_hf_agents.openhands.agent import OpenHandsAgent
+from harbor_hf_agents.support.control_job_environment import ControlJobEnvironment
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +33,7 @@ async def test_openai_settings_are_mapped_to_harness_aliases(temp_dir) -> None:
             "OPENAI_API_KEY": "direct-token",
         },
     )
-    mock_env = AsyncMock()
+    mock_env = AsyncMock(spec=ControlJobEnvironment)
     mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
 
     await agent.run("solve the task", mock_env, AgentContext())
@@ -41,6 +42,17 @@ async def test_openai_settings_are_mapped_to_harness_aliases(temp_dir) -> None:
     assert "solve the task" in run_call.kwargs["command"]
     assert run_call.kwargs["env"]["LLM_BASE_URL"] == "https://router.huggingface.co/v1"
     assert run_call.kwargs["env"]["LLM_API_KEY"] == "direct-token"
+    assert run_call.kwargs["env"]["TMUX_TMPDIR"] == "/tmp/harbor-agent-home/.tmux"
+    tmux_call = mock_env.start_background.await_args
+    assert "exec tmux -D -f /dev/null" in tmux_call.args[0]
+    assert tmux_call.kwargs == {
+        "env": {"TMUX_TMPDIR": "/tmp/harbor-agent-home/.tmux"},
+        "user": "harbor-agent",
+    }
+    assert any(
+        "tmux server did not become ready" in call.kwargs["command"]
+        for call in mock_env.exec.call_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -50,11 +62,13 @@ async def test_missing_direct_settings_fail(temp_dir) -> None:
         model_name="openai/openai/gpt-oss-20b:together",
         version="1.6.0",
     )
-    mock_env = AsyncMock()
+    mock_env = AsyncMock(spec=ControlJobEnvironment)
     mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
 
     with pytest.raises(RuntimeError, match="inference base URL"):
         await agent.run("solve the task", mock_env, AgentContext())
+
+    mock_env.quiesce.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

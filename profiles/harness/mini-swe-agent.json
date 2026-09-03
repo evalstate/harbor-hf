@@ -13,11 +13,7 @@
     "agent": "mini-swe-agent",
     "revision": "2.4.6",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.mini_swe.agent:MiniSweAgent",
       "kwargs": {
@@ -27,9 +23,7 @@
     },
     "contract_version": "v1",
     "capabilities": {
-      "inference_apis": [
-        "chat-completions"
-      ],
+      "inference_apis": ["chat-completions"],
       "litellm_model_registry": true
     }
   }

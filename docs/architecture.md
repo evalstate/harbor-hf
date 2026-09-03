@@ -66,10 +66,29 @@ The Bucket stores:
 Records are versioned, canonical, content-addressed where appropriate, and
 append-only. Conflicting bytes at an existing key are an integrity failure.
 
-### Profile resolver
+### Task result persistence
 
-The resolver combines one benchmark, model, harness, deployment, and launch
-policy profile into a complete execution contract.
+The existing private artifact Bucket stores each finished task result, receipt,
+logs, trajectory, usage, cost and provenance. The control service selects a task
+only after it reads back the objects and verifies the manifest. A selected task
+is durable progress and later Jobs do not run it again.
+
+A physical Job that ends with a replacement-eligible infrastructure failure
+leaves the task unresolved. The next execution starts that task again from the
+same prepared input. A non-infrastructure terminal outcome is not retried
+automatically. Harbor-HF does not save or restore the agent conversation,
+workspace, partial provider response, process memory or container state.
+
+Infrastructure executions have no policy retry count. The reconciler can keep
+starting the unresolved task while the run remains active, the finite action-key
+space has capacity and each launch passes the existing admission and cost
+checks. Every failed physical Job and worker generation remains visible in
+result provenance. A repeated deterministic failure pauses affected work for a
+reviewed worker repair. A normal resume is not a repair. The [task result
+persistence and retry plan](2026-09-01-task-result-retry-plan.md) defines the
+implementation and remote checks.
+
+### Profile resolver
 
 The model profile supplies the canonical Harbor model route and supported
 inference APIs. The harness profile supplies a model-independent
@@ -88,6 +107,11 @@ For direct inference, the resolver:
 7. adds the upstream hostname to Harbor's allowed hosts.
 
 There is no alternate model binding or API translation in the worker.
+
+Approved immutable profiles that pin a historical bridge worker retain a
+conditional bootstrap and provider-capacity reservation path. Direct profiles,
+including the Fast-Agent Workbench deployment, do not use that compatibility
+path.
 
 ### Preparation Job
 
@@ -180,10 +204,17 @@ A Run locks:
 Aliases are submission conveniences only. A behavior-affecting change creates a
 new immutable profile and, for executed work, a new Run identity.
 
-Provider-backed results report unknown runtime facts as unknown. They do not
-claim an unobserved served model commit, hardware, quantization, or engine.
+1. An experiment groups a requested matrix.
+2. A run represents one homogeneous matrix cell.
+3. A trial represents one task and logical benchmark attempt.
+4. An execution represents one physical Job invocation. An unresolved trial can
+   have more than one infrastructure execution.
 
-## Failure and recovery
+An infrastructure retry starts the prepared task again and stays under the same
+trial. It does not consume another benchmark attempt. Failed executions remain
+immutable records. Replacement benchmark attempts remain separate trials and
+never replace previous records. Composite or manually selected results must be
+labeled explicitly and must not appear as single-run results.
 
 Failures are typed as infrastructure or semantic outcomes.
 
@@ -224,7 +255,8 @@ Harbor-HF does not:
 
 - modify Harbor core or monkeypatch Harbor internals;
 - add benchmark-, model-, or harness-specific branches to the control path;
-- run models or benchmark tasks on the operator machine;
+- run models or benchmark tasks on the operator machine as part of the hosted
+  control path;
 - translate between Chat Completions and Responses;
 - treat local SQLite as durable truth;
 - expose the private Bucket to browsers;

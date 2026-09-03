@@ -1,6 +1,8 @@
 import type {
   CurrentRunLock,
   HarborAgentConfig,
+  LegacyResolvedProfile,
+  LegacyRunLock,
   ModelProfileSpec,
   ResolvedDeploymentProfile,
   ResolvedExecutionContract,
@@ -8,9 +10,12 @@ import type {
   ResolvedInferenceContract,
   ResolvedModelProfile,
   ResolvedProfile,
+  RunContinuation,
+  RunContinuationRepair,
+  RunContinuationRepairSuccessor,
   RunLock,
 } from "@harbor-hf/contracts";
-import { canonicalJson } from "@harbor-hf/contracts";
+import { canonicalJson, sha256 } from "@harbor-hf/contracts";
 import { ProfileResolutionError } from "./profiles.js";
 
 function resolvedProfile<K extends ResolvedProfile["kind"]>(
@@ -312,10 +317,242 @@ export function isCurrentRunLock(lock: RunLock): lock is CurrentRunLock {
   );
 }
 
-export function requireExecutionContract(lock: RunLock): ResolvedExecutionContract {
-  if (!isCurrentRunLock(lock))
+function legacyProfile<K extends "model" | "harness" | "deployment">(
+  lock: LegacyRunLock,
+  kind: K,
+): Extract<LegacyResolvedProfile, { kind: K }> {
+  const profile = lock.profiles.find((candidate) => candidate.kind === kind);
+  if (!profile)
+    throw new ProfileResolutionError(`historical run is missing ${kind} profile`);
+  return profile as Extract<LegacyResolvedProfile, { kind: K }>;
+}
+
+function requiredLegacyString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0)
+    throw new ProfileResolutionError(`historical run has no ${label}`);
+  return value;
+}
+
+function assertSameString(previous: unknown, current: unknown, label: string): void {
+  if (requiredLegacyString(previous, label) !== current)
+    throw new ProfileResolutionError(`continuation changes the locked ${label}`);
+}
+
+function assertSameOptionalString(
+  previous: unknown,
+  current: unknown,
+  label: string,
+): void {
+  if (previous !== undefined) assertSameString(previous, current, label);
+}
+
+function assertContinuationCompatibility(
+  lock: LegacyRunLock,
+  execution: ResolvedExecutionContract,
+): void {
+  const model = legacyProfile(lock, "model");
+  const harness = legacyProfile(lock, "harness");
+  const deployment = legacyProfile(lock, "deployment");
+  assertSameString(
+    execution.source_profiles.model.name,
+    model.name,
+    "model profile name",
+  );
+  assertSameString(
+    execution.source_profiles.harness.name,
+    harness.name,
+    "harness profile name",
+  );
+  assertSameString(
+    execution.source_profiles.deployment.name,
+    deployment.name,
+    "deployment profile name",
+  );
+  assertSameString(model.spec.model_id, execution.model.model_id, "model ID");
+  assertSameString(model.spec.revision, execution.model.revision, "model revision");
+  assertSameOptionalString(
+    model.spec.harbor_model_name,
+    execution.model.harbor_model_name,
+    "Harbor model route",
+  );
+  assertSameString(harness.spec.agent, execution.harness.agent, "harness agent");
+  assertSameString(
+    harness.spec.revision,
+    execution.harness.revision,
+    "harness revision",
+  );
+  assertSameOptionalString(
+    harness.spec.reasoning_effort,
+    execution.harness.reasoning_effort,
+    "harness reasoning effort",
+  );
+  assertSameString(
+    deployment.spec.route,
+    execution.deployment.route,
+    "deployment route",
+  );
+  for (const field of [
+    "inference_provider",
+    "inference_token",
+    "preparation",
+    "hardware",
+    "harbor_version",
+    "context_window",
+    "input_price_microusd_per_million_tokens",
+    "output_price_microusd_per_million_tokens",
+    "cache_read_price_microusd_per_million_tokens",
+    "cache_write_price_microusd_per_million_tokens",
+  ] as const) {
+    const previous = deployment.spec[field];
+    if (previous !== undefined && previous !== execution.deployment[field])
+      throw new ProfileResolutionError(
+        `continuation changes the locked deployment ${field}`,
+      );
+  }
+  const previousSource =
+    "trial_job_template" in deployment.spec && deployment.spec.trial_job_template
+      ? deployment.spec.trial_job_template
+      : deployment.spec;
+  const currentSource = execution.deployment.trial_job_template ?? execution.deployment;
+  const previousValues = previousSource as Record<string, unknown>;
+  const currentValues = currentSource as unknown as Record<string, unknown>;
+  for (const field of [
+    "inference_upstream",
+    "inference_api",
+    "inference_max_requests",
+    "inference_max_concurrency",
+    "inference_max_total_concurrency",
+    "inference_timeout_seconds",
+    "inference_max_output_tokens",
+  ] as const) {
+    const previous = previousValues[field];
+    if (previous !== undefined && previous !== currentValues[field])
+      throw new ProfileResolutionError(
+        `continuation changes the locked deployment ${field}`,
+      );
+  }
+}
+
+export function assertRunContinuationCompatible(
+  lock: RunLock,
+  execution: ResolvedExecutionContract,
+): void {
+  if (isCurrentRunLock(lock))
+    throw new ProfileResolutionError("current run locks do not need continuation");
+  assertContinuationCompatibility(lock, execution);
+}
+
+export function assertRunContinuationRepairCandidate(
+  continuation: RunContinuation,
+  candidate: ResolvedExecutionContract,
+): void {
+  assertWorkerRepairCandidate(continuation.execution, candidate, "continuation repair");
+}
+
+export function assertRunContinuationRepairSuccessorCandidate(
+  continuation: RunContinuation,
+  repair: RunContinuationRepair,
+  candidate: ResolvedExecutionContract,
+): void {
+  assertWorkerRepairCandidate(
+    repairedExecution(continuation.execution, repair),
+    candidate,
+    "continuation repair successor",
+  );
+}
+
+function assertWorkerRepairCandidate(
+  source: ResolvedExecutionContract,
+  candidate: ResolvedExecutionContract,
+  label: string,
+): void {
+  const expected = clone(source);
+  const normalized = clone(candidate);
+  if (
+    normalized.source_profiles.deployment.name !==
+    expected.source_profiles.deployment.name
+  )
+    throw new ProfileResolutionError(`${label} changes the deployment profile name`);
+  normalized.source_profiles.deployment.profile_id =
+    expected.source_profiles.deployment.profile_id;
+  normalized.deployment.job_image = expected.deployment.job_image;
+  if (expected.deployment.worker_revision)
+    normalized.deployment.worker_revision = expected.deployment.worker_revision;
+  else delete normalized.deployment.worker_revision;
+  if (canonicalJson(normalized) !== canonicalJson(expected))
     throw new ProfileResolutionError(
-      "historical run locks are read-only after the profile cutover",
+      `${label} changes fields other than the worker image and revision`,
     );
-  return lock.execution;
+  if (
+    candidate.deployment.job_image === expected.deployment.job_image &&
+    candidate.deployment.worker_revision === expected.deployment.worker_revision
+  )
+    throw new ProfileResolutionError(`${label} does not change the worker`);
+}
+
+function repairedExecution(
+  source: ResolvedExecutionContract,
+  repair: Pick<RunContinuationRepair, "job_image" | "worker_revision">,
+): ResolvedExecutionContract {
+  const execution = clone(source);
+  execution.deployment.job_image = repair.job_image;
+  execution.deployment.worker_revision = repair.worker_revision;
+  return execution;
+}
+
+export function resolvedRunExecution(
+  lock: RunLock,
+  continuation: RunContinuation | null,
+  repair: RunContinuationRepair | null = null,
+  successor: RunContinuationRepairSuccessor | null = null,
+): ResolvedExecutionContract {
+  if (isCurrentRunLock(lock)) {
+    if (continuation || repair || successor)
+      throw new ProfileResolutionError(
+        "current run lock has an unexpected continuation attachment or repair",
+      );
+    return lock.execution;
+  }
+  if (!continuation)
+    throw new ProfileResolutionError(
+      "historical run has no execution continuation attachment",
+    );
+  if (
+    continuation.run_id !== lock.run_id ||
+    continuation.run_lock_digest !== sha256(canonicalJson(lock))
+  )
+    throw new ProfileResolutionError(
+      "run continuation does not match the historical lock",
+    );
+  assertContinuationCompatibility(lock, continuation.execution);
+  if (!repair) {
+    if (successor)
+      throw new ProfileResolutionError(
+        "run continuation repair successor has no prior repair",
+      );
+    return continuation.execution;
+  }
+  if (
+    repair.run_id !== lock.run_id ||
+    repair.run_lock_digest !== continuation.run_lock_digest ||
+    repair.run_continuation_id !== continuation.record_id ||
+    repair.run_continuation_digest !== sha256(canonicalJson(continuation))
+  )
+    throw new ProfileResolutionError(
+      "run continuation repair does not match the immutable continuation",
+    );
+  const repaired = repairedExecution(continuation.execution, repair);
+  if (!successor) return repaired;
+  if (
+    successor.run_id !== lock.run_id ||
+    successor.run_lock_digest !== continuation.run_lock_digest ||
+    successor.run_continuation_id !== continuation.record_id ||
+    successor.run_continuation_digest !== sha256(canonicalJson(continuation)) ||
+    successor.run_continuation_repair_id !== repair.record_id ||
+    successor.run_continuation_repair_digest !== sha256(canonicalJson(repair))
+  )
+    throw new ProfileResolutionError(
+      "run continuation repair successor does not match the immutable repair",
+    );
+  return repairedExecution(repaired, successor);
 }

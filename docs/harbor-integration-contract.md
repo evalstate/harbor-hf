@@ -51,13 +51,36 @@ contributes a model-independent agent template. The deployment contributes
 execution and inference routing. The resolver rejects incompatible
 combinations before creating a Job.
 
+A physical Job runs the prepared task from the beginning. If it ends with a
+replacement-eligible infrastructure failure, a later Job reconstructs the same
+one-attempt Harbor `JobConfig` and starts that task again. A
+non-infrastructure terminal outcome is not retried automatically. Harbor's
+internal retry count stays zero, and the infrastructure retry does not create
+another benchmark trial. The worker does not save or restore conversation,
+workspace, process or container state between Jobs.
+
+Both workers install the reviewed Harbor-HF agent package at its immutable
+revision and use the pinned Harbor git commit. The preparation worker has no
+persistent secret, inference access, or Bucket mount. The execution worker has
+no broad control credential or Bucket mount. Its short-lived capability is
+scoped to the assigned lock, evidence upload, and attempt receipt. When
+inference is required, the Job receives only `HF_INFERENCE_TOKEN`. Direct
+profiles expose it through the resolved `AgentConfig` to the reviewed agent.
+Approved immutable compatibility profiles may instead invoke the root bootstrap
+required by their pinned historical worker.
+
+A reviewed worker repair may retry an unresolved task with a new worker. A
+normal resume is not a repair. Historical retries bind the exact immutable
+continuation repair, and unsupported repair paths remain paused. Final evidence
+records every physical Job, worker and repair generation, usage and cost for the
+logical trial. Valid completed-task receipts stay selected, and recovery runs
+only unresolved tasks. A repeated deterministic shared failure pauses the
+affected fleet.
+
 ## Preparation
 
-A credential-free preparation Job consumes the resolved contract and invokes
-Harbor's public planning API. Harbor resolves the benchmark and produces its
-normal job lock.
-
-The worker stores:
+A credential-free preparation Job invokes Harbor's public planning API and
+stores:
 
 - one immutable prepared trial for every logical task;
 - one prepared job record binding their order; and
@@ -89,8 +112,8 @@ attempts so every execution has an explicit identity and receipt.
 
 ## Direct inference through `AgentConfig`
 
-All inference-backed agents are loaded through Harbor's public
-`AgentConfig.import_path`. The resolved `AgentConfig` supplies:
+Direct-inference agents are loaded through Harbor's public
+`AgentConfig.import_path`. Their resolved `AgentConfig` supplies:
 
 ```json
 {
@@ -108,6 +131,11 @@ All inference-backed agents are loaded through Harbor's public
 Harbor expands the credential reference in the execution Job. The selected
 agent configures its native runtime from these values and calls the upstream
 directly.
+
+Approved immutable profiles for pinned historical workers may explicitly
+require the compatibility bridge instead. That launch path is selected by
+profile data, retains its bounded settings, and is not available to arbitrary
+Workbench recipes.
 
 Compatibility is exact:
 
@@ -178,8 +206,9 @@ Required evidence is profile-driven. A complete attempt commonly contains:
 - terminal receipt.
 
 Cost is derived from accepted Harbor result data and immutable pricing where
-available; unknown usage stays unknown rather than invalidating an otherwise
-valid semantic result.
+available. Unknown usage remains unknown unless the locked evidence policy
+requires that usage metric; missing or invalid required usage makes the attempt
+unselectable without changing its underlying semantic outcome.
 
 ## Retry and failure semantics
 
@@ -191,9 +220,10 @@ Harbor-HF distinguishes:
 - replacement-eligible infrastructure failures; and
 - deterministic shared infrastructure defects.
 
-Only the replacement-eligible infrastructure class can receive another
-physical attempt, within the locked limit and Run ceiling. A replacement uses
-the same prepared trial. Behavior-affecting changes require a new linked Run.
+Only the replacement-eligible infrastructure class can receive another physical
+attempt. A replacement uses the same prepared trial and requires the Run to
+remain active and pass its locked admission, resource, finite-action-space, and
+cost-ceiling checks. Behavior-affecting changes require a new linked Run.
 
 ## Historical reader
 

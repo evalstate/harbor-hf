@@ -11,12 +11,8 @@
   "name": "tb21-deepseek-v4-flash-dsh-providers",
   "spec": {
     "route": "hf_job",
-    "models": [
-      "deepseek-v4-flash-0731-together"
-    ],
-    "harnesses": [
-      "dsh-high"
-    ],
+    "models": ["deepseek-v4-flash-0731-together"],
+    "harnesses": ["dsh-high"],
     "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:dd0dac768b7113d50a505a3b811b5c9f4bd9e6e142852a158c71d4db21873636",
     "preparation_job_command": [
       "python",

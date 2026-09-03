@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-07e8e1c6bc56fcf892703fdf",
+  "record_id": "profile-81ddbe054ed76293cec5aebb",
   "created_at": "2026-08-22T00:00:00.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -11,15 +11,9 @@
   "name": "tb21-gpt-oss-20b-pi-providers",
   "spec": {
     "route": "hf_job",
-    "models": [
-      "gpt-oss-20b-together",
-      "gpt-oss-20b"
-    ],
-    "harnesses": [
-      "pi-off",
-      "pi"
-    ],
-    "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:dd0dac768b7113d50a505a3b811b5c9f4bd9e6e142852a158c71d4db21873636",
+    "models": ["gpt-oss-20b-together", "gpt-oss-20b"],
+    "harnesses": ["pi-off", "pi"],
+    "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:188983462f16d40551295fc95f368d18868fc802f4dfe1c2d74cbef276ad2b75",
     "preparation_job_command": [
       "python",
       "-m",
@@ -33,12 +27,13 @@
     "hardware": "cpu-upgrade",
     "active_hourly_cost_microusd": 30000,
     "trusted_worker": true,
+    "inference_token": "forbidden",
     "preparation": "required",
     "inference_provider": "together",
     "input_price_microusd_per_million_tokens": 50000,
     "output_price_microusd_per_million_tokens": 200000,
     "harbor_version": "0.22.0",
-    "worker_revision": "d5e1c8850477fa64f4bcb4e0023492ba27178a1e",
+    "worker_revision": "d985425a85036157259183b63c12b97f0d61421b",
     "context_window": 131072,
     "timeout_seconds": 604800,
     "preparation_timeout_seconds": 7200,
@@ -61,10 +56,18 @@
           "active_hourly_cost_microusd": 30000
         }
       ],
+      "inference_token": "required",
       "inference_upstream": "https://router.huggingface.co/v1",
       "inference_api": "chat-completions",
+      "inference_max_requests": 512,
+      "inference_max_concurrency": 1,
       "inference_timeout_seconds": 1800,
       "inference_max_output_tokens": 32768,
+      "root_bootstrap_command": [
+        "python",
+        "-m",
+        "harbor_hf_agents.support.job_root_bridge"
+      ],
       "default_cpus": 1,
       "default_memory_mb": 2048,
       "default_storage_mb": 10240,

@@ -12,6 +12,7 @@ import type {
   CurrentRunLock,
   DeploymentProfileSpec,
   HarborHFControlRecordV1,
+  HarborHFRunContinuationV1,
   HarnessProfileSpec,
   JobAdmissionGrant,
   JobCapacityRelease,
@@ -22,8 +23,12 @@ import type {
   ProfilePromotion,
   PublicationReceipt,
   PublicationSupersession,
+  ResolvedExecutionContract,
   ResolvedProfile,
   RunActionV1,
+  RunContinuation,
+  RunContinuationRepair,
+  RunContinuationRepairSuccessor,
   RunLock,
   RunRequest,
   RunSubmissionV1,
@@ -39,6 +44,7 @@ import {
   validateControlRecord,
   validatePreparedJobSubmission,
   validateRunAction,
+  validateRunContinuation,
   validateRunSubmission,
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
@@ -52,7 +58,14 @@ import {
   verifyEvidenceReference,
   verifyWorkerEvidence,
 } from "./evidence.js";
-import { composeExecutionContract, isCurrentRunLock } from "./execution-contract.js";
+import {
+  assertRunContinuationCompatible,
+  assertRunContinuationRepairCandidate,
+  assertRunContinuationRepairSuccessorCandidate,
+  composeExecutionContract,
+  isCurrentRunLock,
+  resolvedRunExecution,
+} from "./execution-contract.js";
 import {
   decideJobAdmission,
   type JobAdmissionDecision,
@@ -60,9 +73,11 @@ import {
 } from "./job-admission.js";
 import {
   type LoadedProfile,
+  type PreparedTrialJobLaunch,
   ProfileResolutionError,
   ProfileResolver,
   preparationRequired,
+  preparedTrialJobLaunch,
   profileSpec,
   validatePreparedRunProfiles,
 } from "./profiles.js";
@@ -94,6 +109,7 @@ export interface AttemptInput {
   action_id: string;
   outcome: AttemptReceipt["outcome"];
   replacement_eligible: boolean;
+  failure_fingerprint?: string;
   evidence_digest: string;
   evidence_path: string;
   cost_microusd: number;
@@ -114,6 +130,30 @@ export interface SubmissionResult {
   status_url: string;
   adopted: boolean;
 }
+
+export interface RunContinuationResult {
+  run_id: string;
+  continuation_id: string;
+  status_url: string;
+  adopted: boolean;
+}
+
+export interface RunContinuationRepairResult {
+  run_id: string;
+  continuation_repair_id: string;
+  status_url: string;
+  adopted: boolean;
+}
+
+export interface RunContinuationRepairSuccessorResult {
+  run_id: string;
+  continuation_repair_successor_id: string;
+  status_url: string;
+  adopted: boolean;
+}
+
+export const repeatedInfrastructureFailureReason =
+  "repeated deterministic infrastructure failure";
 
 export interface PreparedJobSubmissionResult {
   phase: PreparedJobSubmissionV1["phase"];
@@ -139,6 +179,8 @@ export interface JobCapacityView {
   run_active: number;
   hardware_limit: number | null;
   hardware_active: number;
+  provider_limit: number;
+  provider_reserved: number;
   start_tokens: number | null;
   start_burst: number | null;
   queued: number;
@@ -367,6 +409,12 @@ function runStatusIsTerminal(status: string): boolean {
   return terminalRunStatuses.has(status);
 }
 
+function lockedProfileName(lock: RunLock, kind: ResolvedProfile["kind"]): string {
+  const profile = lock.profiles.find((candidate) => candidate.kind === kind);
+  if (!profile) throw new PolicyError(`run lock is missing ${kind} profile`);
+  return profile.name;
+}
+
 const terminalJobStates = new Set([
   "STOPPED",
   "COMPLETED",
@@ -383,6 +431,16 @@ export function jobStateIsTerminal(state: string | null): boolean {
 
 export function infrastructureSealReplaceable(terminalOutcome: string | null): boolean {
   return terminalOutcome === null || terminalOutcome === "infrastructure";
+}
+
+export function historicalTaskNeedsSelection(task: {
+  selected_attempt_id: string | null;
+  terminal_outcome: string | null;
+}): boolean {
+  return (
+    task.selected_attempt_id === null &&
+    [null, "infrastructure", "invalid"].includes(task.terminal_outcome)
+  );
 }
 
 export class ControlService {
@@ -408,47 +466,8 @@ export class ControlService {
   }
 
   async initialize(builtInProfiles: readonly LoadedProfile[]): Promise<void> {
-    await this.assertLegacyCutoverReady();
     for (const item of builtInProfiles) await this.append(item.profile);
     await this.refreshProfileResolver();
-  }
-
-  private async assertLegacyCutoverReady(): Promise<void> {
-    const pageSize = 100;
-    for (let offset = 0; ; offset += pageSize) {
-      const runs = await this.projection.runs(pageSize, offset);
-      for (const run of runs) {
-        const lock = await this.projection.runLock(run.run_id);
-        if (!lock || isCurrentRunLock(lock)) continue;
-        if (
-          !runStatusIsTerminal(run.status) ||
-          run.pending_actions > 0 ||
-          run.cleanup_pending
-        )
-          throw new PolicyError(
-            `historical run is not ready for the profile cutover: ${run.run_id}`,
-          );
-        const jobs = await this.projection.jobs(null, 0, run.run_id);
-        if (jobs.some((job) => !jobStateIsTerminal(job.observed_state)))
-          throw new PolicyError(
-            `historical run still has an active Job: ${run.run_id}`,
-          );
-      }
-      if (runs.length < pageSize) break;
-    }
-    const endpoints = await this.projection.endpoints(1_000_000);
-    const legacyRunIds = new Set<string>();
-    for (const endpoint of endpoints) {
-      if (endpoint.cleanup_verified) continue;
-      const lock = await this.projection.runLock(endpoint.run_id);
-      if (lock && !isCurrentRunLock(lock)) legacyRunIds.add(endpoint.run_id);
-    }
-    if (legacyRunIds.size > 0)
-      throw new PolicyError(
-        `historical runs still require Endpoint cleanup: ${[...legacyRunIds].join(
-          ", ",
-        )}`,
-      );
   }
 
   async refreshProfileResolver(): Promise<void> {
@@ -811,6 +830,145 @@ export class ControlService {
     }
   }
 
+  async runExecution(lock: RunLock): Promise<ResolvedExecutionContract> {
+    const continuation = await this.projection.runContinuation(lock.run_id);
+    return resolvedRunExecution(
+      lock,
+      continuation,
+      await this.projection.runContinuationRepair(lock.run_id),
+      await this.projection.runContinuationRepairSuccessor(lock.run_id),
+    );
+  }
+
+  private async assertHistoricalLaunchBinding(
+    lock: RunLock,
+    launch: ActionIntent,
+  ): Promise<void> {
+    if (isCurrentRunLock(lock)) return;
+    const continuation = await this.projection.runContinuation(lock.run_id);
+    if (!continuation || launch.payload.run_continuation_id !== continuation.record_id)
+      throw new PolicyError(
+        "historical Job launch is not bound to the execution continuation",
+      );
+    const repair = await this.projection.runContinuationRepair(lock.run_id);
+    if (
+      repair &&
+      launch.payload.run_continuation_repair_id !== repair.record_id &&
+      !(
+        launch.payload.run_continuation_repair_id === undefined &&
+        Date.parse(launch.created_at) <= Date.parse(repair.created_at)
+      )
+    )
+      throw new PolicyError(
+        "historical Job launch is not bound to the continuation worker repair",
+      );
+    const successor = await this.projection.runContinuationRepairSuccessor(lock.run_id);
+    if (
+      successor &&
+      launch.payload.run_continuation_repair_successor_id !== successor.record_id &&
+      !(
+        launch.payload.run_continuation_repair_successor_id === undefined &&
+        Date.parse(launch.created_at) <= Date.parse(successor.created_at)
+      )
+    )
+      throw new PolicyError(
+        "historical Job launch is not bound to the continuation worker repair successor",
+      );
+  }
+
+  async assertReusableHistoricalPreparation(
+    lock: RunLock,
+    execution: ResolvedExecutionContract,
+  ): Promise<PreparedJob> {
+    const previousDeployment = profileSpec<DeploymentProfileSpec>(
+      lock.profiles,
+      "deployment",
+    );
+    if (
+      !preparationRequired(previousDeployment) ||
+      !preparationRequired(execution.deployment)
+    )
+      throw new PolicyError(
+        "historical continuation requires the original prepared execution",
+      );
+    const prepared = await this.preparedJob(lock.run_id);
+    const lockDigest = sha256(canonicalJson(lock));
+    if (!prepared)
+      throw new PolicyError("historical prepared run has no reusable prepared job");
+    if (
+      prepared.run_lock_digest !== lockDigest ||
+      prepared.harbor_version !== execution.deployment.harbor_version
+    )
+      throw new PolicyError("historical prepared job does not match the run lock");
+    if (
+      prepared.trials.length !== lock.tasks.length ||
+      prepared.trials.some(
+        (reference, index) => reference.task_id !== lock.tasks[index]?.task_id,
+      )
+    )
+      throw new PolicyError("historical prepared job does not cover the run tasks");
+
+    const trials: Array<PreparedTrial | null> = [];
+    for (let offset = 0; offset < lock.tasks.length; offset += 32) {
+      const batch = lock.tasks.slice(offset, offset + 32);
+      trials.push(
+        ...(await Promise.all(
+          batch.map((task) => this.preparedTrial(lock.run_id, task.task_id)),
+        )),
+      );
+    }
+    const historicalExecution = {
+      ...execution,
+      deployment: previousDeployment,
+    } as ResolvedExecutionContract;
+    const launchFields = [
+      "hardware",
+      "timeout_seconds",
+      "active_hourly_cost_microusd",
+      "max_jobs",
+      "max_image_bytes",
+      "max_image_entries",
+    ] as const;
+    for (const [index, expected] of lock.tasks.entries()) {
+      const reference = prepared.trials[index];
+      const trial = trials[index];
+      if (
+        !reference ||
+        !trial ||
+        reference.record_id !== trial.record_id ||
+        reference.record_digest !== sha256(canonicalJson(trial)) ||
+        trial.preparation_id !== prepared.preparation_id ||
+        trial.run_lock_digest !== lockDigest ||
+        trial.task_id !== expected.task_id ||
+        trial.input_digest !== expected.input_digest ||
+        trial.source_task_id !== expected.source_task_id ||
+        trial.trial_index !== expected.trial_index
+      )
+        throw new PolicyError(
+          `historical prepared trial does not match the run lock: ${expected.task_id}`,
+        );
+      let previousLaunch: PreparedTrialJobLaunch;
+      let currentLaunch: PreparedTrialJobLaunch;
+      try {
+        previousLaunch = preparedTrialJobLaunch(historicalExecution, trial);
+        currentLaunch = preparedTrialJobLaunch(execution, trial);
+      } catch (error) {
+        throw new PolicyError(
+          error instanceof Error
+            ? error.message
+            : `prepared trial launch is invalid: ${expected.task_id}`,
+        );
+      }
+      for (const field of launchFields) {
+        if (previousLaunch[field] !== currentLaunch[field])
+          throw new PolicyError(
+            `continuation changes prepared trial ${field}: ${expected.task_id}`,
+          );
+      }
+    }
+    return prepared;
+  }
+
   async preparedTrial(runId: string, taskId: string): Promise<PreparedTrial | null> {
     return this.readRecord<PreparedTrial>({
       kind: "prepared.trial",
@@ -860,11 +1018,7 @@ export class ControlService {
     const input = validatePreparedJobSubmission<PreparedJobSubmissionV1>(raw);
     const lock = await this.projection.runLock(runId);
     if (!lock) throw new PolicyError("prepared job run lock does not exist");
-    if (!isCurrentRunLock(lock))
-      throw new PolicyError(
-        "historical run locks cannot submit prepared work after the profile cutover",
-      );
-    const execution = lock.execution;
+    const execution = await this.runExecution(lock);
     const lockDigest = sha256(canonicalJson(lock));
     const preparationId = deterministicId("preparation", runId);
     if (input.phase === "trial") {
@@ -1048,6 +1202,9 @@ export class ControlService {
         priorAttemptId,
         intent.created_at,
         amount,
+        typeof intent.payload.replacement_reservation_key === "string"
+          ? intent.payload.replacement_reservation_key
+          : priorAttemptId,
       );
     const taskIds = stringArrayValue(intent.payload.task_ids, "Job action task IDs");
     const category =
@@ -1084,6 +1241,7 @@ export class ControlService {
     intent: ActionIntent,
     profileId: string,
     hardware: string,
+    reservedProviderRequests: number,
     previousGrantId: string | null,
     decision: JobAdmissionDecision,
   ): Promise<JobAdmissionGrant> {
@@ -1098,6 +1256,7 @@ export class ControlService {
       namespace: this.namespace,
       capacity_profile_id: profileId,
       hardware,
+      reserved_provider_requests: reservedProviderRequests,
       tokens_remaining: decision.tokens_remaining,
       refill_cursor_at: decision.refill_cursor_at,
       previous_grant_id: previousGrantId,
@@ -1168,15 +1327,30 @@ export class ControlService {
     if (!existingGrant) {
       const active = await this.projection.activeJobAdmissions(this.namespace);
       const latest = await this.projection.latestJobAdmission(this.namespace);
+      const providerRequests =
+        typeof intent.payload.inference_upstream === "string"
+          ? (intent.payload.inference_max_concurrency ?? 1)
+          : 0;
+      const providerLimit =
+        intent.payload.inference_max_total_concurrency ??
+        Math.max(providerRequests, runMaxJobs * providerRequests);
       const decision = decideJobAdmission(
         capacity.spec,
         {
           active_jobs: active.length,
           active_hardware: active.filter((grant) => grant.hardware === hardware).length,
+          active_provider_requests: active
+            .filter((grant) => grant.run_id === intent.run_id)
+            .reduce(
+              (total, grant) => total + (grant.reserved_provider_requests ?? 0),
+              0,
+            ),
           tokens: latest?.tokens_remaining ?? capacity.spec.start_burst,
           refill_cursor_at: latest?.refill_cursor_at ?? this.clock.now().toISOString(),
         },
         hardware,
+        providerRequests,
+        providerLimit,
         runMaxJobs,
         active.filter((grant) => grant.run_id === intent.run_id).length,
         this.clock.now(),
@@ -1200,6 +1374,7 @@ export class ControlService {
         intent,
         capacity.profile_id,
         hardware,
+        providerRequests,
         latest?.record_id ?? null,
         decision,
       );
@@ -1216,9 +1391,11 @@ export class ControlService {
   async jobCapacityView(runId: string): Promise<JobCapacityView> {
     const lock = await this.projection.runLock(runId);
     if (!lock) throw new PolicyError("run lock is missing");
-    const deployment = isCurrentRunLock(lock)
-      ? lock.execution.deployment
-      : profileSpec<DeploymentProfileSpec>(lock.profiles, "deployment");
+    const continuation = await this.projection.runContinuation(runId);
+    const deployment =
+      isCurrentRunLock(lock) || continuation
+        ? resolvedRunExecution(lock, continuation).deployment
+        : profileSpec<DeploymentProfileSpec>(lock.profiles, "deployment");
     const capacity = this.capacityProfile();
     const active = await this.projection.activeJobAdmissions(this.namespace);
     const runActive = active.filter((grant) => grant.run_id === runId);
@@ -1246,6 +1423,19 @@ export class ControlService {
     const hardwareActive = hardware
       ? active.filter((grant) => grant.hardware === hardware).length
       : 0;
+    const providerReserved = runActive.reduce(
+      (total, grant) => total + (grant.reserved_provider_requests ?? 0),
+      0,
+    );
+    const providerRequestsPerJob =
+      deployment.route === "hf_job" &&
+      (template?.inference_upstream ?? deployment.inference_upstream)
+        ? (template?.inference_max_concurrency ??
+          deployment.inference_max_concurrency ??
+          1)
+        : 0;
+    const providerLimit =
+      template?.inference_max_total_concurrency ?? runLimit * providerRequestsPerJob;
     let startTokens: number | null = null;
     let notBefore: string | null = null;
     if (capacity) {
@@ -1267,6 +1457,11 @@ export class ControlService {
       limitingFactor = "namespace_job_capacity";
     else if (hardwareLimit !== null && hardwareActive >= hardwareLimit)
       limitingFactor = "hardware_job_capacity";
+    else if (
+      providerLimit > 0 &&
+      providerReserved + providerRequestsPerJob > providerLimit
+    )
+      limitingFactor = "provider_request_capacity";
     else if (capacity && startTokens !== null && startTokens < 1)
       limitingFactor = "start_rate";
     return {
@@ -1278,6 +1473,8 @@ export class ControlService {
       run_active: runActive.length,
       hardware_limit: hardwareLimit,
       hardware_active: hardwareActive,
+      provider_limit: providerLimit,
+      provider_reserved: providerReserved,
       start_tokens: startTokens,
       start_burst: capacity?.spec.start_burst ?? null,
       queued,
@@ -1299,6 +1496,368 @@ export class ControlService {
       () => undefined,
     );
     return operation;
+  }
+
+  async continueHistoricalRun(
+    runId: string,
+    raw: unknown,
+    idempotencyKey: string,
+    actor: Actor,
+  ): Promise<RunContinuationResult> {
+    const operation = this.submitQueue.then(() =>
+      this.continueHistoricalRunSerialized(runId, raw, idempotencyKey, actor),
+    );
+    this.submitQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async continueHistoricalRunSerialized(
+    runId: string,
+    raw: unknown,
+    idempotencyKey: string,
+    actor: Actor,
+  ): Promise<RunContinuationResult> {
+    this.assertReady();
+    if (actor.role !== "operator")
+      throw new PolicyError("run continuation requires an operator");
+    if (!idempotencyKey || idempotencyKey.length > 256)
+      throw new IdempotencyConflictError("a bounded idempotency key is required");
+    const input = validateRunContinuation<HarborHFRunContinuationV1>(raw);
+    const lock = await this.projection.runLock(runId);
+    if (!lock) throw new PolicyError("run lock does not exist");
+    if (isCurrentRunLock(lock))
+      throw new PolicyError("current run locks do not need continuation");
+    const keyDigest = sha256(idempotencyKey);
+    const payloadDigest = sha256(canonicalJson(input));
+    const existing = await this.projection.runContinuation(runId);
+    if (existing) {
+      if (
+        existing.idempotency_key_digest !== keyDigest ||
+        existing.idempotency_payload_digest !== payloadDigest ||
+        canonicalJson(existing.actor) !== canonicalJson(actor)
+      )
+        throw new IdempotencyConflictError(
+          "run continuation already exists with different authorization",
+        );
+      return {
+        run_id: runId,
+        continuation_id: existing.record_id,
+        status_url: `/api/v1/runs/${runId}`,
+        adopted: true,
+      };
+    }
+    const run = await this.projection.run(runId);
+    if (!run) throw new PolicyError("run does not exist");
+    if (runStatusIsTerminal(run.status))
+      throw new PolicyError("terminal run cannot receive continuation");
+    if (!run.paused)
+      throw new PolicyError("historical run must be paused before continuation");
+    if (
+      run.pending_actions > 0 ||
+      run.cleanup_pending ||
+      (await this.projection.runHasUnadvancedActions(runId)) ||
+      (await this.projection.runHasRunningJobs(runId))
+    )
+      throw new PolicyError(
+        "historical run must have no pending action, unadvanced action, running Job, or cleanup before continuation",
+      );
+
+    const profiles = this.resolver.resolve({
+      benchmark: lockedProfileName(lock, "benchmark"),
+      model: lockedProfileName(lock, "model"),
+      harness: lockedProfileName(lock, "harness"),
+      deployment: lockedProfileName(lock, "deployment"),
+      launch_policy: lockedProfileName(lock, "launch_policy"),
+    });
+    const execution = composeExecutionContract(profiles);
+    try {
+      assertRunContinuationCompatible(lock, execution);
+      validatePreparedRunProfiles(
+        execution,
+        this.resolvedProfile<BenchmarkProfileSpec>(lock, "benchmark"),
+        lock.tasks,
+      );
+    } catch (error) {
+      throw new PolicyError(
+        error instanceof Error ? error.message : "run continuation is incompatible",
+      );
+    }
+    await this.assertReusableHistoricalPreparation(lock, execution);
+    const record: RunContinuation = {
+      schema_version: "v1",
+      kind: "run.continuation",
+      record_id: deterministicId("continuation", runId),
+      created_at: this.clock.now().toISOString(),
+      actor,
+      run_id: runId,
+      run_lock_digest: sha256(canonicalJson(lock)),
+      idempotency_key_digest: keyDigest,
+      idempotency_payload_digest: payloadDigest,
+      execution,
+      reason: input.reason,
+    };
+    const appended = await this.appendAdopting(record, (recorded) => {
+      const { created_at: _recordedAt, ...recordedValue } = recorded;
+      const { created_at: _candidateAt, ...candidateValue } = record;
+      return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+    });
+    return {
+      run_id: runId,
+      continuation_id: appended.record.record_id,
+      status_url: `/api/v1/runs/${runId}`,
+      adopted: !appended.created,
+    };
+  }
+
+  async repairHistoricalContinuation(
+    runId: string,
+    raw: unknown,
+    idempotencyKey: string,
+    actor: Actor,
+  ): Promise<RunContinuationRepairResult> {
+    const operation = this.submitQueue.then(() =>
+      this.repairHistoricalContinuationSerialized(runId, raw, idempotencyKey, actor),
+    );
+    this.submitQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async repairHistoricalContinuationSerialized(
+    runId: string,
+    raw: unknown,
+    idempotencyKey: string,
+    actor: Actor,
+  ): Promise<RunContinuationRepairResult> {
+    this.assertReady();
+    if (actor.role !== "operator")
+      throw new PolicyError("run continuation repair requires an operator");
+    if (!idempotencyKey || idempotencyKey.length > 256)
+      throw new IdempotencyConflictError("a bounded idempotency key is required");
+    const input = validateRunContinuation<HarborHFRunContinuationV1>(raw);
+    const lock = await this.projection.runLock(runId);
+    if (!lock) throw new PolicyError("run lock does not exist");
+    if (isCurrentRunLock(lock))
+      throw new PolicyError("current run locks do not need continuation repair");
+    const continuation = await this.projection.runContinuation(runId);
+    if (!continuation)
+      throw new PolicyError("historical run has no execution continuation attachment");
+    const keyDigest = sha256(idempotencyKey);
+    const payloadDigest = sha256(canonicalJson(input));
+    const existing = await this.projection.runContinuationRepair(runId);
+    if (existing) {
+      if (
+        existing.idempotency_key_digest !== keyDigest ||
+        existing.idempotency_payload_digest !== payloadDigest ||
+        canonicalJson(existing.actor) !== canonicalJson(actor)
+      )
+        throw new IdempotencyConflictError(
+          "run continuation repair already exists with different authorization",
+        );
+      return {
+        run_id: runId,
+        continuation_repair_id: existing.record_id,
+        status_url: `/api/v1/runs/${runId}`,
+        adopted: true,
+      };
+    }
+    const run = await this.projection.run(runId);
+    if (!run) throw new PolicyError("run does not exist");
+    if (
+      run.pending_actions > 0 ||
+      run.cleanup_pending ||
+      (await this.projection.runHasUnadvancedActions(runId)) ||
+      (await this.projection.runHasRunningJobs(runId))
+    )
+      throw new PolicyError(
+        "historical run must have no pending action, unadvanced action, running Job, or cleanup before continuation repair",
+      );
+    if (!run.paused && run.status !== "failed")
+      throw new PolicyError(
+        "historical run must be paused or failed before continuation repair",
+      );
+    const profiles = this.resolver.resolve({
+      benchmark: lockedProfileName(lock, "benchmark"),
+      model: lockedProfileName(lock, "model"),
+      harness: lockedProfileName(lock, "harness"),
+      deployment: lockedProfileName(lock, "deployment"),
+      launch_policy: lockedProfileName(lock, "launch_policy"),
+    });
+    const candidate = composeExecutionContract(profiles);
+    try {
+      assertRunContinuationRepairCandidate(continuation, candidate);
+    } catch (error) {
+      throw new PolicyError(
+        error instanceof Error ? error.message : "run continuation repair is invalid",
+      );
+    }
+    const workerRevision = candidate.deployment.worker_revision;
+    if (!workerRevision)
+      throw new PolicyError("continuation repair deployment has no worker revision");
+    const record: RunContinuationRepair = {
+      schema_version: "v1",
+      kind: "run.continuation.repair",
+      record_id: deterministicId("continuation-repair", runId),
+      created_at: this.clock.now().toISOString(),
+      actor,
+      run_id: runId,
+      run_lock_digest: continuation.run_lock_digest,
+      run_continuation_id: continuation.record_id,
+      run_continuation_digest: sha256(canonicalJson(continuation)),
+      idempotency_key_digest: keyDigest,
+      idempotency_payload_digest: payloadDigest,
+      job_image: candidate.deployment.job_image,
+      worker_revision: workerRevision,
+      reason: input.reason,
+    };
+    const appended = await this.appendAdopting(record, (recorded) => {
+      const { created_at: _recordedAt, ...recordedValue } = recorded;
+      const { created_at: _candidateAt, ...candidateValue } = record;
+      return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+    });
+    return {
+      run_id: runId,
+      continuation_repair_id: appended.record.record_id,
+      status_url: `/api/v1/runs/${runId}`,
+      adopted: !appended.created,
+    };
+  }
+
+  async repairHistoricalContinuationSuccessor(
+    runId: string,
+    raw: unknown,
+    idempotencyKey: string,
+    actor: Actor,
+  ): Promise<RunContinuationRepairSuccessorResult> {
+    const operation = this.submitQueue.then(() =>
+      this.repairHistoricalContinuationSuccessorSerialized(
+        runId,
+        raw,
+        idempotencyKey,
+        actor,
+      ),
+    );
+    this.submitQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async repairHistoricalContinuationSuccessorSerialized(
+    runId: string,
+    raw: unknown,
+    idempotencyKey: string,
+    actor: Actor,
+  ): Promise<RunContinuationRepairSuccessorResult> {
+    this.assertReady();
+    if (actor.role !== "operator")
+      throw new PolicyError("run continuation repair successor requires an operator");
+    if (!idempotencyKey || idempotencyKey.length > 256)
+      throw new IdempotencyConflictError("a bounded idempotency key is required");
+    const input = validateRunContinuation<HarborHFRunContinuationV1>(raw);
+    const lock = await this.projection.runLock(runId);
+    if (!lock) throw new PolicyError("run lock does not exist");
+    if (isCurrentRunLock(lock))
+      throw new PolicyError(
+        "current run locks do not need continuation repair successors",
+      );
+    const continuation = await this.projection.runContinuation(runId);
+    const repair = await this.projection.runContinuationRepair(runId);
+    if (!continuation || !repair)
+      throw new PolicyError(
+        "historical run has no continuation worker repair to supersede",
+      );
+    const keyDigest = sha256(idempotencyKey);
+    const payloadDigest = sha256(canonicalJson(input));
+    const existing = await this.projection.runContinuationRepairSuccessor(runId);
+    if (existing) {
+      if (
+        existing.idempotency_key_digest !== keyDigest ||
+        existing.idempotency_payload_digest !== payloadDigest ||
+        canonicalJson(existing.actor) !== canonicalJson(actor)
+      )
+        throw new IdempotencyConflictError(
+          "run continuation repair successor already exists with different authorization",
+        );
+      return {
+        run_id: runId,
+        continuation_repair_successor_id: existing.record_id,
+        status_url: `/api/v1/runs/${runId}`,
+        adopted: true,
+      };
+    }
+    const run = await this.projection.run(runId);
+    if (!run) throw new PolicyError("run does not exist");
+    if (
+      run.pending_actions > 0 ||
+      run.cleanup_pending ||
+      (await this.projection.runHasUnadvancedActions(runId)) ||
+      (await this.projection.runHasRunningJobs(runId))
+    )
+      throw new PolicyError(
+        "historical run must have no pending action, unadvanced action, running Job, or cleanup before continuation repair successor",
+      );
+    if (!run.paused && run.status !== "failed")
+      throw new PolicyError(
+        "historical run must be paused or failed before continuation repair successor",
+      );
+    const profiles = this.resolver.resolve({
+      benchmark: lockedProfileName(lock, "benchmark"),
+      model: lockedProfileName(lock, "model"),
+      harness: lockedProfileName(lock, "harness"),
+      deployment: lockedProfileName(lock, "deployment"),
+      launch_policy: lockedProfileName(lock, "launch_policy"),
+    });
+    const candidate = composeExecutionContract(profiles);
+    try {
+      assertRunContinuationRepairSuccessorCandidate(continuation, repair, candidate);
+    } catch (error) {
+      throw new PolicyError(
+        error instanceof Error
+          ? error.message
+          : "run continuation repair successor is invalid",
+      );
+    }
+    const workerRevision = candidate.deployment.worker_revision;
+    if (!workerRevision)
+      throw new PolicyError(
+        "continuation repair successor deployment has no worker revision",
+      );
+    const record: RunContinuationRepairSuccessor = {
+      schema_version: "v1",
+      kind: "run.continuation.repair.successor",
+      record_id: deterministicId("continuation-repair-successor", runId),
+      created_at: this.clock.now().toISOString(),
+      actor,
+      run_id: runId,
+      run_lock_digest: continuation.run_lock_digest,
+      run_continuation_id: continuation.record_id,
+      run_continuation_digest: sha256(canonicalJson(continuation)),
+      run_continuation_repair_id: repair.record_id,
+      run_continuation_repair_digest: sha256(canonicalJson(repair)),
+      idempotency_key_digest: keyDigest,
+      idempotency_payload_digest: payloadDigest,
+      job_image: candidate.deployment.job_image,
+      worker_revision: workerRevision,
+      reason: input.reason,
+    };
+    const appended = await this.appendAdopting(record, (recorded) => {
+      const { created_at: _recordedAt, ...recordedValue } = recorded;
+      const { created_at: _candidateAt, ...candidateValue } = record;
+      return canonicalJson(recordedValue) === canonicalJson(candidateValue);
+    });
+    return {
+      run_id: runId,
+      continuation_repair_successor_id: appended.record.record_id,
+      status_url: `/api/v1/runs/${runId}`,
+      adopted: !appended.created,
+    };
   }
 
   private async submitSerialized(
@@ -1560,13 +2119,40 @@ export class ControlService {
         );
       return;
     }
+    if (
+      intent.action_kind === "job.launch" &&
+      intent.payload.worker_role === "execution"
+    ) {
+      const repair = await this.projection.runContinuationRepair(intent.run_id);
+      if (repair && intent.payload.run_continuation_repair_id !== repair.record_id)
+        throw new PolicyError(
+          "new historical Job launch is not bound to the continuation worker repair",
+        );
+      const successor = await this.projection.runContinuationRepairSuccessor(
+        intent.run_id,
+      );
+      if (
+        successor &&
+        intent.payload.run_continuation_repair_successor_id !== successor.record_id
+      )
+        throw new PolicyError(
+          "new historical Job launch is not bound to the continuation worker repair successor",
+        );
+    }
     const taskId =
       typeof intent.payload.task_id === "string" ? intent.payload.task_id : null;
     if (taskId) {
       const task = await this.projection.task(intent.run_id, taskId);
+      const continuation = await this.projection.runContinuation(intent.run_id);
+      const continuedFailure =
+        task &&
+        continuation &&
+        intent.payload.run_continuation_id === continuation.record_id &&
+        historicalTaskNeedsSelection(task.task);
       if (
         task?.task.terminal_outcome &&
-        !infrastructureSealReplaceable(task.task.terminal_outcome)
+        !infrastructureSealReplaceable(task.task.terminal_outcome) &&
+        !continuedFailure
       )
         throw new PolicyError(`terminal task cannot receive action: ${taskId}`);
     }
@@ -1745,14 +2331,13 @@ export class ControlService {
     bytes: Uint8Array,
   ): Promise<EvidenceUploadResult> {
     const lock = await this.projection.runLock(runId);
-    if (!lock || !isCurrentRunLock(lock))
-      throw new PolicyError(
-        "historical run locks cannot accept evidence after the profile cutover",
-      );
+    if (!lock) throw new PolicyError("evidence upload has no run lock");
+    await this.runExecution(lock);
     const action = await this.projection.action(actionId);
     if (!action || action.run_id !== runId || action.action_kind !== "job.launch")
       throw new PolicyError("evidence upload has no eligible Job launch");
     const intent = JSON.parse(action.intent_body) as ActionIntent;
+    await this.assertHistoricalLaunchBinding(lock, intent);
     if (
       !Array.isArray(intent.payload.task_ids) ||
       !intent.payload.task_ids.includes(taskId)
@@ -1804,7 +2389,7 @@ export class ControlService {
     actor: Actor,
   ): Promise<{ receipt: AttemptReceipt; adopted: boolean }> {
     const { completed_at, ...fields } = input;
-    const candidate: AttemptReceipt = {
+    const submittedCandidate: AttemptReceipt = {
       schema_version: "v1",
       kind: "attempt.receipt",
       record_id: deterministicId("attempt-receipt", input.attempt_id),
@@ -1812,15 +2397,6 @@ export class ControlService {
       actor,
       ...fields,
     };
-    const existing = await this.projection.attemptById(input.attempt_id);
-    if (existing) {
-      const record = JSON.parse(existing.body) as AttemptReceipt;
-      if (canonicalJson(record) !== canonicalJson(candidate))
-        throw new IdempotencyConflictError(
-          `attempt identity conflict: ${input.attempt_id}`,
-        );
-      return { receipt: record, adopted: true };
-    }
     const action = await this.projection.action(input.action_id);
     if (
       !action ||
@@ -1831,6 +2407,37 @@ export class ControlService {
         `attempt does not reference an eligible run action: ${input.action_id}`,
       );
     const launch = JSON.parse(action.intent_body) as ActionIntent;
+    const fallbackFingerprint =
+      input.outcome === "infrastructure" &&
+      input.replacement_eligible &&
+      !input.failure_fingerprint
+        ? sha256(
+            canonicalJson({
+              kind: "legacy-worker-infrastructure-failure",
+              worker_revision: launch.payload.worker_revision ?? "unknown",
+            }),
+          )
+        : null;
+    const candidate: AttemptReceipt = {
+      ...submittedCandidate,
+      ...(fallbackFingerprint ? { failure_fingerprint: fallbackFingerprint } : {}),
+    };
+    const existing = await this.projection.attemptById(input.attempt_id);
+    if (existing) {
+      const record = JSON.parse(existing.body) as AttemptReceipt;
+      const matchesPreFingerprintRecord =
+        !input.failure_fingerprint &&
+        !record.failure_fingerprint &&
+        canonicalJson(record) === canonicalJson(submittedCandidate);
+      if (
+        canonicalJson(record) !== canonicalJson(candidate) &&
+        !matchesPreFingerprintRecord
+      )
+        throw new IdempotencyConflictError(
+          `attempt identity conflict: ${input.attempt_id}`,
+        );
+      return { receipt: record, adopted: true };
+    }
     const launchTasks = stringArrayValue(
       launch.payload.task_ids,
       "attempt Job action task IDs",
@@ -1857,13 +2464,15 @@ export class ControlService {
       );
     }
     const lock = await this.projection.runLock(input.run_id);
-    if (!lock || !isCurrentRunLock(lock))
-      throw new PolicyError(
-        "historical run locks cannot accept attempts after the profile cutover",
-      );
+    if (!lock) throw new PolicyError("attempt has no run lock");
+    await this.runExecution(lock);
+    await this.assertHistoricalLaunchBinding(lock, launch);
     const task = await this.projection.task(input.run_id, input.task_id);
     if (!task) throw new PolicyError(`task does not exist: ${input.task_id}`);
-    if (!infrastructureSealReplaceable(task.task.terminal_outcome))
+    const replaceable = isCurrentRunLock(lock)
+      ? infrastructureSealReplaceable(task.task.terminal_outcome)
+      : historicalTaskNeedsSelection(task.task);
+    if (!replaceable)
       throw new PolicyError(`terminal task cannot receive attempt: ${input.task_id}`);
     const run = await this.projection.run(input.run_id);
     if (!run) throw new PolicyError(`run does not exist: ${input.run_id}`);
@@ -1877,10 +2486,24 @@ export class ControlService {
   ): Promise<TerminalSelection> {
     const lock = await this.projection.runLock(attempt.run_id);
     if (!lock) throw new PolicyError("terminal selection has no run lock");
-    if (!isCurrentRunLock(lock))
-      throw new PolicyError(
-        "historical run locks cannot select attempts after the profile cutover",
+    await this.runExecution(lock);
+    if (!isCurrentRunLock(lock)) {
+      const action = await this.projection.action(attempt.action_id);
+      if (action?.action_kind !== "job.launch")
+        throw new PolicyError("historical attempt has no Job launch");
+      await this.assertHistoricalLaunchBinding(
+        lock,
+        JSON.parse(action.intent_body) as ActionIntent,
       );
+      const task = await this.projection.task(attempt.run_id, attempt.task_id);
+      if (
+        task?.task.selected_attempt_id &&
+        task.task.selected_attempt_id !== attempt.attempt_id
+      )
+        throw new PolicyError(
+          `historical selected task cannot change attempt: ${attempt.task_id}`,
+        );
+    }
     const validity = attemptAdmissibility(attempt, requiredPositiveMetrics(lock));
     if (!validity.admissible && attempt.outcome !== "cancelled")
       throw new PolicyError(`attempt is not selectable: ${validity.reason}`);
@@ -2172,9 +2795,18 @@ export class ControlService {
     const amountMicrousd = intent.payload.reservation_microusd;
     if (typeof amountMicrousd !== "number" || amountMicrousd <= 0) return false;
     const priorAttemptId = intent.payload.prior_attempt_id;
+    const replacementReservationKey =
+      typeof intent.payload.replacement_reservation_key === "string"
+        ? intent.payload.replacement_reservation_key
+        : priorAttemptId;
     const reserveId =
-      typeof priorAttemptId === "string"
-        ? deterministicId("budget", intent.run_id, "replacement", priorAttemptId)
+      typeof replacementReservationKey === "string"
+        ? deterministicId(
+            "budget",
+            intent.run_id,
+            "replacement",
+            replacementReservationKey,
+          )
         : deterministicId(
             "budget",
             intent.run_id,
@@ -2298,14 +2930,15 @@ export class ControlService {
     priorAttemptId: string,
     priorAttemptCompletedAt: string,
     amountMicrousd: number,
+    reservationKey = priorAttemptId,
   ): Promise<boolean> {
     await this.reconcileTerminalJobReservations(runId);
     const operation = this.budgetQueue.then(() =>
       this.reserveReplacementSerialized(
         runId,
-        priorAttemptId,
         priorAttemptCompletedAt,
         amountMicrousd,
+        reservationKey,
       ),
     );
     this.budgetQueue = operation.then(
@@ -2317,12 +2950,12 @@ export class ControlService {
 
   private async reserveReplacementSerialized(
     runId: string,
-    priorAttemptId: string,
     priorAttemptCompletedAt: string,
     amountMicrousd: number,
+    reservationKey: string,
   ): Promise<boolean> {
     if (amountMicrousd <= 0) return true;
-    const recordId = deterministicId("budget", runId, "replacement", priorAttemptId);
+    const recordId = deterministicId("budget", runId, "replacement", reservationKey);
     const existing = await this.projection.budget(recordId);
     if (existing) {
       if (
@@ -2346,7 +2979,7 @@ export class ControlService {
       const catchUp: BudgetEvent = {
         schema_version: "v1",
         kind: "budget.event",
-        record_id: deterministicId("budget", runId, "observed-overage", priorAttemptId),
+        record_id: deterministicId("budget", runId, "observed-overage", reservationKey),
         created_at: priorAttemptCompletedAt,
         actor: serviceActor(),
         run_id: runId,
@@ -2392,10 +3025,7 @@ export class ControlService {
     const previous = this.runMutationQueues.get(runId) ?? Promise.resolve();
     const queued = previous.then(async () => {
       const lock = await this.projection.runLock(runId);
-      if (lock && !isCurrentRunLock(lock))
-        throw new PolicyError(
-          "historical run locks cannot create work after the profile cutover",
-        );
+      if (lock) await this.runExecution(lock);
       return operation();
     });
     const settled = queued.then(
@@ -2428,15 +3058,6 @@ export class ControlService {
     if (prior?.outcome !== "infrastructure" || prior.replacement_eligible !== 1)
       return null;
     return prior;
-  }
-
-  private consumedInfrastructureAttempts(
-    attempts: ReadonlyArray<{ outcome: string; replacement_eligible: number }>,
-  ): number {
-    return attempts.filter(
-      (attempt) =>
-        attempt.outcome === "infrastructure" && attempt.replacement_eligible === 1,
-    ).length;
   }
 
   private launchStillRunning(
@@ -2530,8 +3151,6 @@ export class ControlService {
       const prior = this.selectedInfrastructureAttempt(detail);
       if (
         !prior ||
-        this.consumedInfrastructureAttempts(detail.attempts) >=
-          policy.max_infrastructure_attempts ||
         (await this.projection.retryActionForAttempt(runId, prior.attempt_id)) ||
         (await this.laterExecutionLaunchExists(runId, task.task_id, prior.action_id))
       )
@@ -2611,6 +3230,11 @@ export class ControlService {
       if (sourceRow?.action_kind !== "job.launch")
         throw new PolicyError("bulk retry attempt has no physical Job launch");
       const source = JSON.parse(sourceRow.intent_body) as ActionIntent;
+      const replacementReservationKey = deterministicId(
+        "replacement-reservation",
+        attemptId,
+        String(command.generation),
+      );
       const child = this.actionIntent(
         command.run_id,
         "job.launch",
@@ -2621,6 +3245,7 @@ export class ControlService {
           task_id: taskId,
           task_ids: [taskId],
           prior_attempt_id: attemptId,
+          replacement_reservation_key: replacementReservationKey,
           reason: command.payload.reason ?? null,
         },
         command.actor,
@@ -2633,6 +3258,7 @@ export class ControlService {
           attemptId,
           attempt.created_at,
           reservation,
+          replacementReservationKey,
         ))
       )
         return { actionIds, complete: false };
@@ -2766,10 +3392,7 @@ export class ControlService {
     if (!run) throw new PolicyError("run does not exist");
     const lock = await this.projection.runLock(runId);
     if (!lock) throw new PolicyError("run lock does not exist");
-    if (!isCurrentRunLock(lock))
-      throw new PolicyError(
-        "historical run locks cannot create actions after the profile cutover",
-      );
+    const execution = await this.runExecution(lock);
     if (!idempotencyKey || idempotencyKey.length > 256)
       throw new IdempotencyConflictError("a bounded idempotency key is required");
     const idempotency = {
@@ -2786,6 +3409,7 @@ export class ControlService {
       attemptId: string;
       completedAt: string;
       amountMicrousd: number;
+      reservationKey: string;
     } | null = null;
     if (input.action === "cancel") {
       if (runStatusIsTerminal(run.status))
@@ -2811,15 +3435,41 @@ export class ControlService {
       kind = "run.pause";
       payload = { reason: input.reason ?? null };
     } else if (input.action === "resume") {
-      if (!run.paused) throw new PolicyError("run is not paused");
+      const historical = !isCurrentRunLock(lock);
+      const repair = historical
+        ? await this.projection.runContinuationRepair(runId)
+        : null;
+      const successor = historical
+        ? await this.projection.runContinuationRepairSuccessor(runId)
+        : null;
+      const repeatedDefectPause = (await this.projection.runActions(runId)).find(
+        (action) => {
+          if (action.action_kind !== "run.pause") return false;
+          const pause = JSON.parse(action.intent_body) as ActionIntent;
+          return pause.payload.reason === repeatedInfrastructureFailureReason;
+        },
+      );
+      const latestRepair = successor ?? repair;
+      if (
+        repeatedDefectPause &&
+        (!latestRepair ||
+          Date.parse(latestRepair.created_at) <=
+            Date.parse(repeatedDefectPause.created_at))
+      )
+        throw new PolicyError(
+          "repeated infrastructure failure requires a reviewed worker repair",
+        );
+      if (!run.paused && !(historical && repair && run.status === "failed"))
+        throw new PolicyError("run is not paused");
       if (run.pending_actions > 0)
         throw new PolicyError("run cannot resume while actions are pending");
+      if (historical) await this.assertReusableHistoricalPreparation(lock, execution);
       await this.reconcileTerminalJobReservations(runId);
-      const deployment = lock.execution.deployment;
+      const deployment = execution.deployment;
       const needsPreparation =
         preparationRequired(deployment) && !(await this.preparedJob(runId));
-      const unresolvedTasks = (await this.projection.tasks(runId)).filter(
-        (task) => !task.terminal_outcome,
+      const unresolvedTasks = (await this.projection.tasks(runId)).filter((task) =>
+        historical ? historicalTaskNeedsSelection(task) : !task.terminal_outcome,
       );
       const unresolvedTaskIds = (
         input.task_limit ? unresolvedTasks.slice(0, input.task_limit) : unresolvedTasks
@@ -2829,6 +3479,7 @@ export class ControlService {
       const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
       const reservationCreatedAt = this.clock.now().toISOString();
       let reservations: JobBudgetReservation[];
+      let launchGeneration: number | null = null;
       if (needsPreparation) {
         const preparationLaunches = (await this.projection.runActions(runId)).filter(
           (action) => {
@@ -2851,14 +3502,52 @@ export class ControlService {
           },
         ];
       } else {
+        const continuation = historical
+          ? await this.projection.runContinuation(runId)
+          : null;
+        if (historical && !continuation)
+          throw new PolicyError(
+            "historical run has no execution continuation attachment",
+          );
         const freshTaskIds: string[] = [];
         for (const taskId of unresolvedTaskIds) {
           const detail = await this.projection.task(runId, taskId);
-          if (!detail || detail.attempts.length === 0) freshTaskIds.push(taskId);
+          if (
+            detail?.task.terminal_outcome &&
+            historicalTaskNeedsSelection(detail.task)
+          ) {
+            freshTaskIds.push(taskId);
+            continue;
+          }
+          const latest = detail?.attempts.at(-1);
+          if (!latest) {
+            freshTaskIds.push(taskId);
+            continue;
+          }
+          if (continuation) {
+            const action = await this.projection.action(latest.action_id);
+            const launch =
+              action?.action_kind === "job.launch"
+                ? (JSON.parse(action.intent_body) as ActionIntent)
+                : null;
+            if (
+              launch?.payload.run_continuation_id !== continuation.record_id ||
+              (repair &&
+                launch.payload.run_continuation_repair_id !== repair.record_id) ||
+              (successor &&
+                launch.payload.run_continuation_repair_successor_id !==
+                  successor.record_id)
+            )
+              freshTaskIds.push(taskId);
+          }
         }
+        const executionGeneration = historical
+          ? await this.projection.nextExecutionLaunchGeneration(runId)
+          : generation;
+        launchGeneration = executionGeneration;
         reservations = freshTaskIds.map((taskId) => ({
           category: executionReservationCategory([taskId]),
-          generation,
+          generation: executionGeneration,
           created_at: reservationCreatedAt,
           amount_microusd: policy.reservation_microusd,
         }));
@@ -2868,6 +3557,7 @@ export class ControlService {
         throw new PolicyError("resumed execution would exceed the run ceiling");
       kind = "run.resume";
       payload = {
+        ...(launchGeneration !== null ? { launch_generation: launchGeneration } : {}),
         reason: input.reason ?? null,
         ...(input.task_limit ? { task_limit: input.task_limit } : {}),
         task_ids: unresolvedTaskIds,
@@ -2925,6 +3615,10 @@ export class ControlService {
       target = endpoint.endpoint_id;
       payload = { endpoint_id: endpoint.endpoint_id };
     } else {
+      if (!isCurrentRunLock(lock))
+        throw new PolicyError(
+          "historical continuation cannot retry a selected infrastructure outcome",
+        );
       if (!input.task_id)
         return this.queueEligibleInfrastructureRetries(
           runId,
@@ -2956,19 +3650,20 @@ export class ControlService {
         ))
       )
         throw new PolicyError("infrastructure retry is already recorded");
-      const deployment = lock.execution.deployment;
+      const deployment = execution.deployment;
       if (deployment.route !== "hf_job")
         throw new PolicyError("imported deployment profiles cannot launch retries");
       const policy = this.resolvedProfile<LaunchPolicySpec>(lock, "launch_policy");
-      if (
-        this.consumedInfrastructureAttempts(task.attempts) >=
-        policy.max_infrastructure_attempts
-      )
-        throw new PolicyError("infrastructure retry budget is exhausted");
+      const replacementReservationKey = deterministicId(
+        "replacement-reservation",
+        priorAttempt.attempt_id,
+        idempotency.key_digest,
+      );
       retryReservation = {
         attemptId: priorAttempt.attempt_id,
         completedAt: priorAttempt.created_at,
         amountMicrousd: policy.reservation_microusd,
+        reservationKey: replacementReservationKey,
       };
       const sourceRow = await this.projection.action(priorAttempt.action_id);
       if (sourceRow?.action_kind !== "job.launch")
@@ -2981,6 +3676,7 @@ export class ControlService {
         task_ids: [input.task_id],
         reason: input.reason ?? null,
         prior_attempt_id: priorAttempt.attempt_id,
+        replacement_reservation_key: replacementReservationKey,
       };
     }
     payload = {
@@ -2995,6 +3691,7 @@ export class ControlService {
         retryReservation.attemptId,
         retryReservation.completedAt,
         retryReservation.amountMicrousd,
+        retryReservation.reservationKey,
       ))
     )
       throw new PolicyError("replacement Job would exceed the run ceiling");

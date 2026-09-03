@@ -13,11 +13,7 @@
     "agent": "openhands",
     "revision": "1.6.0",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.openhands.agent:OpenHandsAgent",
       "override_setup_timeout_sec": 7200,
@@ -27,9 +23,7 @@
     },
     "contract_version": "v1",
     "capabilities": {
-      "inference_apis": [
-        "chat-completions"
-      ]
+      "inference_apis": ["chat-completions"]
     }
   }
 }

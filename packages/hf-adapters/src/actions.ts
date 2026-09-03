@@ -81,6 +81,13 @@ function requiresInference(intent: ActionIntent): boolean {
   );
 }
 
+function usesCompatibilityBridge(intent: ActionIntent): boolean {
+  const value = intent.payload.inference_token;
+  if (value !== undefined && value !== "forbidden" && value !== "required")
+    throw new Error("action payload inference_token is invalid");
+  return value === "required";
+}
+
 type ApiJob = Awaited<ReturnType<typeof getJob>>;
 
 interface ExpectedJobSpec {
@@ -112,7 +119,7 @@ function jobEnvironment(
     typeof intent.payload.task_image === "string"
       ? intent.payload.task_image
       : undefined;
-  return {
+  const environment = {
     HARBOR_HF_RUN_ID: intent.run_id,
     HARBOR_HF_ACTION_ID: launchActionId(intent),
     HARBOR_HF_TASK_IDS_JSON: JSON.stringify(taskIds),
@@ -133,6 +140,18 @@ function jobEnvironment(
     ...(typeof intent.payload.worker_revision === "string"
       ? { HARBOR_HF_WORKER_REVISION: intent.payload.worker_revision }
       : {}),
+    ...(typeof intent.payload.run_continuation_repair_id === "string"
+      ? {
+          HARBOR_HF_RUN_CONTINUATION_REPAIR_ID:
+            intent.payload.run_continuation_repair_id,
+        }
+      : {}),
+    ...(typeof intent.payload.run_continuation_repair_successor_id === "string"
+      ? {
+          HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID:
+            intent.payload.run_continuation_repair_successor_id,
+        }
+      : {}),
     ...(typeof intent.payload.prepared_job_digest === "string"
       ? { HARBOR_HF_PREPARED_JOB_DIGEST: intent.payload.prepared_job_digest }
       : {}),
@@ -142,6 +161,25 @@ function jobEnvironment(
     ...(typeof intent.payload.max_image_entries === "number"
       ? { HARBOR_HF_MAX_IMAGE_ENTRIES: String(intent.payload.max_image_entries) }
       : {}),
+  };
+  if (!usesCompatibilityBridge(intent)) return environment;
+  return {
+    ...environment,
+    HARBOR_HF_INFERENCE_UPSTREAM: stringValue(intent, "inference_upstream"),
+    HARBOR_HF_INFERENCE_ALLOWED_MODEL: stringValue(intent, "inference_model"),
+    HARBOR_HF_INFERENCE_API: stringValue(intent, "inference_api"),
+    HARBOR_HF_INFERENCE_MAX_REQUESTS: String(
+      numberValue(intent, "inference_max_requests"),
+    ),
+    HARBOR_HF_INFERENCE_MAX_CONCURRENCY: String(
+      numberValue(intent, "inference_max_concurrency"),
+    ),
+    HARBOR_HF_INFERENCE_TIMEOUT_SECONDS: String(
+      numberValue(intent, "inference_timeout_seconds"),
+    ),
+    HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS: String(
+      numberValue(intent, "inference_max_output_tokens"),
+    ),
   };
 }
 
@@ -163,10 +201,9 @@ function expectedJobSpec(
       harbor_hf_worker_role: workerRole(intent),
     },
     environment: jobEnvironment(intent, controlUrl, taskImageMirrorRepository),
-    secretNames:
-      requiresInference(intent)
-        ? ["HARBOR_HF_WORKER_CAPABILITY", "HF_INFERENCE_TOKEN"]
-        : ["HARBOR_HF_WORKER_CAPABILITY"],
+    secretNames: requiresInference(intent)
+      ? ["HARBOR_HF_WORKER_CAPABILITY", "HF_INFERENCE_TOKEN"]
+      : ["HARBOR_HF_WORKER_CAPABILITY"],
   };
 }
 
@@ -238,6 +275,15 @@ function verifyJobSpec(
   taskImageMirrorRepository: string,
 ): void {
   const expected = expectedJobSpec(intent, controlUrl, taskImageMirrorRepository);
+  const expectedEnvironment = { ...expected.environment };
+  if (
+    intent.action_kind === "job.observe" &&
+    job.environment &&
+    !Object.hasOwn(job.environment, "HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY")
+  )
+    // The launch receipt already attested older immutable Jobs created before
+    // mirror routing existed. Observations still verify every field they carry.
+    delete expectedEnvironment.HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY;
   const stockJob = job as ApiJob & {
     retry?: unknown;
     timeout?: unknown;
@@ -252,7 +298,7 @@ function verifyJobSpec(
       expected.timeoutSeconds ||
     normalizedJobAttempts(job.attempts, stockJob.retry) !== 1 ||
     !recordsEqual(job.labels, expected.labels) ||
-    !recordsEqual(job.environment, expected.environment)
+    !recordsEqual(job.environment, expectedEnvironment)
   )
     throw new Error("Job specification does not match the locked launch intent");
   if (job.spaceId !== undefined && job.spaceId !== null)

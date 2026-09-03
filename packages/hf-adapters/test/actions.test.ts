@@ -67,6 +67,17 @@ function expectedEnvironment(intent: ActionIntent): Record<string, string> {
     ...(typeof payload.worker_revision === "string"
       ? { HARBOR_HF_WORKER_REVISION: payload.worker_revision }
       : {}),
+    ...(typeof payload.run_continuation_repair_id === "string"
+      ? {
+          HARBOR_HF_RUN_CONTINUATION_REPAIR_ID: payload.run_continuation_repair_id,
+        }
+      : {}),
+    ...(typeof payload.run_continuation_repair_successor_id === "string"
+      ? {
+          HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID:
+            payload.run_continuation_repair_successor_id,
+        }
+      : {}),
     ...(typeof payload.prepared_job_digest === "string"
       ? { HARBOR_HF_PREPARED_JOB_DIGEST: payload.prepared_job_digest }
       : {}),
@@ -75,6 +86,23 @@ function expectedEnvironment(intent: ActionIntent): Record<string, string> {
       : {}),
     ...(typeof payload.max_image_entries === "number"
       ? { HARBOR_HF_MAX_IMAGE_ENTRIES: String(payload.max_image_entries) }
+      : {}),
+    ...(payload.inference_token === "required"
+      ? {
+          HARBOR_HF_INFERENCE_UPSTREAM: String(payload.inference_upstream),
+          HARBOR_HF_INFERENCE_ALLOWED_MODEL: String(payload.inference_model),
+          HARBOR_HF_INFERENCE_API: String(payload.inference_api),
+          HARBOR_HF_INFERENCE_MAX_REQUESTS: String(payload.inference_max_requests),
+          HARBOR_HF_INFERENCE_MAX_CONCURRENCY: String(
+            payload.inference_max_concurrency,
+          ),
+          HARBOR_HF_INFERENCE_TIMEOUT_SECONDS: String(
+            payload.inference_timeout_seconds,
+          ),
+          HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS: String(
+            payload.inference_max_output_tokens,
+          ),
+        }
       : {}),
   };
 }
@@ -147,6 +175,41 @@ describe("HuggingFaceActions", () => {
     const firstCall = fetchMock.mock.calls[0];
     expect(firstCall).toBeDefined();
     expect((firstCall?.[1] as RequestInit | undefined)?.method).toBeUndefined();
+  });
+
+  it("binds a continued historical Job to its worker repair", async () => {
+    const intent: ActionIntent = {
+      ...base,
+      record_id: "action-test-repair",
+      action_id: "action-test-repair",
+      payload: {
+        ...base.payload,
+        run_continuation_id: "continuation-test",
+        run_continuation_repair_id: "continuation-repair-test",
+        run_continuation_repair_successor_id: "continuation-repair-successor-test",
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([apiJob(intent)]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      taskImageMirrorRepository,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.execute(intent)).resolves.toMatchObject({
+      outcome: "adopted",
+      resource_id: "job-1",
+    });
   });
 
   it("rejects reuse of the control credential as a worker inference credential", () => {
@@ -594,6 +657,7 @@ describe("HuggingFaceActions", () => {
         expect(request.environment).toMatchObject({
           HARBOR_HF_PREPARED_JOB_DIGEST: `sha256:${"d".repeat(64)}`,
         });
+        expect(request.environment).not.toHaveProperty("HARBOR_HF_INFERENCE_UPSTREAM");
         expect(request.secrets).toEqual({
           HARBOR_HF_WORKER_CAPABILITY: expect.stringMatching(/^v1\./),
           HF_INFERENCE_TOKEN: testInferenceToken,
@@ -625,6 +689,71 @@ describe("HuggingFaceActions", () => {
       resource_id: "job-inference",
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("exports the bounded environment for a bridge-compatible worker", async () => {
+    const inferenceIntent: ActionIntent = {
+      ...base,
+      action_id: "action-test-bridge-compatibility",
+      payload: {
+        ...base.payload,
+        inference_token: "required",
+        inference_upstream: "https://router.huggingface.co/v1",
+        inference_model: "example/model",
+        inference_api: "chat-completions",
+        inference_max_requests: 64,
+        inference_max_concurrency: 4,
+        inference_timeout_seconds: 600,
+        inference_max_output_tokens: 32768,
+      },
+    };
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        if (!init?.method)
+          return new Response("[]", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        const request = JSON.parse(String(init.body)) as {
+          environment: Record<string, string>;
+          secrets: Record<string, string>;
+          labels: Record<string, string>;
+        };
+        expect(request.environment).toMatchObject({
+          HARBOR_HF_INFERENCE_UPSTREAM: "https://router.huggingface.co/v1",
+          HARBOR_HF_INFERENCE_ALLOWED_MODEL: "example/model",
+          HARBOR_HF_INFERENCE_API: "chat-completions",
+          HARBOR_HF_INFERENCE_MAX_REQUESTS: "64",
+          HARBOR_HF_INFERENCE_MAX_CONCURRENCY: "4",
+          HARBOR_HF_INFERENCE_TIMEOUT_SECONDS: "600",
+          HARBOR_HF_INFERENCE_MAX_OUTPUT_TOKENS: "32768",
+        });
+        return new Response(
+          JSON.stringify(
+            apiJob(inferenceIntent, {
+              id: "job-bridge-compatibility",
+              environment: request.environment,
+              labels: request.labels,
+              secrets: Object.keys(request.secrets),
+            }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      taskImageMirrorRepository,
+      inferenceToken: testInferenceToken,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.execute(inferenceIntent)).resolves.toMatchObject({
+      outcome: "created",
+      resource_id: "job-bridge-compatibility",
+    });
   });
 
   it("fails closed before a remote lookup when a required inference credential is absent", async () => {
@@ -864,6 +993,71 @@ describe("HuggingFaceActions", () => {
       active_hourly_cost_microusd: 10_000,
       cost_microusd: 10_000,
     });
+  });
+
+  it("observes a historical Job created before task-image mirror routing", async () => {
+    const observeIntent: ActionIntent = {
+      ...base,
+      action_kind: "job.observe",
+      target: "job-historical",
+      payload: {
+        ...base.payload,
+        resource_id: "job-historical",
+        launch_action_id: base.action_id,
+      },
+    };
+    const historicalJob = apiJob(observeIntent, {
+      id: "job-historical",
+      status: { stage: "COMPLETED", failureCount: 0 },
+    });
+    delete (historicalJob.environment as Record<string, string>)
+      .HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([historicalJob]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      taskImageMirrorRepository,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.observeJobs([observeIntent])).resolves.toMatchObject([
+      { outcome: "completed", observed_state: "COMPLETED" },
+    ]);
+  });
+
+  it("still requires task-image mirror routing when adopting a new Job", async () => {
+    const unmirroredJob = apiJob();
+    delete (unmirroredJob.environment as Record<string, string>)
+      .HARBOR_HF_TASK_IMAGE_MIRROR_REPOSITORY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify([unmirroredJob]), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const adapter = new HuggingFaceActions({
+      namespace: "example",
+      accessToken: testToken,
+      taskImageMirrorRepository,
+      controlUrl: "https://control.example",
+    });
+
+    await expect(adapter.execute(base)).rejects.toBeInstanceOf(
+      AmbiguousExternalActionError,
+    );
   });
 
   it("caches and paginates batched Job observations by namespace", async () => {

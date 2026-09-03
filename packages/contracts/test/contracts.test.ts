@@ -6,11 +6,12 @@ import {
   deterministicId,
   schemas,
   sha256,
-  validateRunSubmission,
   validateControlRecord,
   validateLeaderboardSnapshot,
   validatePreparedJobSubmission,
   validateResultCatalog,
+  validateRunContinuation,
+  validateRunSubmission,
   validateWorkerEvidenceManifest,
   workerEvidenceObjectPath,
 } from "../src/index.js";
@@ -207,10 +208,11 @@ describe("canonical contracts", () => {
 
     expect(validateControlRecord(profile)).toEqual(profile);
     expect(validateControlRecord(grant)).toEqual(grant);
+    expect(validateControlRecord({ ...grant, reserved_provider_requests: 1 })).toEqual({
+      ...grant,
+      reserved_provider_requests: 1,
+    });
     expect(validateControlRecord(release)).toEqual(release);
-    expect(() =>
-      validateControlRecord({ ...grant, reserved_provider_requests: 1 }),
-    ).toThrow(ContractValidationError);
     expect(controlRecordPath(grant)).toContain("/p-admission.json");
     expect(controlRecordPath(release)).toContain("/zy-capacity-release.json");
     expect(() =>
@@ -595,6 +597,27 @@ describe("canonical contracts", () => {
         action_id: "action-1",
       }),
     ).toBe("control/schema=v1/runs/run-1/actions/action-1/zz-advanced.json");
+    expect(
+      controlRecordPath({
+        kind: "run.continuation",
+        record_id: "continuation-1",
+        run_id: "run-1",
+      }),
+    ).toBe("control/schema=v1/runs/run-1/continuation.json");
+    expect(
+      controlRecordPath({
+        kind: "run.continuation.repair",
+        record_id: "continuation-repair-1",
+        run_id: "run-1",
+      }),
+    ).toBe("control/schema=v1/runs/run-1/continuation-repair.json");
+    expect(
+      controlRecordPath({
+        kind: "run.continuation.repair.successor",
+        record_id: "continuation-repair-successor-1",
+        run_id: "run-1",
+      }),
+    ).toBe("control/schema=v1/runs/run-1/continuation-repair-successor.json");
   });
 
   it("validates run submission boundaries", () => {
@@ -615,6 +638,24 @@ describe("canonical contracts", () => {
         harness: "x",
         launch_policy: "x",
         ceiling_microusd: -1,
+        confirmed: false,
+      }),
+    ).toThrow(ContractValidationError);
+  });
+
+  it("requires explicit historical continuation confirmation", () => {
+    expect(
+      validateRunContinuation({
+        reason: "finish unresolved tasks",
+        confirmed: true,
+      }),
+    ).toEqual({
+      reason: "finish unresolved tasks",
+      confirmed: true,
+    });
+    expect(() =>
+      validateRunContinuation({
+        reason: "finish unresolved tasks",
         confirmed: false,
       }),
     ).toThrow(ContractValidationError);

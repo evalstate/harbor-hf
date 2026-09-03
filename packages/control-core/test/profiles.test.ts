@@ -1,7 +1,7 @@
 import type {
   BenchmarkProfileSpec,
-  HFJobDeploymentProfileSpec,
   HarnessProfileSpec,
+  HFJobDeploymentProfileSpec,
   ModelProfileSpec,
   PreparedTrial,
   ResolvedExecutionContract,
@@ -12,8 +12,8 @@ import { canonicalJson } from "@harbor-hf/contracts";
 import { describe, expect, it } from "vitest";
 import { composeExecutionContract } from "../src/execution-contract.js";
 import {
-  preparedTrialJobLaunch,
   ProfileResolutionError,
+  preparedTrialJobLaunch,
   validatePreparedRunProfiles,
 } from "../src/profiles.js";
 
@@ -307,5 +307,32 @@ describe("resolved execution profiles", () => {
       "run worker",
       "it's-locked",
     ]);
+  });
+
+  it("wraps only bridge-compatible workers in their root bootstrap", () => {
+    const value = deployment();
+    value.job_command = ["run worker", "it's-locked"];
+    if (!value.trial_job_template) throw new Error("trial template is missing");
+    value.trial_job_template.inference_token = "required";
+    value.trial_job_template.inference_max_requests = 64;
+    value.trial_job_template.inference_max_concurrency = 4;
+    value.trial_job_template.root_bootstrap_command = ["/root setup", "first"];
+    const composed = composeExecutionContract(resolved(model, "model", value));
+
+    expect(preparedTrialJobLaunch(composed, preparedTrial())).toMatchObject({
+      inference_token: "required",
+      inference_max_requests: 64,
+      inference_max_concurrency: 4,
+      job_command: [
+        "/bin/sh",
+        "-c",
+        [
+          "set -eu",
+          "'/root setup' 'first'",
+          "unset HF_INFERENCE_TOKEN HARBOR_HF_INFERENCE_TOKEN",
+          `exec 'run worker' 'it'"'"'s-locked'`,
+        ].join("\n"),
+      ],
+    });
   });
 });

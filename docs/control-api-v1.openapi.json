@@ -3668,6 +3668,291 @@
         }
       }
     },
+    "/api/v1/runs/{run_id}/continuation": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "Harbor-HF run continuation v1",
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reason",
+                  "confirmed"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "confirmed": {
+                    "enum": [
+                      true
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "run_id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "run_id",
+                    "continuation_id",
+                    "status_url",
+                    "adopted"
+                  ],
+                  "properties": {
+                    "run_id": {
+                      "type": "string"
+                    },
+                    "continuation_id": {
+                      "type": "string"
+                    },
+                    "status_url": {
+                      "type": "string"
+                    },
+                    "adopted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "run_id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{run_id}/continuation-repair": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "Harbor-HF run continuation v1",
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reason",
+                  "confirmed"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "confirmed": {
+                    "enum": [
+                      true
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "run_id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "run_id",
+                    "continuation_repair_id",
+                    "status_url",
+                    "adopted"
+                  ],
+                  "properties": {
+                    "run_id": {
+                      "type": "string"
+                    },
+                    "continuation_repair_id": {
+                      "type": "string"
+                    },
+                    "status_url": {
+                      "type": "string"
+                    },
+                    "adopted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "run_id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{run_id}/continuation-repair-successor": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "Harbor-HF run continuation v1",
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reason",
+                  "confirmed"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "confirmed": {
+                    "enum": [
+                      true
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "run_id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "run_id",
+                    "continuation_repair_successor_id",
+                    "status_url",
+                    "adopted"
+                  ],
+                  "properties": {
+                    "run_id": {
+                      "type": "string"
+                    },
+                    "continuation_repair_successor_id": {
+                      "type": "string"
+                    },
+                    "status_url": {
+                      "type": "string"
+                    },
+                    "adopted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "run_id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/v1/runs/{run_id}": {
       "get": {
         "tags": [
@@ -3873,6 +4158,8 @@
                     "run_active",
                     "hardware_limit",
                     "hardware_active",
+                    "provider_limit",
+                    "provider_reserved",
                     "start_tokens",
                     "start_burst",
                     "queued",
@@ -3925,6 +4212,12 @@
                     "hardware_active": {
                       "type": "integer"
                     },
+                    "provider_limit": {
+                      "type": "integer"
+                    },
+                    "provider_reserved": {
+                      "type": "integer"
+                    },
                     "start_tokens": {
                       "anyOf": [
                         {
@@ -3955,6 +4248,7 @@
                             "run_job_capacity",
                             "namespace_job_capacity",
                             "hardware_job_capacity",
+                            "provider_request_capacity",
                             "start_rate",
                             "run_cancelled"
                           ]
@@ -4597,6 +4891,7 @@
                           "task_id",
                           "outcome",
                           "replacement_eligible",
+                          "failure_fingerprint",
                           "cost_microusd",
                           "metrics",
                           "created_at",
@@ -4620,6 +4915,16 @@
                           },
                           "replacement_eligible": {
                             "type": "integer"
+                          },
+                          "failure_fingerprint": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           },
                           "cost_microusd": {
                             "type": "integer"
@@ -4947,6 +5252,10 @@
                         "type": "boolean"
                       },
                       "evidence_digest": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$"
+                      },
+                      "failure_fingerprint": {
                         "type": "string",
                         "pattern": "^sha256:[0-9a-f]{64}$"
                       },

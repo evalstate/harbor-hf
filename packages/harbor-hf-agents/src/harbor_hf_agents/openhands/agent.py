@@ -4,11 +4,13 @@ from typing import override
 
 from harbor.agents.installed.openhands import OpenHands
 from harbor.environments.base import BaseEnvironment
+from harbor.models.agent.context import AgentContext
 
-from harbor_hf_agents.support.direct_inference import (
-    DirectChatCompletionsAgent,
-)
-from harbor_hf_agents.support.isolated_user import AGENT_USER
+from harbor_hf_agents.support.control_job_environment import ControlJobEnvironment
+from harbor_hf_agents.support.direct_inference import DirectChatCompletionsAgent
+from harbor_hf_agents.support.isolated_user import AGENT_HOME, AGENT_USER
+
+_TMUX_TMPDIR = f"{AGENT_HOME}/.tmux"
 
 
 class OpenHandsAgent(DirectChatCompletionsAgent, OpenHands):
@@ -25,6 +27,45 @@ class OpenHandsAgent(DirectChatCompletionsAgent, OpenHands):
         "util-linux",
     )
     inject_environment_into_process = True
+
+    @override
+    def extend_inference_env(self, env: dict[str, str]) -> None:
+        """Route OpenHands tmux clients to the lifecycle-owned server."""
+        env["TMUX_TMPDIR"] = _TMUX_TMPDIR
+
+    @override
+    async def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        """Run OpenHands with a foreground tmux server owned by the task lifecycle."""
+        if not isinstance(environment, ControlJobEnvironment):
+            raise RuntimeError("OpenHands requires the isolated Job environment")
+        await self._ensure_isolated_agent_user(environment)
+        tmux_env = {"TMUX_TMPDIR": _TMUX_TMPDIR}
+        # OpenHands uses libtmux for every tool shell. Keeping the server in
+        # foreground mode prevents it from escaping PRoot as a daemon.
+        await environment.start_background(
+            ('install -d -m 0700 "$TMUX_TMPDIR"; exec tmux -D -f /dev/null'),
+            env=tmux_env,
+            user=AGENT_USER,
+        )
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "for attempt in {1..50}; do "
+                'test -S "$TMUX_TMPDIR/tmux-$(id -u)/default" && exit 0; '
+                "sleep 0.1; "
+                "done; "
+                "printf '%s\\n' 'OpenHands tmux server did not become ready' >&2; "
+                "exit 1"
+            ),
+            env=tmux_env,
+            timeout_sec=10,
+        )
+        await super().run(instruction, environment, context)
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:

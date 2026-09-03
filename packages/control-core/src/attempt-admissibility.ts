@@ -1,4 +1,4 @@
-import type { AttemptReceipt, RunLock, LaunchPolicySpec } from "@harbor-hf/contracts";
+import type { AttemptReceipt, LaunchPolicySpec, RunLock } from "@harbor-hf/contracts";
 
 export interface AttemptAdmissibility {
   admissible: boolean;

@@ -3,9 +3,9 @@ import type {
   ActionIntent,
   ActionReceipt,
   AttemptReceipt,
-  CurrentRunLock,
   DeploymentProfileSpec,
   EndpointResource,
+  ResolvedExecutionContract,
   RunLock,
 } from "@harbor-hf/contracts";
 import {
@@ -25,9 +25,11 @@ import type { ResultPublisher } from "./publication.js";
 import {
   type ControlService,
   executionReservationCategory,
+  historicalTaskNeedsSelection,
   infrastructureSealReplaceable,
   type JobBudgetReservation,
   PolicyError,
+  repeatedInfrastructureFailureReason,
 } from "./service.js";
 
 export interface ExternalActionResult {
@@ -64,6 +66,27 @@ export interface ReconcilerOptions {
   batch_size: number;
   dispatch_adoption_delay_ms?: number;
   worker_receipt_grace_ms?: number;
+}
+
+interface ExecutableRun {
+  run_id: string;
+  tasks: RunLock["tasks"];
+  profiles: RunLock["profiles"];
+  execution: ResolvedExecutionContract;
+  source_lock: RunLock;
+}
+
+const maximumActionGeneration = 1_000_000;
+
+export function nextAvailableActionGeneration(
+  generations: readonly number[],
+  maximum = maximumActionGeneration,
+): number | null {
+  const used = new Set(generations);
+  for (let generation = 0; generation <= maximum; generation += 1) {
+    if (!used.has(generation)) return generation;
+  }
+  return null;
 }
 
 const terminalJobStates = new Set([
@@ -126,7 +149,10 @@ function scalar<T extends string | number | boolean>(
   return value as T;
 }
 
-function profile(lock: RunLock, kind: string): Record<string, unknown> {
+function profile(
+  lock: { profiles: RunLock["profiles"] },
+  kind: string,
+): Record<string, unknown> {
   const selected = lock.profiles.find((item) => item.kind === kind);
   if (!selected) throw new PolicyError(`run lock is missing ${kind}`);
   return selected.spec as unknown as Record<string, unknown>;
@@ -311,10 +337,14 @@ export class Reconciler {
     const failures: unknown[] = [];
     const activeRuns = await this.projection.activeRuns();
     const syncRunIds = activeRuns.map((run) => run.run_id);
+    const executableRuns = await this.executableItems(activeRuns);
     const syncInterval = this.options.sync_interval_ms ?? 30_000;
     // Admit runs and dispatch queued Jobs before historical advancement or
     // Bucket I/O so slow projection work cannot starve physical execution.
-    const admissions = (await this.projection.pendingActions(10_000)).filter(
+    const initialPending = await this.executableActions(
+      await this.projection.pendingActions(10_000),
+    );
+    const admissions = initialPending.filter(
       (intent) => intent.action_kind === "run.admit",
     );
     const newlyAdmittedRuns = new Set<string>();
@@ -324,7 +354,9 @@ export class Reconciler {
       newlyAdmittedRuns.add(intent.run_id);
       handled += 1;
     }
-    const pendingBeforeAdvancement = await this.projection.pendingActions(10_000);
+    const pendingBeforeAdvancement = await this.executableActions(
+      await this.projection.pendingActions(10_000),
+    );
     const queuedLaunches = pendingBeforeAdvancement.filter(
       (intent) =>
         intent.action_kind === "job.launch" &&
@@ -353,6 +385,7 @@ export class Reconciler {
       this.options.batch_size,
     )) {
       try {
+        if (!(await this.actionIsExecutable(intent))) continue;
         await this.advance(intent, receipt);
         await this.service.markAdvanced(intent, receipt);
         handled += 1;
@@ -361,7 +394,9 @@ export class Reconciler {
       }
     }
     await yieldToEventLoop();
-    const pending = await this.projection.pendingActions(10_000);
+    const pending = await this.executableActions(
+      await this.projection.pendingActions(10_000),
+    );
     const dueNow = (intent: ActionIntent): boolean => {
       const notBefore = intent.payload.not_before;
       return !(typeof notBefore === "string" && Date.parse(notBefore) > Date.now());
@@ -410,7 +445,7 @@ export class Reconciler {
     failures.push(...laterLaunchBatch.failures);
     await yieldToEventLoop();
     const activeRunBatch = rotatingBatch(
-      activeRuns,
+      executableRuns,
       this.activeRunCursor,
       this.options.batch_size,
     );
@@ -558,6 +593,73 @@ export class Reconciler {
   private async fairJobLaunches(intents: ActionIntent[]): Promise<ActionIntent[]> {
     const latest = await this.projection.latestJobAdmission(this.service.namespace);
     return fairJobLaunchOrder(intents, latest?.run_id ?? null);
+  }
+
+  private async runExecutionState(
+    runId: string,
+  ): Promise<"executable" | "historical" | "missing"> {
+    const lock = await this.projection.runLock(runId);
+    if (!lock) return "missing";
+    if (isCurrentRunLock(lock)) return "executable";
+    if (!(await this.projection.runContinuation(runId))) return "historical";
+    await this.service.runExecution(lock);
+    return "executable";
+  }
+
+  private async runHasExecution(runId: string): Promise<boolean> {
+    return (await this.runExecutionState(runId)) === "executable";
+  }
+
+  private async executableItems<T extends { run_id: string }>(
+    items: readonly T[],
+  ): Promise<T[]> {
+    const availability = new Map<string, Promise<boolean>>();
+    for (const item of items) {
+      if (!availability.has(item.run_id))
+        availability.set(item.run_id, this.runHasExecution(item.run_id));
+    }
+    const executable = new Set(
+      (
+        await Promise.all(
+          [...availability].map(
+            async ([runId, available]) => [runId, await available] as const,
+          ),
+        )
+      )
+        .filter(([, available]) => available)
+        .map(([runId]) => runId),
+    );
+    return items.filter((item) => executable.has(item.run_id));
+  }
+
+  private async actionIsExecutable(intent: ActionIntent): Promise<boolean> {
+    const state = await this.runExecutionState(intent.run_id);
+    return (
+      state === "executable" ||
+      (state === "historical" && intent.action_kind === "job.observe")
+    );
+  }
+
+  private async executableActions(
+    intents: readonly ActionIntent[],
+  ): Promise<ActionIntent[]> {
+    const states = new Map<string, Promise<"executable" | "historical" | "missing">>();
+    for (const intent of intents) {
+      if (!states.has(intent.run_id))
+        states.set(intent.run_id, this.runExecutionState(intent.run_id));
+    }
+    const resolved = new Map(
+      await Promise.all(
+        [...states].map(async ([runId, state]) => [runId, await state] as const),
+      ),
+    );
+    return intents.filter((intent) => {
+      const state = resolved.get(intent.run_id);
+      return (
+        state === "executable" ||
+        (state === "historical" && intent.action_kind === "job.observe")
+      );
+    });
   }
 
   private async handle(intent: ActionIntent): Promise<void> {
@@ -720,6 +822,26 @@ export class Reconciler {
         break;
       case "run.resume": {
         const lock = await this.requiredLock(intent.run_id);
+        const historical = !isCurrentRunLock(lock.source_lock);
+        const continuation = historical
+          ? await this.projection.runContinuation(intent.run_id)
+          : null;
+        const repair = historical
+          ? await this.projection.runContinuationRepair(intent.run_id)
+          : null;
+        const successor = historical
+          ? await this.projection.runContinuationRepairSuccessor(intent.run_id)
+          : null;
+        if (historical) {
+          if (!continuation)
+            throw new PolicyError(
+              "historical run has no execution continuation attachment",
+            );
+          await this.service.assertReusableHistoricalPreparation(
+            lock.source_lock,
+            lock.execution,
+          );
+        }
         const deployment = lock.execution.deployment;
         if (
           preparationRequired(deployment) &&
@@ -756,6 +878,13 @@ export class Reconciler {
         const freshTaskIds: string[] = [];
         for (const taskId of taskIds) {
           const detail = await this.projection.task(intent.run_id, taskId);
+          if (
+            detail?.task.terminal_outcome &&
+            historicalTaskNeedsSelection(detail.task)
+          ) {
+            freshTaskIds.push(taskId);
+            continue;
+          }
           const latest = detail?.attempts.at(-1);
           if (!latest) {
             freshTaskIds.push(taskId);
@@ -764,16 +893,26 @@ export class Reconciler {
           const sourceRow = await this.projection.action(latest.action_id);
           if (sourceRow?.action_kind !== "job.launch")
             throw new PolicyError("resume attempt has no physical Job launch");
-          await this.finishAttempt(
-            JSON.parse(latest.body) as AttemptReceipt,
-            JSON.parse(sourceRow.intent_body) as ActionIntent,
-          );
+          const source = JSON.parse(sourceRow.intent_body) as ActionIntent;
+          if (
+            continuation &&
+            (source.payload.run_continuation_id !== continuation.record_id ||
+              (repair &&
+                source.payload.run_continuation_repair_id !== repair.record_id) ||
+              (successor &&
+                source.payload.run_continuation_repair_successor_id !==
+                  successor.record_id))
+          ) {
+            freshTaskIds.push(taskId);
+            continue;
+          }
+          await this.finishAttempt(JSON.parse(latest.body) as AttemptReceipt, source);
         }
         if (freshTaskIds.length > 0)
           await this.launchExecution(
             lock,
             receipt.created_at,
-            intent.generation,
+            scalar<number>(intent.payload, "launch_generation", "number"),
             freshTaskIds,
           );
         break;
@@ -829,7 +968,7 @@ export class Reconciler {
   }
 
   private async launchPreparation(
-    lock: CurrentRunLock,
+    lock: ExecutableRun,
     createdAt: string,
     attempt: number,
     generation = attempt,
@@ -887,7 +1026,7 @@ export class Reconciler {
         reservation_microusd: reservation,
         trusted_worker: profileScalar<boolean>(deployment, "trusted_worker", "boolean"),
         worker_revision: profileScalar<string>(deployment, "worker_revision", "string"),
-        run_lock_digest: sha256(canonicalJson(lock)),
+        run_lock_digest: sha256(canonicalJson(lock.source_lock)),
         ...(hourly !== undefined ? { active_hourly_cost_microusd: hourly } : {}),
       },
     );
@@ -895,7 +1034,7 @@ export class Reconciler {
   }
 
   private executionReservations(
-    lock: CurrentRunLock,
+    lock: ExecutableRun,
     taskIds: readonly string[],
     generation: number,
     createdAt: string,
@@ -993,11 +1132,12 @@ export class Reconciler {
   }
 
   private async launchExecution(
-    lock: CurrentRunLock,
+    lock: ExecutableRun,
     createdAt: string,
     generation: number,
     taskIds = lock.tasks.map((task) => task.task_id),
   ): Promise<void> {
+    const historical = !isCurrentRunLock(lock.source_lock);
     const tasks = new Map(
       (await this.projection.tasks(lock.run_id)).map((task) => [task.task_id, task]),
     );
@@ -1005,12 +1145,24 @@ export class Reconciler {
     for (const taskId of taskIds) {
       const task = tasks.get(taskId);
       if (!task) throw new PolicyError(`run task is missing: ${taskId}`);
-      if (!task.terminal_outcome) pendingTaskIds.push(taskId);
+      if (!task.terminal_outcome || (historical && historicalTaskNeedsSelection(task)))
+        pendingTaskIds.push(taskId);
     }
     if (pendingTaskIds.length === 0) return;
 
     const execution = lock.execution;
     const deployment = execution.deployment;
+    const continuation = historical
+      ? await this.projection.runContinuation(lock.run_id)
+      : null;
+    const repair = historical
+      ? await this.projection.runContinuationRepair(lock.run_id)
+      : null;
+    const successor = historical
+      ? await this.projection.runContinuationRepairSuccessor(lock.run_id)
+      : null;
+    if (historical && !continuation)
+      throw new PolicyError("historical run has no execution continuation attachment");
     const policy = profile(lock, "launch_policy");
     const reservation = profileScalar<number>(policy, "reservation_microusd", "number");
     const reservations = this.executionReservations(
@@ -1042,11 +1194,32 @@ export class Reconciler {
             timeout_seconds: deployment.timeout_seconds,
             active_hourly_cost_microusd: deployment.active_hourly_cost_microusd ?? 0,
             max_jobs: 1,
+            ...(deployment.inference_token
+              ? { inference_token: deployment.inference_token }
+              : {}),
             ...(execution.inference
               ? {
                   inference_upstream: execution.inference.upstream,
                   inference_model: execution.inference.provider_model,
                   inference_api: execution.inference.api,
+                }
+              : {}),
+            ...(deployment.inference_max_requests
+              ? { inference_max_requests: deployment.inference_max_requests }
+              : {}),
+            ...(deployment.inference_max_concurrency
+              ? {
+                  inference_max_concurrency: deployment.inference_max_concurrency,
+                }
+              : {}),
+            ...(deployment.inference_timeout_seconds
+              ? {
+                  inference_timeout_seconds: deployment.inference_timeout_seconds,
+                }
+              : {}),
+            ...(deployment.inference_max_output_tokens
+              ? {
+                  inference_max_output_tokens: deployment.inference_max_output_tokens,
                 }
               : {}),
           };
@@ -1065,11 +1238,6 @@ export class Reconciler {
             "success_without_worker_receipt",
             "boolean",
           ),
-          max_infrastructure_attempts: profileScalar<number>(
-            policy,
-            "max_infrastructure_attempts",
-            "number",
-          ),
           required_positive_metrics: optionalProfileStrings(
             policy,
             "required_positive_metrics",
@@ -1079,7 +1247,12 @@ export class Reconciler {
           ...(deployment.worker_revision
             ? { worker_revision: deployment.worker_revision }
             : {}),
-          run_lock_digest: sha256(canonicalJson(lock)),
+          run_lock_digest: sha256(canonicalJson(lock.source_lock)),
+          ...(continuation ? { run_continuation_id: continuation.record_id } : {}),
+          ...(repair ? { run_continuation_repair_id: repair.record_id } : {}),
+          ...(successor
+            ? { run_continuation_repair_successor_id: successor.record_id }
+            : {}),
           ...(prepared ? { prepared_job_digest: sha256(canonicalJson(prepared)) } : {}),
         },
       );
@@ -1150,6 +1323,7 @@ export class Reconciler {
       return;
     }
     await this.releaseObservedJobReservation(intent, receipt.created_at);
+    if (!(await this.runHasExecution(intent.run_id))) return;
     if (intent.payload.worker_role === "preparation") {
       await this.handlePreparationTerminal(intent, receipt, state);
       return;
@@ -1215,7 +1389,7 @@ export class Reconciler {
     const prepared = successful ? await this.service.preparedJob(intent.run_id) : null;
     if (prepared) {
       const lock = await this.requiredLock(intent.run_id);
-      if (prepared.run_lock_digest !== sha256(canonicalJson(lock)))
+      if (prepared.run_lock_digest !== sha256(canonicalJson(lock.source_lock)))
         throw new PolicyError("prepared job does not match the run lock");
       if (!(await this.projection.runPaused(intent.run_id)))
         await this.launchExecution(
@@ -1307,9 +1481,18 @@ export class Reconciler {
   ): Promise<void> {
     const tasks = stringArray(intent.payload, "task_ids");
     const known = await this.projection.runAttempts(intent.run_id);
+    const continuation = await this.projection.runContinuation(intent.run_id);
+    const continued =
+      continuation !== null &&
+      intent.payload.run_continuation_id === continuation.record_id;
     for (const taskId of tasks) {
       const task = await this.projection.task(intent.run_id, taskId);
-      if (!task || task.task.terminal_outcome) continue;
+      if (
+        !task ||
+        (task.task.terminal_outcome &&
+          !(continued && historicalTaskNeedsSelection(task.task)))
+      )
+        continue;
       const launchActionId =
         intent.action_kind === "job.launch"
           ? intent.action_id
@@ -1338,6 +1521,17 @@ export class Reconciler {
         action_id: launchActionId,
         outcome: fallback,
         replacement_eligible: replacementEligible,
+        ...(replacementEligible
+          ? {
+              failure_fingerprint: sha256(
+                canonicalJson({
+                  kind: "job-terminal-without-worker-receipt",
+                  observed_state: receipt.observed_state,
+                  worker_revision: intent.payload.worker_revision ?? "unknown",
+                }),
+              ),
+            }
+          : {}),
         evidence_digest: sha256(canonicalJson(receipt)),
         evidence_path: controlRecordPath(receipt),
         cost_microusd: 0,
@@ -1357,11 +1551,15 @@ export class Reconciler {
       (await this.taskCancellationRequested(attempt.run_id, attempt.task_id))
     )
       return;
+    const task = await this.projection.task(attempt.run_id, attempt.task_id);
+    if (task?.task.selected_attempt_id) return;
     const lock = await this.requiredLock(attempt.run_id);
-    const validity = attemptAdmissibility(attempt, requiredPositiveMetrics(lock));
-    const attempts = (await this.projection.runAttempts(attempt.run_id)).filter(
-      (item) => item.task_id === attempt.task_id,
+    const validity = attemptAdmissibility(
+      attempt,
+      requiredPositiveMetrics(lock.source_lock),
     );
+    const runAttempts = await this.projection.runAttempts(attempt.run_id);
+    const attempts = runAttempts.filter((item) => item.task_id === attempt.task_id);
     if (source.payload.worker_role === "preparation") {
       await this.service.exhaustTask(
         attempt,
@@ -1388,21 +1586,40 @@ export class Reconciler {
         await this.projection.retryActionForAttempt(attempt.run_id, attempt.attempt_id)
       )
         return;
-      const infrastructureAttempts = attempts.filter(
-        (item) => item.outcome === "infrastructure",
-      );
-      const maxAttempts = scalar<number>(
-        source.payload,
-        "max_infrastructure_attempts",
-        "number",
-      );
-      if (infrastructureAttempts.length >= maxAttempts) {
-        await this.service.exhaustTask(
-          attempt,
-          `attempt limit exhausted: ${validity.reason}`,
-          attempts.length,
+      if (attempt.failure_fingerprint) {
+        const matchingFailures = runAttempts.filter((item) => {
+          const receipt = JSON.parse(item.body) as AttemptReceipt;
+          return (
+            receipt.outcome === "infrastructure" &&
+            receipt.failure_fingerprint === attempt.failure_fingerprint
+          );
+        });
+        const repair = await this.projection.runContinuationRepair(attempt.run_id);
+        const successor = await this.projection.runContinuationRepairSuccessor(
+          attempt.run_id,
         );
-        return;
+        const latestRepair = successor ?? repair;
+        const repairedAfterAttempt =
+          latestRepair !== null &&
+          Date.parse(latestRepair.created_at) > Date.parse(attempt.created_at);
+        if (matchingFailures.length >= 2 && !repairedAfterAttempt) {
+          const latestResume = (await this.projection.runActions(attempt.run_id)).find(
+            (action) =>
+              action.action_kind === "run.resume" &&
+              Date.parse(action.created_at) > Date.parse(attempt.created_at),
+          );
+          const pauseCycle = latestResume?.action_id ?? attempt.attempt_id;
+          await this.service.writeAction(
+            this.service.actionIntent(
+              attempt.run_id,
+              "run.pause",
+              `repeated-defect:${attempt.task_id}:${pauseCycle}`,
+              0,
+              { reason: repeatedInfrastructureFailureReason },
+            ),
+          );
+          return;
+        }
       }
       if (
         await this.service.laterExecutionLaunchExists(
@@ -1418,12 +1635,51 @@ export class Reconciler {
         "reservation_microusd",
         "number",
       );
+      const runActions = await this.projection.runActions(attempt.run_id);
+      const taskLaunches = runActions.filter((action) => {
+        if (action.action_kind !== "job.launch") return false;
+        const launch = JSON.parse(action.intent_body) as ActionIntent;
+        return launch.payload.task_id === attempt.task_id;
+      });
+      const retryGeneration = nextAvailableActionGeneration(
+        taskLaunches.map((launch) => launch.generation),
+      );
+      if (retryGeneration === null) {
+        await this.service.writeAction(
+          this.service.actionIntent(
+            attempt.run_id,
+            "run.pause",
+            `retry-generation-limit:${attempt.task_id}`,
+            maximumActionGeneration,
+            { reason: "automatic retry generation limit reached" },
+          ),
+        );
+        return;
+      }
+      const latestResume = runActions.find(
+        (action) =>
+          action.action_kind === "run.resume" &&
+          Date.parse(action.created_at) > Date.parse(attempt.created_at),
+      );
+      const repair = await this.projection.runContinuationRepair(attempt.run_id);
+      const successor = await this.projection.runContinuationRepairSuccessor(
+        attempt.run_id,
+      );
+      const replacementReservationKey = deterministicId(
+        "replacement-reservation",
+        attempt.attempt_id,
+        latestResume?.action_id ??
+          successor?.record_id ??
+          repair?.record_id ??
+          "initial",
+      );
       if (
         !(await this.service.reserveReplacement(
           attempt.run_id,
           attempt.attempt_id,
           attempt.created_at,
           reservation,
+          replacementReservationKey,
         ))
       ) {
         await this.service.exhaustTask(
@@ -1441,12 +1697,27 @@ export class Reconciler {
         attempt.run_id,
         "job.launch",
         attempt.task_id,
-        infrastructureAttempts.length,
+        retryGeneration,
         {
           ...withoutRunActionIdempotency(launch.payload),
+          ...(repair
+            ? {
+                job_image: lock.execution.deployment.job_image,
+                worker_revision: lock.execution.deployment.worker_revision,
+                run_continuation_repair_id: repair.record_id,
+              }
+            : {}),
+          ...(successor
+            ? {
+                job_image: lock.execution.deployment.job_image,
+                worker_revision: lock.execution.deployment.worker_revision,
+                run_continuation_repair_successor_id: successor.record_id,
+              }
+            : {}),
           task_id: attempt.task_id,
           task_ids: [attempt.task_id],
           prior_attempt_id: attempt.attempt_id,
+          replacement_reservation_key: replacementReservationKey,
         },
       );
       await this.service.writeAction(retry);
@@ -1685,24 +1956,36 @@ export class Reconciler {
     if (intent.payload.worker_role === "preparation") return false;
     const taskIds = stringArray(intent.payload, "task_ids");
     if (taskIds.length === 0) return false;
+    const lock = await this.projection.runLock(intent.run_id);
+    const historical = lock !== null && !isCurrentRunLock(lock);
+    const continuation = historical
+      ? await this.projection.runContinuation(intent.run_id)
+      : null;
+    const continued =
+      continuation !== null &&
+      intent.payload.run_continuation_id === continuation.record_id;
     for (const taskId of taskIds) {
       const task = await this.projection.task(intent.run_id, taskId);
       if (
         !task?.task.terminal_outcome ||
-        infrastructureSealReplaceable(task.task.terminal_outcome)
+        (historical
+          ? continued && historicalTaskNeedsSelection(task.task)
+          : infrastructureSealReplaceable(task.task.terminal_outcome))
       )
         return false;
     }
     return true;
   }
 
-  private async requiredLock(runId: string): Promise<CurrentRunLock> {
+  private async requiredLock(runId: string): Promise<ExecutableRun> {
     const lock = await this.projection.runLock(runId);
     if (!lock) throw new PolicyError(`run lock is missing: ${runId}`);
-    if (!isCurrentRunLock(lock))
-      throw new PolicyError(
-        `historical run lock is read-only after the profile cutover: ${runId}`,
-      );
-    return lock;
+    return {
+      run_id: lock.run_id,
+      tasks: lock.tasks,
+      profiles: lock.profiles,
+      execution: await this.service.runExecution(lock),
+      source_lock: lock,
+    };
   }
 }

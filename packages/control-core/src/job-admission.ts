@@ -4,11 +4,13 @@ export type JobLimitingFactor =
   | "run_job_capacity"
   | "namespace_job_capacity"
   | "hardware_job_capacity"
+  | "provider_request_capacity"
   | "start_rate";
 
 export interface JobAdmissionState {
   active_jobs: number;
   active_hardware: number;
+  active_provider_requests: number;
   tokens: number;
   refill_cursor_at: string;
 }
@@ -45,10 +47,24 @@ export function decideJobAdmission(
   policy: CapacityProfileSpec,
   state: JobAdmissionState,
   hardware: string,
+  reservedProviderRequests: number,
+  maxProviderRequests: number,
   runMaxJobs: number,
   runActiveJobs: number,
   now: Date,
 ): JobAdmissionDecision {
+  if (
+    !Number.isInteger(reservedProviderRequests) ||
+    reservedProviderRequests < 0 ||
+    reservedProviderRequests > 65_536
+  )
+    throw new Error("reserved provider requests must be an integer from 0 to 65536");
+  if (
+    !Number.isInteger(maxProviderRequests) ||
+    maxProviderRequests < reservedProviderRequests ||
+    maxProviderRequests > 65_536
+  )
+    throw new Error("provider request cap must cover one Job and not exceed 65536");
   if (!Number.isInteger(runMaxJobs) || runMaxJobs < 1 || runMaxJobs > 1024)
     throw new Error("run Job cap must be an integer from 1 to 1024");
 
@@ -76,6 +92,17 @@ export function decideJobAdmission(
     return {
       status: "deferred",
       limiting_factor: "hardware_job_capacity",
+      not_before: null,
+      tokens_remaining: refillState.tokens,
+      refill_cursor_at: refillState.cursor.toISOString(),
+    };
+  if (
+    reservedProviderRequests > 0 &&
+    state.active_provider_requests + reservedProviderRequests > maxProviderRequests
+  )
+    return {
+      status: "deferred",
+      limiting_factor: "provider_request_capacity",
       not_before: null,
       tokens_remaining: refillState.tokens,
       refill_cursor_at: refillState.cursor.toISOString(),

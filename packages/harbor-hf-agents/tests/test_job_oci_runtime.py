@@ -648,6 +648,57 @@ async def test_background_process_is_lifecycle_owned_and_reaped(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_command_quiesces_without_deleting_task_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolated = IsolatedOciRuntime(
+        _TASK_IMAGE,
+        _limits(),
+        _image_limits(),
+        control_task_image_mirror_repository=_MIRROR_REPOSITORY,
+    )
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()
+    stderr = asyncio.StreamReader()
+    stderr.feed_eof()
+    process = Mock(
+        stdout=stdout,
+        stderr=stderr,
+        returncode=None,
+    )
+    process.wait = AsyncMock(side_effect=[asyncio.CancelledError(), -9])
+    create_process = AsyncMock(return_value=process)
+    quiesce = AsyncMock()
+    stop = AsyncMock()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(
+        isolated,
+        "_proot_arguments",
+        lambda *_args, **_kwargs: ["proot", "command"],
+    )
+    monkeypatch.setattr(runtime, "_setpriv_arguments", lambda arguments: arguments)
+    monkeypatch.setattr(isolated, "quiesce", quiesce)
+    monkeypatch.setattr(isolated, "stop", stop)
+    isolated._running = True
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await isolated.exec(
+                "agent",
+                cwd=None,
+                environment={},
+                timeout_seconds=5,
+                user="root",
+            )
+
+        process.kill.assert_called_once_with()
+        quiesce.assert_awaited_once_with()
+        stop.assert_not_awaited()
+        assert isolated.rootfs.is_dir()
+    finally:
+        _cleanup_runtime(isolated)
+
+
+@pytest.mark.asyncio
 async def test_quiesce_is_idempotent_after_runtime_shutdown() -> None:
     isolated = IsolatedOciRuntime(
         _TASK_IMAGE,

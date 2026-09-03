@@ -1,7 +1,6 @@
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
 import { fastAgentWorkbenchStarter } from "@harbor-hf/control-core";
 import type {
   WorkbenchJobClient,
@@ -10,6 +9,7 @@ import type {
   WorkbenchJobRequest,
   WorkbenchJobSnapshot,
 } from "@harbor-hf/hf-adapters";
+import { afterEach, describe, expect, it } from "vitest";
 import { WorkbenchRuntime } from "../src/workbench.js";
 
 describe.sequential("local Workbench runner", () => {

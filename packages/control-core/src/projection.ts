@@ -18,6 +18,9 @@ import type {
   ProfilePromotion,
   PublicationReceipt,
   PublicationSupersession,
+  RunContinuation,
+  RunContinuationRepair,
+  RunContinuationRepairSuccessor,
   RunLock,
   RunRequest,
   TaskCancellation,
@@ -38,6 +41,11 @@ import {
 } from "./attempt-admissibility.js";
 import { type ControlEvent, decodeEventCursor, eventCursor } from "./events.js";
 import { verifyEvidenceReference, verifyWorkerEvidence } from "./evidence.js";
+import {
+  assertRunContinuationCompatible,
+  isCurrentRunLock,
+  resolvedRunExecution,
+} from "./execution-contract.js";
 import type { PromotedProfile } from "./profiles.js";
 import type { ImmutableObjectStore, ObjectEntry } from "./store.js";
 
@@ -81,6 +89,27 @@ interface RunRow {
   request_body: string | null;
   lock_body: string | null;
   ceiling_microusd: number;
+}
+
+interface RunContinuationRow {
+  run_id: string;
+  record_id: string;
+  created_at: string;
+  body: string;
+}
+
+interface RunContinuationRepairRow {
+  run_id: string;
+  record_id: string;
+  created_at: string;
+  body: string;
+}
+
+interface RunContinuationRepairSuccessorRow {
+  run_id: string;
+  record_id: string;
+  created_at: string;
+  body: string;
 }
 
 interface ActionRow {
@@ -253,6 +282,9 @@ interface MigrationRow {
 interface DatabaseSchema {
   objects: ObjectRow;
   runs: RunRow;
+  run_continuations: RunContinuationRow;
+  run_continuation_repairs: RunContinuationRepairRow;
+  run_continuation_repair_successors: RunContinuationRepairSuccessorRow;
   actions: ActionRow;
   jobs: JobRow;
   dispatches: DispatchRow;
@@ -307,7 +339,7 @@ export interface SystemView {
 
 export class ProjectionIntegrityError extends Error {}
 
-const REBUILD_IO_CONCURRENCY = 16;
+const REBUILD_IO_CONCURRENCY = 64;
 const PROJECTION_APPLY_BATCH_SIZE = 64;
 const RUN_NATIVE_CONTROL_PREFIXES = [
   "control/schema=v1/migrations/",
@@ -368,18 +400,6 @@ async function listProjectionEntries(
 ): Promise<ObjectEntry[]> {
   const prefixes = prefix ? [prefix] : RUN_NATIVE_CONTROL_PREFIXES;
   return (await Promise.all(prefixes.map((value) => store.list(value)))).flat();
-}
-
-async function readRebuildObjects(
-  store: ImmutableObjectStore,
-  entries: readonly ObjectEntry[],
-): Promise<Uint8Array[]> {
-  const objects: Uint8Array[] = [];
-  for (let offset = 0; offset < entries.length; offset += REBUILD_IO_CONCURRENCY) {
-    const batch = entries.slice(offset, offset + REBUILD_IO_CONCURRENCY);
-    objects.push(...(await Promise.all(batch.map((entry) => store.read(entry.key)))));
-  }
-  return objects;
 }
 
 async function verifyRebuildEvidence(
@@ -452,7 +472,9 @@ const terminalJobStates = new Set([
 ]);
 
 function jobStateIsTerminal(state: string | null): boolean {
-  return state !== null && terminalJobStates.has(state.toUpperCase());
+  if (state === null) return false;
+  const normalized = state.toUpperCase();
+  return terminalJobStates.has(normalized) || normalized.startsWith("SUPPRESSED-");
 }
 
 function assignedTaskIdsFromIntent(intentBody: string): string[] {
@@ -680,6 +702,30 @@ export class Projection {
       )
       .execute();
     await this.db.schema
+      .createTable("run_continuations")
+      .ifNotExists()
+      .addColumn("run_id", "text", (column) => column.primaryKey())
+      .addColumn("record_id", "text", (column) => column.notNull().unique())
+      .addColumn("created_at", "text", (column) => column.notNull())
+      .addColumn("body", "text", (column) => column.notNull())
+      .execute();
+    await this.db.schema
+      .createTable("run_continuation_repairs")
+      .ifNotExists()
+      .addColumn("run_id", "text", (column) => column.primaryKey())
+      .addColumn("record_id", "text", (column) => column.notNull().unique())
+      .addColumn("created_at", "text", (column) => column.notNull())
+      .addColumn("body", "text", (column) => column.notNull())
+      .execute();
+    await this.db.schema
+      .createTable("run_continuation_repair_successors")
+      .ifNotExists()
+      .addColumn("run_id", "text", (column) => column.primaryKey())
+      .addColumn("record_id", "text", (column) => column.notNull().unique())
+      .addColumn("created_at", "text", (column) => column.notNull())
+      .addColumn("body", "text", (column) => column.notNull())
+      .execute();
+    await this.db.schema
       .createTable("actions")
       .ifNotExists()
       .addColumn("action_id", "text", (column) => column.primaryKey())
@@ -795,6 +841,7 @@ export class Projection {
       .addColumn("reason", "text", (column) => column.notNull())
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("body", "text", (column) => column.notNull())
+      .addUniqueConstraint("task_exhaustions_run_task_unique", ["run_id", "task_id"])
       .execute();
     await this.db.schema
       .createTable("budgets")
@@ -925,10 +972,24 @@ export class Projection {
       "dispatches",
       "jobs",
       "actions",
+      "run_continuation_repair_successors",
+      "run_continuation_repairs",
+      "run_continuations",
       "runs",
       "objects",
     ] as const) {
       await this.db.deleteFrom(table).execute();
+    }
+  }
+
+  private async writeTransaction(work: () => Promise<void>): Promise<void> {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      await work();
+      this.database.exec("COMMIT");
+    } catch (error) {
+      if (this.database.inTransaction) this.database.exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -953,33 +1014,47 @@ export class Projection {
           throw new ProjectionIntegrityError(`duplicate object listing: ${entry.key}`);
         seen.add(entry.key);
       }
-      // Fetch immutable objects concurrently, then apply them in deterministic key order.
-      const objects = await readRebuildObjects(store, entries);
       await this.clear();
-      const parsed = entries.map((entry, index) => {
-        const bytes = objects[index];
-        if (!bytes)
-          throw new ProjectionIntegrityError(`missing prefetched object: ${entry.key}`);
-        const verified = verifiedEntry(bytes, entry);
-        return { entry: verified, record: parseRecord(bytes, verified) };
-      });
-      await verifyRebuildEvidence(
-        store,
-        parsed.map(({ record }) => record),
-      );
       const supersessions: Array<{
         entry: VerifiedObjectEntry;
         record: PublicationSupersession;
       }> = [];
-      for (const [index, { entry, record }] of parsed.entries()) {
-        if (index > 0 && index % PROJECTION_APPLY_BATCH_SIZE === 0)
-          await yieldToEventLoop();
-        if (record.kind === "publication.supersession")
-          supersessions.push({ entry, record });
-        else await this.apply(entry, record);
+      const evidenceRecords: AttemptReceipt[] = [];
+      // Parse and apply one download batch at a time so replay memory stays
+      // bounded as the immutable Run history grows.
+      for (let offset = 0; offset < entries.length; offset += REBUILD_IO_CONCURRENCY) {
+        const batchEntries = entries.slice(offset, offset + REBUILD_IO_CONCURRENCY);
+        const objects = await Promise.all(
+          batchEntries.map((entry) => store.read(entry.key)),
+        );
+        const parsed = batchEntries.map((entry, index) => {
+          const bytes = objects[index];
+          if (!bytes)
+            throw new ProjectionIntegrityError(
+              `missing prefetched object: ${entry.key}`,
+            );
+          const verified = verifiedEntry(bytes, entry);
+          return { entry: verified, record: parseRecord(bytes, verified) };
+        });
+        // One transaction per batch avoids a durable SQLite flush for every
+        // derived row while keeping network reads outside the transaction.
+        await this.writeTransaction(async () => {
+          for (const { entry, record } of parsed) {
+            if (record.kind === "attempt.receipt" && record.actor.role !== "migration")
+              evidenceRecords.push(record);
+            if (record.kind === "publication.supersession")
+              supersessions.push({ entry, record });
+            else await this.apply(entry, record);
+          }
+        });
+        await yieldToEventLoop();
       }
-      for (const deferred of supersessions)
-        await this.apply(deferred.entry, deferred.record);
+      if (supersessions.length > 0)
+        await this.writeTransaction(async () => {
+          for (const deferred of supersessions)
+            await this.apply(deferred.entry, deferred.record);
+        });
+      await verifyRebuildEvidence(store, evidenceRecords);
       await this.verifyInvariants();
       const rebuiltAt = new Date().toISOString();
       this.state = {
@@ -1133,6 +1208,15 @@ export class Projection {
       case "run.lock":
         await this.applyRunLock(record);
         break;
+      case "run.continuation":
+        await this.applyRunContinuation(record);
+        break;
+      case "run.continuation.repair":
+        await this.applyRunContinuationRepair(record);
+        break;
+      case "run.continuation.repair.successor":
+        await this.applyRunContinuationRepairSuccessor(record);
+        break;
       case "action.intent":
         await this.applyActionIntent(record);
         break;
@@ -1242,6 +1326,46 @@ export class Projection {
         })
         .execute();
     }
+  }
+
+  private async applyRunContinuation(record: RunContinuation): Promise<void> {
+    await this.db
+      .insertInto("run_continuations")
+      .values({
+        run_id: record.run_id,
+        record_id: record.record_id,
+        created_at: record.created_at,
+        body: body(record),
+      })
+      .execute();
+  }
+
+  private async applyRunContinuationRepair(
+    record: RunContinuationRepair,
+  ): Promise<void> {
+    await this.db
+      .insertInto("run_continuation_repairs")
+      .values({
+        run_id: record.run_id,
+        record_id: record.record_id,
+        created_at: record.created_at,
+        body: body(record),
+      })
+      .execute();
+  }
+
+  private async applyRunContinuationRepairSuccessor(
+    record: RunContinuationRepairSuccessor,
+  ): Promise<void> {
+    await this.db
+      .insertInto("run_continuation_repair_successors")
+      .values({
+        run_id: record.run_id,
+        record_id: record.record_id,
+        created_at: record.created_at,
+        body: body(record),
+      })
+      .execute();
   }
 
   private async applyActionIntent(record: ActionIntent): Promise<void> {
@@ -1546,6 +1670,10 @@ export class Projection {
         eb.or([
           eb("terminal_outcome", "is", null),
           eb("terminal_outcome", "=", "infrastructure"),
+          eb.and([
+            eb("selected_attempt_id", "is", null),
+            eb("terminal_outcome", "=", "invalid"),
+          ]),
         ]),
       )
       .executeTakeFirst();
@@ -1593,20 +1721,40 @@ export class Projection {
         attempt.outcome === "infrastructure" &&
         Number(attempt.replacement_eligible) > 0;
     }
-    await this.db
-      .insertInto("task_exhaustions")
-      .values({
-        record_id: record.record_id,
-        run_id: record.run_id,
-        task_id: record.task_id,
-        source_action_id: record.source_action_id,
-        last_attempt_id: record.last_attempt_id,
-        attempt_count: record.attempt_count,
-        reason: record.reason,
-        created_at: record.created_at,
-        body: body(record),
-      })
-      .execute();
+    const existing = await this.db
+      .selectFrom("task_exhaustions")
+      .select(["record_id", "created_at"])
+      .where("run_id", "=", record.run_id)
+      .where("task_id", "=", record.task_id)
+      .executeTakeFirst();
+    // Bucket listing order is not event order. Keep the latest immutable
+    // exhaustion so crash rebuilds and live projection produce the same task.
+    if (
+      existing &&
+      (existing.created_at > record.created_at ||
+        (existing.created_at === record.created_at &&
+          existing.record_id >= record.record_id))
+    )
+      return;
+    const values = {
+      record_id: record.record_id,
+      run_id: record.run_id,
+      task_id: record.task_id,
+      source_action_id: record.source_action_id,
+      last_attempt_id: record.last_attempt_id,
+      attempt_count: record.attempt_count,
+      reason: record.reason,
+      created_at: record.created_at,
+      body: body(record),
+    };
+    if (existing)
+      await this.db
+        .updateTable("task_exhaustions")
+        .set(values)
+        .where("run_id", "=", record.run_id)
+        .where("task_id", "=", record.task_id)
+        .execute();
+    else await this.db.insertInto("task_exhaustions").values(values).execute();
     const result = await this.db
       .updateTable("tasks")
       .set({
@@ -1615,7 +1763,16 @@ export class Projection {
       })
       .where("run_id", "=", record.run_id)
       .where("task_id", "=", record.task_id)
-      .where("terminal_outcome", "is", null)
+      .where((eb) =>
+        eb.or([
+          eb("terminal_outcome", "is", null),
+          eb("terminal_outcome", "=", "infrastructure"),
+          eb.and([
+            eb("selected_attempt_id", "is", null),
+            eb("terminal_outcome", "=", "invalid"),
+          ]),
+        ]),
+      )
       .executeTakeFirst();
     if (Number(result.numUpdatedRows) !== 1)
       throw new ProjectionIntegrityError(`task is already terminal: ${record.task_id}`);
@@ -1782,6 +1939,123 @@ export class Projection {
   }
 
   private async verifyInvariants(): Promise<void> {
+    const continuationRows = await this.db
+      .selectFrom("run_continuations")
+      .select(["run_id", "record_id", "body"])
+      .execute();
+    const continuationLocks = new Map(
+      (
+        await this.db
+          .selectFrom("runs")
+          .select(["run_id", "lock_body"])
+          .where(
+            "run_id",
+            "in",
+            continuationRows.map((row) => row.run_id),
+          )
+          .execute()
+      ).map((run) => [run.run_id, run.lock_body]),
+    );
+    for (const row of continuationRows) {
+      const lockBody = continuationLocks.get(row.run_id);
+      const continuation = JSON.parse(row.body) as RunContinuation;
+      if (!lockBody)
+        throw new ProjectionIntegrityError(
+          `run continuation has no lock: ${row.record_id}`,
+        );
+      const lock = JSON.parse(lockBody) as RunLock;
+      if (
+        isCurrentRunLock(lock) ||
+        continuation.actor.role !== "operator" ||
+        continuation.run_id !== lock.run_id ||
+        continuation.run_lock_digest !== sha256(canonicalJson(lock))
+      )
+        throw new ProjectionIntegrityError(
+          `run continuation binding is invalid: ${row.record_id}`,
+        );
+      try {
+        assertRunContinuationCompatible(lock, continuation.execution);
+      } catch (error) {
+        throw new ProjectionIntegrityError(
+          `run continuation execution is incompatible: ${row.record_id}: ${
+            error instanceof Error ? error.message : "validation failed"
+          }`,
+        );
+      }
+    }
+
+    const repairRows = await this.db
+      .selectFrom("run_continuation_repairs")
+      .select(["run_id", "record_id", "body"])
+      .execute();
+    const continuations = new Map(
+      continuationRows.map((row) => [
+        row.run_id,
+        JSON.parse(row.body) as RunContinuation,
+      ]),
+    );
+    for (const row of repairRows) {
+      const lockBody = continuationLocks.get(row.run_id);
+      const continuation = continuations.get(row.run_id);
+      const repair = JSON.parse(row.body) as RunContinuationRepair;
+      if (!lockBody || !continuation)
+        throw new ProjectionIntegrityError(
+          `run continuation repair has no continuation: ${row.record_id}`,
+        );
+      if (repair.actor.role !== "operator")
+        throw new ProjectionIntegrityError(
+          `run continuation repair binding is invalid: ${row.record_id}`,
+        );
+      try {
+        resolvedRunExecution(JSON.parse(lockBody) as RunLock, continuation, repair);
+      } catch (error) {
+        throw new ProjectionIntegrityError(
+          `run continuation repair is incompatible: ${row.record_id}: ${
+            error instanceof Error ? error.message : "validation failed"
+          }`,
+        );
+      }
+    }
+
+    const successorRows = await this.db
+      .selectFrom("run_continuation_repair_successors")
+      .select(["run_id", "record_id", "body"])
+      .execute();
+    const repairs = new Map(
+      repairRows.map((row) => [
+        row.run_id,
+        JSON.parse(row.body) as RunContinuationRepair,
+      ]),
+    );
+    for (const row of successorRows) {
+      const lockBody = continuationLocks.get(row.run_id);
+      const continuation = continuations.get(row.run_id);
+      const repair = repairs.get(row.run_id);
+      const successor = JSON.parse(row.body) as RunContinuationRepairSuccessor;
+      if (!lockBody || !continuation || !repair)
+        throw new ProjectionIntegrityError(
+          `run continuation repair successor has no prior repair: ${row.record_id}`,
+        );
+      if (successor.actor.role !== "operator")
+        throw new ProjectionIntegrityError(
+          `run continuation repair successor binding is invalid: ${row.record_id}`,
+        );
+      try {
+        resolvedRunExecution(
+          JSON.parse(lockBody) as RunLock,
+          continuation,
+          repair,
+          successor,
+        );
+      } catch (error) {
+        throw new ProjectionIntegrityError(
+          `run continuation repair successor is incompatible: ${row.record_id}: ${
+            error instanceof Error ? error.message : "validation failed"
+          }`,
+        );
+      }
+    }
+
     const profileRows = await this.db
       .selectFrom("profiles")
       .select(["profile_id", "profile_kind", "spec_body"])
@@ -2065,7 +2339,7 @@ export class Projection {
       .where("actions.receipt_body", "is not", null)
       .where("advancements.action_id", "is", null)
       .where(
-        sql<boolean>`json_extract(actions.intent_body, '$.actor.role') <> 'migration'`,
+        sql<boolean>`(json_extract(actions.intent_body, '$.actor.role') <> 'migration' or actions.action_kind = 'job.observe')`,
       )
       .orderBy("actions.created_at")
       .orderBy("actions.action_id")
@@ -2075,6 +2349,19 @@ export class Projection {
       intent: JSON.parse(row.intent_body) as ActionIntent,
       receipt: JSON.parse(row.receipt_body as string) as ActionReceipt,
     }));
+  }
+
+  async runHasUnadvancedActions(runId: string): Promise<boolean> {
+    return Boolean(
+      await this.db
+        .selectFrom("actions")
+        .leftJoin("advancements", "advancements.action_id", "actions.action_id")
+        .select("actions.action_id")
+        .where("actions.run_id", "=", runId)
+        .where("actions.receipt_body", "is not", null)
+        .where("advancements.action_id", "is", null)
+        .executeTakeFirst(),
+    );
   }
 
   async actionDispatch(actionId: string): Promise<Selectable<DispatchRow> | null> {
@@ -2128,18 +2415,33 @@ export class Projection {
   async activeJobAdmissions(namespace: string): Promise<JobAdmissionGrant[]> {
     const rows = await this.db
       .selectFrom("job_admissions")
+      .innerJoin("actions", "actions.action_id", "job_admissions.action_id")
       .leftJoin(
         "job_capacity_releases",
         "job_capacity_releases.action_id",
         "job_admissions.action_id",
       )
-      .select("job_admissions.body")
+      .select(["job_admissions.body", "actions.intent_body"])
       .where("job_admissions.namespace", "=", namespace)
       .where("job_capacity_releases.action_id", "is", null)
       .orderBy("job_admissions.created_at")
       .orderBy("job_admissions.action_id")
       .execute();
-    return rows.map((row) => JSON.parse(row.body) as JobAdmissionGrant);
+    return rows.map((row) => {
+      const grant = JSON.parse(row.body) as JobAdmissionGrant;
+      if (grant.reserved_provider_requests !== undefined) return grant;
+      const intent = JSON.parse(row.intent_body) as ActionIntent;
+      const concurrency = intent.payload.inference_max_concurrency;
+      return {
+        ...grant,
+        reserved_provider_requests:
+          typeof intent.payload.inference_upstream === "string"
+            ? typeof concurrency === "number"
+              ? concurrency
+              : 1
+            : 0,
+      };
+    });
   }
 
   async activeJobAdmissionRunUsage(
@@ -2231,6 +2533,35 @@ export class Projection {
       .where("run_id", "=", runId)
       .executeTakeFirst();
     return row?.lock_body ? (JSON.parse(row.lock_body) as RunLock) : null;
+  }
+
+  async runContinuation(runId: string): Promise<RunContinuation | null> {
+    const row = await this.db
+      .selectFrom("run_continuations")
+      .select("body")
+      .where("run_id", "=", runId)
+      .executeTakeFirst();
+    return row ? (JSON.parse(row.body) as RunContinuation) : null;
+  }
+
+  async runContinuationRepair(runId: string): Promise<RunContinuationRepair | null> {
+    const row = await this.db
+      .selectFrom("run_continuation_repairs")
+      .select("body")
+      .where("run_id", "=", runId)
+      .executeTakeFirst();
+    return row ? (JSON.parse(row.body) as RunContinuationRepair) : null;
+  }
+
+  async runContinuationRepairSuccessor(
+    runId: string,
+  ): Promise<RunContinuationRepairSuccessor | null> {
+    const row = await this.db
+      .selectFrom("run_continuation_repair_successors")
+      .select("body")
+      .where("run_id", "=", runId)
+      .executeTakeFirst();
+    return row ? (JSON.parse(row.body) as RunContinuationRepairSuccessor) : null;
   }
 
   async budget(recordId: string): Promise<Selectable<BudgetRow> | null> {
@@ -2336,6 +2667,26 @@ export class Projection {
     const launch = actions.find((action) => action.action_id === actionId);
     if (launch?.action_kind !== "job.launch") return false;
     return launchStillRunning(launch, actions);
+  }
+
+  async runHasRunningJobs(runId: string): Promise<boolean> {
+    const actions = await this.runActions(runId);
+    return actions.some(
+      (action) =>
+        action.action_kind === "job.launch" && launchStillRunning(action, actions),
+    );
+  }
+
+  async nextExecutionLaunchGeneration(runId: string): Promise<number> {
+    return (
+      (await this.runActions(runId)).reduce((maximum, action) => {
+        if (action.action_kind !== "job.launch") return maximum;
+        const launch = JSON.parse(action.intent_body) as ActionIntent;
+        return launch.payload.worker_role === "preparation"
+          ? maximum
+          : Math.max(maximum, action.generation);
+      }, -1) + 1
+    );
   }
 
   /**
@@ -2754,18 +3105,21 @@ export class Projection {
     runId: string,
     priorAttemptId: string,
   ): Promise<Selectable<ActionRow> | null> {
+    const candidates = await this.db
+      .selectFrom("actions")
+      .selectAll()
+      .where("run_id", "=", runId)
+      .where("action_kind", "=", "job.launch")
+      .where(
+        sql<boolean>`json_extract(intent_body, '$.payload.prior_attempt_id') = ${priorAttemptId}`,
+      )
+      .orderBy("created_at")
+      .orderBy("action_id")
+      .execute();
     return (
-      (await this.db
-        .selectFrom("actions")
-        .selectAll()
-        .where("run_id", "=", runId)
-        .where("action_kind", "=", "job.launch")
-        .where(
-          sql<boolean>`json_extract(intent_body, '$.payload.prior_attempt_id') = ${priorAttemptId}`,
-        )
-        .orderBy("created_at")
-        .orderBy("action_id")
-        .executeTakeFirst()) ?? null
+      candidates.find(
+        (candidate) => !candidate.observed_state?.startsWith("suppressed-"),
+      ) ?? null
     );
   }
 

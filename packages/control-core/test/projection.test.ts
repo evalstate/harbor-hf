@@ -136,6 +136,29 @@ class ConcurrentReadStore implements ImmutableObjectStore {
   }
 }
 
+class BatchLifetimeStore implements ImmutableObjectStore {
+  private readCount = 0;
+  private readonly returned: Uint8Array[] = [];
+
+  constructor(private readonly source: ImmutableObjectStore) {}
+
+  list(prefix: string): Promise<readonly ObjectEntry[]> {
+    return this.source.list(prefix);
+  }
+
+  async read(key: string): Promise<Uint8Array> {
+    this.readCount += 1;
+    if (this.readCount === 65) for (const bytes of this.returned) bytes.fill(0);
+    const bytes = await this.source.read(key);
+    this.returned.push(bytes);
+    return bytes;
+  }
+
+  create(key: string, bytes: Uint8Array) {
+    return this.source.create(key, bytes);
+  }
+}
+
 describe("projection replay", () => {
   it("preserves historical capacity profile bytes and promotion identity", async () => {
     const control = await createTestControl();
@@ -309,7 +332,36 @@ describe("projection replay", () => {
     await projection.rebuild(store);
 
     expect(store.maxActiveReads).toBeGreaterThan(1);
-    expect(store.maxActiveReads).toBeLessThanOrEqual(16);
+    expect(store.maxActiveReads).toBeLessThanOrEqual(64);
+    await projection.close();
+  });
+
+  it("parses each rebuild download batch before reading the next batch", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    for (let index = 0; index < 65; index += 1) {
+      const record = {
+        schema_version: "v1",
+        kind: "operator.acl",
+        record_id: `bounded-rebuild-${index}`,
+        created_at: `2026-09-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        actor: { subject: "projection-test", role: "migration" },
+        operators: ["operator"],
+        readers: [],
+      } as const;
+      await control.store.create(
+        `control/schema=v1/operators/${record.record_id}.json`,
+        new TextEncoder().encode(canonicalJson(record)),
+      );
+    }
+    const projection = await Projection.open(`${control.root}/bounded-rebuild.sqlite`);
+
+    await projection.rebuild(new BatchLifetimeStore(control.store));
+
+    expect(projection.system()).toMatchObject({
+      ready: true,
+      integrity_error: null,
+    });
     await projection.close();
   });
 

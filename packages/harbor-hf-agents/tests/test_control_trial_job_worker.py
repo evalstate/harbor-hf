@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -59,6 +61,15 @@ def _trial_lock() -> dict:
 
 
 def _lock() -> dict:
+    deployment = {
+        "route": "hf_job",
+        "preparation": "required",
+        "job_image": WORKER_IMAGE,
+        "harbor_version": "0.22.0",
+        "worker_revision": "abcdef0",
+        "input_price_microusd_per_million_tokens": 100_000,
+        "output_price_microusd_per_million_tokens": 200_000,
+    }
     return {
         "run_id": "run-1",
         "tasks": [
@@ -72,17 +83,18 @@ def _lock() -> dict:
         "profiles": [
             {
                 "kind": "deployment",
-                "spec": {
-                    "route": "hf_job",
-                    "preparation": "required",
-                    "job_image": WORKER_IMAGE,
-                    "harbor_version": "0.22.0",
-                    "worker_revision": "abcdef0",
-                    "input_price_microusd_per_million_tokens": 100_000,
-                    "output_price_microusd_per_million_tokens": 200_000,
-                },
+                "spec": deployment,
             }
         ],
+        "execution": {
+            "contract_version": "v1",
+            "deployment": deployment,
+            "harbor_agent": {
+                "import_path": "example.agent:Agent",
+                "model_name": "openai/example/model:together",
+                "kwargs": {},
+            },
+        },
     }
 
 
@@ -191,6 +203,185 @@ def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
 def _config(monkeypatch: pytest.MonkeyPatch) -> worker.WorkerConfig:
     _configure(monkeypatch)
     return worker._locked_config(_lock())
+
+
+def _harbor_result(tmp_path: Path, trial_lock: worker.TrialLock) -> Path:
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    result_path = trial / "result.json"
+    result_path.write_text('{"exception_info": null}')
+    (trial / "lock.json").write_text(json.dumps(trial_lock.model_dump(mode="json")))
+    return result_path
+
+
+def test_reads_historical_execution_from_the_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = _lock()
+    execution = lock.pop("execution")
+    lock_digest = worker.digest_bytes(worker._canonical_json(lock))
+    monkeypatch.setenv("HARBOR_HF_ACTION_ID", "action-1")
+    monkeypatch.setenv("HARBOR_HF_RUN_LOCK_DIGEST", lock_digest)
+
+    class ContinuationClient:
+        def request_sync(
+            self,
+            method: str,
+            path: str,
+            *,
+            idempotency_key: str,
+        ) -> dict:
+            assert method == "GET"
+            assert path == "/api/v1/runs/run-1/continuation"
+            assert idempotency_key == "control-worker-continuation-action-1"
+            return {
+                "record_id": "continuation-1",
+                "run_id": "run-1",
+                "run_lock_digest": lock_digest,
+                "execution": execution,
+            }
+
+    monkeypatch.setattr(
+        worker,
+        "_control_client",
+        lambda _run_id: ContinuationClient(),
+    )
+
+    assert worker._read_execution(lock, "run-1") == execution
+
+
+def test_applies_capability_bound_historical_worker_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = _lock()
+    execution = lock.pop("execution")
+    lock_digest = worker.digest_bytes(worker._canonical_json(lock))
+    continuation = {
+        "record_id": "continuation-1",
+        "run_id": "run-1",
+        "run_lock_digest": lock_digest,
+        "execution": execution,
+    }
+    repaired_image = f"example.invalid/repaired@sha256:{'c' * 64}"
+    monkeypatch.setenv("HARBOR_HF_ACTION_ID", "action-1")
+    monkeypatch.setenv("HARBOR_HF_RUN_LOCK_DIGEST", lock_digest)
+    monkeypatch.setenv("HARBOR_HF_RUN_CONTINUATION_REPAIR_ID", "repair-1")
+
+    class RepairClient:
+        def request_sync(
+            self,
+            method: str,
+            path: str,
+            *,
+            idempotency_key: str,
+        ) -> dict:
+            assert method == "GET"
+            if path == "/api/v1/runs/run-1/continuation":
+                assert idempotency_key == "control-worker-continuation-action-1"
+                return continuation
+            assert path == "/api/v1/runs/run-1/continuation-repair"
+            assert idempotency_key == "control-worker-continuation-repair-action-1"
+            return {
+                "record_id": "repair-1",
+                "run_id": "run-1",
+                "run_lock_digest": lock_digest,
+                "run_continuation_id": "continuation-1",
+                "run_continuation_digest": worker.digest_bytes(
+                    worker._canonical_json(continuation)
+                ),
+                "job_image": repaired_image,
+                "worker_revision": "repaired-worker",
+            }
+
+    monkeypatch.setattr(worker, "_control_client", lambda _run_id: RepairClient())
+
+    repaired = worker._read_execution(lock, "run-1")
+
+    assert repaired["deployment"]["job_image"] == repaired_image
+    assert repaired["deployment"]["worker_revision"] == "repaired-worker"
+    expected = copy.deepcopy(repaired)
+    expected["deployment"]["job_image"] = execution["deployment"]["job_image"]
+    expected["deployment"]["worker_revision"] = execution["deployment"][
+        "worker_revision"
+    ]
+    assert expected == execution
+
+
+def test_applies_capability_bound_historical_worker_repair_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = _lock()
+    execution = lock.pop("execution")
+    lock_digest = worker.digest_bytes(worker._canonical_json(lock))
+    continuation = {
+        "record_id": "continuation-1",
+        "run_id": "run-1",
+        "run_lock_digest": lock_digest,
+        "execution": execution,
+    }
+    repaired_image = f"example.invalid/repaired@sha256:{'c' * 64}"
+    successor_image = f"example.invalid/successor@sha256:{'d' * 64}"
+    repair = {
+        "record_id": "repair-1",
+        "run_id": "run-1",
+        "run_lock_digest": lock_digest,
+        "run_continuation_id": "continuation-1",
+        "run_continuation_digest": worker.digest_bytes(
+            worker._canonical_json(continuation)
+        ),
+        "job_image": repaired_image,
+        "worker_revision": "repaired-worker",
+    }
+    monkeypatch.setenv("HARBOR_HF_ACTION_ID", "action-1")
+    monkeypatch.setenv("HARBOR_HF_RUN_LOCK_DIGEST", lock_digest)
+    monkeypatch.setenv("HARBOR_HF_RUN_CONTINUATION_REPAIR_ID", "repair-1")
+    monkeypatch.setenv(
+        "HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID",
+        "successor-1",
+    )
+
+    class SuccessorClient:
+        def request_sync(
+            self,
+            method: str,
+            path: str,
+            *,
+            idempotency_key: str,
+        ) -> dict:
+            assert method == "GET"
+            if path == "/api/v1/runs/run-1/continuation":
+                assert idempotency_key == "control-worker-continuation-action-1"
+                return continuation
+            if path == "/api/v1/runs/run-1/continuation-repair":
+                assert idempotency_key == "control-worker-continuation-repair-action-1"
+                return repair
+            assert path == "/api/v1/runs/run-1/continuation-repair-successor"
+            assert (
+                idempotency_key
+                == "control-worker-continuation-repair-successor-action-1"
+            )
+            return {
+                "record_id": "successor-1",
+                "run_id": "run-1",
+                "run_lock_digest": lock_digest,
+                "run_continuation_id": "continuation-1",
+                "run_continuation_digest": worker.digest_bytes(
+                    worker._canonical_json(continuation)
+                ),
+                "run_continuation_repair_id": "repair-1",
+                "run_continuation_repair_digest": worker.digest_bytes(
+                    worker._canonical_json(repair)
+                ),
+                "job_image": successor_image,
+                "worker_revision": "successor-worker",
+            }
+
+    monkeypatch.setattr(worker, "_control_client", lambda _run_id: SuccessorClient())
+
+    repaired = worker._read_execution(lock, "run-1")
+
+    assert repaired["deployment"]["job_image"] == successor_image
+    assert repaired["deployment"]["worker_revision"] == "successor-worker"
 
 
 def test_evidence_chunks_fit_the_encoded_api_limit() -> None:
@@ -412,6 +603,7 @@ def test_harbor_run_config_uses_one_adhoc_task(
     tmp_path: Path,
 ) -> None:
     config = _config(monkeypatch)
+    config.harbor_agent["import_path"] = "reviewed.agent:Agent"
 
     path = worker._job_config(config, tmp_path)
     written = json.loads(path.read_text())
@@ -426,6 +618,7 @@ def test_harbor_run_config_uses_one_adhoc_task(
     assert written["tasks"][0]["git_commit_id"] == "b" * 40
     assert written["tasks"][0]["source"] is None
     assert written["environment"]["kwargs"]["control_task_image"] == TASK_IMAGE
+    assert written["agents"][0]["import_path"] == "reviewed.agent:Agent"
 
 
 @pytest.mark.parametrize(
@@ -485,7 +678,7 @@ def test_harbor_run_config_uses_one_adhoc_task(
             },
             "",
             False,
-            ("agent", False),
+            ("infrastructure", True),
         ),
         (
             {
@@ -500,7 +693,7 @@ def test_harbor_run_config_uses_one_adhoc_task(
             {"exception_info": {"exception_type": "RuntimeError"}},
             "",
             False,
-            ("invalid", False),
+            ("infrastructure", True),
         ),
         (
             {
@@ -562,11 +755,11 @@ def test_metrics_and_cost_use_harbor_agent_result_counts(
 @pytest.mark.parametrize(
     ("timed_out", "expected"),
     [
-        (False, ("invalid", False)),
+        (False, ("infrastructure", True)),
         (True, ("benchmark_timeout", False)),
     ],
 )
-def test_missing_harbor_result_is_not_retryable(
+def test_missing_harbor_result_is_retryable_unless_timed_out(
     timed_out: bool,
     expected: tuple[str, bool],
 ) -> None:
@@ -760,6 +953,72 @@ def test_rejects_multiple_durable_results(
         worker._result_path(tmp_path, task)
 
 
+def test_historical_result_uses_the_continuation_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    continuation_agent = worker.AgentConfig.model_validate(
+        {
+            **config.harbor_agent,
+            "kwargs": {"continuation": True},
+            "skills": [],
+        }
+    )
+    historical = replace(
+        config,
+        historical=True,
+        harbor_agent=continuation_agent.model_dump(
+            mode="json",
+            exclude={"skills"},
+        ),
+    )
+    observed_lock = config.task.trial_lock.model_copy(
+        update={"agent": continuation_agent}
+    )
+
+    assert worker._verified_result(
+        historical,
+        _harbor_result(tmp_path, observed_lock),
+    ) == {"exception_info": None}
+
+
+def test_historical_result_keeps_non_agent_inputs_immutable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = replace(_config(monkeypatch), historical=True)
+    changed_environment = config.task.trial_lock.environment.model_copy(
+        update={"delete": False}
+    )
+    observed_lock = config.task.trial_lock.model_copy(
+        update={"environment": changed_environment}
+    )
+
+    with pytest.raises(worker.WorkerEvidenceError, match="differs from preparation"):
+        worker._verified_result(
+            config,
+            _harbor_result(tmp_path, observed_lock),
+        )
+
+
+def test_current_result_cannot_replace_the_prepared_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(monkeypatch)
+    changed_agent = config.task.trial_lock.agent.model_copy(
+        update={"kwargs": {"replacement": True}}
+    )
+    observed_lock = config.task.trial_lock.model_copy(update={"agent": changed_agent})
+
+    with pytest.raises(worker.WorkerEvidenceError, match="differs from preparation"):
+        worker._verified_result(
+            config,
+            _harbor_result(tmp_path, observed_lock),
+        )
+
+
 def test_rejects_sensitive_values_in_evidence_content_and_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -778,12 +1037,12 @@ def test_rejects_sensitive_values_in_evidence_content_and_paths(
     leaked.write_text(f"prefix-{secret}-suffix")
 
     with pytest.raises(worker.WorkerEvidenceError, match="sensitive worker setting"):
-        worker._verified_result(config.task, result_path)
+        worker._verified_result(config, result_path)
 
     leaked.write_text("safe")
     leaked.rename(trial / f"artifact-{secret}.txt")
     with pytest.raises(worker.WorkerEvidenceError, match="sensitive worker setting"):
-        worker._verified_result(config.task, result_path)
+        worker._verified_result(config, result_path)
 
 
 def test_runs_harbor_exactly_once(
@@ -837,7 +1096,7 @@ def test_missing_harbor_result_preserves_timeout_provenance(
         (worker.WorkerEvidenceError("invalid evidence"), ("invalid", False)),
         (
             worker.MissingHarborResultError("missing result"),
-            ("invalid", False),
+            ("infrastructure", True),
         ),
         (
             worker.MissingHarborResultError("timed out", timed_out=True),
@@ -859,6 +1118,41 @@ def test_only_typed_transient_worker_failures_are_replaceable(
     expected: tuple[str, bool],
 ) -> None:
     assert worker._worker_failure_outcome(error) == expected
+
+
+def test_infrastructure_failure_fingerprint_is_stable_and_worker_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HARBOR_HF_WORKER_REVISION", "worker-a")
+    first = worker._failure_fingerprint(
+        "JobEnvironmentPreflightError",
+        replacement_eligible=True,
+    )
+    assert first == worker._failure_fingerprint(
+        "JobEnvironmentPreflightError",
+        replacement_eligible=True,
+    )
+    assert first != worker._failure_fingerprint(
+        "MissingHarborResultError",
+        replacement_eligible=True,
+    )
+    monkeypatch.setenv("HARBOR_HF_WORKER_REVISION", "worker-b")
+    assert first != worker._failure_fingerprint(
+        "JobEnvironmentPreflightError",
+        replacement_eligible=True,
+    )
+    assert (
+        worker._failure_fingerprint(
+            "JobEnvironmentPreflightError",
+            replacement_eligible=False,
+        )
+        is None
+    )
+
+
+def test_pre_agent_failure_has_a_stable_failure_class() -> None:
+    assert worker._result_failure_class(None) == "missing-harbor-result"
+    assert worker._result_failure_class({}) == "agent-execution-not-started"
 
 
 def test_failure_evidence_uploads_note_then_canonical_manifest(

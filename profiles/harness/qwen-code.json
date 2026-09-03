@@ -13,11 +13,7 @@
     "agent": "qwen-code",
     "revision": "0.21.15",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.qwen_code.agent:QwenCodeAgent",
       "kwargs": {
@@ -26,9 +22,7 @@
     },
     "contract_version": "v1",
     "capabilities": {
-      "inference_apis": [
-        "chat-completions"
-      ]
+      "inference_apis": ["chat-completions"]
     }
   }
 }

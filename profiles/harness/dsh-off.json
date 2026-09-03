@@ -13,11 +13,7 @@
     "agent": "dsh",
     "revision": "0.1.0-rc.7",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.dsh.agent:DshAgent",
       "kwargs": {
@@ -26,12 +22,8 @@
     },
     "contract_version": "v1",
     "capabilities": {
-      "inference_apis": [
-        "chat-completions"
-      ]
+      "inference_apis": ["chat-completions"]
     },
-    "aliases": [
-      "dsh"
-    ]
+    "aliases": ["dsh"]
   }
 }

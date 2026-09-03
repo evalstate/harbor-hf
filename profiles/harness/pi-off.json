@@ -13,11 +13,7 @@
     "agent": "pi",
     "revision": "0.84.2",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.pi.agent:PiAgent",
       "kwargs": {
@@ -27,15 +23,11 @@
     },
     "contract_version": "v1",
     "capabilities": {
-      "inference_apis": [
-        "chat-completions"
-      ],
+      "inference_apis": ["chat-completions"],
       "provider_runtime": true,
       "provider_max_attempts": 1,
       "model_registry": "pi"
     },
-    "aliases": [
-      "pi"
-    ]
+    "aliases": ["pi"]
   }
 }

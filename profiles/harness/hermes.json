@@ -13,11 +13,7 @@
     "agent": "hermes",
     "revision": "b6bcb3e791c673e63974029bbab40cc9326803ff",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.hermes.agent:HermesAgent",
       "override_setup_timeout_sec": 1800,
@@ -27,9 +23,7 @@
     },
     "contract_version": "v1",
     "capabilities": {
-      "inference_apis": [
-        "chat-completions"
-      ],
+      "inference_apis": ["chat-completions"],
       "provider_runtime": true,
       "provider_max_attempts": 1
     }

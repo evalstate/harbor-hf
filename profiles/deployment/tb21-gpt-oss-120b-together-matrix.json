@@ -11,15 +11,8 @@
   "name": "tb21-gpt-oss-120b-together-matrix",
   "spec": {
     "route": "hf_job",
-    "models": [
-      "gpt-oss-120b-together"
-    ],
-    "harnesses": [
-      "hermes",
-      "kimi-code",
-      "qwen-code",
-      "opencode"
-    ],
+    "models": ["gpt-oss-120b-together"],
+    "harnesses": ["hermes", "kimi-code", "qwen-code", "opencode"],
     "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:dd0dac768b7113d50a505a3b811b5c9f4bd9e6e142852a158c71d4db21873636",
     "preparation_job_command": [
       "python",

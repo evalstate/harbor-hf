@@ -286,7 +286,7 @@ class ControlJobEnvironment(BaseEnvironment):
                 user=self._resolve_user(user),
             )
         except TimeoutError as error:
-            await self.stop(delete=True)
+            await self.quiesce()
             raise JobEnvironmentTimeoutError(
                 f"isolated Job command exceeded {timeout} seconds"
             ) from error

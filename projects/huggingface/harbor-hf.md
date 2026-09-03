@@ -31,6 +31,7 @@ Harbor-first deployment amendment completed at: 2026-09-02T14:39:30Z
 Canonical Bucket reset amendment approved at: 2026-09-02T14:59:25Z
 Workbench installer-variable amendment approved at: 2026-09-02T15:03:05Z
 Post-reset installation-repair amendment approved at: 2026-09-02T16:00:27Z
+Amended at: 2026-09-01T18:11:42Z
 Inference-token amendment approved at: 2026-08-17T15:37:46Z
 Sandbox-lifecycle amendment approved at: 2026-08-17T18:39:15Z
 Finalization amendment approved at: 2026-08-18T00:25:01Z
@@ -96,6 +97,11 @@ Agent-Workbench recipe-and-UX repair amendment approved at: 2026-08-28T15:38:33Z
 Agent-Workbench upstream integration amendment approved at: 2026-09-01T08:56:03Z
 Agent-Workbench upstream push amendment approved at: 2026-09-01T09:56:29Z
 Mutation-tooling retirement amendment approved: 2026-08-26
+GLM-5.3-Flash full-run amendment approved at: 2026-09-01T11:12:25Z
+GLM-5.3-Flash streaming-replacement amendment approved at: 2026-09-01T14:07:05Z
+Historical-Run continuation amendment approved at: 2026-09-01T18:11:42Z
+Historical-Run continuation worker-repair amendment approved at: 2026-09-01T22:13:57Z
+Historical-Run continuation successor-repair amendment approved at: 2026-09-02T07:03:36Z
 
 ### Scope
 
@@ -236,6 +242,11 @@ Mutation-tooling retirement amendment approved: 2026-08-26
 - Activate the reviewed Fast-Agent Workbench canary path: keep Slophammer's Python mutation-declaration rule disabled, remove mutation execution from the mandatory local completion gate while retaining the on-demand tooling, push only `feat/agent-workbench`, publish one reviewed digest-pinned generic trial-worker image from the exact committed revision, add its compatible deployment and diagnostic launch-policy profiles, deploy the exact reviewed control revision to the existing canonical `<control-space>`, verify setup through the Workbench setup path, and submit one normal Run using `terminal-bench-2-1-canary`, `gpt-oss-20b`, and the reviewed Fast-Agent command-agent harness.
 - Repair the Agent Workbench after the first Fast-Agent diagnostic: keep CLI installation and runtime provisioning in immutable recipes so Python/uv, npm/npx, and other ecosystems use the same generic command-agent path without core name branches; update the reviewed Fast-Agent recipe and route binding; make the Workbench workflow explicitly communicate configure, test, publish, and Run stages; consolidate or clearly distinguish setup and execution logs; improve reviewed-profile loading and failure states; correct deterministic setup and client-configuration outcome classification; test, commit, push, and deploy the exact reviewed repair; then launch one new two-task diagnostic canary under the same limits.
 - Make the canonical `huggingface/harbor-hf` repository the normal work remote for this checkout. Rename that remote to `origin`, retain the former fork as a secondary `fork` remote, push `feat/agent-workbench` directly to the canonical repository, and use the canonical repository's existing Actions workflow and package permission for worker-image publication.
+- Run one final Terminal-Bench 2.1 full evaluation with all 89 tasks and one trial per task, using the existing promoted GLM-5.3-Flash Together deployment and Pi 0.84.2 with reasoning off.
+- Cancel only the GLM-5.3-Flash plus Pi full Run invalidated by the pre-streaming inference bridge after its admitted Jobs reach evidence boundaries, then launch exactly one clean 89-task replacement using the fixed streaming worker.
+- Add one append-only execution-continuation attachment to each of the seven approved historical gpt-oss 89-task Runs so the current TypeScript control service can finish only their unresolved tasks without changing Run IDs or rerunning selected outcomes.
+- Add one immutable worker-repair attachment to each of those seven continuation records. Bind each repair to its original continuation and permit only the digest-pinned worker image and source revision to change. Preserve Run IDs, ceilings, prepared inputs, harness, model, provider and inference settings, evidence, and selected outcomes. Prove the repair with one unresolved OpenHands task before admitting the remaining work.
+- Add one immutable successor worker-repair attachment to each of those seven existing repairs after the first repair-aware worker exposed a cross-language continuation-digest defect. Bind each successor to the original continuation and prior repair digests, and permit only the digest-pinned worker image and source revision to change. Preserve every existing record, Run ID, ceiling, prepared input, harness, model, provider and inference setting, evidence item, and selected outcome. Prove the successor with the same unresolved OpenHands task before admitting the remaining work.
 
 ### Limits
 
@@ -329,6 +340,10 @@ Mutation-tooling retirement amendment approved: 2026-08-26
 - Preserve the failed first canary and its accepted evidence. The repair may update the generic worker image and immutable profiles when required, but must use the existing public image package, canonical `<control-space>`, canonical `<artifact-bucket>`, and two existing Space secrets. Do not create, delete, replace, or transfer a persistent resource or credential.
 - Slophammer `py.mutation-required` remains explicitly disabled with a reason. The local mutation script and manual workflow may remain available on demand, but mutation execution is not a completion, deployment, or canary gate for this amendment.
 - The canonical work-remote amendment authorizes normal feature-branch fetches and fast-forward pushes to `huggingface/harbor-hf`. It does not authorize changing the upstream default branch, merging, opening or modifying a pull request, force pushing, deleting a shared branch, creating a tag or release, or pushing additional commits to the retained fork without separate approval.
+- The 2026-09-01 GLM-5.3-Flash amendment permits exactly one new full Run with a USD 18 hard ceiling, at most 16 active trial Jobs, and at most two physical attempts per task. These bounds come from the checked-in `tb21-full-glm-standard` launch policy. The measured estimate is USD 2.052029 from its published two-task canary, as recorded in the full-matrix plan. Do not launch another matrix cell, create a persistent resource or credential, or rerun a valid logical task.
+- The 2026-09-01 streaming-replacement amendment classifies every outcome from the first GLM-5.3-Flash plus Pi full Run as invalid because its immutable worker buffered streaming provider responses until completion. It permits cancelling only that paused Run and launching one clean full replacement with a new USD 18 hard ceiling, at most 16 active trial Jobs, and at most two physical attempts per task. It explicitly permits the replacement to rerun those invalidated tasks. Do not resume the invalidated Run, launch another matrix cell, create a persistent resource or credential, or alter any other Run.
+- The 2026-09-01 historical-Run continuation amendment permits one immutable attachment per approved historical Run. The attachment must preserve the original lock, Run ID, task IDs, selected outcomes, attempt and evidence history, observed cost, ceiling, model, benchmark, harness, provider, and trial identity. It may bind only a reviewed current deployment and worker contract that matches those identities. It may admit only tasks without a valid selected receipt. It creates no replacement Run, persistent resource, credential, budget reset, selected-task retry, deletion, or compatibility writer outside the TypeScript control service. The seven USD 10.60 per-Run ceilings and USD 74.20 aggregate ceiling remain unchanged.
+- The 2026-09-02 successor-repair amendment permits exactly one append-only successor for each of the seven existing continuation worker repairs. Each successor must bind to the original continuation and prior repair digests and may change only the digest-pinned worker image and worker source revision. It does not permit another successor, replacement Run, persistent resource, credential, ceiling increase, prepared-input change, configuration change, evidence mutation, selected-outcome retry, deletion, or overwrite.
 
 ### Remaining gates
 
@@ -339,6 +354,10 @@ No project-scope amendment remains pending. Operational gates still apply:
 - Keep the harness-integration canary series inside the USD 80 hard ceiling. Reject a harness that needs a native API the locked router route cannot preserve.
 - Keep the seven gpt-oss 89-task harness diagnostics inside USD 10.60 each and USD 74.20 combined.
 - Finish only still-supported existing 89-task rows, plus the existing OpenCode row, without a second campaign for the same harness. The retired harness row may not continue or publish under current authorization.
+- Finish those existing 89-task rows, plus the existing OpenCode and FX 89-task rows, without a second campaign for the same harness.
+- Attach and resume a historical Run only after deterministic replay and selection-preservation tests pass and that harness's reviewed worker passes its bounded canary.
+- Admit remaining historical work only after the successor repair passes the same unresolved OpenHands task with valid evidence and nonzero provider token usage.
+- Keep the approved GLM-5.3-Flash Together plus Pi replacement inside its USD 18 immutable ceiling and the rollout plan's 16-Job physical concurrency limit. Do not resume the invalidated first Run.
 
 ## Approval history
 
@@ -522,3 +541,13 @@ authorization effect.
 
 - At 2026-09-01T08:56:03Z, approved fetching the latest canonical `main` branch and merging it into local `feat/agent-workbench`, preserving both sides' intended behavior. Resolve conflicts if necessary, run relevant validation and the public-privacy check, inspect the resulting diff and metadata, and commit the merge locally. Do not push, open or modify a pull request, update the default branch, deploy, mutate hosted resources, handle credentials, run inference, or incur cost.
 - At 2026-09-01T09:56:29Z, approved committing this authorization amendment and pushing the verified local `feat/agent-workbench` history through the current merge commit to public `origin/feat/agent-workbench`. Require a normal fast-forward branch update after fetching and confirming no remote divergence. Do not force push, create or modify a pull request, update the default branch, create a tag or release, deploy, mutate hosted resources, handle credentials, run inference, or incur cost.
+
+### 2026-09-01
+
+- At 2026-09-01T11:12:25Z, approved one full 89-task, single-trial Terminal-Bench 2.1 Run with GLM-5.3-Flash through Together and Pi 0.84.2 reasoning off. The selected launch option fixes the hard ceiling at USD 18 and uses the existing profile limits of 16 active trial Jobs and two physical attempts per task.
+- At 2026-09-01T14:07:05Z, approved cancelling only the paused GLM-5.3-Flash plus Pi Run invalidated by the pre-streaming inference bridge and launching one clean 89-task replacement on the fixed streaming worker. The replacement has a new USD 18 hard ceiling, at most 16 active trial Jobs, and at most two physical attempts per task. Outcomes from the invalidated Run may be rerun only in this replacement.
+- At 2026-09-01T18:11:42Z, approved a narrow continuation mechanism for the seven historical gpt-oss full Runs that the current service cannot resume. Each Run may receive one append-only current execution attachment after local verification and its harness canary. The same Run then schedules only unresolved tasks, retains all selected outcomes and costs, and remains inside its existing ceiling. No replacement Run, selected-task retry, deletion, resource, credential, or budget increase is authorized.
+
+### 2026-09-02
+
+- At 2026-09-02T07:03:36Z, approved one immutable successor worker-repair attachment for each of the seven existing continuation repairs after the first repair-aware worker exposed a cross-language continuation-digest defect. Each successor binds to the original continuation and prior repair digests and may change only the worker image digest and source revision. Existing records, Run IDs, ceilings, prepared inputs, settings, evidence, and selected outcomes remain unchanged. The same unresolved OpenHands task must prove the corrected image before other historical work is admitted.

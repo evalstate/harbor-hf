@@ -5,6 +5,7 @@ import fastifyStatic from "@fastify/static";
 import swagger from "@fastify/swagger";
 import type {
   Actor,
+  AttemptReceipt,
   AttemptSubmissionV1,
   HarborHFResultCatalogV1,
   PublicationReceipt,
@@ -55,6 +56,9 @@ import {
   namespaceCapacityViewSchema,
   profileSchema,
   publicationSchema,
+  runContinuationAcceptedSchema,
+  runContinuationRepairAcceptedSchema,
+  runContinuationRepairSuccessorAcceptedSchema,
   runListSchema,
   runViewSchema,
   sessionSchema,
@@ -115,7 +119,7 @@ function isWorkerCapabilityRoute(request: FastifyRequest): boolean {
   return (
     (request.method === "GET" &&
       (/^\/api\/v1\/runs\/[^/]+$/.test(path) ||
-        /^\/api\/v1\/runs\/[^/]+\/(?:lock|prepared-job(?:\/trials\/[^/]+)?)$/.test(
+        /^\/api\/v1\/runs\/[^/]+\/(?:lock|continuation(?:-repair(?:-successor)?)?|prepared-job(?:\/trials\/[^/]+)?)$/.test(
           path,
         ))) ||
     (request.method === "POST" &&
@@ -1752,6 +1756,78 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     },
   );
 
+  app.post(
+    "/api/v1/runs/:run_id/continuation",
+    {
+      schema: {
+        tags: ["runs"],
+        body: cleanSchema(schemas.runContinuation),
+        response: { 202: runContinuationAcceptedSchema },
+      },
+    },
+    async (request, reply) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("run writes are disabled before cutover");
+      const { run_id } = request.params as { run_id: string };
+      const result = await runtime.service.continueHistoricalRun(
+        run_id,
+        request.body,
+        idempotencyKey(request),
+        domainActor(request),
+      );
+      reply.header("Location", result.status_url);
+      return reply.code(202).send(result);
+    },
+  );
+
+  app.post(
+    "/api/v1/runs/:run_id/continuation-repair",
+    {
+      schema: {
+        tags: ["runs"],
+        body: cleanSchema(schemas.runContinuation),
+        response: { 202: runContinuationRepairAcceptedSchema },
+      },
+    },
+    async (request, reply) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("run writes are disabled before cutover");
+      const { run_id } = request.params as { run_id: string };
+      const result = await runtime.service.repairHistoricalContinuation(
+        run_id,
+        request.body,
+        idempotencyKey(request),
+        domainActor(request),
+      );
+      reply.header("Location", result.status_url);
+      return reply.code(202).send(result);
+    },
+  );
+
+  app.post(
+    "/api/v1/runs/:run_id/continuation-repair-successor",
+    {
+      schema: {
+        tags: ["runs"],
+        body: cleanSchema(schemas.runContinuation),
+        response: { 202: runContinuationRepairSuccessorAcceptedSchema },
+      },
+    },
+    async (request, reply) => {
+      if (runtime.config.write_mode === "disabled")
+        throw new ControlNotReadyError("run writes are disabled before cutover");
+      const { run_id } = request.params as { run_id: string };
+      const result = await runtime.service.repairHistoricalContinuationSuccessor(
+        run_id,
+        request.body,
+        idempotencyKey(request),
+        domainActor(request),
+      );
+      reply.header("Location", result.status_url);
+      return reply.code(202).send(result);
+    },
+  );
+
   app.get(
     "/api/v1/runs/:run_id",
     {
@@ -1855,6 +1931,72 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
           },
         })
       );
+    },
+  );
+
+  app.get("/api/v1/runs/:run_id/continuation", async (request, reply) => {
+    const { run_id } = request.params as { run_id: string };
+    requireWorkerOperation(request, "run.read");
+    if (request.workerCapability?.run_id !== run_id)
+      throw new WorkerScopeError("the worker capability does not authorize this run");
+    const continuation = await runtime.projection.runContinuation(run_id);
+    if (!continuation)
+      return reply.code(404).send({
+        error: {
+          code: "not_found",
+          message: "run continuation was not found",
+          request_id: request.id,
+        },
+      });
+    if (continuation.run_lock_digest !== request.workerCapability.run_lock_digest)
+      throw new WorkerScopeError(
+        "the worker capability does not match this run continuation",
+      );
+    return continuation;
+  });
+
+  app.get("/api/v1/runs/:run_id/continuation-repair", async (request, reply) => {
+    const { run_id } = request.params as { run_id: string };
+    requireWorkerOperation(request, "run.read");
+    if (request.workerCapability?.run_id !== run_id)
+      throw new WorkerScopeError("the worker capability does not authorize this run");
+    const repair = await runtime.projection.runContinuationRepair(run_id);
+    if (!repair)
+      return reply.code(404).send({
+        error: {
+          code: "not_found",
+          message: "run continuation repair was not found",
+          request_id: request.id,
+        },
+      });
+    if (repair.run_lock_digest !== request.workerCapability.run_lock_digest)
+      throw new WorkerScopeError(
+        "the worker capability does not match this run continuation repair",
+      );
+    return repair;
+  });
+
+  app.get(
+    "/api/v1/runs/:run_id/continuation-repair-successor",
+    async (request, reply) => {
+      const { run_id } = request.params as { run_id: string };
+      requireWorkerOperation(request, "run.read");
+      if (request.workerCapability?.run_id !== run_id)
+        throw new WorkerScopeError("the worker capability does not authorize this run");
+      const successor = await runtime.projection.runContinuationRepairSuccessor(run_id);
+      if (!successor)
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "run continuation repair successor was not found",
+            request_id: request.id,
+          },
+        });
+      if (successor.run_lock_digest !== request.workerCapability.run_lock_digest)
+        throw new WorkerScopeError(
+          "the worker capability does not match this run continuation repair successor",
+        );
+      return successor;
     },
   );
 
@@ -1978,6 +2120,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
         task: detail.task,
         attempts: detail.attempts.map((attempt) => {
           const job = jobsByLaunchAction.get(attempt.action_id);
+          const receipt = JSON.parse(attempt.body) as AttemptReceipt;
           return {
             attempt_id: attempt.attempt_id,
             action_id: attempt.action_id,
@@ -1985,6 +2128,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
             task_id: attempt.task_id,
             outcome: attempt.outcome,
             replacement_eligible: attempt.replacement_eligible,
+            failure_fingerprint: receipt.failure_fingerprint ?? null,
             cost_microusd: attempt.cost_microusd,
             metrics: attempt.metrics,
             created_at: attempt.created_at,
@@ -2120,6 +2264,9 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
           action_id: input.action_id,
           outcome: input.outcome,
           replacement_eligible: input.replacement_eligible,
+          ...(input.failure_fingerprint
+            ? { failure_fingerprint: input.failure_fingerprint }
+            : {}),
           evidence_digest: input.evidence_digest,
           evidence_path: input.evidence_path,
           cost_microusd: input.cost_microusd,

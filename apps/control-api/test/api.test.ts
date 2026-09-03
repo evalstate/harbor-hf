@@ -1063,9 +1063,63 @@ describe("control API", () => {
       configured: true,
       run_limit: 1,
       run_active: 0,
+      provider_limit: 0,
+      provider_reserved: 0,
     });
-    expect(response.json()).not.toHaveProperty("provider_limit");
-    expect(response.json()).not.toHaveProperty("provider_reserved");
+    await app.close();
+  });
+
+  it("rejects continuation attachments for current runs", async () => {
+    const { app } = await setup();
+    const submission = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "current-continuation-run" },
+      payload: input,
+    });
+    const runId = submission.json().run_id as string;
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/continuation`,
+      headers: { "idempotency-key": "current-continuation-attachment" },
+      payload: {
+        reason: "not a historical run",
+        confirmed: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toMatchObject({
+      error: { message: "current run locks do not need continuation" },
+    });
+    const repairResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/continuation-repair`,
+      headers: { "idempotency-key": "current-continuation-repair" },
+      payload: {
+        reason: "not a historical run",
+        confirmed: true,
+      },
+    });
+    expect(repairResponse.statusCode).toBe(422);
+    expect(repairResponse.json()).toMatchObject({
+      error: { message: "current run locks do not need continuation repair" },
+    });
+    const successorResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/runs/${runId}/continuation-repair-successor`,
+      headers: { "idempotency-key": "current-continuation-repair-successor" },
+      payload: {
+        reason: "not a historical run",
+        confirmed: true,
+      },
+    });
+    expect(successorResponse.statusCode).toBe(422);
+    expect(successorResponse.json()).toMatchObject({
+      error: {
+        message: "current run locks do not need continuation repair successors",
+      },
+    });
     await app.close();
   });
 
@@ -1749,6 +1803,33 @@ describe("control API", () => {
     expect(sha256(canonicalJson(lockResponse.json()))).toBe(
       sha256(canonicalJson(lock)),
     );
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/api/v1/runs/${submission.run_id}/continuation`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/api/v1/runs/${submission.run_id}/continuation-repair-successor`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/api/v1/runs/${submission.run_id}/continuation-repair`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(404);
     expect(
       (await app.inject({ method: "GET", url: "/api/v1/profiles", headers }))
         .statusCode,

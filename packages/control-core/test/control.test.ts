@@ -2,6 +2,9 @@ import { join } from "node:path";
 import type {
   ActionIntent,
   AttemptReceipt,
+  JobAdmissionGrant,
+  PreparedJob,
+  PreparedTrial,
   ProfileObject,
   ProfilePromotion,
   RunLock,
@@ -16,8 +19,13 @@ import {
 } from "@harbor-hf/contracts";
 import { NoopActions } from "@harbor-hf/hf-adapters";
 import type { TestControl } from "@harbor-hf/test-fixtures";
-import { createTestControl } from "@harbor-hf/test-fixtures";
+import {
+  createTestControl,
+  createTestControlFromProfiles,
+  preparedProfiles,
+} from "@harbor-hf/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { assertRunContinuationCompatible } from "../src/execution-contract.js";
 import { Projection } from "../src/projection.js";
 import { ResultPublisher } from "../src/publication.js";
 import {
@@ -26,6 +34,7 @@ import {
   ExternalActionNotFoundError,
   type ExternalActionPort,
   type ExternalActionResult,
+  nextAvailableActionGeneration,
   Reconciler,
 } from "../src/reconciler.js";
 import { runIdentity, runUnique } from "../src/run-id.js";
@@ -59,6 +68,12 @@ describe("profile cutover Job classification", () => {
     expect(jobStateIsTerminal("COMPLETED")).toBe(true);
     expect(jobStateIsTerminal("RUNNING")).toBe(false);
     expect(jobStateIsTerminal(null)).toBe(false);
+  });
+
+  it("selects an unused action generation without treating it as an ordinal", () => {
+    expect(nextAvailableActionGeneration([1_000_000])).toBe(0);
+    expect(nextAvailableActionGeneration([0, 2], 2)).toBe(1);
+    expect(nextAvailableActionGeneration([0, 1, 2], 2)).toBeNull();
   });
 });
 
@@ -176,9 +191,36 @@ describe("control service", () => {
     );
   });
 
-  it("keeps historical run locks readable but unable to create work", async () => {
-    const control = await createTestControl();
+  it("attaches current execution without mutating a historical lock", async () => {
+    const control = await createTestControlFromProfiles(preparedProfiles(2));
     controls.push(control);
+    const historicalProfiles = control.profiles.map(({ profile, profile_id }) => {
+      const spec = profile.spec as unknown as Record<string, unknown>;
+      const historicalSpec =
+        profile.profile_kind === "model" ||
+        profile.profile_kind === "harness" ||
+        profile.profile_kind === "deployment"
+          ? Object.fromEntries(
+              Object.entries(spec).filter(([key]) => key !== "contract_version"),
+            )
+          : spec;
+      if (profile.profile_kind === "harness")
+        historicalSpec.harbor_agent = {
+          import_path: "legacy.agent:Agent",
+          kwargs: {},
+        };
+      if (profile.profile_kind === "deployment") {
+        historicalSpec.job_image =
+          "example.invalid/legacy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        historicalSpec.worker_revision = "legacy-worker";
+      }
+      return {
+        kind: profile.profile_kind,
+        name: profile.name,
+        profile_id,
+        spec: historicalSpec,
+      };
+    }) as RunLock["profiles"];
     const legacy: RunLock = {
       schema_version: "v1",
       kind: "run.lock",
@@ -186,66 +228,130 @@ describe("control service", () => {
       created_at: "2026-08-16T00:00:00.000Z",
       actor: { subject: "migration", role: "migration" },
       run_id: "run-legacy-read-only",
-      profiles: [
-        {
-          kind: "benchmark",
-          name: "control-smoke",
-          profile_id: `sha256:${"a".repeat(64)}`,
-          spec: {
-            benchmark: "control-smoke",
-            revision: "legacy",
-            task_ids: ["task-legacy"],
-            task_digests: [`sha256:${"b".repeat(64)}`],
-          },
-        },
-        {
-          kind: "model",
-          name: "control-smoke",
-          profile_id: `sha256:${"c".repeat(64)}`,
-          spec: { model_id: "control-smoke", revision: "legacy" },
-        },
-        {
-          kind: "harness",
-          name: "control-smoke",
-          profile_id: `sha256:${"d".repeat(64)}`,
-          spec: {
-            agent: "control-smoke",
-            revision: "legacy",
-            required_evidence: [],
-          },
-        },
-        {
-          kind: "deployment",
-          name: "hf-cpu-smoke",
-          profile_id: `sha256:${"e".repeat(64)}`,
-          spec: {
-            route: "hf_job",
-            models: ["control-smoke"],
-            harnesses: ["control-smoke"],
-          },
-        },
-        {
-          kind: "launch_policy",
-          name: "control-smoke",
-          profile_id: `sha256:${"f".repeat(64)}`,
-          spec: {
-            max_infrastructure_attempts: 1,
-            reservation_microusd: 0,
-            success_without_worker_receipt: true,
-            publication_role: "diagnostic",
-          },
-        },
-      ],
+      profiles: historicalProfiles,
       tasks: [
         {
-          task_id: "task-legacy",
-          input_digest: `sha256:${"b".repeat(64)}`,
+          task_id: "task-001-trial-1",
+          source_task_id: "task-001",
+          trial_index: 1,
+          input_digest: sha256("task-001"),
+        },
+        {
+          task_id: "task-002-trial-1",
+          source_task_id: "task-002",
+          trial_index: 1,
+          input_digest: sha256("task-002"),
         },
       ],
-      ceiling_microusd: 0,
+      ceiling_microusd: 1_000_000,
       source_revision: `sha256:${"0".repeat(64)}`,
     };
     await control.service.append(legacy);
+    const [selectedTask, unresolvedTask] = legacy.tasks;
+    if (!selectedTask || !unresolvedTask)
+      throw new Error("historical continuation test needs two tasks");
+    const preparationId = deterministicId("preparation", legacy.run_id);
+    const runLockDigest = ControlService.recordDigest(legacy);
+    const preparedTrials: PreparedTrial[] = legacy.tasks.map((task) => {
+      if (!task.source_task_id || task.trial_index === undefined)
+        throw new Error(`prepared task identity is incomplete: ${task.task_id}`);
+      return {
+        schema_version: "v1",
+        kind: "prepared.trial",
+        record_id: deterministicId("prepared-trial", legacy.run_id, task.task_id),
+        created_at: "2026-08-16T00:00:00.000Z",
+        actor: { subject: "migration", role: "migration" },
+        run_id: legacy.run_id,
+        preparation_id: preparationId,
+        run_lock_digest: runLockDigest,
+        task_id: task.task_id,
+        source_task_id: task.source_task_id,
+        trial_index: task.trial_index,
+        input_digest: task.input_digest,
+        trial_lock: { schema_version: 2 },
+        trial_lock_digest: sha256(task.task_id),
+        declared_image: "python:3.12",
+        image: `library/python@sha256:${"b".repeat(64)}`,
+        cpus: 1,
+        memory_mb: 2048,
+        storage_mb: 10240,
+        gpus: 0,
+        agent_timeout_seconds: 900,
+        verifier_timeout_seconds: 600,
+        environment_build_timeout_seconds: 600,
+        agent_setup_timeout_seconds: 360,
+      };
+    });
+    for (const trial of preparedTrials) await control.service.append(trial);
+    const preparedJob: PreparedJob = {
+      schema_version: "v1",
+      kind: "prepared.job",
+      record_id: deterministicId("prepared-job", legacy.run_id),
+      created_at: "2026-08-16T00:00:00.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: legacy.run_id,
+      preparation_id: preparationId,
+      run_lock_digest: runLockDigest,
+      harbor_version: "0.21.0",
+      job_config: { n_attempts: 1 },
+      job_lock_header: { schema_version: 3 },
+      trials: preparedTrials.map((trial) => ({
+        task_id: trial.task_id,
+        record_id: trial.record_id,
+        record_digest: ControlService.recordDigest(trial),
+      })) as PreparedJob["trials"],
+      harbor_lock_digest: sha256("harbor-lock"),
+    };
+    await control.service.append(preparedJob);
+    const historicalLaunch = control.service.actionIntent(
+      legacy.run_id,
+      "job.launch",
+      selectedTask.task_id,
+      0,
+      {
+        worker_role: "execution",
+        task_id: selectedTask.task_id,
+        task_ids: [selectedTask.task_id],
+      },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:00:01.000Z",
+    );
+    await control.service.append(historicalLaunch);
+    const launchReceipt = await control.service.receipt(historicalLaunch, {
+      outcome: "completed",
+      observed_state: "COMPLETED",
+    });
+    await control.service.markAdvanced(historicalLaunch, launchReceipt);
+    const selectedAttempt: AttemptReceipt = {
+      schema_version: "v1",
+      kind: "attempt.receipt",
+      record_id: "attempt-receipt-legacy-selected",
+      created_at: "2026-08-16T00:00:02.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: legacy.run_id,
+      task_id: selectedTask.task_id,
+      attempt_id: "attempt-legacy-selected",
+      action_id: historicalLaunch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      evidence_digest: sha256("legacy-selected-evidence"),
+      evidence_path: "evidence/legacy-selected",
+      cost_microusd: 7,
+      metrics: {},
+    };
+    await control.service.append(selectedAttempt);
+    await control.service.append({
+      schema_version: "v1",
+      kind: "terminal.selection",
+      record_id: "terminal-legacy-selected",
+      created_at: "2026-08-16T00:00:03.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: legacy.run_id,
+      task_id: selectedTask.task_id,
+      attempt_id: selectedAttempt.attempt_id,
+      outcome: "infrastructure",
+      reason: "historical selected outcome",
+    });
 
     await expect(
       control.service.runAction(
@@ -254,17 +360,503 @@ describe("control service", () => {
         "legacy-pause",
         operator,
       ),
-    ).rejects.toThrow("historical run locks cannot create work");
-    const restarted = new ControlService(
+    ).rejects.toThrow("historical run has no execution continuation attachment");
+    const blockedLaunch = control.service.actionIntent(
+      legacy.run_id,
+      "job.launch",
+      unresolvedTask.task_id,
+      0,
+      {
+        worker_role: "execution",
+        task_id: unresolvedTask.task_id,
+        task_ids: [unresolvedTask.task_id],
+      },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:00:04.000Z",
+    );
+    await control.service.append(blockedLaunch);
+    const blockedExternal = new NoopActions();
+    const execute = vi.spyOn(blockedExternal, "execute");
+    const blockedReconciler = new Reconciler(
+      control.service,
+      control.projection,
+      blockedExternal,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await expect(blockedReconciler.tick()).resolves.toBe(0);
+    expect(execute).not.toHaveBeenCalled();
+    expect(
+      (await control.projection.action(blockedLaunch.action_id))?.receipt_body,
+    ).toBeNull();
+    const blockedReceipt = await control.service.receipt(blockedLaunch, {
+      outcome: "completed",
+      observed_state: "suppressed-historical",
+    });
+    await control.service.markAdvanced(blockedLaunch, blockedReceipt);
+    const pause = control.service.actionIntent(
+      legacy.run_id,
+      "run.pause",
+      "run",
+      0,
+      { reason: "preserve the historical boundary" },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:01:00.000Z",
+    );
+    await control.service.append(pause);
+    const pauseReceipt = await control.service.receipt(pause, {
+      outcome: "completed",
+      observed_state: "paused",
+    });
+    await expect(
+      control.service.continueHistoricalRun(
+        legacy.run_id,
+        { reason: "finish unresolved tasks", confirmed: true },
+        "legacy-continuation",
+        operator,
+      ),
+    ).rejects.toThrow("unadvanced action");
+    await control.service.markAdvanced(pause, pauseReceipt);
+    const activeHistoricalLaunch = control.service.actionIntent(
+      legacy.run_id,
+      "job.launch",
+      unresolvedTask.task_id,
+      1,
+      {
+        worker_role: "execution",
+        task_id: unresolvedTask.task_id,
+        task_ids: [unresolvedTask.task_id],
+      },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:01:01.000Z",
+    );
+    await control.service.append(activeHistoricalLaunch);
+    const activeLaunchReceipt = await control.service.receipt(activeHistoricalLaunch, {
+      outcome: "completed",
+      observed_state: "RUNNING",
+      resource_id: "legacy-active-job",
+    });
+    await control.service.markAdvanced(activeHistoricalLaunch, activeLaunchReceipt);
+    await expect(
+      control.service.continueHistoricalRun(
+        legacy.run_id,
+        { reason: "finish unresolved tasks", confirmed: true },
+        "legacy-continuation",
+        operator,
+      ),
+    ).rejects.toThrow("running Job");
+    const terminalObservation = control.service.actionIntent(
+      legacy.run_id,
+      "job.observe",
+      "legacy-active-job",
+      0,
+      {
+        launch_action_id: activeHistoricalLaunch.action_id,
+        resource_id: "legacy-active-job",
+      },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:01:02.000Z",
+    );
+    await control.service.append(terminalObservation);
+    const terminalObservationReconciler = new Reconciler(
+      control.service,
+      control.projection,
+      {
+        execute: async (): Promise<ExternalActionResult> => ({
+          outcome: "completed",
+          observed_state: "COMPLETED",
+          resource_id: "legacy-active-job",
+        }),
+      },
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    const markAdvanced = control.service.markAdvanced.bind(control.service);
+    const interruptedAdvancement = vi
+      .spyOn(control.service, "markAdvanced")
+      .mockImplementation(async (intent, receipt) => {
+        if (intent.action_id === terminalObservation.action_id)
+          throw new Error("historical observation advancement interrupted");
+        return markAdvanced(intent, receipt);
+      });
+    await expect(terminalObservationReconciler.tick()).rejects.toThrow(
+      "historical observation advancement interrupted",
+    );
+    expect(
+      (await control.projection.unadvancedActions()).map(
+        ({ intent }) => intent.action_id,
+      ),
+    ).toContain(terminalObservation.action_id);
+    interruptedAdvancement.mockRestore();
+    await terminalObservationReconciler.tick();
+    expect(
+      (await control.projection.action(terminalObservation.action_id))?.observed_state,
+    ).toBe("COMPLETED");
+    expect(
+      (await control.projection.task(legacy.run_id, unresolvedTask.task_id))?.task
+        .terminal_outcome,
+    ).toBeNull();
+    const unselectedAttempt: AttemptReceipt = {
+      schema_version: "v1",
+      kind: "attempt.receipt",
+      record_id: "attempt-receipt-legacy-unselected",
+      created_at: "2026-08-16T00:01:03.000Z",
+      actor: { subject: "migration", role: "migration" },
+      run_id: legacy.run_id,
+      task_id: unresolvedTask.task_id,
+      attempt_id: "attempt-legacy-unselected",
+      action_id: activeHistoricalLaunch.action_id,
+      outcome: "complete",
+      replacement_eligible: false,
+      evidence_digest: sha256("legacy-unselected-evidence"),
+      evidence_path: "evidence/legacy-unselected",
+      cost_microusd: 5,
+      metrics: {},
+    };
+    await control.service.append(unselectedAttempt);
+    const continuation = await control.service.continueHistoricalRun(
+      legacy.run_id,
+      { reason: "finish unresolved tasks", confirmed: true },
+      "legacy-continuation",
+      operator,
+    );
+    expect(continuation.adopted).toBe(false);
+    expect(
+      await control.service.continueHistoricalRun(
+        legacy.run_id,
+        { reason: "finish unresolved tasks", confirmed: true },
+        "legacy-continuation",
+        operator,
+      ),
+    ).toMatchObject({ adopted: true });
+    const attached = await control.projection.runContinuation(legacy.run_id);
+    expect(attached).toMatchObject({
+      run_id: legacy.run_id,
+      run_lock_digest: ControlService.recordDigest(legacy),
+      reason: "finish unresolved tasks",
+    });
+    if (!attached) throw new Error("run continuation is missing");
+    const repairedProfiles = control.profiles.map((item) => {
+      if (item.profile.profile_kind !== "deployment") return item;
+      const spec = {
+        ...item.profile.spec,
+        job_image:
+          "example.invalid/repaired@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        worker_revision: "repaired-worker",
+      };
+      const profile: ProfileObject = {
+        ...item.profile,
+        record_id: deterministicId(
+          "profile",
+          item.profile.profile_kind,
+          item.profile.name,
+          sha256(canonicalJson(spec)),
+        ),
+        spec,
+      };
+      return { profile, profile_id: sha256(canonicalJson(profile)) };
+    });
+    const repairService = new ControlService(
       "test",
       control.store,
       control.projection,
+      repairedProfiles,
+    );
+    await repairService.initialize(repairedProfiles);
+    const repairResult = await repairService.repairHistoricalContinuation(
+      legacy.run_id,
+      { reason: "replace the broken historical worker", confirmed: true },
+      "legacy-continuation-repair",
+      operator,
+    );
+    expect(repairResult.adopted).toBe(false);
+    const repair = await control.projection.runContinuationRepair(legacy.run_id);
+    expect(repair).toMatchObject({
+      record_id: repairResult.continuation_repair_id,
+      run_continuation_id: attached.record_id,
+      run_continuation_digest: sha256(canonicalJson(attached)),
+      job_image:
+        "example.invalid/repaired@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      worker_revision: "repaired-worker",
+    });
+    if (!repair) throw new Error("run continuation repair is missing");
+    await expect(
+      repairService.repairHistoricalContinuation(
+        legacy.run_id,
+        { reason: "replace the broken historical worker", confirmed: true },
+        "legacy-continuation-repair",
+        operator,
+      ),
+    ).resolves.toMatchObject({ adopted: true });
+    const successorProfiles = repairedProfiles.map((item) => {
+      if (item.profile.profile_kind !== "deployment") return item;
+      const spec = {
+        ...item.profile.spec,
+        job_image:
+          "example.invalid/successor@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        worker_revision: "successor-worker",
+      };
+      const profile: ProfileObject = {
+        ...item.profile,
+        record_id: deterministicId(
+          "profile",
+          item.profile.profile_kind,
+          item.profile.name,
+          sha256(canonicalJson(spec)),
+        ),
+        spec,
+      };
+      return { profile, profile_id: sha256(canonicalJson(profile)) };
+    });
+    const successorService = new ControlService(
+      "test",
+      control.store,
+      control.projection,
+      successorProfiles,
+    );
+    await successorService.initialize(successorProfiles);
+    const successorResult =
+      await successorService.repairHistoricalContinuationSuccessor(
+        legacy.run_id,
+        { reason: "replace the digest-defective repaired worker", confirmed: true },
+        "legacy-continuation-repair-successor",
+        operator,
+      );
+    expect(successorResult.adopted).toBe(false);
+    const successor = await control.projection.runContinuationRepairSuccessor(
+      legacy.run_id,
+    );
+    expect(successor).toMatchObject({
+      record_id: successorResult.continuation_repair_successor_id,
+      run_continuation_id: attached.record_id,
+      run_continuation_digest: sha256(canonicalJson(attached)),
+      run_continuation_repair_id: repair.record_id,
+      run_continuation_repair_digest: sha256(canonicalJson(repair)),
+      job_image:
+        "example.invalid/successor@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      worker_revision: "successor-worker",
+    });
+    if (!successor) throw new Error("run continuation repair successor is missing");
+    await expect(
+      successorService.repairHistoricalContinuationSuccessor(
+        legacy.run_id,
+        { reason: "replace the digest-defective repaired worker", confirmed: true },
+        "legacy-continuation-repair-successor",
+        operator,
+      ),
+    ).resolves.toMatchObject({ adopted: true });
+    await control.service.exhaustTask(
+      unselectedAttempt,
+      "historical attempt has no valid selection",
+      1,
+    );
+    expect(
+      (await control.projection.task(legacy.run_id, unresolvedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "invalid",
+      selected_attempt_id: null,
+    });
+    const failedUnpause = control.service.actionIntent(
+      legacy.run_id,
+      "run.resume",
+      "run",
+      1,
+      { reason: "historical failed state was not paused" },
+      { subject: "migration", role: "migration" },
+      "2026-08-16T00:02:00.000Z",
+    );
+    await control.service.append(failedUnpause);
+    const failedUnpauseReceipt = await control.service.receipt(failedUnpause, {
+      outcome: "completed",
+      observed_state: "running",
+    });
+    await control.service.markAdvanced(failedUnpause, failedUnpauseReceipt);
+    expect(await control.projection.run(legacy.run_id)).toMatchObject({
+      paused: false,
+      status: "failed",
+    });
+    expect(() =>
+      assertRunContinuationCompatible(legacy, {
+        ...attached.execution,
+        deployment: {
+          ...attached.execution.deployment,
+          trial_job_template: {
+            ...attached.execution.deployment.trial_job_template,
+            inference_upstream: "https://incompatible.example/v1",
+          },
+        },
+      }),
+    ).toThrow("continuation changes the locked deployment inference_upstream");
+    await expect(
+      control.service.uploadEvidenceObject(
+        legacy.run_id,
+        historicalLaunch.action_id,
+        selectedTask.task_id,
+        sha256("late historical evidence"),
+        new TextEncoder().encode("late historical evidence"),
+      ),
+    ).rejects.toThrow("not bound to the execution continuation");
+    await expect(
+      control.service.runAction(
+        legacy.run_id,
+        {
+          action: "retry_infrastructure",
+          task_id: selectedTask.task_id,
+          confirmed: true,
+        },
+        "legacy-retry",
+        operator,
+      ),
+    ).rejects.toThrow("historical continuation cannot retry");
+    const resumed = await control.service.runAction(
+      legacy.run_id,
+      { action: "resume", confirmed: true },
+      "legacy-resume",
+      operator,
+    );
+    const resume = await control.projection.action(resumed.action_id);
+    const resumeIntent = JSON.parse(resume?.intent_body ?? "{}") as ActionIntent;
+    expect(resumeIntent).toMatchObject({
+      payload: { task_ids: [unresolvedTask.task_id] },
+    });
+    const resumedNoop = new NoopActions();
+    let resumedLaunchCount = 0;
+    const resumedExecute = vi.fn(
+      async (intent: ActionIntent): Promise<ExternalActionResult> => {
+        if (intent.action_kind !== "job.launch") return resumedNoop.execute(intent);
+        resumedLaunchCount += 1;
+        return resumedLaunchCount === 1
+          ? { outcome: "failed", observed_state: "job-create-failed" }
+          : {
+              outcome: "completed",
+              observed_state: "RUNNING",
+              resource_id: "continued-job",
+            };
+      },
+    );
+    const resumedReconciler = new Reconciler(
+      control.service,
+      control.projection,
+      { execute: resumedExecute },
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+    await settle(resumedReconciler, 5);
+    const resumedLaunches = resumedExecute.mock.calls
+      .map(([intent]) => intent)
+      .filter(
+        (intent) =>
+          intent.action_kind === "job.launch" &&
+          intent.payload.task_id === unresolvedTask.task_id,
+      );
+    const resumedLaunch = resumedLaunches[0];
+    expect(resumedLaunch?.payload).toMatchObject({
+      job_image:
+        "example.invalid/successor@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      worker_revision: "successor-worker",
+      run_continuation_id: attached.record_id,
+      run_continuation_repair_id: repair.record_id,
+      run_continuation_repair_successor_id: successor.record_id,
+    });
+    expect(attached.execution.harness.harbor_agent).toEqual({
+      import_path: "example.agent:Agent",
+      kwargs: {},
+    });
+    expect(resumedLaunches.map((intent) => intent.generation)).toEqual([2, 3]);
+    expect(await control.projection.run(legacy.run_id)).toMatchObject({
+      paused: false,
+      reserved_microusd: 100_012,
+    });
+    await expect(
+      control.service.continueHistoricalRun(
+        legacy.run_id,
+        { reason: "finish unresolved tasks", confirmed: true },
+        "legacy-continuation",
+        operator,
+      ),
+    ).resolves.toMatchObject({ adopted: true });
+    expect(
+      (await control.projection.task(legacy.run_id, selectedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "infrastructure",
+      selected_attempt_id: selectedAttempt.attempt_id,
+    });
+    const repeatedLaunch = resumedLaunches[resumedLaunches.length - 1];
+    if (!repeatedLaunch) throw new Error("continued Job launch is missing");
+    const repeatedAttempt: AttemptReceipt = {
+      ...unselectedAttempt,
+      record_id: "attempt-receipt-legacy-repeated-exhaustion",
+      created_at: new Date().toISOString(),
+      attempt_id: "attempt-legacy-repeated-exhaustion",
+      action_id: repeatedLaunch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: false,
+      evidence_digest: sha256("legacy-repeated-exhaustion-evidence"),
+      evidence_path: "evidence/legacy-repeated-exhaustion",
+      cost_microusd: 1,
+    };
+    await control.service.append(repeatedAttempt);
+    await control.service.exhaustTask(
+      repeatedAttempt,
+      "historical task exhausted again after repair",
+      2,
+    );
+    expect(
+      (await control.projection.task(legacy.run_id, unresolvedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "invalid",
+      selected_attempt_id: null,
+    });
+    const rebuilt = await Projection.open(
+      join(control.root, "historical-continuation.sqlite"),
+    );
+    await rebuilt.rebuild(control.store);
+    const restarted = new ControlService(
+      "test",
+      control.store,
+      rebuilt,
       control.profiles,
     );
-    await expect(restarted.initialize(control.profiles)).rejects.toThrow(
-      "historical run is not ready for the profile cutover",
+    await expect(restarted.initialize(control.profiles)).resolves.toBeUndefined();
+    expect(await rebuilt.runLock(legacy.run_id)).toEqual(legacy);
+    expect(
+      (await rebuilt.task(legacy.run_id, selectedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "infrastructure",
+      selected_attempt_id: selectedAttempt.attempt_id,
+    });
+    expect(
+      (await rebuilt.task(legacy.run_id, unresolvedTask.task_id))?.task,
+    ).toMatchObject({
+      terminal_outcome: "invalid",
+      selected_attempt_id: null,
+    });
+    await expect(restarted.runExecution(legacy)).resolves.toMatchObject({
+      contract_version: "v1",
+      deployment: {
+        job_image:
+          "example.invalid/successor@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        worker_revision: "successor-worker",
+      },
+    });
+    await rebuilt.close();
+
+    const orphan = {
+      ...attached,
+      record_id: "continuation-orphan",
+      run_id: "run-orphan",
+    };
+    await control.store.create(
+      controlRecordPath(orphan),
+      new TextEncoder().encode(canonicalJson(orphan)),
     );
-    expect(await control.projection.runLock(legacy.run_id)).toEqual(legacy);
+    const invalid = await Projection.open(
+      join(control.root, "invalid-continuation.sqlite"),
+    );
+    await expect(invalid.rebuild(control.store)).rejects.toThrow(
+      "run continuation has no lock",
+    );
+    await invalid.close();
   });
 
   it("replaces the promoted namespace Job cap and start pacing", async () => {
@@ -519,6 +1111,107 @@ describe("control service", () => {
       observed_scheduling_jobs: 0,
       reserved_without_active_observation: 0,
     });
+  });
+
+  it("applies provider request reservations per Run", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await configureCapacity(control, {
+      maximum: 3,
+      hardwareMaximum: 3,
+      burst: 3,
+    });
+    const firstRun = await control.service.submit(
+      { ...submission, start_paused: true },
+      "provider-capacity-first-run",
+      operator,
+    );
+    const secondRun = await control.service.submit(
+      { ...submission, start_paused: true },
+      "provider-capacity-second-run",
+      operator,
+    );
+    const launch = (runId: string, generation: number) =>
+      control.service.actionIntent(runId, "job.launch", "task-001", generation, {
+        worker_role: "execution",
+        task_id: "task-001",
+        task_ids: ["task-001"],
+        hardware: "cpu-basic",
+        max_jobs: 3,
+        inference_upstream: "https://router.huggingface.co/v1",
+        inference_max_total_concurrency: 1,
+      });
+    const first = launch(firstRun.run_id, 0);
+    const second = launch(secondRun.run_id, 0);
+    const sameRun = launch(firstRun.run_id, 1);
+
+    await expect(control.service.admitJobLaunch(first)).resolves.toMatchObject({
+      status: "admitted",
+    });
+    await expect(
+      control.projection.jobAdmission(first.action_id),
+    ).resolves.toMatchObject({
+      reserved_provider_requests: 1,
+    });
+    await expect(control.service.admitJobLaunch(second)).resolves.toMatchObject({
+      status: "admitted",
+    });
+    await expect(control.service.admitJobLaunch(sameRun)).resolves.toMatchObject({
+      status: "deferred",
+      limiting_factor: "provider_request_capacity",
+    });
+  });
+
+  it("derives provider reservations for active historical grants", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    await configureCapacity(control);
+    const capacity = control.service.capacityProfile();
+    if (!capacity) throw new Error("capacity profile is missing");
+    const run = await control.service.submit(
+      { ...submission, start_paused: true },
+      "historical-provider-capacity-run",
+      operator,
+    );
+    const intent = control.service.actionIntent(
+      run.run_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        worker_role: "execution",
+        task_id: "task-001",
+        task_ids: ["task-001"],
+        hardware: "cpu-basic",
+        max_jobs: 4,
+        inference_upstream: "https://router.huggingface.co/v1",
+        inference_max_concurrency: 4,
+      },
+    );
+    await control.service.writeAction(intent);
+    const grant: JobAdmissionGrant = {
+      schema_version: "v1",
+      kind: "job.admission",
+      record_id: deterministicId("job-admission", intent.action_id),
+      created_at: "2026-08-22T00:00:00.000Z",
+      actor: { subject: "test", role: "service" },
+      action_id: intent.action_id,
+      run_id: run.run_id,
+      namespace: "test",
+      capacity_profile_id: capacity.profile_id,
+      hardware: "cpu-basic",
+      tokens_remaining: 1,
+      refill_cursor_at: "2026-08-22T00:00:00.000Z",
+      previous_grant_id: null,
+    };
+    await control.service.append(grant);
+
+    await expect(control.projection.activeJobAdmissions("test")).resolves.toEqual([
+      expect.objectContaining({
+        action_id: intent.action_id,
+        reserved_provider_requests: 4,
+      }),
+    ]);
   });
 
   it("adopts idempotent submissions and completes a control smoke run", async () => {
@@ -2627,7 +3320,7 @@ describe("control service", () => {
     });
   });
 
-  it("turns failed Job launches into bounded infrastructure attempts", async () => {
+  it("retries unresolved infrastructure failures without a fixed attempt limit", async () => {
     const control = await createTestControl();
     controls.push(control);
     const result = await control.service.submit(
@@ -2641,10 +3334,16 @@ describe("control service", () => {
         if (intent.action_kind !== "job.launch")
           return new NoopActions().execute(intent);
         launches += 1;
+        if (launches <= 3)
+          return {
+            outcome: "failed",
+            observed_state: `job-create-failed-${launches}`,
+            error_code: "jobs-api-unavailable",
+          };
         return {
-          outcome: "failed",
-          observed_state: "job-create-failed",
-          error_code: "jobs-api-unavailable",
+          outcome: "created",
+          observed_state: "RUNNING",
+          resource_id: "job-after-infrastructure-retries",
         };
       },
     };
@@ -2655,29 +3354,168 @@ describe("control service", () => {
       new ResultPublisher(control.store, control.projection, control.service),
       { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
-    await settle(reconciler, 10);
-    expect(launches).toBe(1);
-    expect(await control.projection.unadvancedActions()).toHaveLength(0);
-    expect(await control.projection.runAttempts(result.run_id)).toMatchObject([
-      { outcome: "infrastructure", replacement_eligible: 1 },
-    ]);
+    await settle(reconciler, 16);
+    expect(launches).toBe(4);
+    expect(await control.projection.runAttempts(result.run_id)).toHaveLength(3);
     expect(await control.projection.run(result.run_id)).toMatchObject({
-      status: "failed",
-      terminal_tasks: 1,
-      exhausted_tasks: 1,
+      status: "active",
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
       publication_status: null,
     });
     const detail = await control.projection.task(result.run_id, "task-001");
-    expect(detail?.attempts).toMatchObject([
-      { outcome: "infrastructure", replacement_eligible: 1 },
-    ]);
+    expect(detail?.attempts).toHaveLength(3);
     expect(detail?.task).toMatchObject({
-      terminal_outcome: "infrastructure",
+      terminal_outcome: null,
       selected_attempt_id: null,
     });
   });
 
-  it("keeps a run active when one task is exhausted and others remain", async () => {
+  it("retries with a free generation after a hash-derived generation", async () => {
+    const control = await createTestControl(1, 2, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 12 },
+      "retry-generation-gap-key",
+      operator,
+    );
+    const launchGenerations: number[] = [];
+    let sentinelWritten = false;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind === "job.observe")
+          return {
+            outcome: "completed",
+            observed_state: "RUNNING",
+            resource_id: String(intent.payload.resource_id),
+          };
+        if (intent.action_kind !== "job.launch")
+          return new NoopActions().execute(intent);
+        launchGenerations.push(intent.generation);
+        if (!sentinelWritten) {
+          sentinelWritten = true;
+          const sentinel = control.service.actionIntent(
+            result.run_id,
+            "job.launch",
+            "task-001",
+            1_000_000,
+            { ...intent.payload },
+          );
+          await control.service.writeAction(sentinel);
+          await control.service.markAdvanced(
+            sentinel,
+            await control.service.receipt(sentinel, {
+              outcome: "completed",
+              observed_state: "suppressed-generation-sentinel",
+            }),
+          );
+          return {
+            outcome: "failed",
+            observed_state: "job-create-failed",
+            error_code: "jobs-api-unavailable",
+          };
+        }
+        return {
+          outcome: "created",
+          observed_state: "RUNNING",
+          resource_id: "replacement-job",
+        };
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 12);
+
+    expect(launchGenerations).toHaveLength(2);
+    expect(launchGenerations[1]).not.toBe(1_000_000);
+    expect(launchGenerations[1]).not.toBe(launchGenerations[0]);
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      status: "active",
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
+    });
+  });
+
+  it("pauses sibling tasks after a shared infrastructure failure repeats", async () => {
+    const control = await createTestControl(2, 1, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 100 },
+      "shared-failure-across-tasks-key",
+      operator,
+    );
+    let launches = 0;
+    const external: ExternalActionPort = {
+      execute: async (intent): Promise<ExternalActionResult> => {
+        if (intent.action_kind !== "job.launch")
+          return new NoopActions().execute(intent);
+        launches += 1;
+        return {
+          outcome: "failed",
+          observed_state: "shared-worker-failure",
+          error_code: "worker-start-failed",
+        };
+      },
+    };
+    const reconciler = new Reconciler(
+      control.service,
+      control.projection,
+      external,
+      new ResultPublisher(control.store, control.projection, control.service),
+      { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
+    );
+
+    await settle(reconciler, 12);
+    const launchesAtPause = launches;
+    expect(launchesAtPause).toBeGreaterThanOrEqual(2);
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      status: "paused",
+      reserved_microusd: 0,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
+    });
+    await settle(reconciler, 5);
+    expect(launches).toBe(launchesAtPause);
+    expect(
+      (await control.projection.runActions(result.run_id)).some(
+        (action) =>
+          action.action_kind === "job.launch" &&
+          action.observed_state === "suppressed-paused",
+      ),
+    ).toBe(true);
+
+    await expect(
+      control.service.runAction(
+        result.run_id,
+        {
+          action: "resume",
+          reason: "no worker repair attached",
+          task_limit: 1,
+          confirmed: true,
+        },
+        "resume-shared-failure-across-tasks-key",
+        operator,
+      ),
+    ).rejects.toThrow(
+      "repeated infrastructure failure requires a reviewed worker repair",
+    );
+    await settle(reconciler, 12);
+    expect(launches).toBe(launchesAtPause);
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      status: "paused",
+      reserved_microusd: 0,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
+    });
+  });
+
+  it("keeps unresolved tasks active while their replacement Jobs run", async () => {
     const control = await createTestControl(2, 1, 0, true, "forbidden", undefined, []);
     controls.push(control);
     const result = await control.service.submit(
@@ -2719,16 +3557,16 @@ describe("control service", () => {
       { interval_ms: 100, observation_interval_ms: 0, batch_size: 16 },
     );
     await settle(reconciler, 12);
-    expect(launches).toBe(2);
+    expect(launches).toBe(3);
     expect(await control.projection.run(result.run_id)).toMatchObject({
       status: "active",
-      terminal_tasks: 1,
-      exhausted_tasks: 1,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
       publication_status: null,
     });
     expect(
       (await control.projection.task(result.run_id, "task-001"))?.task.terminal_outcome,
-    ).toBe("infrastructure");
+    ).toBeNull();
     expect(
       (await control.projection.task(result.run_id, "task-002"))?.task.terminal_outcome,
     ).toBeNull();
@@ -2743,14 +3581,17 @@ describe("control service", () => {
       operator,
     );
     let failObservation = true;
+    let launchSequence = 0;
     const external: ExternalActionPort = {
       execute: async (intent): Promise<ExternalActionResult> => {
-        if (intent.action_kind === "job.launch")
+        if (intent.action_kind === "job.launch") {
+          launchSequence += 1;
           return {
             outcome: "created",
             observed_state: "SCHEDULING",
-            resource_id: "job-broken-observe-chain",
+            resource_id: `job-broken-observe-chain-${launchSequence}`,
           };
+        }
         if (intent.action_kind === "job.observe" && failObservation)
           return {
             outcome: "failed",
@@ -2761,7 +3602,7 @@ describe("control service", () => {
           return {
             outcome: "completed",
             observed_state: "ERROR",
-            resource_id: "job-broken-observe-chain",
+            resource_id: String(intent.payload.resource_id),
           };
         return new NoopActions().execute(intent);
       },
@@ -2788,7 +3629,7 @@ describe("control service", () => {
     await control.service.receipt(JSON.parse(observe?.intent_body ?? "null"), {
       outcome: "completed",
       observed_state: "SCHEDULING",
-      resource_id: "job-broken-observe-chain",
+      resource_id: "job-broken-observe-chain-1",
     });
     await settle(reconciler, 3);
     expect(
@@ -3406,6 +4247,51 @@ describe("control service", () => {
     }
   });
 
+  it("rejects a repeated attempt that omits an explicit failure fingerprint", async () => {
+    const control = await createTestControl();
+    controls.push(control);
+    const result = await control.service.submit(
+      submission,
+      "explicit-fingerprint-idempotency-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.run_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_id: "task-001",
+        task_ids: ["task-001"],
+        reservation_microusd: 0,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "explicit-fingerprint-evidence",
+    );
+    const input = {
+      run_id: result.run_id,
+      task_id: "task-001",
+      attempt_id: "attempt-explicit-fingerprint",
+      action_id: launch.action_id,
+      outcome: "infrastructure" as const,
+      replacement_eligible: true,
+      failure_fingerprint: sha256("explicit-failure"),
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    };
+    await control.service.attempt(input);
+    const { failure_fingerprint: _omitted, ...withoutFingerprint } = input;
+
+    await expect(control.service.attempt(withoutFingerprint)).rejects.toThrow(
+      "attempt identity conflict",
+    );
+  });
+
   it("adopts a repeated infrastructure retry request", async () => {
     const control = await createTestControl(1, 2);
     controls.push(control);
@@ -3431,18 +4317,32 @@ describe("control service", () => {
       control,
       "retry-idempotency-evidence",
     );
-    await control.service.attempt({
+    const infrastructureAttemptInput = {
       run_id: result.run_id,
       task_id: "task-001",
       attempt_id: "attempt-retry-idempotency",
       action_id: launch.action_id,
-      outcome: "infrastructure",
+      outcome: "infrastructure" as const,
       replacement_eligible: true,
       ...retryEvidence,
       cost_microusd: 0,
       metrics: {},
       completed_at: "2026-08-16T00:00:01.000Z",
-    });
+    };
+    const infrastructureAttempt = await control.service.attempt(
+      infrastructureAttemptInput,
+    );
+    expect(infrastructureAttempt.failure_fingerprint).toBe(
+      sha256(
+        canonicalJson({
+          kind: "legacy-worker-infrastructure-failure",
+          worker_revision: "unknown",
+        }),
+      ),
+    );
+    await expect(
+      control.service.attemptWithStatus(infrastructureAttemptInput),
+    ).resolves.toMatchObject({ adopted: true });
     const action = {
       action: "retry_infrastructure",
       task_id: "task-001",
@@ -3502,6 +4402,104 @@ describe("control service", () => {
     ).rejects.toThrow(
       "idempotency key belongs to a different retry_infrastructure action",
     );
+  });
+
+  it("reuses a manual retry reservation after an interrupted intent write", async () => {
+    const control = await createTestControl(1, 2, 6);
+    controls.push(control);
+    const result = await control.service.submit(
+      { ...submission, ceiling_microusd: 12 },
+      "interrupted-retry-intent-run-key",
+      operator,
+    );
+    const launch = control.service.actionIntent(
+      result.run_id,
+      "job.launch",
+      "task-001",
+      0,
+      {
+        task_id: "task-001",
+        task_ids: ["task-001"],
+        reservation_microusd: 6,
+      },
+    );
+    await control.service.writeAction(launch);
+    const evidence = await putEvidenceReference(
+      control,
+      "interrupted-retry-intent-evidence",
+    );
+    await control.service.attempt({
+      run_id: result.run_id,
+      task_id: "task-001",
+      attempt_id: "attempt-interrupted-retry-intent",
+      action_id: launch.action_id,
+      outcome: "infrastructure",
+      replacement_eligible: true,
+      ...evidence,
+      cost_microusd: 0,
+      metrics: {},
+      completed_at: "2026-08-16T00:00:01.000Z",
+    });
+    const action = {
+      action: "retry_infrastructure",
+      task_id: "task-001",
+      reason: "retry after interrupted intent write",
+      confirmed: true,
+    } as const;
+    const writeAction = control.service.writeAction.bind(control.service);
+    let interruptedIntent: ActionIntent | null = null;
+    const interruptedWrite = vi
+      .spyOn(control.service, "writeAction")
+      .mockImplementation(async (intent) => {
+        if (
+          intent.action_kind === "job.launch" &&
+          intent.payload.prior_attempt_id === "attempt-interrupted-retry-intent"
+        ) {
+          interruptedIntent = intent;
+          throw new Error("simulated retry intent write interruption");
+        }
+        return writeAction(intent);
+      });
+
+    await expect(
+      control.service.runAction(
+        result.run_id,
+        action,
+        "interrupted-retry-intent-key",
+        operator,
+      ),
+    ).rejects.toThrow("simulated retry intent write interruption");
+    interruptedWrite.mockRestore();
+    if (!interruptedIntent) throw new Error("interrupted retry intent is missing");
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      reserved_microusd: 6,
+    });
+    const collision = control.service.actionIntent(
+      result.run_id,
+      "publication.publish",
+      "generation-collision",
+      interruptedIntent.generation,
+      {},
+    );
+    await control.service.writeAction(collision);
+
+    const repeated = await control.service.runAction(
+      result.run_id,
+      action,
+      "interrupted-retry-intent-key",
+      operator,
+    );
+    const repeatedRow = await control.projection.action(repeated.action_id);
+    if (!repeatedRow) throw new Error("repeated retry intent is missing");
+    const repeatedIntent = JSON.parse(repeatedRow.intent_body) as ActionIntent;
+
+    expect(repeatedIntent.generation).not.toBe(interruptedIntent.generation);
+    expect(repeatedIntent.payload.replacement_reservation_key).toBe(
+      interruptedIntent.payload.replacement_reservation_key,
+    );
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      reserved_microusd: 6,
+    });
   });
 
   it("serializes concurrent infrastructure retry admissions", async () => {
@@ -4110,7 +5108,7 @@ describe("control service", () => {
     });
   });
 
-  it("releases each failed Job reservation before reserving its replacement", async () => {
+  it("releases failed Job reservations before pausing a repeated defect", async () => {
     const control = await createTestControl(1, 2, 6);
     controls.push(control);
     const result = await control.service.submit(
@@ -4143,10 +5141,29 @@ describe("control service", () => {
 
     expect(launches).toBe(2);
     expect(await control.projection.run(result.run_id)).toMatchObject({
-      status: "failed",
+      status: "paused",
       reserved_microusd: 0,
-      terminal_tasks: 1,
-      exhausted_tasks: 1,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
+    });
+
+    await expect(
+      control.service.runAction(
+        result.run_id,
+        { action: "resume", reason: "no worker repair attached", confirmed: true },
+        "resume-after-shared-defect-key",
+        operator,
+      ),
+    ).rejects.toThrow(
+      "repeated infrastructure failure requires a reviewed worker repair",
+    );
+    await settle(reconciler, 10);
+    expect(launches).toBe(2);
+    expect(await control.projection.run(result.run_id)).toMatchObject({
+      status: "paused",
+      reserved_microusd: 0,
+      terminal_tasks: 0,
+      exhausted_tasks: 0,
     });
   });
 

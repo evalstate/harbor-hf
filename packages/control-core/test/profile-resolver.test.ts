@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import { profile } from "@harbor-hf/test-fixtures";
+import { describe, expect, it } from "vitest";
 import { ProfileResolver } from "../src/profiles.js";
 
 describe("ProfileResolver", () => {

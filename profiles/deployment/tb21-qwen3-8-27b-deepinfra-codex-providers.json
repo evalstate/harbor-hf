@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-6aa41d06f54656b9148852ff",
+  "record_id": "profile-1a27877e0ed4c29bebf962d5",
   "created_at": "2026-08-30T08:40:00.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -11,13 +11,9 @@
   "name": "tb21-qwen3-8-27b-deepinfra-codex-providers",
   "spec": {
     "route": "hf_job",
-    "models": [
-      "qwen3-8-27b-deepinfra"
-    ],
-    "harnesses": [
-      "codex"
-    ],
-    "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:dd0dac768b7113d50a505a3b811b5c9f4bd9e6e142852a158c71d4db21873636",
+    "models": ["qwen3-8-27b-deepinfra"],
+    "harnesses": ["codex"],
+    "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:b0aa46621509a74be133e68c8858164b50dba57a48807353c0f3c7bd9a99d239",
     "preparation_job_command": [
       "python",
       "-m",
@@ -31,12 +27,13 @@
     "hardware": "cpu-upgrade",
     "active_hourly_cost_microusd": 30000,
     "trusted_worker": true,
+    "inference_token": "forbidden",
     "preparation": "required",
     "inference_provider": "deepinfra",
     "input_price_microusd_per_million_tokens": 400000,
     "output_price_microusd_per_million_tokens": 3000000,
     "harbor_version": "0.22.0",
-    "worker_revision": "d5e1c8850477fa64f4bcb4e0023492ba27178a1e",
+    "worker_revision": "1d1346a2de44eac1a924d49da29459ccc0464bd0",
     "context_window": 262144,
     "timeout_seconds": 604800,
     "preparation_timeout_seconds": 7200,
@@ -59,10 +56,18 @@
           "active_hourly_cost_microusd": 30000
         }
       ],
+      "inference_token": "required",
       "inference_upstream": "https://router.huggingface.co/v1",
       "inference_api": "responses",
+      "inference_max_requests": 512,
+      "inference_max_concurrency": 1,
       "inference_timeout_seconds": 1800,
       "inference_max_output_tokens": 32768,
+      "root_bootstrap_command": [
+        "python",
+        "-m",
+        "harbor_hf_agents.support.job_root_bridge"
+      ],
       "default_cpus": 1,
       "default_memory_mb": 2048,
       "default_storage_mb": 10240,

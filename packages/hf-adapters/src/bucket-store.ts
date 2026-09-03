@@ -6,7 +6,6 @@ import {
   type ObjectEntry,
 } from "@harbor-hf/control-core";
 import {
-  downloadFile,
   HubApiError,
   type ListFileEntry,
   listFiles,
@@ -17,6 +16,8 @@ const defaultRetryDelaysMs = [
   250, 1_000, 3_000, 10_000, 30_000, 60_000, 120_000,
 ] as const;
 const defaultListTimeoutMs = 30_000;
+const defaultCacheMaxBytes = 64 * 1024 * 1024;
+const defaultHubUrl = "https://huggingface.co";
 const xetHashPattern = /^[0-9a-f]{64}$/i;
 
 export interface HuggingFaceBucketStoreOptions {
@@ -24,6 +25,8 @@ export interface HuggingFaceBucketStoreOptions {
   accessToken: string;
   retryDelaysMs?: readonly number[];
   listTimeoutMs?: number;
+  cacheMaxBytes?: number;
+  fetch?: typeof fetch;
 }
 
 function transientDownloadError(error: unknown): boolean {
@@ -62,6 +65,10 @@ function sourceIdentity(entry: ListFileEntry): string {
   return `xet:${entry.xetHash.toLowerCase()}`;
 }
 
+function encodedPath(value: string): string {
+  return value.split("/").map(encodeURIComponent).join("/");
+}
+
 async function sleep(milliseconds: number): Promise<void> {
   if (milliseconds <= 0) return;
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -72,7 +79,10 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
   private readonly credentials: { accessToken: string };
   private readonly retryDelaysMs: readonly number[];
   private readonly listTimeoutMs: number;
+  private readonly cacheMaxBytes: number;
+  private readonly fetch: typeof fetch;
   private readonly cache = new Map<string, Uint8Array>();
+  private cacheBytes = 0;
   private readonly sourceIdentities = new Map<string, string>();
   private queue: Promise<void> = Promise.resolve();
 
@@ -81,8 +91,12 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
     this.credentials = { accessToken: options.accessToken };
     this.retryDelaysMs = options.retryDelaysMs ?? defaultRetryDelaysMs;
     this.listTimeoutMs = options.listTimeoutMs ?? defaultListTimeoutMs;
+    this.cacheMaxBytes = options.cacheMaxBytes ?? defaultCacheMaxBytes;
+    this.fetch = options.fetch ?? fetch;
     if (!Number.isSafeInteger(this.listTimeoutMs) || this.listTimeoutMs <= 0)
       throw new Error("Bucket list timeout must be a positive integer");
+    if (!Number.isSafeInteger(this.cacheMaxBytes) || this.cacheMaxBytes < 0)
+      throw new Error("Bucket cache limit must be a nonnegative integer");
   }
 
   async list(prefix: string): Promise<readonly ObjectEntry[]> {
@@ -96,9 +110,33 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
     for (const entry of entries) {
       const previous = this.sourceIdentities.get(entry.key);
       if (previous !== undefined && previous !== entry.source_identity)
-        this.cache.delete(entry.key);
+        this.deleteCached(entry.key);
       this.sourceIdentities.set(entry.key, entry.source_identity);
     }
+  }
+
+  private deleteCached(key: string): void {
+    const cached = this.cache.get(key);
+    if (!cached) return;
+    this.cache.delete(key);
+    this.cacheBytes -= cached.byteLength;
+  }
+
+  private setCached(key: string, bytes: Uint8Array): void {
+    if (
+      key.startsWith("evidence/") ||
+      bytes.byteLength > this.cacheMaxBytes ||
+      this.cacheMaxBytes === 0
+    )
+      return;
+    this.deleteCached(key);
+    while (this.cacheBytes + bytes.byteLength > this.cacheMaxBytes) {
+      const oldest = this.cache.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.deleteCached(oldest);
+    }
+    this.cache.set(key, bytes);
+    this.cacheBytes += bytes.byteLength;
   }
 
   private async listEntriesWithRetry(
@@ -118,20 +156,15 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
 
   async read(key: string): Promise<Uint8Array> {
     const cached = this.cache.get(key);
-    if (cached) return Uint8Array.from(cached);
+    if (cached) {
+      this.cache.delete(key);
+      this.cache.set(key, cached);
+      return Uint8Array.from(cached);
+    }
     let bytes: Uint8Array | null = null;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        const blob = await downloadFile({
-          repo: this.repo,
-          path: key,
-          ...this.credentials,
-        });
-        if (!blob)
-          throw Object.assign(new Error(`object not found: ${key}`), {
-            code: "ENOENT",
-          });
-        bytes = new Uint8Array(await blob.arrayBuffer());
+        bytes = await this.download(key);
         break;
       } catch (error) {
         const delay = this.retryDelaysMs[attempt];
@@ -140,8 +173,31 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
       }
     }
     if (!bytes) throw new Error(`object download produced no bytes: ${key}`);
-    if (!key.startsWith("evidence/")) this.cache.set(key, bytes);
+    this.setCached(key, bytes);
     return Uint8Array.from(bytes);
+  }
+
+  private async download(key: string): Promise<Uint8Array> {
+    const url = new URL(
+      `/buckets/${encodedPath(this.repo.name)}/resolve/${encodedPath(key)}`,
+      defaultHubUrl,
+    );
+    const response = await this.fetch(url, {
+      headers: { Authorization: `Bearer ${this.credentials.accessToken}` },
+      redirect: "follow",
+    });
+    if (response.status === 404)
+      throw Object.assign(new Error(`object not found: ${key}`), {
+        code: "ENOENT",
+      });
+    if (!response.ok)
+      throw new HubApiError(
+        url.href,
+        response.status,
+        response.headers.get("X-Request-Id") ?? undefined,
+        `Bucket object download failed with HTTP ${response.status}`,
+      );
+    return new Uint8Array(await response.arrayBuffer());
   }
 
   async create(key: string, bytes: Uint8Array): Promise<CreateResult> {
@@ -158,7 +214,7 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
     bytes: Uint8Array,
   ): Promise<CreateResult> {
     const digest = sha256(bytes);
-    this.cache.delete(key);
+    this.deleteCached(key);
     const existing = await this.readIfPresent(key);
     if (existing) {
       if (sha256(existing) !== digest) throw new ImmutableConflictError(key);
@@ -225,7 +281,7 @@ export class HuggingFaceBucketStore implements ImmutableObjectStore {
 
   private async stableSourceIdentity(key: string, digest: string): Promise<string> {
     const before = await this.objectMetadata(key);
-    this.cache.delete(key);
+    this.deleteCached(key);
     const observed = await this.read(key);
     const after = await this.objectMetadata(key);
     if (

@@ -28,6 +28,7 @@ from urllib.parse import quote
 
 from harbor.models.job.config import JobConfig
 from harbor.models.job.lock import TrialLock
+from harbor.models.trial.config import AgentConfig
 
 from harbor_hf_agents.support.control_client import (
     ControlClient,
@@ -35,7 +36,6 @@ from harbor_hf_agents.support.control_client import (
     ControlClientTransientError,
     digest_bytes,
     digest_json,
-    run_lock_profile,
 )
 from harbor_hf_agents.support.control_job_environment import (
     ControlJobEnvironment,
@@ -160,10 +160,12 @@ class WorkerConfig:
 
     run_id: str
     action_id: str
+    historical: bool
     harbor_version: str
     worker_revision: str
     input_price: int
     output_price: int
+    harbor_agent: dict[str, Any]
     job_config: dict[str, Any]
     task: LockedTask
 
@@ -221,6 +223,183 @@ def _read_lock(run_id: str) -> dict[str, Any]:
         f"/api/v1/runs/{quote(run_id, safe='')}/lock",
         idempotency_key=f"control-worker-lock-{_required('HARBOR_HF_ACTION_ID')}",
     )
+
+
+def _read_execution(lock: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Read the immutable execution bound to a current or continued Run."""
+    if "execution" in lock:
+        execution = lock["execution"]
+        if (
+            "HARBOR_HF_RUN_CONTINUATION_REPAIR_ID" in os.environ
+            or "HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID" in os.environ
+        ):
+            raise PreparedDataError(
+                "current run cannot carry a continuation worker repair"
+            )
+    else:
+        execution = _read_historical_execution(run_id)
+    if not isinstance(execution, dict) or execution["contract_version"] != "v1":
+        raise PreparedDataError("run execution contract is invalid")
+    return execution
+
+
+def _read_historical_execution(run_id: str) -> dict[str, Any]:
+    """Read a historical continuation and its complete worker repair chain."""
+    continuation = _control_client(run_id).request_sync(
+        "GET",
+        f"/api/v1/runs/{quote(run_id, safe='')}/continuation",
+        idempotency_key=(
+            f"control-worker-continuation-{_required('HARBOR_HF_ACTION_ID')}"
+        ),
+    )
+    try:
+        continuation_record_id = continuation["record_id"]
+        continuation_run_id = continuation["run_id"]
+        continuation_lock_digest = continuation["run_lock_digest"]
+        execution = continuation["execution"]
+    except KeyError as error:
+        raise PreparedDataError(
+            "run continuation is missing its immutable execution binding"
+        ) from error
+    if continuation_run_id != run_id or continuation_lock_digest != _required(
+        "HARBOR_HF_RUN_LOCK_DIGEST"
+    ):
+        raise PreparedDataError(
+            "run continuation does not match the worker capability"
+        ) from None
+    repair_id = os.environ.get("HARBOR_HF_RUN_CONTINUATION_REPAIR_ID")
+    successor_id = os.environ.get("HARBOR_HF_RUN_CONTINUATION_REPAIR_SUCCESSOR_ID")
+    if repair_id:
+        execution, repair = _apply_continuation_repair(
+            run_id,
+            continuation,
+            continuation_record_id,
+            execution,
+            repair_id,
+        )
+        if successor_id:
+            execution = _apply_continuation_repair_successor(
+                run_id,
+                continuation,
+                continuation_record_id,
+                repair,
+                execution,
+                successor_id,
+            )
+    elif successor_id:
+        raise PreparedDataError(
+            "continuation worker repair successor has no prior repair"
+        )
+    return execution
+
+
+def _apply_continuation_repair(
+    run_id: str,
+    continuation: dict[str, Any],
+    continuation_record_id: object,
+    execution: dict[str, Any],
+    repair_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply the capability-bound worker repair to a historical execution."""
+    repair = _control_client(run_id).request_sync(
+        "GET",
+        f"/api/v1/runs/{quote(run_id, safe='')}/continuation-repair",
+        idempotency_key=(
+            f"control-worker-continuation-repair-{_required('HARBOR_HF_ACTION_ID')}"
+        ),
+    )
+    required_fields = (
+        "record_id",
+        "run_id",
+        "run_lock_digest",
+        "run_continuation_id",
+        "run_continuation_digest",
+        "job_image",
+        "worker_revision",
+    )
+    try:
+        values = tuple(repair[field] for field in required_fields)
+    except KeyError as error:
+        raise PreparedDataError(
+            "run continuation repair is missing its immutable binding"
+        ) from error
+    expected = (
+        repair_id,
+        run_id,
+        _required("HARBOR_HF_RUN_LOCK_DIGEST"),
+        continuation_record_id,
+        digest_bytes(_canonical_json(continuation)),
+    )
+    if values[:5] != expected:
+        raise PreparedDataError(
+            "run continuation repair does not match the worker capability"
+        )
+    if not isinstance(values[5], str) or not isinstance(values[6], str):
+        raise PreparedDataError("run continuation repair worker fields are invalid")
+    repaired = copy.deepcopy(execution)
+    deployment = copy.deepcopy(repaired["deployment"])
+    deployment["job_image"], deployment["worker_revision"] = values[5:]
+    repaired["deployment"] = deployment
+    return repaired, repair
+
+
+def _apply_continuation_repair_successor(
+    run_id: str,
+    continuation: dict[str, Any],
+    continuation_record_id: object,
+    repair: dict[str, Any],
+    execution: dict[str, Any],
+    successor_id: str,
+) -> dict[str, Any]:
+    """Apply one capability-bound successor to a continuation worker repair."""
+    successor = _control_client(run_id).request_sync(
+        "GET",
+        f"/api/v1/runs/{quote(run_id, safe='')}/continuation-repair-successor",
+        idempotency_key=(
+            "control-worker-continuation-repair-successor-"
+            f"{_required('HARBOR_HF_ACTION_ID')}"
+        ),
+    )
+    required_fields = (
+        "record_id",
+        "run_id",
+        "run_lock_digest",
+        "run_continuation_id",
+        "run_continuation_digest",
+        "run_continuation_repair_id",
+        "run_continuation_repair_digest",
+        "job_image",
+        "worker_revision",
+    )
+    try:
+        values = tuple(successor[field] for field in required_fields)
+        repair_id = repair["record_id"]
+    except KeyError as error:
+        raise PreparedDataError(
+            "run continuation repair successor is missing its immutable binding"
+        ) from error
+    expected = (
+        successor_id,
+        run_id,
+        _required("HARBOR_HF_RUN_LOCK_DIGEST"),
+        continuation_record_id,
+        digest_bytes(_canonical_json(continuation)),
+        repair_id,
+        digest_bytes(_canonical_json(repair)),
+    )
+    if values[:7] != expected:
+        raise PreparedDataError(
+            "run continuation repair successor does not match the worker capability"
+        )
+    if not isinstance(values[7], str) or not isinstance(values[8], str):
+        raise PreparedDataError(
+            "run continuation repair successor worker fields are invalid"
+        )
+    repaired = copy.deepcopy(execution)
+    deployment = copy.deepcopy(repaired["deployment"])
+    deployment["job_image"], deployment["worker_revision"] = values[7:]
+    repaired["deployment"] = deployment
+    return repaired
 
 
 def _read_prepared_job(run_id: str) -> dict[str, Any]:
@@ -305,7 +484,15 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
     run_id = identity.run_id
     if lock["run_id"] != run_id:
         raise PreparedDataError("run lock identity does not match worker environment")
-    deployment = run_lock_profile(lock, "deployment")
+    historical = "execution" not in lock
+    execution = _read_execution(lock, run_id)
+    try:
+        deployment = execution["deployment"]
+        harbor_agent = execution["harbor_agent"]
+    except KeyError as error:
+        raise PreparedDataError("prepared execution contract is incomplete") from error
+    if not isinstance(deployment, dict) or not isinstance(harbor_agent, dict):
+        raise PreparedDataError("prepared execution contract is invalid")
     if deployment["route"] != "hf_job" or deployment["preparation"] != "required":
         raise PreparedDataError("control worker requires a prepared HF Job deployment")
     worker_image = str(deployment["job_image"])
@@ -346,6 +533,9 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
     if task_id not in references:
         raise PreparedDataError("worker task assignment is outside the prepared job")
 
+    # The capability-authenticated control service verifies complete record
+    # digests. Recomputing JavaScript records here would change valid JSON
+    # numbers whose Python and JavaScript spellings differ.
     reference = references[task_id]
     value = _read_prepared_trial(run_id, task_id)
     expected = expected_tasks[task_id]
@@ -413,10 +603,12 @@ def _locked_config(  # noqa: C901 -- immutable binding validation is explicit
     return WorkerConfig(
         run_id=run_id,
         action_id=identity.action_id,
+        historical=historical,
         harbor_version=str(deployment["harbor_version"]),
         worker_revision=str(deployment["worker_revision"]),
         input_price=int(deployment["input_price_microusd_per_million_tokens"]),
         output_price=int(deployment["output_price_microusd_per_million_tokens"]),
+        harbor_agent=copy.deepcopy(harbor_agent),
         job_config=copy.deepcopy(job_config),
         task=LockedTask(
             task_id=task_id,
@@ -459,7 +651,7 @@ def _job_config(config: WorkerConfig, root: Path) -> Path:
         )
     verifier = lock.verifier.model_dump(mode="json")
     verifier.pop("environment_mode", None)
-    agent = lock.agent.model_dump(mode="json")
+    agent = copy.deepcopy(config.harbor_agent)
     agent["skills"] = []
     value = copy.deepcopy(config.job_config)
     value.update(
@@ -556,17 +748,17 @@ def _exception_outcome(  # noqa: C901 -- explicit terminal outcome map
         return "agent", False
     if "policy_rejected" in detail:
         return "policy", False
-    if name in _ENVIRONMENT_SETUP_ERRORS or name == TransientProviderError.__name__:
+    if (
+        name in _ENVIRONMENT_SETUP_ERRORS
+        or name == TransientProviderError.__name__
+        or not _phase_started(result, "agent_execution")
+    ):
         return "infrastructure", True
     if "Verifier" in name or "Reward" in name:
         return "verifier", False
     if "Refusal" in name:
         return "refusal", False
-    if _phase_started(result, "agent_setup") or _phase_started(
-        result, "agent_execution"
-    ):
-        return "agent", False
-    return "invalid", False
+    return "agent", False
 
 
 def _phase_started(result: dict[str, Any], name: str) -> bool:
@@ -576,6 +768,37 @@ def _phase_started(result: dict[str, Any], name: str) -> bool:
         and "started_at" in value
         and value["started_at"] is not None
     )
+
+
+def _failure_fingerprint(
+    failure_class: str | None,
+    *,
+    replacement_eligible: bool,
+) -> str | None:
+    """Identify a repeatable worker failure without storing private error text."""
+    if not replacement_eligible or failure_class is None:
+        return None
+    return digest_json(
+        {
+            "schema_version": "v1",
+            "kind": "infrastructure.failure",
+            "failure_class": failure_class,
+            "worker_revision": os.environ.get("HARBOR_HF_WORKER_REVISION", "unknown"),
+        }
+    )
+
+
+def _result_failure_class(
+    result: dict[str, Any] | None,
+) -> str:
+    if result is None:
+        return "missing-harbor-result"
+    exception = result.get("exception_info")
+    if isinstance(exception, dict) and exception.get("exception_type"):
+        return str(exception["exception_type"])
+    if not _phase_started(result, "agent_execution"):
+        return "agent-execution-not-started"
+    return "unclassified-infrastructure-failure"
 
 
 def _agent_result(result: dict[str, Any] | None) -> dict[str, Any]:
@@ -876,6 +1099,7 @@ def _submit_attempt(
     *,
     timed_out: bool = False,
     outcome_override: tuple[str, bool] | None = None,
+    failure_class_override: str | None = None,
 ) -> None:
     task = config.task
     outcome, replacement = outcome_override or _exception_outcome(
@@ -884,6 +1108,14 @@ def _submit_attempt(
         timed_out=timed_out,
     )
     metrics = _metrics(result)
+    failure_fingerprint = _failure_fingerprint(
+        (
+            failure_class_override or _result_failure_class(result)
+            if outcome == "infrastructure"
+            else None
+        ),
+        replacement_eligible=replacement,
+    )
     client = _control_client(config.run_id)
     client.request_sync(
         "POST",
@@ -892,6 +1124,11 @@ def _submit_attempt(
             "action_id": config.action_id,
             "outcome": outcome,
             "replacement_eligible": replacement,
+            **(
+                {"failure_fingerprint": failure_fingerprint}
+                if failure_fingerprint is not None
+                else {}
+            ),
             "evidence_digest": evidence_digest,
             "evidence_path": evidence_path,
             "cost_microusd": _cost_microusd(config, result),
@@ -913,6 +1150,10 @@ def _submit_failure_attempt(
 ) -> None:
     """Submit a bounded failure manifest without trusting prepared result data."""
     digest, evidence_path = _upload_failure_note(identity, error)
+    failure_fingerprint = _failure_fingerprint(
+        type(error).__name__ if outcome == "infrastructure" else None,
+        replacement_eligible=replacement_eligible,
+    )
     client = _control_client(identity.run_id)
     client.request_sync(
         "POST",
@@ -921,6 +1162,11 @@ def _submit_failure_attempt(
             "action_id": identity.action_id,
             "outcome": outcome,
             "replacement_eligible": replacement_eligible,
+            **(
+                {"failure_fingerprint": failure_fingerprint}
+                if failure_fingerprint is not None
+                else {}
+            ),
             "evidence_digest": digest,
             "evidence_path": evidence_path,
             "cost_microusd": 0,
@@ -938,7 +1184,7 @@ def _worker_failure_outcome(error: BaseException) -> tuple[str, bool]:
     if isinstance(error, MissingHarborResultError):
         if error.timed_out:
             return "benchmark_timeout", False
-        return "invalid", False
+        return "infrastructure", True
     if isinstance(
         error,
         (
@@ -1199,7 +1445,24 @@ def _run_harbor(
     return output, timed_out, result_path
 
 
-def _verified_result(task: LockedTask, result_path: Path) -> dict[str, Any]:
+def _expected_trial_lock(
+    config: WorkerConfig,
+    observed_lock: TrialLock,
+) -> TrialLock:
+    if not config.historical:
+        return config.task.trial_lock
+    expected_agent_value = copy.deepcopy(config.harbor_agent)
+    expected_agent_value["skills"] = []
+    expected_agent = AgentConfig.model_validate(expected_agent_value)
+    if observed_lock.agent != expected_agent:
+        raise WorkerEvidenceError("executed Harbor agent differs from the continuation")
+    # Continuations may update the reviewed agent implementation while the
+    # prepared task, environment, verifier, and other inputs stay immutable.
+    return config.task.trial_lock.model_copy(update={"agent": expected_agent})
+
+
+def _verified_result(config: WorkerConfig, result_path: Path) -> dict[str, Any]:
+    task = config.task
     observed_lock_path = result_path.parent / "lock.json"
     if not observed_lock_path.exists():
         raise WorkerEvidenceError("Harbor did not write a trial lock")
@@ -1210,7 +1473,8 @@ def _verified_result(task: LockedTask, result_path: Path) -> dict[str, Any]:
             label="Harbor trial lock",
         )
     )
-    if observed_lock != task.trial_lock:
+    expected_lock = _expected_trial_lock(config, observed_lock)
+    if observed_lock != expected_lock:
         raise WorkerEvidenceError("executed Harbor trial lock differs from preparation")
     result_value = json.loads(
         _read_bounded_file(
@@ -1252,6 +1516,7 @@ def _deliver_result(
     task = config.task
     archive = _archive_trial(root, task, result_path, output)
     outcome_override: tuple[str, bool] | None = None
+    failure_class_override: str | None = None
     try:
         digest, evidence_path = _upload_evidence(config, archive)
     except ControlClientError as error:
@@ -1262,6 +1527,7 @@ def _deliver_result(
         )
         digest, evidence_path = _upload_failure_note(_config_identity(config), error)
         outcome_override = _worker_failure_outcome(error)
+        failure_class_override = type(error).__name__
     _submit_attempt(
         config,
         result_value,
@@ -1270,6 +1536,7 @@ def _deliver_result(
         evidence_path,
         timed_out=timed_out,
         outcome_override=outcome_override,
+        failure_class_override=failure_class_override,
     )
 
 
@@ -1282,7 +1549,7 @@ def _run_task_once(config: WorkerConfig, root: Path) -> None:
         task.timeout_seconds,
     )
     output, timed_out, result_path = _run_harbor(config, root, path)
-    result_value = _verified_result(task, result_path)
+    result_value = _verified_result(config, result_path)
     _deliver_result(
         config,
         root,

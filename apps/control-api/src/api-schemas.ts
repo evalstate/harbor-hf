@@ -342,6 +342,8 @@ export const capacitySchema = {
     "run_active",
     "hardware_limit",
     "hardware_active",
+    "provider_limit",
+    "provider_reserved",
     "start_tokens",
     "start_burst",
     "queued",
@@ -357,6 +359,8 @@ export const capacitySchema = {
     run_active: integer,
     hardware_limit: nullableInteger,
     hardware_active: integer,
+    provider_limit: integer,
+    provider_reserved: integer,
     start_tokens: nullableInteger,
     start_burst: nullableInteger,
     queued: integer,
@@ -367,6 +371,7 @@ export const capacitySchema = {
             "run_job_capacity",
             "namespace_job_capacity",
             "hardware_job_capacity",
+            "provider_request_capacity",
             "start_rate",
             "run_cancelled",
           ],
@@ -395,6 +400,42 @@ export const acceptedSchema = {
   properties: {
     run_id: { type: "string" },
     action_id: { type: "string" },
+    status_url: { type: "string" },
+    adopted: { type: "boolean" },
+  },
+} as const;
+
+export const runContinuationAcceptedSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["run_id", "continuation_id", "status_url", "adopted"],
+  properties: {
+    run_id: { type: "string" },
+    continuation_id: { type: "string" },
+    status_url: { type: "string" },
+    adopted: { type: "boolean" },
+  },
+} as const;
+
+export const runContinuationRepairAcceptedSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["run_id", "continuation_repair_id", "status_url", "adopted"],
+  properties: {
+    run_id: { type: "string" },
+    continuation_repair_id: { type: "string" },
+    status_url: { type: "string" },
+    adopted: { type: "boolean" },
+  },
+} as const;
+
+export const runContinuationRepairSuccessorAcceptedSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["run_id", "continuation_repair_successor_id", "status_url", "adopted"],
+  properties: {
+    run_id: { type: "string" },
+    continuation_repair_successor_id: { type: "string" },
     status_url: { type: "string" },
     adopted: { type: "boolean" },
   },
@@ -471,6 +512,7 @@ export const attemptSchema = {
     "task_id",
     "outcome",
     "replacement_eligible",
+    "failure_fingerprint",
     "cost_microusd",
     "metrics",
     "created_at",
@@ -483,6 +525,7 @@ export const attemptSchema = {
     task_id: { type: "string" },
     outcome: { type: "string" },
     replacement_eligible: integer,
+    failure_fingerprint: nullableString,
     cost_microusd: integer,
     metrics: { type: "object", additionalProperties: { type: "number" } },
     created_at: { type: "string", format: "date-time" },

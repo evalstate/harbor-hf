@@ -2475,8 +2475,9 @@ describe("installer workflows", () => {
           bootstrapReceipt: receipt,
           persistBootstrapReceipt: async () => {
             if (!setupResult.hf.state.space) throw new Error("test Space is missing");
-            setupResult.hf.state.space.variables.HARBOR_HF_SOURCE_REVISION =
-              "d".repeat(40);
+            setupResult.hf.state.space.variables.HARBOR_HF_SOURCE_REVISION = "d".repeat(
+              40,
+            );
           },
         },
         setupResult.dependencies,

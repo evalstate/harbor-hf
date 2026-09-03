@@ -13,11 +13,7 @@
     "agent": "openclaw",
     "revision": "2026.7.1-2",
     "reasoning_effort": "off",
-    "required_evidence": [
-      "workspace",
-      "trajectory",
-      "verifier"
-    ],
+    "required_evidence": ["workspace", "trajectory", "verifier"],
     "harbor_agent": {
       "import_path": "harbor_hf_agents.openclaw.agent:OpenClawAgent",
       "override_setup_timeout_sec": 1200,
@@ -29,9 +25,7 @@
     },
     "contract_version": "v1",
     "capabilities": {
-      "inference_apis": [
-        "chat-completions"
-      ],
+      "inference_apis": ["chat-completions"],
       "provider_runtime": true,
       "provider_max_attempts": 1
     }
