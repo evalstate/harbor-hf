@@ -17,14 +17,16 @@ resume, the reproducibility lock, and the result files. Harbor-HF owns the
 hosted Space with its submission API and form. It also owns credential handling
 and Bucket storage, plus a cost ceiling on each trial and the leaderboard.
 
-The plan replaces the five profile kinds with one run record that wraps a Harbor
-`JobConfig`. It switches trial execution to Harbor's own `hf-sandbox`
-environment. It also deletes about 90,000 lines of Python that no deployment
-uses.
+Each benchmark run becomes one Harbor process inside one HF Job. That Job
+mounts the Bucket and writes Harbor's job folder there, and it starts one child
+Job per trial through Harbor's `hf-sandbox` environment. The Space submits runs,
+restarts a parent Job that stopped early, and polls the Bucket to show status.
+One `run.json` per run replaces the five profile kinds. About 90,000 lines of
+Python that no deployment uses are deleted. Everything lands in one cutover.
 
-**Status.** Proposed. Nothing in this document is implemented. The plan needs
-agreement from the maintainers on the open questions at the end before work
-starts.
+**Status.** Proposed and reviewed by the maintainers on 2026-09-04. The design
+decisions below are settled. Two paid tests and one token decision, listed under
+preconditions, must happen before code is written.
 
 ## Problem
 
@@ -139,27 +141,86 @@ declares no network policy capability.
 
 ## Target design
 
+### Execution model
+
+Harbor runs inside one parent HF Job per benchmark run. The Space never runs
+Harbor itself. A Space restarts on every deploy, and a restart would stop every
+benchmark in progress, so the Space is the wrong place for a process that lives
+for a day.
+
+The parent Job mounts the Bucket and uses a folder in it as Harbor's
+`jobs_dir`. Harbor writes `config.json`, `lock.json`, each trial's `result.json`
+and the trajectories straight into the Bucket as it works. There is no copy
+step and no storage on the Space. For each trial Harbor starts one child Job
+through `hf-sandbox`, waits for it, collects the result and moves on. The parent
+Job runs on a small CPU flavor and mostly waits, so it costs little.
+
+An HF Job stops after 24 hours. A full Terminal-Bench run with five trials per
+task can take longer, so the Space has one control rule. If a run is not
+finished and no parent Job for it is alive, start one with the same `jobs_dir`.
+Harbor keeps every trial that has a `result.json` and reruns the rest. The rule
+is idempotent. Each parent Job carries a label with its run id, so a duplicate
+start after a lost response finds the live Job and does nothing. This one rule
+replaces the reconciler, the five retry paths and the continuation chain.
+
+The parent Job holds a token that can start Jobs and write to the Bucket. Today
+no Job receives such a token, and the earlier design treated that as a rule.
+This plan changes the rule, because the parent Job is now the orchestrator. The
+token arrives as a Job secret at launch and never appears in the run record.
+
+The parent image is the existing trial worker image with Harbor installed. It
+is the only image to pin, and one tag per Harbor version replaces the digest
+pins in 22 deployment profiles.
+
 ### Run record
 
-A run is a Harbor `JobConfig` plus a small envelope. The envelope holds the
-identity of the run and its submitter, plus the Harbor version and the cost
-ceiling.
+A run is one JSON file at `runs/<run_id>/run.json` in the Bucket. It holds what
+the submitter chose in the form, and it holds the Harbor `JobConfig` that
+Harbor-HF derived from those choices. The parent Job writes Harbor's job folder
+next to it at `runs/<run_id>/job/`.
+
+The submission form has four groups. The maintainers agreed on these fields so
+that a person can submit a run without creating anything in another place
+first.
+
+| Group | Fields |
+| --- | --- |
+| Benchmark | Benchmark name and a size preset. |
+| Model | Model id, reasoning effort. Runtime is fixed to Inference Providers. |
+| Harness | Agent name, agent version. |
+| Cost control | Cost ceiling per trial in USD. |
+
+The size preset fixes the task selection and the number of trials per task.
+The first presets are one task with one trial, all tasks with one trial, and
+all tasks with five trials. Fixed presets keep runs comparable across
+submitters. A preset is a plain `JobConfig` fragment with the dataset
+reference, the task filter, `n_attempts` and a concurrency limit.
+
+The harness list comes from Harbor. Its `harbor agent schema` command lists each
+agent and its accepted options, so the form reads that list instead of keeping
+its own catalog. An agent preset is the agent name plus a pinned version.
 
 ```json
 {
   "run_id": "run-…",
-  "created_at": "2026-09-03T12:00:00Z",
+  "created_at": "2026-09-04T12:00:00Z",
   "submitted_by": "<operator>",
+  "role": "final",
   "harbor_version": "0.22.0",
-  "cost_ceiling_usd_per_trial": 2.0,
+  "submission": {
+    "benchmark": { "name": "terminal-bench-2-1", "preset": "all-tasks-5-trials" },
+    "model": { "id": "openai/gpt-oss-120b", "provider": "together", "reasoning_effort": "high" },
+    "harness": { "agent": "pi", "version": "0.84.2" },
+    "cost_ceiling_usd_per_trial": 2.0
+  },
   "harbor_job_config": {
-    "datasets": [{ "name": "terminal-bench@2.1", "n_tasks": 89 }],
+    "datasets": [{ "name": "terminal-bench@2.1" }],
     "n_attempts": 5,
     "n_concurrent_trials": 8,
     "agents": [
       {
         "name": "pi",
-        "model_name": "huggingface/openai/gpt-oss-120b:together",
+        "model_name": "openai/openai/gpt-oss-120b:together",
         "kwargs": { "version": "0.84.2", "reasoning_effort": "high" }
       }
     ],
@@ -168,102 +229,130 @@ ceiling.
 }
 ```
 
-The `harbor_job_config` field is stored as Harbor accepts it. Harbor-HF
-validates it by calling Harbor's own config parser and adds nothing to it. The
-run record, the Harbor `config.json`, `lock.json`, and `result.json` together
-are the reproducibility record. Nothing else needs to be stored for that
-purpose.
+The `submission` block is what the person chose. The `harbor_job_config` block
+is what Harbor received, stored as Harbor accepts it. Harbor-HF validates it
+with Harbor's own config parser and adds no field of its own to it. The run
+record together with Harbor's `config.json`, `lock.json` and `result.json` is
+the full reproducibility record.
 
 Reasoning effort lives on the agent config only, because that is where Harbor
 puts it. The model profile's `revision` field goes away. For a provider-routed
-model the revision is unknown, and for a future Inference Endpoint the endpoint
-config records it.
+model the revision is unknown, and a future Inference Endpoint records it in
+its own config.
 
-### Profile kinds
+The `role` field is optional and defaults to `final`. A run marked `diagnostic`
+stays off the leaderboard. This replaces `publication_role` from the launch
+policy.
 
-The model, harness, deployment, launch policy, and capacity profile kinds are
-removed. Two kinds of preset remain, and both are plain `JobConfig` fragments.
+The model, harness, deployment, launch policy and capacity profile kinds are
+removed. No run record field may duplicate a `JobConfig` field.
 
-A benchmark preset names a dataset, a task filter, `n_attempts`, and a
-concurrency limit. The initial presets cover Terminal-Bench 2.1 at increasing
-sizes. One task with one trial checks that a setup works. All tasks with one
-trial gives a quick score, while all tasks with five trials is the official
-measurement. Fixed presets keep runs comparable across submitters.
+### Routing and credentials
 
-An agent preset names a Harbor agent and a pinned version. Harbor's `harbor
-agent schema` command lists each agent's accepted kwargs, so the form can read
-that list instead of keeping its own table.
+Harbor has no Inference Providers routing yet. Until it does, runs use the path
+Harbor already supports for any OpenAI-compatible server. The model name is
+`openai/<model>:<provider>`, the agent environment sets `OPENAI_BASE_URL` to the
+Hugging Face router and `OPENAI_API_KEY` to the inference token. The router
+accepts the `:provider` suffix in the model field. Harbor's own agents handle
+their configuration from there, including pi with its generated `models.json`.
+When Harbor gains a `huggingface` provider with the router as default base URL,
+only the model name changes.
 
-### Submission form
+Credentials never touch the run record. The Space holds two tokens as Space
+secrets. The control token can start Jobs and write the Bucket, and it goes to
+the parent Job as a Job secret. The inference token goes the same way and
+reaches each child Job through Harbor's agent environment. Harbor scrubs it
+from logs.
 
-The form asks for five values. A benchmark preset and an agent preset come from
-the two catalogs. The submitter types a model id and a reasoning effort, and
-sets a cost ceiling per trial. The runtime is fixed to Inference Providers for
-the first version. Submitter-supplied API keys for providers such as OpenAI and
-Anthropic come next, because those models are the most requested. Inference
-Endpoints and running an agent from a fork commit are recorded as later work.
+Version one uses only these two tokens. Submitter-supplied keys for providers
+such as OpenAI and Anthropic come next, because those models are the most
+requested. They will arrive with the submission and be stored encrypted in the
+Bucket with a key the Space holds, because a parent Job restart after 24 hours
+needs them again.
 
-### Execution
+### Cost ceiling
 
-The Space runs `harbor run` with the `hf-sandbox` environment. Harbor then
-launches one HF Job per trial and owns concurrency, retries, resume and the
-result files. Each task still runs as its own Job, and the Space remains the
-process that notices failures and reruns them.
+The cost ceiling is enforced inside the parent Job. A Harbor job plugin reads
+each finished trial's `cost_usd` and stops the job when the sum crosses the
+ceiling. Whether the plugin hooks allow a stop mid-run is one of the
+preconditions below. If they do not, a small wrapper around the `harbor`
+process watches the trial results and sends SIGTERM, which Harbor handles
+cleanly. The ceiling is a candidate for an upstream `max_cost_usd` field later.
 
-Harbor's `jobs_dir` lives on Space persistent storage so a Space restart resumes
-the job in place. The orchestrator must not run inside an HF Job, because Jobs
-stop after 24 hours and a full Terminal-Bench run with five trials per task can
-take longer.
+### Status and the control panel
 
-The cost ceiling is a Harbor job plugin in Harbor-HF. Harbor calls
-`BaseJobPlugin` hooks on job start and end and trial hooks on each trial event,
-which is enough to read `cost_usd` from finished trials and cancel the job when
-the ceiling is crossed.
+Harbor does not provide a panel across runs. `harbor view` shows one job folder,
+and Harbor Hub is a hosted service on Harbor's own infrastructure. The panel
+that lists what is running now stays in the Space.
 
-### Results and leaderboard
+The panel needs no store of its own. The list of runs is the list of
+`runs/*/run.json` files in the Bucket. The state of a run is its job-level
+`result.json`, which Harbor updates with pending, running and finished counts.
+Whether a run is live comes from the HF Jobs API through the run id label on
+the parent Job.
 
-After each trial finishes, the Space copies the Harbor job directory to the
-Bucket unchanged. The leaderboard reads `result.json` for pass rate and token
-counts as well as cost and timing. The Parquet tables and the result catalog are
-removed, along with the publication receipt and the supersession chain.
+The Space polls the Bucket for runs that have a live parent Job, every 15 to 30
+seconds. Finished runs never change, so they are read once. When the Jobs API
+reports that a parent Job ended, the Space reads that run one last time and
+applies the control rule. There is no push channel from the Job. Polling cannot
+miss a file, and a push would need a poll as backup anyway. A small notice from
+a Harbor trial hook can be added later for faster updates without changing the
+design.
+
+The Bucket stays the only durable store and SQLite stays a cache that can be
+deleted and rebuilt at any time. `HuggingFaceBucketStore` and the rebuild loop
+in `projection.ts` stay almost as they are. The 25 record kinds and 24 tables
+become three tables, for runs, trials and parent Jobs. The 369-line invariant
+checker goes, because there are no cross-record invariants left.
+
+### Leaderboard
+
+The leaderboard is a query over finished runs with `role` set to `final` and a
+preset that covers all tasks. Rows group by benchmark preset, agent preset,
+model id and reasoning effort. Pass rate is the mean over all trials, and
+`n_attempts` is shown next to it so that a one-trial run and a five-trial run
+are never read as equal. The Parquet tables, the result catalog, the
+publication receipt and the supersession chain are removed.
 
 Historical runs in the Bucket stay as a read-only archive under their existing
-paths. They are not migrated to the new record shape.
+paths. They are not migrated.
 
-### Command-line client
+### Retained components
 
-The `harbor-hf` CLI stays. It is a thin HTTPS client for the control API and
-keeps that role. Two commands fit the new shape well. `harbor-hf submit --config
-job.yaml` sends a Harbor `JobConfig` file to the Space as it is, and `harbor-hf
-run status` reads the projection. The package loses the 66 dead modules that
-share its directory and the dependencies they pulled in, such as `pyarrow` and
-`zstandard`.
+The `harbor-hf` CLI stays as a thin HTTPS client for the control API. It gains
+`harbor-hf submit --config job.yaml`, which sends a Harbor `JobConfig` file to
+the Space as it is, and keeps `harbor-hf run status`. The package loses the 66
+dead modules that share its directory and their dependencies, such as `pyarrow`
+and `zstandard`.
+
+Authentication in `auth.ts` is unchanged. The installer under
+`scripts/control-service` still provisions the Space and the Bucket and can
+shrink in a later change. In `packages/harbor-hf-agents` only the four ATIF
+converters for pi, hermes, openclaw and dsh remain, as custom agents behind
+Harbor's `import_path`, until they move upstream. Everything else uses Harbor's
+built-in agents.
 
 ## Upstream contributions
 
 Several parts of the current wrapper belong in Harbor. Hugging Face maintainers
-already own the `hf-sandbox` path there, so these do not conflict with Harbor's
-direction.
+already own the `hf-sandbox` path there. Opening an issue or a pull request in
+the Harbor repository needs explicit confirmation from the maintainers for that
+specific change, as `AGENTS.md` states.
 
-The first is Inference Providers routing. Adding a default base URL for the
-`huggingface` provider in `model_connection.py` and passing the `:provider`
-suffix through is a small change. Once it lands, most of the 13 agent wrappers
-in `packages/harbor-hf-agents` lose their reason to exist, because they mainly
-redirect the agent to the local bridge.
+The first candidate is Inference Providers routing, a default base URL for the
+`huggingface` provider in `model_connection.py` with the `:provider` suffix
+passed through. Once it lands, most of the 13 agent wrappers in
+`packages/harbor-hf-agents` lose their reason to exist.
 
-The second is the set of local `hf-sandbox` fixes that are not yet upstream. Six
-fix branches exist in a maintainer's Harbor checkout. They cover startup
-readiness, working directory creation, mounts and private task environments. The
-prebuilt image requirement and user switching are the two remaining gaps worth a
-Harbor issue each.
+The second is the set of `hf-sandbox` fixes that are not yet upstream. Six fix
+branches exist in a maintainer's Harbor checkout. They cover startup readiness,
+working directory creation, mounts and private task environments. The prebuilt
+image requirement and user switching are the two remaining gaps.
 
-The third is trajectory export. The pi, hermes, openclaw and dsh agents in this
-repository each convert native sessions to ATIF by hand. Those converters belong
-in the upstream agents, and local Harbor branches already exist for pi and
-openclaw.
+The third is trajectory export. The four ATIF converters in this repository
+belong in the upstream agents, and branches already exist for pi and openclaw.
 
-The fourth is a per-trial cost ceiling as a `JobConfig` field. Until Harbor
-accepts it, the job plugin described above does the work here.
+The fourth is a per-trial cost ceiling as a `JobConfig` field.
 
 ## Cutover
 
@@ -274,50 +363,63 @@ external users of its API yet, and the historical runs in the Bucket stay
 readable without any new code, so there is nothing that a staged path would
 protect.
 
-The cutover starts only after the open questions below are answered, because
-the execution part cannot be finished without them. Answering them is a day of
-checks against the Terminal-Bench task registry and a local `hf-sandbox` run,
-and it happens before any code is written.
-
-The cutover itself removes and adds the following in one change. Every module in
-`src/harbor_hf` except `cli.py` goes, together with its Python tests, the 85%
-coverage gate in `.github/workflows/ci.yml`, the ten unreferenced files in
-`schemas/`, the empty `space/` and `apps/results-web` directories,
-`scripts/build_space_release.py`, and the one-shot migration scripts. The five
-profile kinds and the four compatibility implementations are replaced by the run
-record and the two preset kinds, and the launch form shrinks to the fields
-listed above. The Space starts calling `harbor run` with `hf-sandbox`, so the
-proot runtime and both workers in `packages/harbor-hf-agents` go, together with
-the inference bridge and the retry and continuation machinery in
-`control-core`. The Bucket receives Harbor job directories and the leaderboard
-reads `result.json` from them, so the Parquet publication path goes as well.
-`docs/architecture.md` is rewritten and `docs/run-spec.md` is retired in the
-same change. The untracked `mutants/` directories, about 774 MB, can be deleted
-at any time.
+The cutover removes every module in `src/harbor_hf` except `cli.py`, together
+with its Python tests, the 85% coverage gate in `.github/workflows/ci.yml`, the
+ten unreferenced files in `schemas/`, the empty `space/` and `apps/results-web`
+directories, `scripts/build_space_release.py` and the one-shot migration
+scripts. The five profile kinds and the four compatibility implementations are
+replaced by the run record and the presets, and the launch form shrinks to the
+four groups above. The proot runtime and both workers in
+`packages/harbor-hf-agents` go, together with the inference bridge and the
+retry and continuation machinery in `control-core`. The Parquet publication
+path goes. `docs/architecture.md` is rewritten and `docs/run-spec.md` is
+retired in the same change. The untracked `mutants/` directories, about 774 MB,
+can be deleted at any time.
 
 The change is large, so it should be one pull request with a reviewable
-sequence of commits rather than one commit. Each commit can leave the tree
-uncompilable as long as the final state passes the checks. Nothing deploys until
-the whole pull request merges.
+sequence of commits. Nothing deploys until the whole
+pull request merges. Before the pull request, one implementation specification
+names the files, the record shapes and the API routes, so that the work does
+not make design decisions on its own.
 
-## Open questions
+## Preconditions
 
-Every Terminal-Bench 2.1 task must have a prebuilt `docker_image`, because
-`hf-sandbox` cannot build one. This needs a check against the task registry
-before the cutover.
+Three things must happen before code is written.
 
-No task may need user switching or a network policy inside the sandbox. The
-proot runtime enforced both, and `hf-sandbox` does neither.
+The maintainers must approve that the parent Job holds a token with Jobs and
+Bucket write scope. This reverses the earlier rule that no Job receives a
+credential.
 
-The current design keeps the inference token out of the agent process through a
-root-owned bridge. With `hf-sandbox` the key is in the agent environment, and
-Harbor scrubs it from logs. The maintainers need to decide whether that is
-acceptable for the first version, at least for keys the submitter supplies.
+Two paid tests must run. The first is one `harbor run` with `hf-sandbox` from a
+laptop on a few Terminal-Bench tasks. It confirms that HF Jobs can pull the task
+images and that trials complete. The second is one HF Job that mounts a Bucket,
+runs Harbor with `jobs_dir` on the mount, and starts a child Job from inside. It
+confirms that the mount is writable and fast enough for Harbor's file writes.
+If the second test fails, the fallback is to run Harbor on the Space with
+persistent storage, at the cost of restarts on every deploy.
+
+The Harbor plugin hooks must be checked for a mid-run stop, for the cost
+ceiling.
+
+Two facts are already known. `hf-sandbox` runs only tasks that ship a prebuilt
+image, and this is a general requirement for every benchmark. The current
+worker has the same requirement, and all 89 Terminal-Bench 2.1 tasks have run
+through it, so that benchmark is covered. What changes is the image source.
+Today the trial Job pulls a pinned digest from a mirror, and `hf-sandbox` pulls
+by tag from the registry named in `task.toml`. The current worker also rejects a
+separate verifier image, and `hf-sandbox` behavior for that case is unknown.
+Terminal-Bench does not use one.
 
 The Harbor checkout used while writing this plan was 16 days behind
-`origin/main`. It misses the hosted job commands, `harbor agent schema` and the
-shell fix for `hf-sandbox`. Implementation work must start from a current
-checkout.
+`origin/main`. Implementation work must start from a current checkout.
+
+## Later work
+
+These items are recorded so that they do not creep into the cutover.
+Submitter-supplied provider API keys. Inference Endpoints as a runtime, with
+the model revision recorded on the endpoint. Running a harness from a fork
+commit for harness development. A trial hook that notifies the Space for faster
+panel updates. Shrinking the installer.
 
 ## Related documents
 
@@ -328,4 +430,5 @@ specification](CONTROL_SERVICE.md) remains the reference for the Space runtime,
 authentication, the Bucket store, and the projection until the cutover updates
 its profile and run sections. The [task result retry
 plan](2026-09-01-task-result-retry-plan.md) describes the retry mechanism that
-the cutover removes.
+the cutover removes. The Harbor boundary rules in [AGENTS.md](../AGENTS.md)
+apply to all work under this plan.
