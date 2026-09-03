@@ -174,10 +174,20 @@ pins in 22 deployment profiles.
 
 ### Run record
 
-A run is one JSON file at `runs/<run_id>/run.json` in the Bucket. It holds what
-the submitter chose in the form, and it holds the Harbor `JobConfig` that
-Harbor-HF derived from those choices. The parent Job writes Harbor's job folder
-next to it at `runs/<run_id>/job/`.
+A run is one folder in the Bucket with two small files that Harbor-HF writes
+and one folder that Harbor writes. `runs/<run_id>/run.json` holds what the
+submitter chose in the form and the Harbor `JobConfig` that Harbor-HF derived
+from those choices. It never changes after submission. `runs/<run_id>/state.json`
+holds the facts that only Harbor-HF knows, such as a cancel or pause by an
+operator and the list of parent Jobs started for the run with their start
+times. The Space rewrites it when an operator acts or when it starts a parent
+Job. The parent Job writes Harbor's job folder at `runs/<run_id>/job/`, and
+Harbor-HF never writes into that folder.
+
+The status shown in the panel is computed from these files. A run with
+`run.json` and no parent Job yet is queued. A run with a live parent Job is
+running. A run whose job-level `result.json` reports every trial as done is
+finished. A run whose `state.json` says cancelled is cancelled.
 
 The submission form has four groups. The maintainers agreed on these fields so
 that a person can submit a run without creating anything in another place
@@ -292,7 +302,14 @@ Whether a run is live comes from the HF Jobs API through the run id label on
 the parent Job.
 
 The Space polls the Bucket for runs that have a live parent Job, every 15 to 30
-seconds. Finished runs never change, so they are read once. When the Jobs API
+seconds. One file per live run is enough, because Harbor's job-level
+`result.json` contains the results of all finished trials and the pending and
+running counts. The Bucket store keeps the content hash of each file it has
+read, so an unchanged file is not downloaded again. Trial folders are read only
+when someone opens a trial in the panel. The Space knows every run without
+listing the Bucket, because it wrote `run.json` itself. It lists the `runs/`
+folder once at startup to rebuild SQLite. Finished runs never change, so they
+are read once. When the Jobs API
 reports that a parent Job ended, the Space reads that run one last time and
 applies the control rule. There is no push channel from the Job. Polling cannot
 miss a file, and a push would need a poll as backup anyway. A small notice from
