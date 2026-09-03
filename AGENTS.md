@@ -29,6 +29,40 @@
   report exactly what was exposed and where, remove it from the current version,
   and ask before rewriting public history or rotating credentials.
 
+## Harbor boundary
+
+- Harbor owns job configuration and task resolution, trial execution with its
+  retries and resume, the reproducibility lock and result files, trajectories
+  and agent implementations. Harbor-HF owns the control Space with run
+  submission and credential handling, Bucket storage, and the cost ceiling and
+  leaderboard.
+- Before you write code for a behavior, check whether Harbor already provides
+  it. Read the Harbor source at the pinned revision, and name the Harbor file
+  you checked in the pull request description. A pull request without that
+  answer is not ready for review.
+- Do not add code to Harbor-HF for a behavior that Harbor owns. If Harbor lacks
+  the behavior, stop and report the gap to the user with a proposed upstream
+  change. Do not open an issue or a pull request in the Harbor repository
+  without explicit confirmation from the user for that specific issue or pull
+  request.
+- Carry a local patch for a Harbor gap only when the user has approved it.
+  Record the reason next to the patch together with the Harbor revision that
+  makes it unnecessary, and remove the patch when the pin reaches that
+  revision.
+- New code talks to Harbor by running `harbor run` with a `JobConfig` and by
+  reading `config.json`, `lock.json`, and `result.json` from the job directory.
+  Do not import Harbor internals for anything else.
+- Do not add a run record or profile field that duplicates a `JobConfig` field.
+  Store the Harbor configuration as Harbor accepts it.
+- Keep the Harbor pin current. Read the Harbor history since the pinned
+  revision before you design a feature, and update the pin instead of building
+  a feature that has already landed upstream.
+- Do not raise a package line budget in CI without an explanation in the pull
+  request.
+- The [simplification plan](docs/2026-09-03-simplification-plan.md) describes
+  the target design. The run architecture section below describes the code
+  that runs today and is replaced by the cutover in that plan.
+
 ## General run architecture
 
 - Keep Harbor-HF independent of specific benchmarks and models. Keep its core
