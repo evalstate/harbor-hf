@@ -193,9 +193,23 @@ export function Layout({
                 <div className="flex items-center justify-between">
                   <span className="flex items-center gap-2 text-xs text-slate-400">
                     <ShieldCheck size={14} />
-                    <Hint text={hints.chrome.writeMode}>Write mode</Hint>
+                    <Hint
+                      text={
+                        writeMode === "local"
+                          ? "Local Harbor runs are enabled. Hosted control-plane writes remain disabled."
+                          : hints.chrome.writeMode
+                      }
+                    >
+                      {writeMode === "local" ? "Execution mode" : "Write mode"}
+                    </Hint>
                   </span>
-                  <Badge status={writeMode === "enabled" ? "ready" : "pending"}>
+                  <Badge
+                    status={
+                      writeMode === "enabled" || writeMode === "local"
+                        ? "ready"
+                        : "pending"
+                    }
+                  >
                     {humanize(writeMode)}
                   </Badge>
                 </div>

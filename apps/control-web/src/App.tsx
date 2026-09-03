@@ -6,8 +6,6 @@ import { ControlStateProvider, type DisplayActor } from "./control-state";
 import { Layout, loginHref } from "./layout";
 import {
   AuditPage,
-  RunPage,
-  RunsPage,
   EndpointsPage,
   JobsPage,
   LeaderboardPage,
@@ -16,6 +14,8 @@ import {
   ProfilesPage,
   ResultPage,
   ResultsPage,
+  RunPage,
+  RunsPage,
   TaskPage,
 } from "./pages";
 import { keys, useLiveUpdates, useSession, useSystem } from "./queries";
@@ -73,11 +73,15 @@ function AuthenticatedApp({
     },
   });
   const writeMode = system.data?.write_mode ?? "unknown";
+  const chromeMode =
+    actor.transport === "development" && system.data?.source_revision === "development"
+      ? "local"
+      : writeMode;
   return (
     <ControlStateProvider actor={actor} writeMode={writeMode}>
       <Layout
         actor={actor}
-        writeMode={writeMode}
+        writeMode={chromeMode}
         live={live}
         serviceError={sessionError ?? (system.data ? system.error : null)}
         onSignOut={() => logout.mutate()}

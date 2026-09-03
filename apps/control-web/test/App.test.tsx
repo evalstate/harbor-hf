@@ -124,7 +124,7 @@ function launchProfiles() {
         agent: "opencode",
         reasoning_effort: "off",
       }),
-      approved("fast-agent-0-10-11-command", "harness", {
+      approved("fast-agent-0-10-16-command", "harness", {
         ...reviewedFastAgentPreview.harness_profile,
       }),
       approved("tb21-gpt-oss-20b-opencode-providers", "deployment", {
@@ -139,7 +139,7 @@ function launchProfiles() {
       approved("tb21-gpt-oss-20b-command-providers", "deployment", {
         route: "hf_job",
         models: ["gpt-oss-20b"],
-        harnesses: ["fast-agent-0-10-11-command"],
+        harnesses: ["fast-agent-0-10-16-command"],
         preparation: "required",
         inference_provider: "together",
         trial_job_template: {
@@ -235,6 +235,57 @@ describe("control web", () => {
         if (path.endsWith("/api/v1/workbench/preview")) {
           return json(compileAgentWorkbenchRecipe(JSON.parse(String(init?.body))));
         }
+        if (path.endsWith("/api/v1/workbench/local-runs/options"))
+          return json({
+            enabled: true,
+            ready: true,
+            reason: null,
+            benchmark: "terminal-bench-2-1-canary",
+            model: "gpt-oss-20b-together",
+            task_names: ["adaptive-rejection-sampler", "modernize-scientific-stack"],
+            harbor_version: "0.22.0",
+            expected_harbor_version: "0.22.0",
+          });
+        if (path.endsWith("/api/v1/workbench/local-runs") && init?.method !== "POST")
+          return json([]);
+        if (path.endsWith("/api/v1/workbench/local-runs/preview"))
+          return json({
+            config: {
+              job_name: "local-preview",
+              datasets: [
+                {
+                  task_names: ["adaptive-rejection-sampler"],
+                },
+              ],
+              agents: [
+                {
+                  import_path: "harbor_hf_agents.command_agent.agent:CommandAgent",
+                },
+              ],
+            },
+          });
+        if (path.endsWith("/api/v1/workbench/local-runs") && init?.method === "POST")
+          return json(
+            {
+              local_run_id: "local-run-one",
+              recipe_digest: reviewedFastAgentPreview.recipe_digest,
+              status: "succeeded",
+              benchmark: "terminal-bench-2-1-canary",
+              model: "gpt-oss-20b-together",
+              task_names: ["adaptive-rejection-sampler"],
+              created_at: "2026-08-27T00:00:03.000Z",
+              started_at: "2026-08-27T00:00:03.000Z",
+              completed_at: "2026-08-27T00:00:04.000Z",
+              exit_code: 0,
+              error: null,
+              config_path: "/tmp/local-run-one/config.json",
+              result_path: "/tmp/local-run-one/result.json",
+              command: ["harbor", "run"],
+            },
+            202,
+          );
+        if (path.endsWith("/local-run-one/logs"))
+          return json({ stdout: "Harbor complete\n", stderr: "" });
         if (path.endsWith("/api/v1/workbench/setup-tests") && init?.method === "POST")
           return json(
             {
@@ -260,7 +311,7 @@ describe("control web", () => {
             202,
           );
         if (path.endsWith("/setup-test-one/logs"))
-          return json({ stdout: "fast-agent-mcp v0.10.11\n", stderr: "" });
+          return json({ stdout: "fast-agent-mcp v0.10.16\n", stderr: "" });
         if (path.endsWith("/files/workbench-file-one"))
           return json({
             content: "<script>window.compromised = true</script>",
@@ -277,22 +328,36 @@ describe("control web", () => {
       await screen.findByRole("heading", { name: "Agent Workbench" }),
     ).toBeVisible();
     expect(
-      screen.getByRole("heading", { name: "Configure → Test → Publish → Run" }),
+      screen.getByRole("heading", { name: "Configure → Test → Run" }),
     ).toBeVisible();
-    expect(
-      screen.getAllByText(/Passing setup does not publish a profile/i),
-    ).toHaveLength(2);
     expect(await screen.findByText("Preview ready")).toBeVisible();
-    expect(screen.getByText("<injected placeholder>")).toBeVisible();
-    expect(screen.queryByRole("button", { name: /FX/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "FX 0.0.6" })).toBeVisible();
     expect(
-      screen.getByLabelText("Environment variable OPENAI_API_KEY source"),
-    ).toHaveValue("model_api_key");
+      screen.queryByRole("combobox", { name: "Inference API" }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByLabelText("Environment variable MODEL_BASE_URL source"),
-    ).toHaveValue("model_base_url");
+      screen.queryByLabelText("Environment variable OPENAI_API_KEY source"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Environment variable MODEL_BASE_URL source"),
+    ).not.toBeInTheDocument();
+    expect(await screen.findByText("adaptive-rejection-sampler")).toBeVisible();
+    expect(await screen.findByText(/"job_name": "local-preview"/)).toBeVisible();
 
     const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "FX 0.0.6" }));
+    expect(screen.getByLabelText("Configuration name")).toHaveValue("fx");
+    expect(
+      (screen.getByLabelText("Setup command") as HTMLTextAreaElement).value,
+    ).toContain(["https://releases.fx.sh/v", "$", "{fx_version}", "/"].join(""));
+    expect(
+      await screen.findByText(/FX 0\.0\.6 expects Vercel AI Gateway semantics/),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /start local benchmark/i }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Fast-Agent 0.10.16" }));
+    expect(screen.getByLabelText("Configuration name")).toHaveValue("fast-agent");
     await user.click(
       screen.getByRole("checkbox", {
         name: /launch this exact setup recipe/i,
@@ -304,120 +369,25 @@ describe("control web", () => {
     await waitFor(() => expect(launchSetup).toBeEnabled());
     await user.click(launchSetup);
     expect(await screen.findByText("passed")).toBeVisible();
-    expect(await screen.findByText("Published", { exact: true })).toBeVisible();
-    expect(
-      screen.getByText(/already published as fast-agent-0-10-11-command/i),
-    ).toBeVisible();
-    expect(await screen.findByText(/fast-agent-mcp v0.10.11/)).toBeVisible();
+    expect(await screen.findByText(/fast-agent-mcp v0.10.16/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: /hostile.txt/i }));
     expect(
       await screen.findByText("<script>window.compromised = true</script>"),
     ).toBeVisible();
     expect(document.querySelector("script")).toBeNull();
-    const continueToRun = await screen.findByRole("button", {
-      name: /open run launcher/i,
-    });
-    const configurationName = screen.getByLabelText("Configuration name");
-    await user.clear(configurationName);
-    await user.type(configurationName, "fast-agent-edited");
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /run unavailable/i })).toBeDisabled(),
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /start harbor locally with this exact recipe/i,
+      }),
     );
-    await user.clear(configurationName);
-    await user.type(configurationName, "fast-agent");
-    const restoredContinue = await screen.findByRole("button", {
-      name: /open run launcher/i,
+    const startLocal = screen.getByRole("button", {
+      name: /start local benchmark/i,
     });
-    expect(restoredContinue).toBe(continueToRun);
-    await user.click(restoredContinue);
-    expect(await screen.findByRole("heading", { name: "Runs" })).toBeVisible();
-    expect(await screen.findByRole("heading", { name: "Start a run" })).toBeVisible();
-    expect(screen.getByLabelText("Harness")).toHaveValue("fast-agent-0-10-11-command");
+    await waitFor(() => expect(startLocal).toBeEnabled());
+    await user.click(startLocal);
+    expect(await screen.findByText("succeeded")).toBeVisible();
+    expect(await screen.findByText(/Harbor complete/)).toBeVisible();
   });
-
-  it.each([
-    ["loading", "Checking profiles"],
-    ["error", "Profile error"],
-    ["unpublished", "Unpublished"],
-    ["no-deployment", "Published · no compatible deployment"],
-  ] as const)(
-    "explains the %s Workbench publication state",
-    async (mode, expectedState) => {
-      vi.stubGlobal("EventSource", FakeEventSource);
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-          const path = String(input);
-          if (path.includes("auth/session")) return json(session());
-          if (path.includes("/system")) return json(system());
-          if (path.endsWith("/api/v1/workbench/preview"))
-            return json(compileAgentWorkbenchRecipe(JSON.parse(String(init?.body))));
-          if (path.endsWith("/api/v1/workbench/setup-tests") && init?.method === "POST")
-            return json(
-              {
-                setup_test_id: "setup-test-publication-state",
-                recipe_digest: reviewedFastAgentPreview.recipe_digest,
-                revision_id: reviewedFastAgentPreview.revision_id,
-                status: "passed",
-                created_at: "2026-08-27T00:00:00.000Z",
-                started_at: "2026-08-27T00:00:01.000Z",
-                completed_at: "2026-08-27T00:00:02.000Z",
-                exit_code: 0,
-                error: null,
-                files: [],
-              },
-              202,
-            );
-          if (path.endsWith("/setup-test-publication-state/logs"))
-            return json({ stdout: "setup complete\n", stderr: "" });
-          if (path.includes("/profiles")) {
-            if (mode === "loading") return new Promise<Response>(() => undefined);
-            if (mode === "error") return json({ error: "forbidden" }, 403);
-            const profiles = launchProfiles();
-            return json({
-              ...profiles,
-              items: profiles.items.filter((profile) => {
-                if (mode === "unpublished")
-                  return !profile.approved_aliases.includes(
-                    "fast-agent-0-10-11-command",
-                  );
-                if (mode === "no-deployment")
-                  return !(
-                    profile.profile_kind === "deployment" &&
-                    Array.isArray(profile.spec.harnesses) &&
-                    profile.spec.harnesses.includes("fast-agent-0-10-11-command")
-                  );
-                return true;
-              }),
-            });
-          }
-          if (path.includes("/events")) throw new Error("offline");
-          throw new Error(`unexpected request: ${path}`);
-        }),
-      );
-
-      renderApp("/workbench");
-      expect(await screen.findByText("Preview ready")).toBeVisible();
-      const user = userEvent.setup();
-      await user.click(
-        screen.getByRole("checkbox", {
-          name: /launch this exact setup recipe/i,
-        }),
-      );
-      await user.click(
-        screen.getByRole("button", {
-          name: /launch setup test/i,
-        }),
-      );
-
-      expect(await screen.findByText(expectedState, { exact: true })).toBeVisible();
-      expect(screen.getByRole("button", { name: /run unavailable/i })).toBeDisabled();
-      if (mode === "error")
-        expect(
-          screen.getByRole("button", { name: /retry profile catalog/i }),
-        ).toBeVisible();
-    },
-  );
 
   it("tails a running Workbench setup and confirms cancellation", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
@@ -652,6 +622,29 @@ describe("control web", () => {
     renderApp("/runs");
     expect(await screen.findByRole("button", { name: "Start a run" })).toBeDisabled();
     expect(screen.getByText("Disabled", { exact: true })).toBeInTheDocument();
+  });
+
+  it("labels local execution without enabling hosted writes", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes("auth/session")) return json(session());
+        if (path.includes("/system"))
+          return json({
+            ...system("disabled"),
+            source_revision: "development",
+          });
+        if (path.includes("/runs")) return json({ items: [], next_cursor: null });
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+    renderApp("/runs");
+    expect(await screen.findByRole("button", { name: "Start a run" })).toBeDisabled();
+    expect(screen.getByText("Execution mode")).toBeInTheDocument();
+    expect(screen.getByText("Local", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText("Disabled", { exact: true })).not.toBeInTheDocument();
   });
 
   it("requires a separate acknowledgement before run cancellation", async () => {
@@ -1179,28 +1172,17 @@ describe("control web", () => {
     ).toBeInTheDocument();
   });
 
-  it("filters and reselects benchmarks when the runtime preparation mode changes", async () => {
+  it("keeps deployment routing internal to the simplified run launcher", async () => {
     stubLaunchPage();
     renderApp("/runs");
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Start a run" }));
 
     const benchmark = screen.getByRole("combobox", { name: "Benchmark" });
-    const runtime = screen.getByRole("combobox", { name: "Runtime" });
     await waitFor(() => expect(benchmark).toHaveValue("terminal-bench-2-1-canary"));
-    expect(
-      screen.queryByRole("option", { name: "Control Smoke · 1 task" }),
-    ).not.toBeInTheDocument();
-
-    await user.selectOptions(runtime, "endpoints");
-    expect(
-      await screen.findByRole("option", { name: "Control Smoke · 1 task" }),
-    ).toBeInTheDocument();
-    await user.selectOptions(benchmark, "control-smoke");
-    expect(benchmark).toHaveValue("control-smoke");
-
-    await user.selectOptions(runtime, "providers");
-    await waitFor(() => expect(benchmark).toHaveValue("terminal-bench-2-1-canary"));
+    expect(screen.queryByRole("combobox", { name: "Runtime" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Inference Providers")).not.toBeInTheDocument();
+    expect(screen.queryByText("Inference Endpoints")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("option", { name: "Control Smoke · 1 task" }),
     ).not.toBeInTheDocument();

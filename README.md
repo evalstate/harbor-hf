@@ -2,11 +2,76 @@
   <img alt="harbor-hf" src="assets/harbor-hf-logo.svg" width="440">
 </p>
 
-`harbor-hf` is a hosted control plane for running Harbor benchmarks on Hugging
-Face infrastructure. It resolves approved profiles, asks Harbor to prepare and
-execute exact trials in HF Jobs, keeps immutable evidence in a private HF
-Bucket, and publishes queryable results. The operator machine does not run the
-benchmark or load the model.
+`harbor-hf` provides a local Workbench loop and a hosted control plane for
+running Harbor benchmarks. The local MVP compiles a command-agent harness,
+prepares a normal Harbor config, and runs a Terminal-Bench 2.1 canary directly
+with the installed Harbor CLI. The hosted path resolves approved profiles,
+executes exact trials in HF Jobs, keeps immutable evidence in a private HF
+Bucket, and publishes queryable results.
+
+## Run the MVP locally
+
+The local path is deliberately small: configure a harness, test its setup,
+select one or both checked-in Terminal-Bench 2.1 canary tasks, inspect the
+generated Harbor config, and start Harbor. Inference transport is supplied by
+the deployment profile; the Workbench does not expose API protocol, base URL,
+or credential controls.
+
+Prerequisites:
+
+1. Node.js `>=22.12.0`, Docker, and Harbor `0.22.0` on `PATH`. Install the
+   repository-pinned Harbor revision with:
+
+   ```bash
+   uv tool install \
+     'harbor @ git+https://github.com/harbor-framework/harbor.git@b37833221e27435a18d7acdd41d875cdc2831893' \
+     --force
+   ```
+
+2. An inference credential exported as `HF_INFERENCE_TOKEN`.
+3. Dependencies installed with `npm ci`.
+
+Start the local API and Vite UI:
+
+```bash
+export HF_INFERENCE_TOKEN=<purpose-scoped-inference-token>
+npm run dev
+```
+
+Workbench setup tests use local Docker by default. To keep the UI and control
+API local but execute setup in an HF Job instead, also provide a separate
+control credential and your Hugging Face namespace:
+
+```bash
+export HARBOR_HF_WORKBENCH_RUNNER=hf-jobs
+export HARBOR_HF_NAMESPACE=<hf-user-or-org>
+export HF_TOKEN=<jobs-capable-control-token>
+export HF_INFERENCE_TOKEN=<separate-inference-token>
+npm run dev
+```
+
+The setup Job receives the setup command and non-secret setup environment. It
+does not receive `HF_INFERENCE_TOKEN` and does not make a model request. The
+subsequent **Run locally with Harbor** action still executes Harbor on the local
+machine.
+
+Open `http://127.0.0.1:5173/workbench`. The generated secret-free config and
+local results are written beneath `.harbor-hf/local-runs/`, which is ignored by
+Git. Local execution is enabled only when both `NODE_ENV=development` and
+`HARBOR_HF_AUTH_MODE=development`; production and OAuth deployments cannot
+invoke a process on the control host.
+
+The checked-in local profile currently uses:
+
+- benchmark `terminal-bench-2-1-canary`;
+- model `gpt-oss-20b-together`;
+- deployment `tb21-gpt-oss-20b-fast-agent-command-providers`; and
+- the Workbench-compiled `CommandAgent` harness.
+
+Use the installed Harbor version shown in the Workbench to spot drift from the
+deployment profile before spending on a run.
+
+## Hosted control plane
 
 ## How it works
 

@@ -1,5 +1,5 @@
-import type { paths } from "./generated/api";
 import type { AgentWorkbenchRecipeV1 } from "@harbor-hf/contracts";
+import type { paths } from "./generated/api";
 
 export type SessionResponse =
   paths["/api/v1/auth/session"]["get"]["responses"][200]["content"]["application/json"];
@@ -48,6 +48,34 @@ export type WorkbenchLogs =
   paths["/api/v1/workbench/setup-tests/{setup_test_id}/logs"]["get"]["responses"][200]["content"]["application/json"];
 export type WorkbenchFileContent =
   paths["/api/v1/workbench/setup-tests/{setup_test_id}/files/{file_id}"]["get"]["responses"][200]["content"]["application/json"];
+
+export interface LocalHarborOptions {
+  enabled: boolean;
+  ready: boolean;
+  reason: string | null;
+  benchmark: string;
+  model: string;
+  task_names: string[];
+  harbor_version: string | null;
+  expected_harbor_version: string | null;
+}
+
+export interface LocalHarborRun {
+  local_run_id: string;
+  recipe_digest: string;
+  status: "queued" | "running" | "cancelling" | "cancelled" | "succeeded" | "failed";
+  benchmark: string;
+  model: string;
+  task_names: string[];
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  exit_code: number | null;
+  error: string | null;
+  config_path: string;
+  result_path: string | null;
+  command: string[];
+}
 
 export class ApiError extends Error {
   constructor(
@@ -187,5 +215,67 @@ export async function getWorkbenchFile(
 ): Promise<WorkbenchFileContent> {
   return request<WorkbenchFileContent>(
     `/api/v1/workbench/setup-tests/${encodeURIComponent(setupId)}/files/${encodeURIComponent(fileId)}`,
+  );
+}
+
+export async function getLocalHarborOptions(): Promise<LocalHarborOptions> {
+  return request<LocalHarborOptions>("/api/v1/workbench/local-runs/options");
+}
+
+export async function previewLocalHarborConfig(
+  recipe: WorkbenchRecipe,
+  taskNames: string[],
+): Promise<Record<string, unknown>> {
+  const result = await request<{ config: Record<string, unknown> }>(
+    "/api/v1/workbench/local-runs/preview",
+    {
+      method: "POST",
+      body: JSON.stringify({ recipe, task_names: taskNames }),
+    },
+  );
+  return result.config;
+}
+
+export async function startLocalHarborRun(
+  recipe: WorkbenchRecipe,
+  taskNames: string[],
+): Promise<LocalHarborRun> {
+  return request<LocalHarborRun>("/api/v1/workbench/local-runs", {
+    method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({
+      recipe,
+      task_names: taskNames,
+      confirmed: true,
+    }),
+  });
+}
+
+export async function listLocalHarborRuns(): Promise<LocalHarborRun[]> {
+  return request<LocalHarborRun[]>("/api/v1/workbench/local-runs");
+}
+
+export async function getLocalHarborRun(id: string): Promise<LocalHarborRun> {
+  return request<LocalHarborRun>(
+    `/api/v1/workbench/local-runs/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function getLocalHarborLogs(
+  id: string,
+): Promise<{ stdout: string; stderr: string }> {
+  return request<{ stdout: string; stderr: string }>(
+    `/api/v1/workbench/local-runs/${encodeURIComponent(id)}/logs`,
+  );
+}
+
+export async function cancelLocalHarborRun(id: string): Promise<LocalHarborRun> {
+  return request<LocalHarborRun>(
+    `/api/v1/workbench/local-runs/${encodeURIComponent(id)}/cancel`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ confirmed: true }),
+    },
   );
 }

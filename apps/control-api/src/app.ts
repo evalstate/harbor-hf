@@ -47,6 +47,9 @@ import {
   itemList,
   jobSchema,
   leaderboardSchema,
+  localHarborConfigSchema,
+  localHarborOptionsSchema,
+  localHarborRunSchema,
   namespaceCapacityPolicySchema,
   namespaceCapacityUpdateSchema,
   namespaceCapacityViewSchema,
@@ -340,6 +343,29 @@ const agentWorkbenchCancelRequestSchema = {
   additionalProperties: false,
   required: ["confirmed"],
   properties: {
+    confirmed: { const: true },
+  },
+} as const;
+const localHarborSelectionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["recipe", "task_names"],
+  properties: {
+    recipe: agentWorkbenchRecipeSchema,
+    task_names: {
+      type: "array",
+      minItems: 1,
+      maxItems: 2,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 160 },
+    },
+  },
+} as const;
+const localHarborStartSchema = {
+  ...localHarborSelectionSchema,
+  required: ["recipe", "task_names", "confirmed"],
+  properties: {
+    ...localHarborSelectionSchema.properties,
     confirmed: { const: true },
   },
 } as const;
@@ -1256,6 +1282,198 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     },
   );
 
+  app.get(
+    "/api/v1/workbench/local-runs/options",
+    {
+      schema: {
+        tags: ["workbench"],
+        response: { 200: localHarborOptionsSchema },
+      },
+    },
+    async () => runtime.localHarbor.options(),
+  );
+
+  app.post(
+    "/api/v1/workbench/local-runs/preview",
+    {
+      schema: {
+        tags: ["workbench"],
+        body: localHarborSelectionSchema,
+        response: {
+          200: localHarborConfigSchema,
+          422: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request) => {
+      const body = request.body as { recipe: unknown; task_names: string[] };
+      try {
+        return {
+          config: runtime.localHarbor.config(body.recipe, body.task_names),
+        };
+      } catch (error) {
+        throw new PolicyError(
+          error instanceof Error ? error.message : "local Harbor config is invalid",
+        );
+      }
+    },
+  );
+
+  app.get(
+    "/api/v1/workbench/local-runs",
+    {
+      schema: {
+        tags: ["workbench"],
+        response: {
+          200: { type: "array", items: localHarborRunSchema },
+        },
+      },
+    },
+    async (request) => runtime.localHarbor.list(actor(request).subject),
+  );
+
+  app.post(
+    "/api/v1/workbench/local-runs",
+    {
+      schema: {
+        tags: ["workbench"],
+        body: localHarborStartSchema,
+        response: {
+          202: localHarborRunSchema,
+          422: cleanSchema(schemas.apiError),
+          503: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      const body = request.body as {
+        recipe: unknown;
+        task_names: string[];
+        confirmed: true;
+      };
+      const options = runtime.localHarbor.options();
+      if (!options.ready)
+        throw new ControlNotReadyError(options.reason ?? "local Harbor is unavailable");
+      try {
+        return reply
+          .code(202)
+          .send(
+            await runtime.localHarbor.start(
+              body.recipe,
+              body.task_names,
+              actor(request).subject,
+              idempotencyKey(request),
+            ),
+          );
+      } catch (error) {
+        throw new PolicyError(
+          error instanceof Error ? error.message : "local Harbor run is invalid",
+        );
+      }
+    },
+  );
+
+  app.get(
+    "/api/v1/workbench/local-runs/:local_run_id",
+    {
+      schema: {
+        tags: ["workbench"],
+        params: {
+          type: "object",
+          required: ["local_run_id"],
+          properties: { local_run_id: { type: "string", maxLength: 160 } },
+        },
+        response: {
+          200: localHarborRunSchema,
+          404: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      const { local_run_id: localRunId } = request.params as {
+        local_run_id: string;
+      };
+      const result = runtime.localHarbor.get(localRunId, actor(request).subject);
+      if (!result)
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "local Harbor run was not found",
+            request_id: request.id,
+          },
+        });
+      return result;
+    },
+  );
+
+  app.get(
+    "/api/v1/workbench/local-runs/:local_run_id/logs",
+    {
+      schema: {
+        tags: ["workbench"],
+        params: {
+          type: "object",
+          required: ["local_run_id"],
+          properties: { local_run_id: { type: "string", maxLength: 160 } },
+        },
+        response: {
+          200: workbenchLogsSchema,
+          404: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      const { local_run_id: localRunId } = request.params as {
+        local_run_id: string;
+      };
+      const result = runtime.localHarbor.logs(localRunId, actor(request).subject);
+      if (!result)
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "local Harbor run logs were not found",
+            request_id: request.id,
+          },
+        });
+      return result;
+    },
+  );
+
+  app.post(
+    "/api/v1/workbench/local-runs/:local_run_id/cancel",
+    {
+      schema: {
+        tags: ["workbench"],
+        params: {
+          type: "object",
+          required: ["local_run_id"],
+          properties: { local_run_id: { type: "string", maxLength: 160 } },
+        },
+        body: agentWorkbenchCancelRequestSchema,
+        response: {
+          200: localHarborRunSchema,
+          404: cleanSchema(schemas.apiError),
+        },
+      },
+    },
+    async (request, reply) => {
+      idempotencyKey(request);
+      const { local_run_id: localRunId } = request.params as {
+        local_run_id: string;
+      };
+      const result = runtime.localHarbor.cancel(localRunId, actor(request).subject);
+      if (!result)
+        return reply.code(404).send({
+          error: {
+            code: "not_found",
+            message: "local Harbor run was not found",
+            request_id: request.id,
+          },
+        });
+      return result;
+    },
+  );
+
   app.post(
     "/api/v1/workbench/setup-tests",
     {
@@ -1269,7 +1487,10 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
       },
     },
     async (request, reply) => {
-      if (runtime.config.write_mode === "disabled")
+      if (
+        runtime.config.write_mode === "disabled" &&
+        runtime.config.node_env !== "development"
+      )
         throw new ControlNotReadyError("workbench setup testing is disabled");
       const body = request.body as { recipe: unknown; confirmed: true };
       try {

@@ -214,7 +214,7 @@ recipe data:
 ```text
 uv 0.12.5
 CPython 3.12.14
-fast-agent-mcp==0.10.11
+fast-agent-mcp==0.10.16
 ```
 
 The setup command downloads the pinned Linux `uv` archive, verifies its exact
@@ -229,11 +229,27 @@ runtime `OPENAI_API_KEY`, instruction file, workspace, managed home, results,
 and trajectory output. Fast-Agent and its toolchain remain recipe data; neither
 the Workbench compiler nor the command-agent plugin branches on their names.
 
-The checked-in `fast-agent-0-10-11-command` harness profile is derived from the
+The checked-in `fast-agent-0-10-16-command` harness profile is derived from the
 same compiler output returned by the Workbench preview. After setup passes, the
 Workbench compares the complete canonical harness spec rather than the recipe
 name. A different command, binding, output, timeout, or version produces a
 different spec and cannot use that reviewed alias.
+
+## FX starter
+
+The Workbench also includes a standalone FX 0.0.6 starter. Its setup recipe
+downloads the architecture-specific release archive, verifies the pinned
+SHA-256 digest, installs `fx` beneath the managed agent home, and reports the
+installed version. It uses the same generic command-agent compiler as the
+Fast-Agent starter.
+
+FX 0.0.6 expects Vercel AI Gateway model and credential semantics and does not
+provide the direct model-base-URL binding required by the local Harbor MVP.
+The Workbench therefore supports setup testing for this starter but keeps
+local benchmark execution disabled. This prevents the HF inference credential
+from being sent to an unintended endpoint. Enabling FX benchmark execution
+requires a separately reviewed deployment route; it does not require restoring
+the removed completions proxy UX.
 
 ## Benchmark handoff
 

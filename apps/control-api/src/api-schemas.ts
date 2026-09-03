@@ -114,6 +114,79 @@ export const workbenchFileContentSchema = {
   },
 } as const;
 
+export const localHarborOptionsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "enabled",
+    "ready",
+    "reason",
+    "benchmark",
+    "model",
+    "task_names",
+    "harbor_version",
+    "expected_harbor_version",
+  ],
+  properties: {
+    enabled: { type: "boolean" },
+    ready: { type: "boolean" },
+    reason: nullableString,
+    benchmark: { type: "string" },
+    model: { type: "string" },
+    task_names: { type: "array", items: { type: "string" } },
+    harbor_version: nullableString,
+    expected_harbor_version: nullableString,
+  },
+} as const;
+
+export const localHarborRunSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "local_run_id",
+    "recipe_digest",
+    "status",
+    "benchmark",
+    "model",
+    "task_names",
+    "created_at",
+    "started_at",
+    "completed_at",
+    "exit_code",
+    "error",
+    "config_path",
+    "result_path",
+    "command",
+  ],
+  properties: {
+    local_run_id: { type: "string" },
+    recipe_digest: { type: "string" },
+    status: {
+      enum: ["queued", "running", "cancelling", "cancelled", "succeeded", "failed"],
+    },
+    benchmark: { type: "string" },
+    model: { type: "string" },
+    task_names: { type: "array", items: { type: "string" } },
+    created_at: { type: "string", format: "date-time" },
+    started_at: nullableString,
+    completed_at: nullableString,
+    exit_code: nullableInteger,
+    error: nullableString,
+    config_path: { type: "string" },
+    result_path: nullableString,
+    command: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
+export const localHarborConfigSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["config"],
+  properties: {
+    config: { type: "object", additionalProperties: true },
+  },
+} as const;
+
 export const runViewSchema = {
   type: "object",
   additionalProperties: false,

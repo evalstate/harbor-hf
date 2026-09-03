@@ -75,7 +75,7 @@ function taskTuples(spec: Record<string, unknown>) {
 
 describe("Terminal-Bench 2.1 profiles", () => {
   it("derives the reviewed Fast-Agent command profile from the Workbench compiler", async () => {
-    const harness = await profile("harness", "fast-agent-0-10-11-command");
+    const harness = await profile("harness", "fast-agent-0-10-16-command");
     const preview = compileAgentWorkbenchRecipe(fastAgentWorkbenchStarter);
 
     expect(harness.spec).toEqual(preview.harness_profile);
@@ -93,7 +93,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
     const resolved = resolver.resolve({
       benchmark: "terminal-bench-2-1-canary",
       model: "gpt-oss-20b-together",
-      harness: "fast-agent-0-10-11-command",
+      harness: "fast-agent-0-10-16-command",
       deployment: "tb21-gpt-oss-20b-fast-agent-command-providers",
       launch_policy: "diagnostic-single-attempt",
     });
@@ -113,7 +113,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "gpt-oss-20b-together",
       "gpt-oss-20b",
     ]);
-    expect(record(deployment?.spec).harnesses).toEqual(["fast-agent-0-10-11-command"]);
+    expect(record(deployment?.spec).harnesses).toEqual(["fast-agent-0-10-16-command"]);
     expect(record(record(deployment?.spec).trial_job_template).max_jobs).toBe(1);
     expect(benchmark?.name).toBe("terminal-bench-2-1-canary");
     expect(record(selected.get("launch_policy")?.spec)).toMatchObject({
@@ -214,7 +214,7 @@ describe("Terminal-Bench 2.1 profiles", () => {
       "control-smoke",
       "dsh-high",
       "dsh-off",
-      "fast-agent-0-10-11-command",
+      "fast-agent-0-10-16-command",
       "hermes",
       "kimi-code",
       "mini-swe-agent",

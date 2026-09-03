@@ -1212,9 +1212,9 @@ function LaunchPanel({
         <div>
           <h2 className="font-semibold">Start a run</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Choose the benchmark, model, runtime, harness, reasoning, and launch policy.
-            The hard ceiling follows twice the estimated reservation until you edit it.
-            Submit locks those choices onto the run.
+            Choose the benchmark, model, harness, reasoning, and launch policy. The hard
+            ceiling follows twice the estimated reservation until you edit it. Submit
+            locks those choices onto the run.
           </p>
         </div>
         <Button variant="ghost" onClick={onClose}>
@@ -1275,20 +1275,6 @@ function LaunchPanel({
                   {profileLabel("model", profile.approved_alias, profile.spec)}
                 </option>
               ))}
-            </select>
-          </div>
-          <div className="space-y-1.5 text-sm">
-            <Hint text={hints.launch.deployment} icon>
-              Runtime
-            </Hint>
-            <select
-              className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50"
-              disabled={!writesAllowed}
-              aria-label="Runtime"
-              {...form.register("deploymentKind", { onChange: resetConfirmation })}
-            >
-              <option value="providers">Inference Providers</option>
-              <option value="endpoints">Inference Endpoints</option>
             </select>
           </div>
           <div className="space-y-1.5 text-sm">
@@ -1420,9 +1406,9 @@ function LaunchPanel({
                 {...form.register("confirmed")}
               />
               <span className="min-w-0 text-sm text-slate-300">
-                I confirm the benchmark, model, runtime, harness, reasoning, launch
-                policy, task count, and cost ceiling. After submit those values are
-                locked on the run.
+                I confirm the benchmark, model, harness, reasoning, launch policy, task
+                count, and cost ceiling. After submit those values are locked on the
+                run.
                 <span className="mt-1.5 block text-slate-400">
                   <Hint text={hints.launch.confirmed} icon>
                     Why is this required?
@@ -1558,7 +1544,7 @@ export function RunsPage() {
     <>
       <PageHeader
         title="Runs"
-        description="Each run locks a benchmark, model, harness, reasoning, runtime, and cost ceiling. Logical tasks stay sealed; only infrastructure failures can be replaced."
+        description="Each run locks a benchmark, model, harness, reasoning, and cost ceiling. Logical tasks stay sealed; only infrastructure failures can be replaced."
         action={
           <Button
             disabled={!writesAllowed}

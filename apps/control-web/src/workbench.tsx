@@ -1,35 +1,39 @@
-import { canonicalJson } from "@harbor-hf/contracts/canonical-json";
 import {
   CheckCircle2,
-  FileCode2,
   FlaskConical,
   LoaderCircle,
+  PlayCircle,
   Plus,
   RotateCcw,
   Square,
   TerminalSquare,
   Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
 import {
+  cancelLocalHarborRun,
   cancelWorkbenchSetup,
+  getLocalHarborLogs,
+  getLocalHarborOptions,
+  getLocalHarborRun,
   getWorkbenchFile,
   getWorkbenchLogs,
   getWorkbenchSetup,
+  type LocalHarborOptions,
+  type LocalHarborRun,
+  listLocalHarborRuns,
   listWorkbenchSetups,
+  previewLocalHarborConfig,
   previewWorkbenchRecipe,
+  startLocalHarborRun,
   startWorkbenchSetup,
   type WorkbenchFile,
   type WorkbenchPreview,
   type WorkbenchRecipe,
   type WorkbenchSetup,
 } from "./api";
-import { useControlState } from "./control-state";
-import { firstCompatibleLaunchSelection } from "./launch";
 import { PageHeader } from "./layout";
 import { cn, formatDate } from "./lib";
-import { useAllProfiles } from "./queries";
 import { Badge, Button, Card, ErrorNotice } from "./ui";
 
 const sources = [
@@ -39,9 +43,13 @@ const sources = [
   "logs_path",
   "agent_home",
   "model_name",
-  "model_base_url",
-  "model_api_key",
 ] as const;
+
+function isManagedInferenceBinding(
+  binding: WorkbenchRecipe["environment"][number],
+): boolean {
+  return binding.source === "model_base_url" || binding.source === "model_api_key";
+}
 
 const fastAgentStarter: WorkbenchRecipe = {
   schema_version: "v1",
@@ -95,7 +103,7 @@ const fastAgentStarter: WorkbenchRecipe = {
     "UV_NO_PROGRESS=1 \\",
     '  "$AGENT_HOME/bin/uv" pip install \\',
     '  --python "$AGENT_HOME/venv/bin/python" \\',
-    "  fast-agent-mcp==0.10.11",
+    "  fast-agent-mcp==0.10.16",
     '"$AGENT_HOME/venv/bin/python" --version',
     '"$AGENT_HOME/venv/bin/fast-agent" --version',
   ].join("\n"),
@@ -137,6 +145,71 @@ const fastAgentStarter: WorkbenchRecipe = {
   },
 };
 
+const fxStarter: WorkbenchRecipe = {
+  schema_version: "v1",
+  name: "fx",
+  setup_command: [
+    "set -eu",
+    "fx_version=0.0.6",
+    'case "$(uname -m)" in',
+    "  x86_64|amd64)",
+    "    fx_target=x86_64",
+    "    fx_sha256=120fa992df8caf982e17ca9e9e3966c790b0d150480511eaf51392e66a0f0b84",
+    "    ;;",
+    "  aarch64|arm64)",
+    "    fx_target=aarch64",
+    "    fx_sha256=0dfd53224c5ecede601bb8ce649f84fab6db05a39afbcd5b39e6091833f6c4d7",
+    "    ;;",
+    '  *) printf "unsupported setup architecture\\n" >&2; exit 2 ;;',
+    "esac",
+    "command -v /usr/lib/apt/apt-helper >/dev/null 2>&1",
+    "command -v tar >/dev/null 2>&1",
+    "command -v sha256sum >/dev/null 2>&1",
+    'mkdir -p "$AGENT_HOME/bin" "$AGENT_HOME/cache"',
+    `fx_archive="$AGENT_HOME/cache/fx-\${fx_version}-\${fx_target}.tar.gz"`,
+    'fx_download_log="$AGENT_HOME/cache/fx-download.log"',
+    "if ! /usr/lib/apt/apt-helper \\",
+    "  -o Acquire::https::Verify-Peer=false \\",
+    "  -o Acquire::https::Verify-Host=false \\",
+    "  download-file \\",
+    `  "https://releases.fx.sh/v\${fx_version}/fx-linux-\${fx_target}.tar.gz" \\`,
+    '  "$fx_archive" >"$fx_download_log" 2>&1',
+    "then",
+    '  printf "pinned FX download failed\\n" >&2',
+    "  exit 1",
+    "fi",
+    'printf "%s  %s\\n" "$fx_sha256" "$fx_archive" |',
+    "  sha256sum --check --strict",
+    'tar -xzf "$fx_archive" -C "$AGENT_HOME/bin" fx',
+    'chmod 0755 "$AGENT_HOME/bin/fx"',
+    '"$AGENT_HOME/bin/fx" --version',
+  ].join("\n"),
+  run_command: [
+    'cd "$TASK_WORKSPACE"',
+    '"$AGENT_HOME/bin/fx" ask --yolo --json -- "$(cat "$TASK_INSTRUCTION_PATH")"',
+    '  < /dev/null > "$AGENT_RESULTS_PATH"',
+  ].join(" \\\n"),
+  route_api: "chat-completions",
+  setup_timeout_seconds: 600,
+  environment: [
+    { name: "AGENT_HOME", source: "agent_home" },
+    { name: "FX_MODEL", source: "model_name" },
+    { name: "AI_GATEWAY_API_KEY", source: "model_api_key" },
+    { name: "FX_AUTO_UPGRADE", source: "literal", value: "0" },
+    {
+      name: "AGENT_RESULTS_PATH",
+      source: "literal",
+      value: "/logs/agent/fx-results.json",
+    },
+    { name: "TASK_INSTRUCTION_PATH", source: "instruction_path" },
+    { name: "TASK_WORKSPACE", source: "workspace_path" },
+  ],
+  outputs: {
+    results_path: "/logs/agent/fx-results.json",
+    trajectory_path: null,
+  },
+};
+
 function copyStarter(starter: WorkbenchRecipe = fastAgentStarter): WorkbenchRecipe {
   return structuredClone(starter);
 }
@@ -155,14 +228,6 @@ function statusTone(status: WorkbenchSetup["status"]): string {
   return "active";
 }
 
-type WorkbenchPublicationState =
-  | { kind: "test-required" }
-  | { kind: "loading" }
-  | { kind: "error"; error: unknown }
-  | { kind: "unpublished" }
-  | { kind: "published-no-deployment"; alias: string }
-  | { kind: "published"; alias: string };
-
 function WorkbenchFlow() {
   const stages = [
     [
@@ -174,18 +239,14 @@ function WorkbenchFlow() {
       "Install this exact recipe in a disposable CPU sandbox. No benchmark or model request is made.",
     ],
     [
-      "Publish",
-      "Match the tested recipe to an approved immutable harness profile. Workbench checks publication status; it does not publish arbitrary recipes.",
-    ],
-    [
       "Run",
-      "Open the normal Run launcher to choose the benchmark, model, runtime, launch policy, and cost ceiling.",
+      "Select a Terminal-Bench 2.1 canary task, inspect the generated config, and start Harbor on this machine.",
     ],
   ] as const;
   return (
     <Card className="mb-6">
-      <h2 className="font-semibold text-white">Configure → Test → Publish → Run</h2>
-      <ol className="mt-4 grid gap-3 md:grid-cols-4">
+      <h2 className="font-semibold text-white">Configure → Test → Run</h2>
+      <ol className="mt-4 grid gap-3 md:grid-cols-3">
         {stages.map(([title, description], index) => (
           <li className="rounded-lg border border-slate-800 p-3" key={title}>
             <div className="flex items-center gap-2">
@@ -196,19 +257,19 @@ function WorkbenchFlow() {
           </li>
         ))}
       </ol>
-      <p className="mt-4 text-sm font-medium text-amber-200">
-        Setup and publication are separate. Passing setup does not publish a profile or
-        start a benchmark Run.
+      <p className="mt-4 text-sm text-slate-300">
+        The model route, direct inference URL, and credential binding come from the
+        local deployment profile. They are not Workbench settings.
       </p>
     </Card>
   );
 }
 
 export function WorkbenchPage() {
-  const navigate = useNavigate();
-  const { writeMode } = useControlState();
-  const profiles = useAllProfiles();
   const [recipe, setRecipe] = useState<WorkbenchRecipe>(copyStarter);
+  const supportsDirectLocalRun = recipe.environment.some(
+    (binding) => binding.source === "model_base_url",
+  );
   const [preview, setPreview] = useState<WorkbenchPreview | null>(null);
   const [previewError, setPreviewError] = useState<unknown>(null);
   const [checking, setChecking] = useState(false);
@@ -223,6 +284,17 @@ export function WorkbenchPage() {
     truncated: boolean;
   } | null>(null);
   const [fileError, setFileError] = useState<unknown>(null);
+  const [localOptions, setLocalOptions] = useState<LocalHarborOptions | null>(null);
+  const [localOptionsError, setLocalOptionsError] = useState<unknown>(null);
+  const [selectedTasks, setSelectedTasks] = useState<string[]>([]);
+  const [localConfig, setLocalConfig] = useState<Record<string, unknown> | null>(null);
+  const [localConfigError, setLocalConfigError] = useState<unknown>(null);
+  const [localRun, setLocalRun] = useState<LocalHarborRun | null>(null);
+  const [localLogs, setLocalLogs] = useState({ stdout: "", stderr: "" });
+  const [localRunError, setLocalRunError] = useState<unknown>(null);
+  const [localConfirmation, setLocalConfirmation] = useState<string | null>(null);
+  const [startingLocal, setStartingLocal] = useState(false);
+  const [cancellingLocal, setCancellingLocal] = useState(false);
   const previewSequence = useRef(0);
   const activeSetupRef = useRef<HTMLDivElement | null>(null);
   const liveOutputRef = useRef<HTMLElement | null>(null);
@@ -234,6 +306,18 @@ export function WorkbenchPage() {
         if (setups[0]) setSetup(setups[0]);
       })
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    void Promise.all([getLocalHarborOptions(), listLocalHarborRuns()])
+      .then(([options, runs]) => {
+        setLocalOptions(options);
+        setSelectedTasks((current) =>
+          current.length > 0 ? current : options.task_names.slice(0, 1),
+        );
+        if (runs[0]) setLocalRun(runs[0]);
+      })
+      .catch(setLocalOptionsError);
   }, []);
 
   useEffect(() => {
@@ -269,6 +353,49 @@ export function WorkbenchPage() {
   }, [setup]);
 
   useEffect(() => {
+    if (!preview || !supportsDirectLocalRun || selectedTasks.length === 0) {
+      setLocalConfig(null);
+      setLocalConfigError(null);
+      return;
+    }
+    let current = true;
+    setLocalConfigError(null);
+    void previewLocalHarborConfig(recipe, selectedTasks)
+      .then((config) => {
+        if (current) setLocalConfig(config);
+      })
+      .catch((error: unknown) => {
+        if (!current) return;
+        setLocalConfig(null);
+        setLocalConfigError(error);
+      });
+    return () => {
+      current = false;
+    };
+  }, [preview, recipe, selectedTasks, supportsDirectLocalRun]);
+
+  useEffect(() => {
+    if (!localRun || !["queued", "running", "cancelling"].includes(localRun.status))
+      return;
+    const timer = window.setInterval(() => {
+      void getLocalHarborRun(localRun.local_run_id)
+        .then(setLocalRun)
+        .catch(setLocalRunError);
+      void getLocalHarborLogs(localRun.local_run_id)
+        .then(setLocalLogs)
+        .catch(setLocalRunError);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [localRun]);
+
+  useEffect(() => {
+    if (!localRun) return;
+    void getLocalHarborLogs(localRun.local_run_id)
+      .then(setLocalLogs)
+      .catch(setLocalRunError);
+  }, [localRun]);
+
+  useEffect(() => {
     if (!setup) return;
     void getWorkbenchLogs(setup.setup_test_id).then(setLogs).catch(setSetupError);
   }, [setup]);
@@ -288,51 +415,9 @@ export function WorkbenchPage() {
     preview?.recipe_digest === setup.recipe_digest &&
     preview?.revision_id === setup.revision_id;
   const verifiedCurrent = setupMatchesCurrent && setup?.status === "passed";
-  const publicationState = useMemo<WorkbenchPublicationState>(() => {
-    if (!verifiedCurrent || !preview) return { kind: "test-required" };
-    if (profiles.isPending && !profiles.data) return { kind: "loading" };
-    if (profiles.isError) return { kind: "error", error: profiles.error };
-    const items = profiles.data?.items ?? [];
-    const approved = (kind: string) =>
-      items
-        .filter((profile) => profile.profile_kind === kind)
-        .flatMap((profile) =>
-          profile.approved_aliases.map((alias) => ({
-            alias,
-            spec: profile.spec,
-          })),
-        );
-    const models = approved("model");
-    const harnesses = approved("harness");
-    const deployments = approved("deployment");
-    const candidates = items
-      .filter(
-        (profile) =>
-          profile.profile_kind === "harness" &&
-          profile.approved_aliases.length > 0 &&
-          canonicalJson(profile.spec) === canonicalJson(preview.harness_profile),
-      )
-      .flatMap((profile) => profile.approved_aliases)
-      .sort();
-    if (!candidates[0]) return { kind: "unpublished" };
-    for (const alias of candidates) {
-      try {
-        firstCompatibleLaunchSelection(models, harnesses, deployments, alias);
-        return { kind: "published", alias };
-      } catch {
-        // Try the next exact published alias.
-      }
-    }
-    return { kind: "published-no-deployment", alias: candidates[0] };
-  }, [
-    preview,
-    profiles.data,
-    profiles.error,
-    profiles.isError,
-    profiles.isPending,
-    verifiedCurrent,
-  ]);
-
+  const localConfirmationKey = preview
+    ? [preview.recipe_digest, ...selectedTasks].join(":")
+    : null;
   const updateEnvironment = (
     index: number,
     change: Partial<WorkbenchRecipe["environment"][number]>,
@@ -401,22 +486,66 @@ export function WorkbenchPage() {
     }
   };
 
+  const launchLocal = async () => {
+    setStartingLocal(true);
+    setLocalRunError(null);
+    try {
+      const value = await startLocalHarborRun(recipe, selectedTasks);
+      setLocalRun(value);
+      setLocalLogs({ stdout: "", stderr: "" });
+      setLocalConfirmation(null);
+    } catch (error) {
+      setLocalRunError(error);
+    } finally {
+      setStartingLocal(false);
+    }
+  };
+
+  const cancelLocal = async () => {
+    if (!localRun || !["queued", "running"].includes(localRun.status)) return;
+    if (!window.confirm("Cancel this local Harbor process and its active trials?"))
+      return;
+    setCancellingLocal(true);
+    setLocalRunError(null);
+    try {
+      setLocalRun(await cancelLocalHarborRun(localRun.local_run_id));
+    } catch (error) {
+      setLocalRunError(error);
+    } finally {
+      setCancellingLocal(false);
+    }
+  };
+
   return (
     <>
       <PageHeader
         title="Agent Workbench"
-        description="Configure, test, publish, then run a command-line agent. Setup tests are private: passing setup does not publish a profile or start a benchmark Run."
+        description="Configure a command-line harness, verify its setup, and run a Terminal-Bench 2.1 canary directly with Harbor on this machine."
         action={
-          <Button
-            variant="secondary"
-            onClick={() => {
-              setRecipe(copyStarter());
-              setSetup(null);
-              setConfirmed(false);
-            }}
-          >
-            <RotateCcw size={16} /> Fast-Agent 0.10.11
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setRecipe(copyStarter());
+                setSetup(null);
+                setConfirmed(false);
+                setLocalConfirmation(null);
+              }}
+            >
+              <RotateCcw size={16} /> Fast-Agent 0.10.16
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setRecipe(copyStarter(fxStarter));
+                setSetup(null);
+                setConfirmed(false);
+                setLocalConfirmation(null);
+              }}
+            >
+              <RotateCcw size={16} /> FX 0.0.6
+            </Button>
+          </div>
         }
       />
 
@@ -430,7 +559,7 @@ export function WorkbenchPage() {
               <div>
                 <h2 className="font-semibold text-white">Commands</h2>
                 <p className="text-sm text-slate-400">
-                  Environment references stay visible and are resolved by the server.
+                  Describe how to install and invoke the harness.
                 </p>
               </div>
             </div>
@@ -486,28 +615,6 @@ export function WorkbenchPage() {
                     }))
                   }
                 />
-              </label>
-              <label className="block max-w-xs">
-                <span className="mb-2 block text-sm font-medium text-slate-200">
-                  Inference API
-                </span>
-                <select
-                  aria-label="Inference API"
-                  className={fieldClass()}
-                  value={recipe.route_api}
-                  onChange={(event) =>
-                    setRecipe((current) => ({
-                      ...current,
-                      route_api: event.target.value as WorkbenchRecipe["route_api"],
-                    }))
-                  }
-                >
-                  <option value="chat-completions">Chat Completions</option>
-                  <option value="responses">Responses</option>
-                </select>
-                <span className="mt-1 block text-xs text-slate-500">
-                  Must match the OpenAI-compatible protocol expected by the agent.
-                </span>
               </label>
               <label className="block max-w-xs">
                 <span className="mb-2 block text-sm font-medium text-slate-200">
@@ -585,16 +692,24 @@ export function WorkbenchPage() {
                     Effective environment
                   </h3>
                   <div className="space-y-1 rounded-lg border border-slate-800 p-3 font-mono text-xs">
-                    {preview.environment.map((item) => (
-                      <div className="break-all" key={item.name}>
-                        <span className="text-cyan-300">{item.name}</span>
-                        <span className="text-slate-600">=</span>
-                        <span className="text-slate-300">
-                          {item.redacted ? "<injected placeholder>" : item.value}
-                        </span>
-                      </div>
-                    ))}
+                    {preview.environment
+                      .filter(
+                        (item) =>
+                          item.source !== "model_base_url" &&
+                          item.source !== "model_api_key",
+                      )
+                      .map((item) => (
+                        <div className="break-all" key={item.name}>
+                          <span className="text-cyan-300">{item.name}</span>
+                          <span className="text-slate-600">=</span>
+                          <span className="text-slate-300">{item.value}</span>
+                        </div>
+                      ))}
                   </div>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Model connectivity is injected by the deployment and is
+                    intentionally omitted here.
+                  </p>
                 </div>
               </div>
             ) : null}
@@ -614,7 +729,7 @@ export function WorkbenchPage() {
             {setup && !setupMatchesCurrent && setup.status === "passed" ? (
               <p className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
                 This setup passed for an older recipe. Test the current edits before
-                checking publication or starting a Run.
+                starting Harbor.
               </p>
             ) : null}
             {setupActive ? (
@@ -668,9 +783,7 @@ export function WorkbenchPage() {
                 </label>
                 <Button
                   className="mt-4 w-full"
-                  disabled={
-                    writeMode !== "enabled" || !confirmed || !preview || checking
-                  }
+                  disabled={!confirmed || !preview || checking}
                   onClick={() => void launchSetup()}
                 >
                   <FlaskConical size={16} /> Launch setup test
@@ -685,7 +798,8 @@ export function WorkbenchPage() {
             <div>
               <h2 className="font-semibold text-white">Environment</h2>
               <p className="mt-1 text-sm text-slate-400">
-                Select runtime bindings instead of pasting credentials.
+                Configure task paths and ordinary non-secret values. Model connectivity
+                is managed by the deployment.
               </p>
             </div>
             <Button
@@ -704,81 +818,309 @@ export function WorkbenchPage() {
             </Button>
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
-            {recipe.environment.map((binding, index) => (
-              <div
-                className="relative grid gap-3 rounded-lg border border-slate-800 p-3 pr-12 sm:grid-cols-2"
-                // biome-ignore lint/suspicious/noArrayIndexKey: the portable recipe contract intentionally has no UI-only row identifier.
-                key={`${index}-${binding.name}`}
-              >
-                <label>
-                  <span className="mb-1 block text-xs text-slate-500">Name</span>
-                  <input
-                    aria-label={`Environment variable ${index + 1} name`}
-                    className={fieldClass()}
-                    value={binding.name}
-                    onChange={(event) =>
-                      updateEnvironment(index, { name: event.target.value })
-                    }
-                  />
-                </label>
-                <label>
-                  <span className="mb-1 block text-xs text-slate-500">Source</span>
-                  <select
-                    aria-label={`Environment variable ${binding.name} source`}
-                    className={fieldClass()}
-                    value={binding.source}
-                    onChange={(event) =>
-                      updateEnvironment(index, {
-                        source: event.target
-                          .value as WorkbenchRecipe["environment"][number]["source"],
-                      })
+            {recipe.environment.map((binding, index) =>
+              isManagedInferenceBinding(binding) ? null : (
+                <div
+                  className="relative grid gap-3 rounded-lg border border-slate-800 p-3 pr-12 sm:grid-cols-2"
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the portable recipe contract intentionally has no UI-only row identifier.
+                  key={`${index}-${binding.name}`}
+                >
+                  <label>
+                    <span className="mb-1 block text-xs text-slate-500">Name</span>
+                    <input
+                      aria-label={`Environment variable ${index + 1} name`}
+                      className={fieldClass()}
+                      value={binding.name}
+                      onChange={(event) =>
+                        updateEnvironment(index, { name: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span className="mb-1 block text-xs text-slate-500">Source</span>
+                    <select
+                      aria-label={`Environment variable ${binding.name} source`}
+                      className={fieldClass()}
+                      value={binding.source}
+                      onChange={(event) =>
+                        updateEnvironment(index, {
+                          source: event.target
+                            .value as WorkbenchRecipe["environment"][number]["source"],
+                        })
+                      }
+                    >
+                      {sources.map((source) => (
+                        <option key={source} value={source}>
+                          {source.replaceAll("_", " ")}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="sm:col-span-2">
+                    <span className="mb-1 block text-xs text-slate-500">
+                      {binding.source === "literal" ? "Value" : "Effective binding"}
+                    </span>
+                    <input
+                      aria-label={`Environment variable ${binding.name} value`}
+                      className={fieldClass()}
+                      disabled={binding.source !== "literal"}
+                      value={
+                        binding.source === "literal"
+                          ? (binding.value ?? "")
+                          : `<${binding.source.replaceAll("_", " ")}>`
+                      }
+                      onChange={(event) =>
+                        updateEnvironment(index, { value: event.target.value })
+                      }
+                    />
+                  </label>
+                  <Button
+                    aria-label={`Remove ${binding.name}`}
+                    className="absolute right-2 top-2"
+                    variant="ghost"
+                    onClick={() =>
+                      setRecipe((current) => ({
+                        ...current,
+                        environment: current.environment.filter(
+                          (_item, itemIndex) => itemIndex !== index,
+                        ),
+                      }))
                     }
                   >
-                    {sources.map((source) => (
-                      <option key={source} value={source}>
-                        {source.replaceAll("_", " ")}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="sm:col-span-2">
-                  <span className="mb-1 block text-xs text-slate-500">
-                    {binding.source === "literal" ? "Value" : "Effective binding"}
-                  </span>
-                  <input
-                    aria-label={`Environment variable ${binding.name} value`}
-                    className={fieldClass()}
-                    disabled={binding.source !== "literal"}
-                    value={
-                      binding.source === "literal"
-                        ? (binding.value ?? "")
-                        : `<${binding.source.replaceAll("_", " ")}>`
-                    }
-                    onChange={(event) =>
-                      updateEnvironment(index, { value: event.target.value })
-                    }
-                  />
-                </label>
-                <Button
-                  aria-label={`Remove ${binding.name}`}
-                  className="absolute right-2 top-2"
-                  variant="ghost"
-                  onClick={() =>
-                    setRecipe((current) => ({
-                      ...current,
-                      environment: current.environment.filter(
-                        (_item, itemIndex) => itemIndex !== index,
-                      ),
-                    }))
-                  }
-                >
-                  <Trash2 size={16} />
-                </Button>
-              </div>
-            ))}
+                    <Trash2 size={16} />
+                  </Button>
+                </div>
+              ),
+            )}
           </div>
         </Card>
+
+        {localOptions?.enabled !== false ? (
+          <Card className="xl:col-span-2">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <PlayCircle className="text-cyan-300" size={20} />
+                  <h2 className="font-semibold text-white">Run locally with Harbor</h2>
+                  {localOptions ? (
+                    <Badge status={localOptions.ready ? "complete" : "error"}>
+                      {localOptions.ready ? "Ready" : "Unavailable"}
+                    </Badge>
+                  ) : null}
+                </div>
+                <p className="mt-2 max-w-3xl text-sm text-slate-400">
+                  Uses the checked-in Terminal-Bench 2.1 canary and approved model
+                  route. Harbor owns task resolution, the container environment,
+                  verification, and native results.
+                </p>
+              </div>
+              {localOptions?.harbor_version ? (
+                <div className="text-right text-xs text-slate-500">
+                  <div>Installed: {localOptions.harbor_version}</div>
+                  {localOptions.expected_harbor_version ? (
+                    <div>Profile: Harbor {localOptions.expected_harbor_version}</div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+            {localOptionsError ? (
+              <div className="mt-4">
+                <ErrorNotice error={localOptionsError} />
+              </div>
+            ) : null}
+            {localOptions?.reason ? (
+              <p className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+                {localOptions.reason}
+              </p>
+            ) : null}
+            {!supportsDirectLocalRun ? (
+              <p className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+                This recipe can be setup-tested, but it cannot use the direct local
+                inference route. FX 0.0.6 expects Vercel AI Gateway semantics, so Harbor
+                Run remains disabled to keep the HF inference credential on its intended
+                endpoint.
+              </p>
+            ) : null}
+            <div className="mt-5 grid gap-6 lg:grid-cols-[minmax(16rem,0.65fr)_minmax(0,1.35fr)]">
+              <div>
+                <h3 className="text-sm font-medium text-slate-200">Canary tasks</h3>
+                <div className="mt-3 space-y-2">
+                  {(localOptions?.task_names ?? []).map((taskName) => (
+                    <label
+                      className="flex items-start gap-3 rounded-lg border border-slate-800 p-3 text-sm text-slate-300"
+                      key={taskName}
+                    >
+                      <input
+                        className="mt-0.5 accent-cyan-400"
+                        type="checkbox"
+                        checked={selectedTasks.includes(taskName)}
+                        onChange={(event) => {
+                          setSelectedTasks((current) =>
+                            event.target.checked
+                              ? [...current, taskName]
+                              : current.filter((item) => item !== taskName),
+                          );
+                          setLocalConfirmation(null);
+                        }}
+                      />
+                      <span className="font-mono text-xs">{taskName}</span>
+                    </label>
+                  ))}
+                </div>
+                <dl className="mt-4 space-y-2 text-xs">
+                  <div>
+                    <dt className="text-slate-500">Benchmark</dt>
+                    <dd className="font-mono text-slate-300">
+                      {localOptions?.benchmark ?? "Loading…"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">Model</dt>
+                    <dd className="font-mono text-slate-300">
+                      {localOptions?.model ?? "Loading…"}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-medium text-slate-200">
+                  Generated Harbor config
+                </h3>
+                {localConfigError ? (
+                  <div className="mt-3">
+                    <ErrorNotice error={localConfigError} />
+                  </div>
+                ) : (
+                  <pre className="mt-3 max-h-96 overflow-auto rounded-lg border border-slate-800 bg-black/30 p-3 text-xs leading-5 text-slate-300">
+                    {localConfig
+                      ? JSON.stringify(localConfig, null, 2)
+                      : "Select a task and wait for a valid recipe preview."}
+                  </pre>
+                )}
+              </div>
+            </div>
+            <div className="mt-5 border-t border-slate-800 pt-5">
+              <label className="flex items-start gap-3 text-sm text-slate-300">
+                <input
+                  className="mt-1 accent-cyan-400"
+                  type="checkbox"
+                  checked={
+                    localConfirmationKey !== null &&
+                    localConfirmation === localConfirmationKey
+                  }
+                  onChange={(event) =>
+                    setLocalConfirmation(
+                      event.target.checked ? localConfirmationKey : null,
+                    )
+                  }
+                />
+                <span>
+                  Start Harbor locally with this exact recipe, config, and task
+                  selection.
+                </span>
+              </label>
+              {localRunError ? (
+                <div className="mt-4">
+                  <ErrorNotice error={localRunError} />
+                </div>
+              ) : null}
+              <Button
+                className="mt-4"
+                disabled={
+                  !localOptions?.ready ||
+                  !supportsDirectLocalRun ||
+                  !verifiedCurrent ||
+                  !localConfig ||
+                  selectedTasks.length === 0 ||
+                  localConfirmationKey === null ||
+                  localConfirmation !== localConfirmationKey ||
+                  startingLocal ||
+                  Boolean(
+                    localRun &&
+                      ["queued", "running", "cancelling"].includes(localRun.status),
+                  )
+                }
+                onClick={() => void launchLocal()}
+              >
+                <PlayCircle size={16} />
+                {startingLocal ? "Starting Harbor…" : "Start local benchmark"}
+              </Button>
+              {!verifiedCurrent ? (
+                <p className="mt-2 text-xs text-slate-500">
+                  Pass setup for the current recipe before starting the benchmark.
+                </p>
+              ) : null}
+            </div>
+          </Card>
+        ) : null}
       </div>
+
+      {localRun ? (
+        <Card className="mt-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                {["queued", "running", "cancelling"].includes(localRun.status) ? (
+                  <LoaderCircle className="animate-spin text-cyan-300" size={20} />
+                ) : localRun.status === "succeeded" ? (
+                  <CheckCircle2 className="text-emerald-400" size={20} />
+                ) : (
+                  <FlaskConical className="text-rose-400" size={20} />
+                )}
+                <h2 className="font-semibold text-white">Local Harbor run</h2>
+                <Badge
+                  status={
+                    localRun.status === "succeeded"
+                      ? "complete"
+                      : ["failed", "cancelled"].includes(localRun.status)
+                        ? "error"
+                        : "active"
+                  }
+                >
+                  {localRun.status}
+                </Badge>
+              </div>
+              <p className="mt-2 break-all font-mono text-xs text-slate-500">
+                {localRun.config_path}
+              </p>
+              {localRun.result_path ? (
+                <p className="mt-1 break-all font-mono text-xs text-emerald-300">
+                  Result: {localRun.result_path}
+                </p>
+              ) : null}
+            </div>
+            {["queued", "running", "cancelling"].includes(localRun.status) ? (
+              <Button
+                variant="secondary"
+                disabled={cancellingLocal || localRun.status === "cancelling"}
+                onClick={() => void cancelLocal()}
+              >
+                <Square size={14} />
+                {cancellingLocal || localRun.status === "cancelling"
+                  ? "Cancelling…"
+                  : "Cancel run"}
+              </Button>
+            ) : null}
+          </div>
+          {localRun.error ? (
+            <p className="mt-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">
+              {localRun.error}
+            </p>
+          ) : null}
+          <section
+            aria-label="Local Harbor output"
+            className="mt-4 max-h-[36rem] min-h-48 overflow-auto rounded-lg border border-slate-800 bg-black/40 p-3 text-xs leading-5 text-slate-300"
+          >
+            <pre className="whitespace-pre-wrap break-words">
+              {localLogs.stdout}
+              {localLogs.stderr ? `\n[stderr]\n${localLogs.stderr}` : ""}
+              {!localLogs.stdout && !localLogs.stderr
+                ? "Waiting for Harbor output…"
+                : ""}
+            </pre>
+          </section>
+        </Card>
+      ) : null}
 
       {setup ? (
         <div className="mt-6 space-y-6">
@@ -804,92 +1146,10 @@ export function WorkbenchPage() {
                 </p>
                 {verifiedCurrent ? (
                   <p className="mt-2 max-w-xl text-sm text-slate-300">
-                    Setup passed for the current recipe. Installation was verified, but
-                    this setup did not publish a profile or start a benchmark Run.
+                    Setup passed for the current recipe. The local Harbor config is
+                    ready to run above.
                   </p>
                 ) : null}
-              </div>
-              <div className="max-w-md text-right">
-                <div className="flex justify-end">
-                  <Badge
-                    status={
-                      publicationState.kind === "published"
-                        ? "complete"
-                        : publicationState.kind === "loading"
-                          ? "active"
-                          : "error"
-                    }
-                  >
-                    {publicationState.kind === "test-required"
-                      ? "Test required"
-                      : publicationState.kind === "loading"
-                        ? "Checking profiles"
-                        : publicationState.kind === "error"
-                          ? "Profile error"
-                          : publicationState.kind === "unpublished"
-                            ? "Unpublished"
-                            : publicationState.kind === "published-no-deployment"
-                              ? "Published · no compatible deployment"
-                              : "Published"}
-                  </Badge>
-                </div>
-                <p className="mt-2 text-xs text-slate-400">
-                  {publicationState.kind === "test-required"
-                    ? "Test the current recipe before checking whether it is published."
-                    : publicationState.kind === "loading"
-                      ? "Checking the approved profile catalog…"
-                      : publicationState.kind === "error"
-                        ? "The profile catalog could not be loaded, so publication and Run readiness are unknown."
-                        : publicationState.kind === "unpublished"
-                          ? "Setup passed, but no approved harness profile matches this exact recipe."
-                          : publicationState.kind === "published-no-deployment"
-                            ? `This exact recipe is already published as ${publicationState.alias}, but no compatible approved deployment is available.`
-                            : `This exact recipe is already published as ${publicationState.alias} and has a compatible approved deployment.`}
-                </p>
-                {publicationState.kind === "error" ? (
-                  <div className="mt-3">
-                    <ErrorNotice error={publicationState.error} />
-                    <Button
-                      className="mt-2"
-                      variant="secondary"
-                      onClick={() => void profiles.refetch()}
-                    >
-                      Retry profile catalog
-                    </Button>
-                  </div>
-                ) : null}
-                <div className="mt-3">
-                  <Button
-                    disabled={publicationState.kind !== "published"}
-                    variant="secondary"
-                    onClick={() => {
-                      if (publicationState.kind !== "published") return;
-                      const query = new URLSearchParams({
-                        launch: "1",
-                        harness: publicationState.alias,
-                      });
-                      navigate(`/runs?${query.toString()}`);
-                    }}
-                  >
-                    {publicationState.kind === "published"
-                      ? "Open Run launcher"
-                      : "Run unavailable"}{" "}
-                    <FileCode2 size={16} />
-                  </Button>
-                  <p className="mt-2 text-xs text-slate-500">
-                    {publicationState.kind === "published"
-                      ? "Choose the benchmark, model, runtime, launch policy, and cost ceiling there. Starting a Run requires a separate confirmation."
-                      : publicationState.kind === "test-required"
-                        ? "Pass setup for the current recipe first."
-                        : publicationState.kind === "loading"
-                          ? "Waiting for publication status."
-                          : publicationState.kind === "error"
-                            ? "Retry the profile catalog request."
-                            : publicationState.kind === "unpublished"
-                              ? "Publish this exact recipe through the reviewed profile workflow first."
-                              : "A compatible approved deployment is required before launch."}
-                  </p>
-                </div>
               </div>
             </div>
             {setup.error ? (

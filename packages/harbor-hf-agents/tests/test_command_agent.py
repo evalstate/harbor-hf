@@ -502,7 +502,7 @@ async def test_atif_null_metrics_do_not_erase_existing_context(temp_dir: Path) -
     assert context.cost_usd == 0.1
 
 
-def _fast_agent_0_10_11_starter() -> dict[str, object]:
+def _fast_agent_0_10_16_starter() -> dict[str, object]:
     """Test-only proof that Fast-Agent is ordinary command recipe data."""
     return _config(
         setup={
@@ -511,7 +511,7 @@ def _fast_agent_0_10_11_starter() -> dict[str, object]:
                 "-m",
                 "pip",
                 "install",
-                "fast-agent-mcp==0.10.11",
+                "fast-agent-mcp==0.10.16",
             ]
         },
         run={
@@ -530,8 +530,8 @@ def _fast_agent_0_10_11_starter() -> dict[str, object]:
     )
 
 
-def test_fast_agent_0_10_11_starter_uses_the_generic_recipe() -> None:
-    config = CommandAgentConfig.model_validate(_fast_agent_0_10_11_starter())
+def test_fast_agent_0_10_16_starter_uses_the_generic_recipe() -> None:
+    config = CommandAgentConfig.model_validate(_fast_agent_0_10_16_starter())
     assert config.setup is not None
-    assert config.setup.argv[-1] == "fast-agent-mcp==0.10.11"
+    assert config.setup.argv[-1] == "fast-agent-mcp==0.10.16"
     assert config.run.bindings["MODEL_BASE_URL"] == "model_base_url"

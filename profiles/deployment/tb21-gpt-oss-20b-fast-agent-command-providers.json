@@ -1,7 +1,7 @@
 {
   "schema_version": "v1",
   "kind": "profile.object",
-  "record_id": "profile-69a18231b183df0bca127a47",
+  "record_id": "profile-99f26c91f5e6fe6d619d0377",
   "created_at": "2026-08-28T16:48:15.000Z",
   "actor": {
     "subject": "harbor-hf-source",
@@ -12,13 +12,8 @@
   "spec": {
     "contract_version": "v1",
     "route": "hf_job",
-    "models": [
-      "gpt-oss-20b-together",
-      "gpt-oss-20b"
-    ],
-    "harnesses": [
-      "fast-agent-0-10-11-command"
-    ],
+    "models": ["gpt-oss-20b-together", "gpt-oss-20b"],
+    "harnesses": ["fast-agent-0-10-16-command"],
     "job_image": "ghcr.io/huggingface/harbor-hf-trial-worker@sha256:dd0dac768b7113d50a505a3b811b5c9f4bd9e6e142852a158c71d4db21873636",
     "preparation_job_command": [
       "python",

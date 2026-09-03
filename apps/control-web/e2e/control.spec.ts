@@ -148,11 +148,11 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
           {
             profile_id: "sha256:harness",
             profile_kind: "harness",
-            name: "fast-agent-0-10-11-command",
+            name: "fast-agent-0-10-16-command",
             source: "built-in",
             promotion_state: "approved",
-            alias: "fast-agent-0-10-11-command",
-            approved_aliases: ["fast-agent-0-10-11-command"],
+            alias: "fast-agent-0-10-16-command",
+            approved_aliases: ["fast-agent-0-10-16-command"],
             spec: reviewedFastAgentPreview.harness_profile,
             created_at: "2026-08-27T00:00:00.000Z",
           },
@@ -166,7 +166,7 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
             approved_aliases: ["tb21-gpt-oss-command-providers"],
             spec: {
               models: ["gpt-oss-20b"],
-              harnesses: ["fast-agent-0-10-11-command"],
+              harnesses: ["fast-agent-0-10-16-command"],
               inference_provider: "together",
             },
             created_at: "2026-08-27T00:00:00.000Z",
@@ -211,7 +211,7 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
   await page.route("**/api/v1/workbench/setup-tests/*/logs", (route) =>
     route.fulfill({
       json: {
-        stdout: "fast-agent-mcp v0.10.11\n",
+        stdout: "fast-agent-mcp v0.10.16\n",
         stderr: "",
         stdout_truncated: false,
         stderr_truncated: false,
@@ -246,7 +246,7 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
 
   await page.getByRole("checkbox").check();
   await page.getByRole("button", { name: "Launch setup test" }).click();
-  await expect(page.getByText("fast-agent-mcp v0.10.11")).toBeVisible();
+  await expect(page.getByText("fast-agent-mcp v0.10.16")).toBeVisible();
   await expect(page.getByText("Published", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", { name: /workspace\/instruction\.txt/ }),
@@ -281,7 +281,7 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
   await page.getByRole("button", { name: "Open Run launcher" }).click();
   await expect(page).toHaveURL(/\/runs$/);
   await expect(page.getByLabel("Harness", { exact: true })).toHaveValue(
-    "fast-agent-0-10-11-command",
+    "fast-agent-0-10-16-command",
   );
 });
 

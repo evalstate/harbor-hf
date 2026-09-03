@@ -19,6 +19,7 @@ import {
 } from "@harbor-hf/hf-adapters";
 import { AuthenticationService, AuthStore } from "./auth.js";
 import type { AppConfig } from "./config.js";
+import { LocalHarborRuntime } from "./local-harbor.js";
 import { WorkbenchRuntime } from "./workbench.js";
 
 export interface Runtime {
@@ -29,6 +30,7 @@ export interface Runtime {
   auth: AuthenticationService;
   reconciler: Reconciler;
   workbench: WorkbenchRuntime;
+  localHarbor: LocalHarborRuntime;
   readonly ready: boolean;
   initialize(): Promise<void>;
   start(onReconcilerError?: (error: unknown) => void): void;
@@ -83,6 +85,12 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
     config.workbench_image,
     workbenchJobs,
   );
+  const localHarbor = new LocalHarborRuntime(
+    config.node_env === "development" && config.auth_mode === "development",
+    config.hf_inference_token,
+    config.profiles_root,
+    profiles,
+  );
   const reconciler = new Reconciler(service, projection, external, publisher, {
     interval_ms: config.reconcile_interval_ms,
     sync_interval_ms: config.sync_interval_ms,
@@ -100,12 +108,16 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
     auth,
     reconciler,
     workbench,
+    localHarbor,
     get ready() {
       return initializationReady && projection.system().ready;
     },
     async initialize() {
       initializationReady = false;
-      if (config.hf_inference_token)
+      if (
+        config.hf_inference_token &&
+        !(config.node_env === "development" && config.auth_mode === "development")
+      )
         await attestInferenceToken({ accessToken: config.hf_inference_token });
       await auth.initialize();
       await projection.rebuild(store);
@@ -145,6 +157,7 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
       abort.abort();
       await reconciler.stop();
       await workbench.close();
+      await localHarbor.close();
       authStore.close();
       await projection.close();
     },

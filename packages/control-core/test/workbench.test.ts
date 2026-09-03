@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compileAgentWorkbenchRecipe,
   fastAgentWorkbenchStarter,
+  fxWorkbenchStarter,
 } from "../src/workbench.js";
 
 describe("Agent Workbench recipe compiler", () => {
@@ -13,7 +14,7 @@ describe("Agent Workbench recipe compiler", () => {
       "68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2",
     );
     expect(preview.setup_command).toContain("python_version=3.12.14");
-    expect(preview.setup_command).toContain("fast-agent-mcp==0.10.11");
+    expect(preview.setup_command).toContain("fast-agent-mcp==0.10.16");
     expect(preview.setup_command).not.toContain('python -m venv "$AGENT_HOME/venv"');
     expect(preview.run_command).toContain("--base-url");
     expect(preview.run_command).toContain("<injected-model-base-url>");
@@ -48,6 +49,43 @@ describe("Agent Workbench recipe compiler", () => {
     });
     expect(JSON.stringify(preview.harness_profile)).not.toContain("route_base_url");
     expect(JSON.stringify(preview.harness_profile)).not.toContain("route_api_key");
+  });
+
+  it("compiles the checksum-pinned FX starter through the generic recipe path", () => {
+    const preview = compileAgentWorkbenchRecipe(fxWorkbenchStarter);
+    expect(preview.recipe.name).toBe("fx");
+    expect(preview.setup_command).toContain(
+      [
+        "https://releases.fx.sh/v",
+        "$",
+        "{fx_version}",
+        "/fx-linux-",
+        "$",
+        "{fx_target}",
+        ".tar.gz",
+      ].join(""),
+    );
+    expect(preview.setup_command).toContain(
+      "120fa992df8caf982e17ca9e9e3966c790b0d150480511eaf51392e66a0f0b84",
+    );
+    expect(preview.setup_command).toContain(
+      "0dfd53224c5ecede601bb8ce649f84fab6db05a39afbcd5b39e6091833f6c4d7",
+    );
+    expect(preview.run_command).toContain('fx" ask --yolo --json --');
+    expect(preview.harness_profile).toMatchObject({
+      agent: "command-agent",
+      required_evidence: ["workspace", "verifier"],
+      harbor_agent: {
+        import_path: "harbor_hf_agents.command_agent.agent:CommandAgent",
+        override_setup_timeout_sec: 600,
+        kwargs: {
+          config: {
+            route_api: "chat-completions",
+            outputs: [{ path: "fx-results.json" }],
+          },
+        },
+      },
+    });
   });
 
   it("produces stable identities and changes them with behavior", () => {

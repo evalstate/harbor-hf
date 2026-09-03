@@ -361,7 +361,7 @@ describe("control API", () => {
     });
     expect(response.statusCode).toBe(200);
     const body = response.json();
-    expect(body.setup_command).toContain("fast-agent-mcp==0.10.11");
+    expect(body.setup_command).toContain("fast-agent-mcp==0.10.16");
     expect(body.run_command).toContain("<injected-model-base-url>");
     expect(body.environment).toContainEqual(
       expect.objectContaining({
@@ -388,6 +388,50 @@ describe("control API", () => {
     expect(JSON.stringify(body.harness_profile)).not.toContain("route_base_url");
     expect(JSON.stringify(body.harness_profile)).not.toContain("route_api_key");
     expect(JSON.stringify(body)).not.toContain("test-token-not-a-real-credential");
+  });
+
+  it("builds a task-scoped secret-free Harbor config for local execution", async () => {
+    const { app } = await setup();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/workbench/local-runs/preview",
+      payload: {
+        recipe: fastAgentWorkbenchStarter,
+        task_names: ["adaptive-rejection-sampler"],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    const config = response.json().config;
+    expect(config).toMatchObject({
+      job_name: "local-preview",
+      n_attempts: 1,
+      n_concurrent_trials: 1,
+      retry: { max_retries: 0 },
+      datasets: [{ task_names: ["adaptive-rejection-sampler"] }],
+      agents: [
+        {
+          import_path: "harbor_hf_agents.command_agent.agent:CommandAgent",
+          model_name: "openai/openai/gpt-oss-20b:together",
+          env: {
+            OPENAI_API_KEY: ["$", "{HF_INFERENCE_TOKEN}"].join(""),
+            OPENAI_BASE_URL: "https://router.huggingface.co/v1",
+          },
+          extra_allowed_hosts: ["router.huggingface.co"],
+        },
+      ],
+    });
+    expect(JSON.stringify(config)).not.toContain("test-token-not-a-real-credential");
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/v1/workbench/local-runs/preview",
+      payload: {
+        recipe: fastAgentWorkbenchStarter,
+        task_names: ["not-a-canary-task"],
+      },
+    });
+    expect(invalid.statusCode).toBe(422);
+    expect(invalid.json().error.code).toBe("policy_rejected");
   });
 
   it("rejects reserved and credential-like Workbench literals and disabled setup execution", async () => {
