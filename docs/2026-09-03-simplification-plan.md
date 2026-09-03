@@ -174,15 +174,15 @@ pins in 22 deployment profiles.
 
 ### Run record
 
-A run is one folder in the Bucket with two small files that Harbor-HF writes
-and one folder that Harbor writes. `runs/<run_id>/run.json` holds what the
-submitter chose in the form and the Harbor `JobConfig` that Harbor-HF derived
-from those choices. It never changes after submission.
-`runs/<run_id>/state.json` holds the facts that only Harbor-HF knows, such as a
-cancel or pause by an operator and the list of parent Jobs started for the run
-with their start times. The Space rewrites it when an operator acts or when it starts a parent
-Job. The parent Job writes Harbor's job folder at `runs/<run_id>/job/`, and
-Harbor-HF never writes into that folder.
+A run is one folder in the Bucket with two small files that Harbor-HF writes and
+one folder that Harbor writes. `runs/<run_id>/run.json` holds what the submitter
+chose in the form and the Harbor `JobConfig` that Harbor-HF derived from those
+choices. It never changes after submission. `runs/<run_id>/state.json` holds the
+facts that only Harbor-HF knows, such as a cancel or pause by an operator and
+the list of parent Jobs started for the run with their start times. The Space
+rewrites it when an operator acts or when it starts a parent Job. The parent Job
+writes Harbor's job folder at `runs/<run_id>/job/`, and Harbor-HF never writes
+into that folder.
 
 The status shown in the panel is computed from these files. A run with
 `run.json` and no parent Job yet is queued. A run with a live parent Job is
