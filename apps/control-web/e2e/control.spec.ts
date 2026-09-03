@@ -183,6 +183,23 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
     const recipe = route.request().postDataJSON();
     return route.fulfill({ json: compileAgentWorkbenchRecipe(recipe) });
   });
+  await page.route("**/api/v1/workbench/local-runs/options", (route) =>
+    route.fulfill({
+      json: {
+        enabled: false,
+        ready: false,
+        reason: "Local Harbor execution is disabled in browser E2E.",
+        benchmark: "terminal-bench-2-1-canary",
+        model: "gpt-oss-20b-together",
+        task_names: [],
+        harbor_version: null,
+        expected_harbor_version: "0.22.0",
+      },
+    }),
+  );
+  await page.route("**/api/v1/workbench/local-runs", (route) =>
+    route.fulfill({ json: [] }),
+  );
   await page.route("**/api/v1/workbench/setup-tests", (route) =>
     route.fulfill({
       status: 202,
@@ -232,22 +249,26 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
   await page.goto("/workbench");
   await expect(page.getByRole("heading", { name: "Agent Workbench" })).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Configure → Test → Publish → Run" }),
+    page.getByRole("heading", { name: "Configure → Test → Run" }),
   ).toBeVisible();
   await expect(
     page.getByText(
-      "Setup and publication are separate. Passing setup does not publish a profile or start a benchmark Run.",
+      "The model route, direct inference URL, and credential binding come from the local deployment profile. They are not Workbench settings.",
       { exact: true },
     ),
   ).toBeVisible();
   await expect(page.getByText("Preview ready")).toBeVisible();
-  await expect(page.getByText("<injected placeholder>", { exact: true })).toBeVisible();
-  await expect(page.getByText(/injected-placeholder/)).toHaveCount(0);
+  await expect(
+    page.getByLabel("Environment variable OPENAI_API_KEY source"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByLabel("Environment variable MODEL_BASE_URL source"),
+  ).toHaveCount(0);
 
-  await page.getByRole("checkbox").check();
+  await page.getByRole("checkbox", { name: /launch this exact setup recipe/i }).check();
   await page.getByRole("button", { name: "Launch setup test" }).click();
   await expect(page.getByText("fast-agent-mcp v0.10.16")).toBeVisible();
-  await expect(page.getByText("Published", { exact: true })).toBeVisible();
+  await expect(page.getByText("passed", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", { name: /workspace\/instruction\.txt/ }),
   ).toBeVisible();
@@ -260,7 +281,6 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
       () => (window as Window & { compromised?: boolean }).compromised,
     ),
   ).toBeUndefined();
-  await expect(page.getByRole("button", { name: "Open Run launcher" })).toBeEnabled();
   await page.screenshot({
     path: testInfo.outputPath("agent-workbench-desktop.png"),
     fullPage: true,
@@ -278,11 +298,6 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
     path: testInfo.outputPath("agent-workbench-mobile.png"),
     fullPage: true,
   });
-  await page.getByRole("button", { name: "Open Run launcher" }).click();
-  await expect(page).toHaveURL(/\/runs$/);
-  await expect(page.getByLabel("Harness", { exact: true })).toHaveValue(
-    "fast-agent-0-10-16-command",
-  );
 });
 
 test("tails and cancels a running Workbench setup", async ({ page }) => {
@@ -306,6 +321,23 @@ test("tails and cancels a running Workbench setup", async ({ page }) => {
       },
     });
   });
+  await page.route("**/api/v1/workbench/local-runs/options", (route) =>
+    route.fulfill({
+      json: {
+        enabled: false,
+        ready: false,
+        reason: "Local Harbor execution is disabled in browser E2E.",
+        benchmark: "terminal-bench-2-1-canary",
+        model: "gpt-oss-20b-together",
+        task_names: [],
+        harbor_version: null,
+        expected_harbor_version: "0.22.0",
+      },
+    }),
+  );
+  await page.route("**/api/v1/workbench/local-runs", (route) =>
+    route.fulfill({ json: [] }),
+  );
   let cancellationRequested = false;
   const setup = (status: "running" | "cancelling" | "cancelled") => ({
     setup_test_id: "setup-test-running",
@@ -345,7 +377,7 @@ test("tails and cancels a running Workbench setup", async ({ page }) => {
 
   await page.goto("/workbench");
   await expect(page.getByText("Preview ready")).toBeVisible();
-  await page.getByRole("checkbox").check();
+  await page.getByRole("checkbox", { name: /launch this exact setup recipe/i }).check();
   await page.getByRole("button", { name: "Launch setup test" }).click();
   await expect(page.getByText("Setup submitted")).toBeVisible();
   await expect(page.getByLabel("Live setup output")).toContainText(
