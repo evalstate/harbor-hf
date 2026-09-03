@@ -28,6 +28,7 @@ ajv.addFormat("date-time", {
   type: "string",
   validate: (value: string) => Number.isFinite(Date.parse(value)),
 });
+ajv.addSchema(schemas.agentWorkbench);
 
 const validators = {
   agentWorkbench: ajv.compile(schemas.agentWorkbench),

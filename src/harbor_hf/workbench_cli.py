@@ -46,7 +46,7 @@ class LogChannel(StrEnum):
     COMBINED = "combined"
 
 
-def _read_recipe(source: str, fail: Fail) -> dict[str, object]:
+def read_workbench_recipe(source: str, fail: Fail) -> dict[str, object]:
     try:
         payload = (
             sys.stdin.buffer.read(_MAX_RECIPE_BYTES + 1)
@@ -383,7 +383,7 @@ def register_workbench_commands(  # noqa: C901 -- bounded Typer command registry
             request(
                 "POST",
                 "/api/v1/workbench/preview",
-                payload=_read_recipe(recipe, fail),
+                payload=read_workbench_recipe(recipe, fail),
             )
         )
 
@@ -405,7 +405,7 @@ def register_workbench_commands(  # noqa: C901 -- bounded Typer command registry
         """Start one confirmed disposable setup test."""
         if recipe == "-" and not yes:
             fail("use --yes when reading a recipe from stdin", 1)
-        value = _read_recipe(recipe, fail)
+        value = read_workbench_recipe(recipe, fail)
         if not yes:
             typer.confirm(
                 "Launch this exact setup recipe in a disposable CPU environment?",
@@ -583,7 +583,7 @@ def register_workbench_commands(  # noqa: C901 -- bounded Typer command registry
     ) -> None:
         """Check whether the exact tested recipe is published and runnable."""
         value = _publication_state(
-            _read_recipe(recipe, fail),
+            read_workbench_recipe(recipe, fail),
             setup_test_id,
             request=request,
             fail=fail,

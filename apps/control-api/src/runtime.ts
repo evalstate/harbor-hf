@@ -85,6 +85,9 @@ export async function createRuntime(config: AppConfig): Promise<Runtime> {
     config.workbench_image,
     workbenchJobs,
   );
+  service.configureWorkbenchSetupAttestor((setupTestId, owner, recipe) =>
+    workbench.attestPassedSetup(setupTestId, owner, recipe),
+  );
   const localHarbor = new LocalHarborRuntime(
     config.node_env === "development" && config.auth_mode === "development",
     config.hf_inference_token,

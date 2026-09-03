@@ -641,6 +641,46 @@ describe("canonical contracts", () => {
         confirmed: false,
       }),
     ).toThrow(ContractValidationError);
+    const recipe = {
+      schema_version: "v1",
+      name: "test-agent",
+      setup_command: "printf setup",
+      run_command: "printf run",
+      route_api: "chat-completions",
+      setup_timeout_seconds: 60,
+      environment: [],
+      outputs: {
+        results_path: "/logs/agent/results.json",
+        trajectory_path: null,
+      },
+    };
+    expect(
+      validateRunSubmission({
+        benchmark_config: "tb21-gpt-oss-20b-canary",
+        benchmark_config_revision: `sha256:${"1".repeat(64)}`,
+        harness: {
+          type: "workbench",
+          recipe,
+          setup_test_id: "setup-test-contract",
+        },
+        ceiling_microusd: 1_000_000,
+        confirmed: true,
+      }),
+    ).toMatchObject({ benchmark_config: "tb21-gpt-oss-20b-canary" });
+    expect(() =>
+      validateRunSubmission({
+        benchmark_config: "tb21-gpt-oss-20b-canary",
+        benchmark_config_revision: `sha256:${"1".repeat(64)}`,
+        benchmark: "control-smoke",
+        harness: {
+          type: "workbench",
+          recipe,
+          setup_test_id: "setup-test-contract",
+        },
+        ceiling_microusd: 1_000_000,
+        confirmed: true,
+      }),
+    ).toThrow(ContractValidationError);
   });
 
   it("requires explicit historical continuation confirmation", () => {

@@ -112,6 +112,108 @@
         }
       }
     },
+    "WorkbenchRunRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark_config",
+        "run_config_revision",
+        "recipe_digest",
+        "revision_id",
+        "setup_test_id"
+      ],
+      "properties": {
+        "benchmark_config": {
+          "$ref": "#/$defs/Id"
+        },
+        "run_config_revision": {
+          "$ref": "#/$defs/Digest"
+        },
+        "recipe_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "revision_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "setup_test_id": {
+          "$ref": "#/$defs/Id"
+        }
+      }
+    },
+    "WorkbenchSetupAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["setup_test_id", "recipe_digest", "revision_id", "completed_at"],
+      "properties": {
+        "setup_test_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "recipe_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "revision_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "completed_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      }
+    },
+    "WorkbenchRunLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark_config",
+        "run_config_revision",
+        "compiler_revision",
+        "template_harness",
+        "resolved_harness_profile_id",
+        "recipe",
+        "recipe_digest",
+        "revision_id",
+        "setup_attestation"
+      ],
+      "properties": {
+        "benchmark_config": {
+          "$ref": "#/$defs/Id"
+        },
+        "run_config_revision": {
+          "$ref": "#/$defs/Digest"
+        },
+        "compiler_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "template_harness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "profile_id"],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/Id"
+            },
+            "profile_id": {
+              "$ref": "#/$defs/Digest"
+            }
+          }
+        },
+        "resolved_harness_profile_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "recipe": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "recipe_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "revision_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "setup_attestation": {
+          "$ref": "#/$defs/WorkbenchSetupAttestation"
+        }
+      }
+    },
     "TaskLock": {
       "type": "object",
       "additionalProperties": false,
@@ -428,6 +530,9 @@
             },
             "start_paused": {
               "type": "boolean"
+            },
+            "workbench": {
+              "$ref": "#/$defs/WorkbenchRunRequest"
             }
           }
         }
@@ -512,6 +617,9 @@
             },
             "start_paused": {
               "type": "boolean"
+            },
+            "workbench": {
+              "$ref": "#/$defs/WorkbenchRunLock"
             }
           }
         }

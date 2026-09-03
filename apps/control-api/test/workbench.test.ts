@@ -67,6 +67,30 @@ printf 'fake setup complete\\n'
       expect(current.status).toBe("passed");
       expect(current.files).toHaveLength(1000);
       expect(current.files[0]?.path).toMatch(/^generated\/file-\d+\.txt$/);
+      await expect(
+        runtime.attestPassedSetup(
+          started.setup_test_id,
+          "test-operator",
+          fastAgentWorkbenchStarter,
+        ),
+      ).resolves.toMatchObject({
+        setup_test_id: started.setup_test_id,
+        recipe_digest: started.recipe_digest,
+        revision_id: started.revision_id,
+      });
+      await expect(
+        runtime.attestPassedSetup(
+          started.setup_test_id,
+          "different-operator",
+          fastAgentWorkbenchStarter,
+        ),
+      ).rejects.toThrow("setup test is unavailable for this actor");
+      await expect(
+        runtime.attestPassedSetup(started.setup_test_id, "test-operator", {
+          ...fastAgentWorkbenchStarter,
+          run_command: `${fastAgentWorkbenchStarter.run_command}\nprintf changed`,
+        }),
+      ).rejects.toThrow("setup test does not match this exact recipe");
     } finally {
       await runtime.close();
     }
@@ -381,6 +405,13 @@ describe("Hugging Face Workbench runner", () => {
         recipe_digest: started.recipe_digest,
         revision_id: started.revision_id,
       });
+      await expect(
+        recovered.attestPassedSetup(
+          started.setup_test_id,
+          "test-operator",
+          fastAgentWorkbenchStarter,
+        ),
+      ).rejects.toThrow("must be rerun after service restart");
       expect(await recovered.listSetups("different-operator")).toEqual([]);
     } finally {
       await recovered.close();

@@ -4,29 +4,24 @@ Agent Workbench is an authenticated control-web page for authoring and privately
 testing a generic command-line Harbor agent recipe. It is available at
 `/workbench`.
 
-The Workbench presents four distinct stages:
+The Workbench presents three distinct stages:
 
 1. **Configure** setup and run commands plus typed environment bindings.
 2. **Test** installation in a disposable local Docker container or Hugging Face
    Job without a benchmark or model request.
-3. **Publish** by matching the exact tested compiler output to an existing
-   approved immutable harness profile.
-4. **Run** through the normal launcher, where benchmark, model, deployment,
-   launch policy, and cost ceiling are selected and separately confirmed.
+3. **Run** by selecting a reviewed benchmark configuration, previewing its
+   locked infrastructure and maximum cost, and explicitly confirming launch.
 
 A successful setup test is ephemeral verification. It does not create, approve,
-or publish a harness profile and does not start a Run. The current Publish stage
-checks the existing reviewed profile catalog; arbitrary recipe finalization
-remains a later generic profile workflow.
+or publish a harness profile and does not start a Run. Hosted submission sends
+the exact non-secret recipe and actor-owned setup-test ID through the ordinary
+`POST /api/v1/runs` endpoint. The server recompiles it and rejects a failed,
+foreign, stale, or digest-mismatched setup test.
 
-The current implementation can continue an exact setup-tested recipe to the
-normal Run launcher only when its compiler output exactly matches a reviewed
-immutable harness profile and an approved compatible deployment exists. The
-handoff sends only the non-secret harness alias. It does not submit the recipe
-through a Workbench-specific Run API.
-
-Arbitrary edited recipes remain setup-test-only. Persisting those recipes as
-actor-owned private profiles is a later workflow.
+The resulting harness exists only inside that Run lock. It is content-addressed
+using the Run, reviewed configuration revision, compiler revision, recipe
+digest, and compiled harness. No `profile.object` or `profile.promotion` record
+is created for the recipe.
 
 ## Recipe contract
 
@@ -128,7 +123,8 @@ harbor-hf workbench setup cancel SETUP_TEST_ID
 harbor-hf workbench setup logs SETUP_TEST_ID
 harbor-hf workbench setup files SETUP_TEST_ID
 harbor-hf workbench setup file SETUP_TEST_ID FILE_ID
-harbor-hf workbench publication RECIPE.json --setup-test SETUP_TEST_ID
+harbor-hf run submit --config CONFIG --harness RECIPE.json \
+  --setup-test SETUP_TEST_ID --ceiling-microusd MICRO_USD --yes
 ```
 
 `RECIPE.json` may be `-` to read one UTF-8 JSON object from stdin. Setup start
@@ -147,14 +143,10 @@ present. File previews are JSON by default; `--output` writes a mode-0600 local
 file atomically, refuses overwrite without `--force`, and refuses a truncated
 preview without `--allow-truncated`.
 
-The `publication` command mirrors the browser's exact publication-state check:
-the current recipe must match the passed setup digest and revision, the
-compiler-produced harness profile must exactly equal an approved immutable
-harness profile, and an approved compatible model and deployment must exist.
-It reports `test-required`, `unpublished`, `published-no-deployment`, or
-`published`. It does not create or approve profiles and does not submit a Run.
-Use `harbor-hf run submit` for the separately confirmed benchmark, model,
-deployment, launch policy, and cost ceiling.
+The older `workbench publication` command remains a non-mutating catalog
+diagnostic. It is not required for hosted Workbench Runs. `run submit --config`
+cannot be mixed with the profile-selection flags because model, deployment, and
+launch policy are fixed by the reviewed configuration.
 
 Setup execution is controlled by:
 
@@ -230,10 +222,11 @@ and trajectory output. Fast-Agent and its toolchain remain recipe data; neither
 the Workbench compiler nor the command-agent plugin branches on their names.
 
 The checked-in `fast-agent-0-10-16-command` harness profile is derived from the
-same compiler output returned by the Workbench preview. After setup passes, the
-Workbench compares the complete canonical harness spec rather than the recipe
-name. A different command, binding, output, timeout, or version produces a
-different spec and cannot use that reviewed alias.
+same compiler output returned by the Workbench preview. The first reviewed
+benchmark configuration uses this profile as its command-agent capability
+template. A submitted recipe does not inherit the template's commands: the
+server replaces only the resolved harness spec with the newly compiled recipe
+and records both identities in the Run lock.
 
 ## FX starter
 
@@ -251,44 +244,34 @@ from being sent to an unintended endpoint. Enabling FX benchmark execution
 requires a separately reviewed deployment route; it does not require restoring
 the removed completions proxy UX.
 
-## Benchmark handoff
+## Hosted benchmark flow
 
-The narrow reviewed-profile flow is:
+The narrow hosted flow is:
 
-1. Setup passes for the current recipe digest and revision.
-2. The browser loads approved profiles from the normal profile catalog.
-3. It compares the complete canonical compiler-produced harness spec with
-   reviewed harness profiles.
-4. It requires an approved deployment that names that exact harness alias and
-   at least one approved model.
-5. It opens the existing Run launcher with only that harness alias.
-6. The user selects the benchmark, model, deployment route, diagnostic launch
-   policy, and cost ceiling, then submits through `POST /api/v1/runs`.
+1. Setup passes for the current actor-owned recipe digest and compiler revision.
+2. The browser loads reviewed configurations from
+   `GET /api/v1/workbench/benchmark-configs`.
+3. The user selects a configuration, reviews its benchmark, model, deployment,
+   task count, launch policy, result role, and maximum ceiling, then confirms an
+   allowed hard ceiling.
+4. The browser submits `benchmark_config`, the exact recipe, and its setup-test
+   ID through `POST /api/v1/runs`, together with the displayed configuration
+   revision. That revision hashes the exact resolved profile and task identities,
+   so a concurrent infrastructure/profile change forces a fresh review.
+5. The server resolves the checked-in configuration and approved template,
+   recompiles the recipe, attests the exact setup test, enforces the recipe API
+   and ceiling policy, and creates a Run-scoped resolved harness.
+6. Preparation, HF Job launch, Harbor execution, retries, evidence, and
+   diagnostic publication continue through the existing Run path.
 
-The browser reports publication as one of these explicit states:
+`tb21-gpt-oss-20b-canary` is the first checked-in configuration. It fixes the
+Terminal-Bench 2.1 canary, GPT-OSS 20B route, digest-pinned worker deployment,
+diagnostic single-attempt policy, and a maximum ceiling of 1 USD.
 
-- checking the approved profile catalog;
-- profile catalog unavailable;
-- setup-tested recipe is unpublished;
-- exact recipe is published but has no compatible deployment; or
-- exact recipe is published and ready for the normal Run launcher.
-
-The launcher selects harnesses by exact immutable alias. Reasoning is displayed
-from the selected harness profile rather than being used to guess a harness by
-agent name.
-
-The Fast-Agent profile is ready for this flow, but a hosted canary also requires
-a reviewed, digest-pinned deployment whose worker image contains the generic
-command-agent plugin. The repository must record the real published image
-digest and exact worker revision; a placeholder or mutable image reference is
-not accepted.
-
-Arbitrary customer recipes still require:
-
-1. actor-owned private profile finalization;
-2. owner-scoped profile resolution;
-3. forced diagnostic-only policy and trial ceilings; and
-4. generic capability-based deployment matching.
+The Run command receives the runtime model credential because the recipe author
+is the intended inference client and bears the Run cost. The setup command does
+not receive that credential. Recipes and literals are still checked for
+credential-like values so secrets are not persisted in the Run lock.
 
 There is no Workbench-specific Run endpoint, worker, reconciler, resource, or
 benchmark/model/harness-name branch.

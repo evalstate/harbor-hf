@@ -18,6 +18,7 @@ import {
   workerEvidenceObjectPath,
 } from "@harbor-hf/contracts";
 import {
+  compileAgentWorkbenchRecipe,
   encodeLeaderboardSqlite,
   eventCursor,
   fastAgentWorkbenchStarter,
@@ -1391,7 +1392,7 @@ describe("control API", () => {
       headers: { "idempotency-key": "durable-profile-run-key" },
       payload: input,
     });
-    expect(response.statusCode).toBe(202);
+    expect(response.statusCode, response.body).toBe(202);
     const lock = await runtime.projection.runLock(response.json().run_id as string);
     const lockedModel = lock?.profiles.find((item) => item.kind === "model");
     expect(lockedModel).toMatchObject({
@@ -2767,6 +2768,199 @@ describe("control API", () => {
     expect(audit.statusCode).toBe(200);
     expect(audit.json().items.length).toBeGreaterThanOrEqual(4);
     expect(runtime.projection.system().ready).toBe(true);
+    await app.close();
+  });
+
+  it("locks an actor-attested Workbench recipe into a reviewed benchmark config", async () => {
+    const { runtime, app } = await setup();
+    const preview = compileAgentWorkbenchRecipe(fastAgentWorkbenchStarter);
+    const setupTestId = "setup-test-hosted-api";
+    const attestor = vi
+      .spyOn(runtime.workbench, "attestPassedSetup")
+      .mockResolvedValue({
+        setup_test_id: setupTestId,
+        recipe_digest: preview.recipe_digest,
+        revision_id: preview.revision_id,
+        completed_at: "2026-09-02T23:00:00.000Z",
+      });
+    const submission = {
+      benchmark_config: "tb21-gpt-oss-20b-canary",
+      benchmark_config_revision: runtime.service.benchmarkConfigs()[0]?.revision,
+      harness: {
+        type: "workbench",
+        recipe: fastAgentWorkbenchStarter,
+        setup_test_id: setupTestId,
+      },
+      ceiling_microusd: 1_000_000,
+      confirmed: true,
+    };
+    const configs = await app.inject({
+      method: "GET",
+      url: "/api/v1/workbench/benchmark-configs",
+    });
+    expect(configs.statusCode).toBe(200);
+    expect(configs.json()).toMatchObject({
+      items: [
+        {
+          name: "tb21-gpt-oss-20b-canary",
+          benchmark: "terminal-bench-2-1-canary",
+          model: "gpt-oss-20b-together",
+          task_count: 2,
+          max_ceiling_microusd: 1_000_000,
+          publication_role: "diagnostic",
+        },
+      ],
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "workbench-hosted-api-key" },
+      payload: submission,
+    });
+    expect(response.statusCode, response.body).toBe(202);
+    expect(attestor).toHaveBeenCalledWith(
+      setupTestId,
+      expect.any(String),
+      fastAgentWorkbenchStarter,
+    );
+
+    const runId = response.json().run_id as string;
+    const lock = await app.inject({
+      method: "GET",
+      url: `/api/v1/runs/${runId}/lock`,
+    });
+    expect(lock.statusCode).toBe(200);
+    expect(lock.json()).toMatchObject({
+      workbench: {
+        benchmark_config: "tb21-gpt-oss-20b-canary",
+        compiler_revision: "agent-workbench-compiler-v1",
+        recipe: {
+          name: fastAgentWorkbenchStarter.name,
+          setup_command: "<redacted>",
+          run_command: "<redacted>",
+        },
+        recipe_digest: preview.recipe_digest,
+        revision_id: preview.revision_id,
+        setup_attestation: {
+          setup_test_id: setupTestId,
+          completed_at: "2026-09-02T23:00:00.000Z",
+        },
+      },
+    });
+    expect(JSON.stringify(lock.json())).not.toContain(
+      fastAgentWorkbenchStarter.setup_command,
+    );
+    expect(JSON.stringify(lock.json())).not.toContain(
+      fastAgentWorkbenchStarter.run_command,
+    );
+    const durableLock = await runtime.projection.runLock(runId);
+    expect(durableLock).toMatchObject({
+      workbench: { recipe: fastAgentWorkbenchStarter },
+      execution: {
+        harbor_agent: preview.harness_profile.harbor_agent,
+        harness: preview.harness_profile,
+      },
+    });
+    const harness = durableLock?.profiles.find(
+      (profile: { kind: string }) => profile.kind === "harness",
+    ) as { name: string; spec: unknown; profile_id: string };
+    expect(harness).toMatchObject({
+      name: "fast-agent-0-10-16-command",
+      spec: preview.harness_profile,
+    });
+    expect(harness.profile_id).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(harness.profile_id).not.toBe(
+      durableLock?.workbench?.template_harness.profile_id,
+    );
+
+    attestor.mockRejectedValue(new Error("setup state no longer exists"));
+    const adopted = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "workbench-hosted-api-key" },
+      payload: submission,
+    });
+    expect(adopted.json()).toMatchObject({ run_id: runId, adopted: true });
+    expect(attestor).toHaveBeenCalledTimes(1);
+
+    const changed = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "workbench-hosted-api-key" },
+      payload: {
+        ...submission,
+        harness: {
+          ...submission.harness,
+          recipe: {
+            ...fastAgentWorkbenchStarter,
+            run_command: `${fastAgentWorkbenchStarter.run_command}\nprintf changed`,
+          },
+        },
+      },
+    });
+    expect(changed.statusCode).toBe(409);
+    await app.close();
+  });
+
+  it("rejects unpassed Workbench setup evidence and config ceilings", async () => {
+    const { runtime, app } = await setup();
+    const attestor = vi
+      .spyOn(runtime.workbench, "attestPassedSetup")
+      .mockRejectedValue(new Error("setup test has not passed"));
+    const submission = {
+      benchmark_config: "tb21-gpt-oss-20b-canary",
+      benchmark_config_revision: runtime.service.benchmarkConfigs()[0]?.revision,
+      harness: {
+        type: "workbench",
+        recipe: fastAgentWorkbenchStarter,
+        setup_test_id: "setup-test-not-passed",
+      },
+      ceiling_microusd: 1_000_000,
+      confirmed: true,
+    };
+    const staleConfig = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "workbench-stale-config-key" },
+      payload: {
+        ...submission,
+        benchmark_config_revision: `sha256:${"0".repeat(64)}`,
+      },
+    });
+    expect(staleConfig.statusCode).toBe(422);
+    expect(staleConfig.json()).toMatchObject({
+      error: {
+        code: "policy_rejected",
+        message:
+          "benchmark configuration changed after it was reviewed; refresh and confirm again",
+      },
+    });
+    expect(attestor).not.toHaveBeenCalled();
+    const unpassed = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "workbench-unpassed-key" },
+      payload: submission,
+    });
+    expect(unpassed.statusCode).toBe(422);
+    expect(unpassed.json()).toMatchObject({
+      error: { code: "policy_rejected", message: "setup test has not passed" },
+    });
+
+    const over = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "workbench-over-ceiling-key" },
+      payload: { ...submission, ceiling_microusd: 1_000_001 },
+    });
+    expect(over.statusCode).toBe(422);
+    expect(over.json()).toMatchObject({
+      error: {
+        code: "policy_rejected",
+        message: "run ceiling exceeds the benchmark configuration maximum",
+      },
+    });
+    expect(attestor).toHaveBeenCalledTimes(1);
     await app.close();
   });
 });

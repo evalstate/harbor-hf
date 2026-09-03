@@ -230,8 +230,23 @@ requests.
 The authenticated [Agent Workbench](docs/agent-workbench.md) compiles generic
 command-agent recipes, previews typed environment expansion, and tests setup in
 a disposable local Docker container or HF Job. Workbench setup state is
-ephemeral. Only an exact recipe matching a reviewed immutable harness profile
-and compatible deployment can continue to the normal Run launcher.
+ephemeral. After the exact actor-owned recipe passes setup, it can be combined
+with a reviewed benchmark configuration and frozen as a Run-scoped harness in
+the ordinary immutable Run lock:
+
+```bash
+harbor-hf workbench setup start harness.json --wait --yes
+harbor-hf run submit \
+  --config tb21-gpt-oss-20b-canary \
+  --harness harness.json \
+  --setup-test setup-test-... \
+  --ceiling-microusd 1000000 \
+  --yes
+```
+
+The recipe is not published or promoted as a global profile. The reviewed
+configuration remains authoritative for the benchmark, model, deployment,
+worker image, hardware, launch policy, maximum ceiling, and evidence envelope.
 
 ## Start a Run
 

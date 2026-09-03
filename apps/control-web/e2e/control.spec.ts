@@ -119,9 +119,10 @@ test("shows the operational overview on desktop and mobile", async ({ page }) =>
   ).toBe(true);
 });
 
-test("previews and verifies a Workbench recipe on desktop and mobile", async ({
+test("tests a Workbench recipe and submits a hosted Run", async ({
   page,
 }, testInfo) => {
+  let hostedSubmission: Record<string, unknown> | null = null;
   await page.route("**/api/v1/auth/session", (route) =>
     route.fulfill({ json: session }),
   );
@@ -176,13 +177,47 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
       },
     }),
   );
-  await page.route("**/api/v1/runs", (route) =>
-    route.fulfill({ json: { items: [], next_cursor: null } }),
-  );
+  await page.route("**/api/v1/runs", (route) => {
+    if (route.request().method() === "POST") {
+      hostedSubmission = route.request().postDataJSON();
+      return route.fulfill({
+        status: 202,
+        json: {
+          run_id: "run-workbench-hosted",
+          action_id: "action-workbench-hosted",
+          status_url: "/api/v1/runs/run-workbench-hosted",
+          adopted: false,
+        },
+      });
+    }
+    return route.fulfill({ json: { items: [], next_cursor: null } });
+  });
   await page.route("**/api/v1/workbench/preview", async (route) => {
     const recipe = route.request().postDataJSON();
     return route.fulfill({ json: compileAgentWorkbenchRecipe(recipe) });
   });
+  await page.route("**/api/v1/workbench/benchmark-configs", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            name: "tb21-gpt-oss-20b-canary",
+            revision: `sha256:${"1".repeat(64)}`,
+            label: "Terminal-Bench 2.1 canary · GPT-OSS 20B",
+            description: "Reviewed hosted canary.",
+            benchmark: "terminal-bench-2-1-canary",
+            model: "gpt-oss-20b-together",
+            deployment: "tb21-gpt-oss-20b-fast-agent-command-providers",
+            launch_policy: "diagnostic-single-attempt",
+            default_ceiling_microusd: 1_000_000,
+            max_ceiling_microusd: 1_000_000,
+            task_count: 2,
+            publication_role: "diagnostic",
+          },
+        ],
+      },
+    }),
+  );
   await page.route("**/api/v1/workbench/local-runs/options", (route) =>
     route.fulfill({
       json: {
@@ -298,6 +333,23 @@ test("previews and verifies a Workbench recipe on desktop and mobile", async ({
     path: testInfo.outputPath("agent-workbench-mobile.png"),
     fullPage: true,
   });
+  await page
+    .getByRole("checkbox", { name: /i confirm this exact tested recipe/i })
+    .check();
+  await page.getByRole("button", { name: "Start hosted run" }).click();
+  await expect
+    .poll(() => hostedSubmission)
+    .toMatchObject({
+      benchmark_config: "tb21-gpt-oss-20b-canary",
+      harness: {
+        type: "workbench",
+        recipe: fastAgentWorkbenchStarter,
+        setup_test_id: "setup-test-workbench",
+      },
+      ceiling_microusd: 1_000_000,
+      confirmed: true,
+    });
+  await expect(page).toHaveURL(/\/runs\/run-workbench-hosted$/);
 });
 
 test("tails and cancels a running Workbench setup", async ({ page }) => {

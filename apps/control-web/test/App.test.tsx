@@ -226,6 +226,7 @@ describe("control web", () => {
 
   it("previews and verifies a Workbench setup without rendering hostile output", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
+    let hostedSubmission: Record<string, unknown> | null = null;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -235,6 +236,25 @@ describe("control web", () => {
         if (path.endsWith("/api/v1/workbench/preview")) {
           return json(compileAgentWorkbenchRecipe(JSON.parse(String(init?.body))));
         }
+        if (path.endsWith("/api/v1/workbench/benchmark-configs"))
+          return json({
+            items: [
+              {
+                name: "tb21-gpt-oss-20b-canary",
+                revision: `sha256:${"1".repeat(64)}`,
+                label: "Terminal-Bench 2.1 canary · GPT-OSS 20B",
+                description: "Reviewed hosted canary.",
+                benchmark: "terminal-bench-2-1-canary",
+                model: "gpt-oss-20b-together",
+                deployment: "tb21-gpt-oss-20b-fast-agent-command-providers",
+                launch_policy: "diagnostic-single-attempt",
+                default_ceiling_microusd: 1_000_000,
+                max_ceiling_microusd: 1_000_000,
+                task_count: 2,
+                publication_role: "diagnostic",
+              },
+            ],
+          });
         if (path.endsWith("/api/v1/workbench/local-runs/options"))
           return json({
             enabled: true,
@@ -317,6 +337,18 @@ describe("control web", () => {
             content: "<script>window.compromised = true</script>",
             truncated: false,
           });
+        if (path.endsWith("/api/v1/runs") && init?.method === "POST") {
+          hostedSubmission = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return json(
+            {
+              run_id: "run-hosted",
+              action_id: "action-hosted",
+              status_url: "/api/v1/runs/run-hosted",
+              adopted: false,
+            },
+            202,
+          );
+        }
         if (path.includes("/profiles")) return json(launchProfiles());
         if (path.includes("/runs")) return json({ items: [], next_cursor: null });
         if (path.includes("/events")) throw new Error("offline");
@@ -387,6 +419,28 @@ describe("control web", () => {
     await user.click(startLocal);
     expect(await screen.findByText("succeeded")).toBeVisible();
     expect(await screen.findByText(/Harbor complete/)).toBeVisible();
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /i confirm this exact tested recipe/i,
+      }),
+    );
+    const startHosted = screen.getByRole("button", {
+      name: /start hosted run/i,
+    });
+    await waitFor(() => expect(startHosted).toBeEnabled());
+    await user.click(startHosted);
+    await waitFor(() =>
+      expect(hostedSubmission).toMatchObject({
+        benchmark_config: "tb21-gpt-oss-20b-canary",
+        harness: {
+          type: "workbench",
+          recipe: fastAgentWorkbenchStarter,
+          setup_test_id: "setup-test-one",
+        },
+        ceiling_microusd: 1_000_000,
+        confirmed: true,
+      }),
+    );
   });
 
   it("tails a running Workbench setup and confirms cancellation", async () => {

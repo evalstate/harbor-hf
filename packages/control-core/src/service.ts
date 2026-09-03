@@ -4,6 +4,7 @@ import type {
   ActionIntent,
   ActionReceipt,
   Actor,
+  AgentWorkbenchRecipeV1,
   AttemptReceipt,
   BenchmarkProfileSpec,
   BudgetEvent,
@@ -35,6 +36,8 @@ import type {
   TaskCancellation,
   TaskExhaustion,
   TerminalSelection,
+  WorkbenchRunLock,
+  WorkbenchSetupAttestation,
 } from "@harbor-hf/contracts";
 import {
   canonicalJson,
@@ -82,12 +85,22 @@ import {
   validatePreparedRunProfiles,
 } from "./profiles.js";
 import type { Projection } from "./projection.js";
+import {
+  listReviewedBenchmarkConfigs,
+  type ResolvedBenchmarkConfig,
+  reviewedBenchmarkConfig,
+} from "./run-configs.js";
 import { runIdentity, runtimeKind, runUnique } from "./run-id.js";
 import {
   createJson,
   ImmutableConflictError,
   type ImmutableObjectStore,
 } from "./store.js";
+import {
+  type AgentWorkbenchPreview,
+  agentWorkbenchCompilerRevision,
+  compileAgentWorkbenchRecipe,
+} from "./workbench.js";
 
 export interface Clock {
   now(): Date;
@@ -129,6 +142,37 @@ export interface SubmissionResult {
   action_id: string;
   status_url: string;
   adopted: boolean;
+}
+
+type WorkbenchRunSubmission = RunSubmissionV1 & {
+  benchmark_config: string;
+  benchmark_config_revision: string;
+  harness: {
+    type: "workbench";
+    recipe: AgentWorkbenchRecipeV1;
+    setup_test_id: string;
+  };
+};
+
+type WorkbenchSetupAttestor = (
+  setupTestId: string,
+  owner: string,
+  recipe: AgentWorkbenchRecipeV1,
+) => Promise<WorkbenchSetupAttestation>;
+
+export interface BenchmarkConfigView {
+  name: string;
+  revision: string;
+  label: string;
+  description: string;
+  benchmark: string;
+  model: string;
+  deployment: string;
+  launch_policy: string;
+  default_ceiling_microusd: number;
+  max_ceiling_microusd: number;
+  task_count: number;
+  publication_role: LaunchPolicySpec["publication_role"];
 }
 
 export interface RunContinuationResult {
@@ -248,6 +292,18 @@ function refilledStartTokens(
 
 function serviceActor(): Actor {
   return { subject: "harbor-hf-control", role: "service" };
+}
+
+function isWorkbenchRunSubmission(
+  input: RunSubmissionV1,
+): input is WorkbenchRunSubmission {
+  return (
+    typeof input.benchmark_config === "string" &&
+    typeof input.benchmark_config_revision === "string" &&
+    typeof input.harness === "object" &&
+    input.harness !== null &&
+    input.harness.type === "workbench"
+  );
 }
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
@@ -453,6 +509,7 @@ export class ControlService {
   private jobAdmissionQueue: Promise<void> = Promise.resolve();
   private capacityUpdateQueue: Promise<void> = Promise.resolve();
   private capacityProfileAlias: string | null = null;
+  private workbenchSetupAttestor: WorkbenchSetupAttestor | null = null;
 
   constructor(
     readonly namespace: string,
@@ -478,6 +535,32 @@ export class ControlService {
 
   configureCapacityProfile(alias: string | null): void {
     this.capacityProfileAlias = alias;
+  }
+
+  configureWorkbenchSetupAttestor(attestor: WorkbenchSetupAttestor): void {
+    this.workbenchSetupAttestor = attestor;
+  }
+
+  benchmarkConfigs(): BenchmarkConfigView[] {
+    return listReviewedBenchmarkConfigs().map((reviewed) => {
+      const config = this.resolveBenchmarkConfig(reviewed.name);
+      const profiles = this.resolver.resolve(this.benchmarkConfigSelection(config));
+      const launchPolicy = profileSpec<LaunchPolicySpec>(profiles, "launch_policy");
+      return {
+        name: config.name,
+        revision: config.revision,
+        label: config.label,
+        description: config.description,
+        benchmark: config.benchmark,
+        model: config.model,
+        deployment: config.deployment,
+        launch_policy: config.launch_policy,
+        default_ceiling_microusd: config.default_ceiling_microusd,
+        max_ceiling_microusd: config.max_ceiling_microusd,
+        task_count: this.resolver.tasks(config.benchmark).length,
+        publication_role: launchPolicy.publication_role,
+      };
+    });
   }
 
   capacityProfile(): { profile_id: string; spec: CapacityProfileSpec } | null {
@@ -1860,6 +1943,145 @@ export class ControlService {
     };
   }
 
+  private resolveBenchmarkConfig(name: string): ResolvedBenchmarkConfig {
+    let config: ResolvedBenchmarkConfig;
+    try {
+      config = reviewedBenchmarkConfig(name);
+    } catch {
+      throw new PolicyError(`unknown benchmark configuration: ${name}`);
+    }
+    const profiles = this.resolver.resolve(this.benchmarkConfigSelection(config));
+    const tasks = this.resolver.tasks(config.benchmark);
+    return {
+      ...config,
+      revision: sha256(
+        canonicalJson({
+          definition_revision: config.revision,
+          compiler_revision: agentWorkbenchCompilerRevision,
+          profiles: profiles.map((profile) => ({
+            kind: profile.kind,
+            name: profile.name,
+            profile_id: profile.profile_id,
+          })),
+          tasks,
+        }),
+      ),
+    };
+  }
+
+  private benchmarkConfigSelection(config: ResolvedBenchmarkConfig): {
+    benchmark: string;
+    model: string;
+    harness: string;
+    deployment: string;
+    launch_policy: string;
+  } {
+    return {
+      benchmark: config.benchmark,
+      model: config.model,
+      harness: config.harness_template,
+      deployment: config.deployment,
+      launch_policy: config.launch_policy,
+    };
+  }
+
+  private profileSelection(input: RunSubmissionV1): {
+    benchmark: string;
+    model: string;
+    harness: string;
+    deployment?: string | null;
+    launch_policy: string;
+  } {
+    if (isWorkbenchRunSubmission(input))
+      return this.benchmarkConfigSelection(
+        this.resolveBenchmarkConfig(input.benchmark_config),
+      );
+    if (
+      typeof input.benchmark !== "string" ||
+      typeof input.model !== "string" ||
+      typeof input.harness !== "string" ||
+      typeof input.launch_policy !== "string"
+    )
+      throw new PolicyError("profile run submission is incomplete");
+    return {
+      benchmark: input.benchmark,
+      model: input.model,
+      harness: input.harness as string,
+      ...(input.deployment !== undefined ? { deployment: input.deployment } : {}),
+      launch_policy: input.launch_policy,
+    };
+  }
+
+  private resolveWorkbenchProfiles(
+    config: ResolvedBenchmarkConfig,
+    preview: AgentWorkbenchPreview,
+    runId: string,
+  ): ResolvedProfile[] {
+    if (!config.harness_policy.inference_apis.includes(preview.recipe.route_api))
+      throw new PolicyError(
+        "workbench recipe inference API is not allowed by the benchmark configuration",
+      );
+    if (
+      config.harness_policy.require_trajectory &&
+      preview.recipe.outputs.trajectory_path === null
+    )
+      throw new PolicyError("benchmark configuration requires a Workbench trajectory");
+    const profiles = this.resolver.resolve(this.benchmarkConfigSelection(config));
+    const template = profiles.find((profile) => profile.kind === "harness");
+    if (!template || (template.spec as HarnessProfileSpec).agent !== "command-agent")
+      throw new PolicyError(
+        "benchmark configuration harness template is not a command agent",
+      );
+    const profileId = sha256(
+      canonicalJson({
+        scope: runId,
+        run_config_revision: config.revision,
+        compiler_revision: agentWorkbenchCompilerRevision,
+        recipe_digest: preview.recipe_digest,
+        harness: preview.harness_profile,
+      }),
+    );
+    return profiles.map((profile) =>
+      profile.kind === "harness"
+        ? {
+            kind: "harness",
+            profile_id: profileId,
+            name: config.harness_template,
+            spec: preview.harness_profile,
+          }
+        : profile,
+    ) as ResolvedProfile[];
+  }
+
+  private async attestWorkbenchSetup(
+    input: WorkbenchRunSubmission,
+    preview: AgentWorkbenchPreview | null,
+    owner: string,
+  ): Promise<WorkbenchSetupAttestation> {
+    if (!preview) throw new PolicyError("workbench recipe preview is unavailable");
+    if (!this.workbenchSetupAttestor)
+      throw new PolicyError("hosted Workbench runs are not enabled");
+    let attestation: WorkbenchSetupAttestation;
+    try {
+      attestation = await this.workbenchSetupAttestor(
+        input.harness.setup_test_id,
+        owner,
+        input.harness.recipe,
+      );
+    } catch (error) {
+      throw new PolicyError(
+        error instanceof Error ? error.message : "setup test could not be attested",
+      );
+    }
+    if (
+      attestation.setup_test_id !== input.harness.setup_test_id ||
+      attestation.recipe_digest !== preview.recipe_digest ||
+      attestation.revision_id !== preview.revision_id
+    )
+      throw new PolicyError("setup attestation does not match this exact recipe");
+    return attestation;
+  }
+
   private async submitSerialized(
     raw: unknown,
     idempotencyKey: string,
@@ -1888,7 +2110,32 @@ export class ControlService {
     const currentExistingLock =
       existingLock && isCurrentRunLock(existingLock) ? existingLock : null;
 
-    const profiles = currentExistingLock?.profiles ?? this.resolver.resolve(input);
+    const workbenchInput = isWorkbenchRunSubmission(input) ? input : null;
+    const workbenchPreview =
+      workbenchInput && !currentExistingLock
+        ? compileAgentWorkbenchRecipe(workbenchInput.harness.recipe)
+        : null;
+    const benchmarkConfig =
+      workbenchInput && !currentExistingLock
+        ? this.resolveBenchmarkConfig(workbenchInput.benchmark_config)
+        : null;
+    if (
+      benchmarkConfig &&
+      workbenchInput?.benchmark_config_revision !== benchmarkConfig.revision
+    )
+      throw new PolicyError(
+        "benchmark configuration changed after it was reviewed; refresh and confirm again",
+      );
+    if (
+      benchmarkConfig &&
+      input.ceiling_microusd > benchmarkConfig.max_ceiling_microusd
+    )
+      throw new PolicyError("run ceiling exceeds the benchmark configuration maximum");
+    const profiles =
+      currentExistingLock?.profiles ??
+      (workbenchInput && workbenchPreview && benchmarkConfig
+        ? this.resolveWorkbenchProfiles(benchmarkConfig, workbenchPreview, runId)
+        : this.resolver.resolve(this.profileSelection(input)));
     const execution =
       currentExistingLock?.execution ?? composeExecutionContract(profiles);
     const deployment = profileSpec<DeploymentProfileSpec>(profiles, "deployment");
@@ -1900,7 +2147,9 @@ export class ControlService {
       input.ceiling_microusd > launchPolicy.max_run_ceiling_microusd
     )
       throw new PolicyError("run ceiling exceeds the launch policy maximum");
-    const tasks = existingLock?.tasks ?? this.resolver.tasks(input.benchmark);
+    const tasks =
+      existingLock?.tasks ??
+      this.resolver.tasks(this.profileSelection(input).benchmark);
     const executionJobs = tasks.length;
     const initialReservation =
       launchPolicy.reservation_microusd * executionJobs +
@@ -1918,6 +2167,14 @@ export class ControlService {
         error instanceof Error ? error.message : "prepared run profile is invalid",
       );
     }
+    const setupAttestation =
+      workbenchInput && !currentExistingLock
+        ? await this.attestWorkbenchSetup(
+            workbenchInput,
+            workbenchPreview,
+            actor.subject,
+          )
+        : null;
     const timestamp =
       existingLock?.created_at ??
       existingRequest?.created_at ??
@@ -1940,7 +2197,41 @@ export class ControlService {
         profiles: refs as RunRequest["profiles"],
         ceiling_microusd: input.ceiling_microusd,
         start_paused: input.start_paused ?? false,
+        ...(workbenchInput && workbenchPreview
+          ? {
+              workbench: {
+                benchmark_config: workbenchInput.benchmark_config,
+                run_config_revision: workbenchInput.benchmark_config_revision,
+                recipe_digest: workbenchPreview.recipe_digest,
+                revision_id: workbenchPreview.revision_id,
+                setup_test_id: workbenchInput.harness.setup_test_id,
+              },
+            }
+          : {}),
       } satisfies RunRequest);
+    const templateHarness = profiles.find((profile) => profile.kind === "harness");
+    const workbenchLock: WorkbenchRunLock | undefined =
+      workbenchInput &&
+      workbenchPreview &&
+      benchmarkConfig &&
+      setupAttestation &&
+      templateHarness
+        ? {
+            benchmark_config: benchmarkConfig.name,
+            run_config_revision: benchmarkConfig.revision,
+            compiler_revision: agentWorkbenchCompilerRevision,
+            template_harness: {
+              name: benchmarkConfig.harness_template,
+              profile_id: this.resolver.get("harness", benchmarkConfig.harness_template)
+                .profile_id,
+            },
+            resolved_harness_profile_id: templateHarness.profile_id,
+            recipe: { ...workbenchPreview.recipe },
+            recipe_digest: workbenchPreview.recipe_digest,
+            revision_id: workbenchPreview.revision_id,
+            setup_attestation: setupAttestation,
+          }
+        : undefined;
     const lock: CurrentRunLock =
       currentExistingLock ??
       ({
@@ -1956,6 +2247,7 @@ export class ControlService {
         source_revision: this.resolver.sourceRevision(),
         execution,
         start_paused: input.start_paused ?? false,
+        ...(workbenchLock ? { workbench: workbenchLock } : {}),
       } satisfies CurrentRunLock);
     const budget: BudgetEvent = {
       schema_version: "v1",
@@ -2010,11 +2302,12 @@ export class ControlService {
    * key so a repeated request adopts the same identity.
    */
   private newRunId(input: RunSubmissionV1, actor: Actor, keyDigest: string): string {
-    const profiles = this.resolver.resolve(input);
+    const selection = this.profileSelection(input);
+    const profiles = this.resolver.resolve(selection);
     const harness = profileSpec<HarnessProfileSpec>(profiles, "harness");
     const deployment = profileSpec<DeploymentProfileSpec>(profiles, "deployment");
     return runIdentity({
-      model: input.model,
+      model: selection.model,
       harness: harness.agent,
       reasoning: harness.reasoning_effort ?? "off",
       runtime: runtimeKind(deployment),
@@ -2027,6 +2320,19 @@ export class ControlService {
     input: RunSubmissionV1,
     actor: Actor,
   ): void {
+    const workbenchInput = isWorkbenchRunSubmission(input) ? input : null;
+    const workbenchPreview = workbenchInput
+      ? compileAgentWorkbenchRecipe(workbenchInput.harness.recipe)
+      : null;
+    const workbenchMatches =
+      workbenchInput && workbenchPreview
+        ? request.workbench?.benchmark_config === workbenchInput.benchmark_config &&
+          request.workbench.run_config_revision ===
+            workbenchInput.benchmark_config_revision &&
+          request.workbench.recipe_digest === workbenchPreview.recipe_digest &&
+          request.workbench.revision_id === workbenchPreview.revision_id &&
+          request.workbench.setup_test_id === workbenchInput.harness.setup_test_id
+        : request.workbench === undefined;
     const selected = Object.fromEntries(
       request.profiles.map((profile) => [profile.kind, profile.alias]),
     );
@@ -2034,13 +2340,17 @@ export class ControlService {
       input.deployment === null ||
       input.deployment === undefined ||
       selected.deployment === input.deployment;
+    const profileMatches =
+      workbenchInput !== null ||
+      (selected.benchmark === input.benchmark &&
+        selected.model === input.model &&
+        selected.harness === input.harness &&
+        deploymentMatches &&
+        selected.launch_policy === input.launch_policy);
     const matches =
       request.actor.subject === actor.subject &&
-      selected.benchmark === input.benchmark &&
-      selected.model === input.model &&
-      selected.harness === input.harness &&
-      deploymentMatches &&
-      selected.launch_policy === input.launch_policy &&
+      workbenchMatches &&
+      profileMatches &&
       request.ceiling_microusd === input.ceiling_microusd &&
       (request.start_paused ?? false) === (input.start_paused ?? false);
     if (!matches)
@@ -2050,6 +2360,21 @@ export class ControlService {
   }
 
   private assertMatchingSubmission(lock: RunLock, input: RunSubmissionV1): void {
+    const workbenchInput = isWorkbenchRunSubmission(input) ? input : null;
+    const workbenchPreview = workbenchInput
+      ? compileAgentWorkbenchRecipe(workbenchInput.harness.recipe)
+      : null;
+    const lockedWorkbench = isCurrentRunLock(lock) ? lock.workbench : undefined;
+    const workbenchMatches =
+      workbenchInput && workbenchPreview
+        ? lockedWorkbench?.benchmark_config === workbenchInput.benchmark_config &&
+          lockedWorkbench.run_config_revision ===
+            workbenchInput.benchmark_config_revision &&
+          lockedWorkbench.recipe_digest === workbenchPreview.recipe_digest &&
+          lockedWorkbench.revision_id === workbenchPreview.revision_id &&
+          lockedWorkbench.setup_attestation.setup_test_id ===
+            workbenchInput.harness.setup_test_id
+        : lockedWorkbench === undefined;
     const selected = Object.fromEntries(
       lock.profiles.map((profile) => [profile.kind, profile.name]),
     );
@@ -2057,12 +2382,16 @@ export class ControlService {
       input.deployment === null ||
       input.deployment === undefined ||
       selected.deployment === input.deployment;
+    const profileMatches =
+      workbenchInput !== null ||
+      (selected.benchmark === input.benchmark &&
+        selected.model === input.model &&
+        selected.harness === input.harness &&
+        deploymentMatches &&
+        selected.launch_policy === input.launch_policy);
     const matches =
-      selected.benchmark === input.benchmark &&
-      selected.model === input.model &&
-      selected.harness === input.harness &&
-      deploymentMatches &&
-      selected.launch_policy === input.launch_policy &&
+      workbenchMatches &&
+      profileMatches &&
       lock.ceiling_microusd === input.ceiling_microusd &&
       (lock.start_paused ?? false) === (input.start_paused ?? false);
     if (!matches)

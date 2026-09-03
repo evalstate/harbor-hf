@@ -157,6 +157,36 @@ describe("Agent Workbench recipe compiler", () => {
         ],
       }),
     ).toThrow("credential");
+    expect(() =>
+      compileAgentWorkbenchRecipe({
+        ...structuredClone(fastAgentWorkbenchStarter),
+        environment: [{ name: "GITHUB_TOKEN", source: "workspace_path" }],
+      }),
+    ).toThrow("credential-like");
+    expect(() =>
+      compileAgentWorkbenchRecipe({
+        ...structuredClone(fastAgentWorkbenchStarter),
+        environment: [{ name: "HARBOR_CONTROL", source: "literal", value: "value" }],
+      }),
+    ).toThrow("reserved");
+    expect(() =>
+      compileAgentWorkbenchRecipe({
+        ...structuredClone(fastAgentWorkbenchStarter),
+        outputs: {
+          results_path: "/logs/agent/result.json",
+          trajectory_path: "/logs/agent/result.json",
+        },
+      }),
+    ).toThrow("must not duplicate");
+    expect(() =>
+      compileAgentWorkbenchRecipe({
+        ...structuredClone(fastAgentWorkbenchStarter),
+        outputs: {
+          results_path: "/logs/agent/result.json",
+          trajectory_path: "/logs/agent/trajectory.txt",
+        },
+      }),
+    ).toThrow("must end in .json");
   });
 
   it("keeps instructions as a path binding instead of command text", () => {

@@ -8,20 +8,35 @@ import {
 
 const reservedEnvironment = new Set([
   "BASH_ENV",
+  "CDPATH",
+  "DEBIAN_FRONTEND",
   "ENV",
   "HOME",
+  "IFS",
+  "LD_LIBRARY_PATH",
   "LD_PRELOAD",
+  "LOGNAME",
+  "NVM_DIR",
+  "OLDPWD",
   "PATH",
+  "PROMPT_COMMAND",
+  "PS4",
+  "PWD",
+  "PYTHONHOME",
   "PYTHONPATH",
   "SHELL",
+  "USER",
   "HF_TOKEN",
   "HF_INFERENCE_TOKEN",
   "HARBOR_HF_WORKER_CAPABILITY",
 ]);
 
-const secretName = /(?:^|_)(?:API_?KEY|ACCESS_?TOKEN|AUTH_?TOKEN|PASSWORD|SECRET)$/i;
+const secretName =
+  /(?:^|_)(?:API_?KEY|TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIALS?|AUTH|COOKIE|PRIVATE_?KEY)(?:_|$)/i;
 const suspiciousLiteral =
-  /(?:\bBearer\s+[A-Za-z0-9._~+/-]{12,}|hf[_-][A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,})/i;
+  /(?:\bBearer\s+[A-Za-z0-9._~+/-]{12,}|hf[_-][A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|\bAKIA[A-Z0-9]{12,})/i;
+
+export const agentWorkbenchCompilerRevision = "agent-workbench-compiler-v1";
 
 export const workbenchRuntimeValues = {
   instruction_path: "/run/agent/instruction.txt",
@@ -247,18 +262,20 @@ function validateRecipeSemantics(recipe: AgentWorkbenchRecipeV1): void {
       throw new Error(`environment variable ${binding.name} is duplicated`);
     names.add(binding.name);
     sources.set(binding.name, binding.source);
-    if (reservedEnvironment.has(binding.name) || binding.name.startsWith("HARBOR_HF_"))
+    if (reservedEnvironment.has(binding.name) || binding.name.startsWith("HARBOR_"))
       throw new Error(`environment variable ${binding.name} is reserved`);
+    if (secretName.test(binding.name) && binding.source !== "model_api_key")
+      throw new Error(`environment variable ${binding.name} looks credential-like`);
     if (binding.source === "literal") {
       if (binding.value === undefined)
         throw new Error(`literal environment variable ${binding.name} needs a value`);
-      if (secretName.test(binding.name))
-        throw new Error(
-          `literal environment variable ${binding.name} looks credential-like`,
-        );
       if (suspiciousLiteral.test(binding.value ?? ""))
         throw new Error(
           `literal environment variable ${binding.name} looks like a credential`,
+        );
+      if ((binding.value ?? "").includes("\0"))
+        throw new Error(
+          `literal environment variable ${binding.name} must not contain NUL`,
         );
     } else if (binding.value !== undefined)
       throw new Error(
@@ -285,6 +302,13 @@ function validateRecipeSemantics(recipe: AgentWorkbenchRecipeV1): void {
     if (path.includes("..") || path.includes("//"))
       throw new Error("output paths must remain beneath /logs/agent");
   }
+  if (
+    recipe.outputs.trajectory_path !== null &&
+    !recipe.outputs.trajectory_path.endsWith(".json")
+  )
+    throw new Error("ATIF trajectory path must end in .json");
+  if (recipe.outputs.trajectory_path === recipe.outputs.results_path)
+    throw new Error("ATIF trajectory path must not duplicate the results path");
 }
 
 function commandAgentConfig(recipe: AgentWorkbenchRecipeV1): Record<string, unknown> {
@@ -361,7 +385,12 @@ export function compileAgentWorkbenchRecipe(value: unknown): AgentWorkbenchPrevi
   return {
     recipe,
     recipe_digest: recipeDigest,
-    revision_id: deterministicId("agent-recipe", recipe.name, recipeDigest),
+    revision_id: deterministicId(
+      "agent-recipe",
+      agentWorkbenchCompilerRevision,
+      recipe.name,
+      recipeDigest,
+    ),
     setup_command: expandSimpleEnvironment(recipe.setup_command, values),
     run_command: expandSimpleEnvironment(recipe.run_command, values),
     environment,

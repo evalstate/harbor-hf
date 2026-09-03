@@ -114,6 +114,49 @@ export const workbenchFileContentSchema = {
   },
 } as const;
 
+export const benchmarkConfigListSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["items"],
+  properties: {
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "name",
+          "revision",
+          "label",
+          "description",
+          "benchmark",
+          "model",
+          "deployment",
+          "launch_policy",
+          "default_ceiling_microusd",
+          "max_ceiling_microusd",
+          "task_count",
+          "publication_role",
+        ],
+        properties: {
+          name: { type: "string" },
+          revision: { type: "string" },
+          label: { type: "string" },
+          description: { type: "string" },
+          benchmark: { type: "string" },
+          model: { type: "string" },
+          deployment: { type: "string" },
+          launch_policy: { type: "string" },
+          default_ceiling_microusd: integer,
+          max_ceiling_microusd: integer,
+          task_count: integer,
+          publication_role: { enum: ["final", "component", "diagnostic"] },
+        },
+      },
+    },
+  },
+} as const;
+
 export const localHarborOptionsSchema = {
   type: "object",
   additionalProperties: false,

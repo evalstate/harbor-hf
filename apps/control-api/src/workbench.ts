@@ -59,8 +59,16 @@ export interface WorkbenchSetupView {
   files: WorkbenchFile[];
 }
 
+export interface WorkbenchSetupAttestation {
+  setup_test_id: string;
+  recipe_digest: string;
+  revision_id: string;
+  completed_at: string;
+}
+
 interface SetupState extends WorkbenchSetupView {
   owner: string;
+  attestable: boolean;
   stdout: string;
   stderr: string;
   directory: string | null;
@@ -219,6 +227,7 @@ export class WorkbenchRuntime {
       error: null,
       files: [],
       owner,
+      attestable: true,
       stdout: "",
       stderr: "",
       directory,
@@ -352,6 +361,7 @@ export class WorkbenchRuntime {
       error: null,
       files: [],
       owner,
+      attestable: true,
       stdout: "",
       stderr: "",
       directory: null,
@@ -418,6 +428,7 @@ export class WorkbenchRuntime {
         error: null,
         files: [],
         owner,
+        attestable: false,
         stdout: "",
         stderr: "",
         directory: null,
@@ -655,6 +666,40 @@ export class WorkbenchRuntime {
     if (!state || state.owner !== owner) return null;
     if (state.remote_job_id) await this.refreshRemote(state);
     return this.view(state);
+  }
+
+  async attestPassedSetup(
+    setupTestId: string,
+    owner: string,
+    recipe: unknown,
+  ): Promise<WorkbenchSetupAttestation> {
+    const preview = this.preview(recipe);
+    let state = this.setupTests.get(setupTestId);
+    if ((!state || state.owner !== owner) && this.mode === "hf-jobs")
+      await this.listSetups(owner);
+    state = this.setupTests.get(setupTestId);
+    if (!state || state.owner !== owner)
+      throw new Error("setup test is unavailable for this actor");
+    if (!state.attestable)
+      throw new Error("setup test must be rerun after service restart");
+    if (state.remote_job_id) await this.refreshRemote(state);
+    if (
+      state.recipe_digest !== preview.recipe_digest ||
+      state.revision_id !== preview.revision_id
+    )
+      throw new Error("setup test does not match this exact recipe");
+    if (
+      state.status !== "passed" ||
+      state.exit_code !== 0 ||
+      state.completed_at === null
+    )
+      throw new Error("setup test has not passed");
+    return {
+      setup_test_id: state.setup_test_id,
+      recipe_digest: state.recipe_digest,
+      revision_id: state.revision_id,
+      completed_at: state.completed_at,
+    };
   }
 
   async logs(

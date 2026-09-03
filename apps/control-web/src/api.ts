@@ -48,6 +48,9 @@ export type WorkbenchLogs =
   paths["/api/v1/workbench/setup-tests/{setup_test_id}/logs"]["get"]["responses"][200]["content"]["application/json"];
 export type WorkbenchFileContent =
   paths["/api/v1/workbench/setup-tests/{setup_test_id}/files/{file_id}"]["get"]["responses"][200]["content"]["application/json"];
+export type BenchmarkConfigList =
+  paths["/api/v1/workbench/benchmark-configs"]["get"]["responses"][200]["content"]["application/json"];
+export type BenchmarkConfig = BenchmarkConfigList["items"][number];
 
 export interface LocalHarborOptions {
   enabled: boolean;
@@ -143,10 +146,13 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return response.json() as Promise<T>;
 }
 
-export async function submitRun(input: RunSubmission): Promise<Accepted> {
+export async function submitRun(
+  input: RunSubmission,
+  idempotencyKey: string = crypto.randomUUID(),
+): Promise<Accepted> {
   return request<Accepted>("/api/v1/runs", {
     method: "POST",
-    headers: { "Idempotency-Key": crypto.randomUUID() },
+    headers: { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(input),
   });
 }
@@ -170,6 +176,10 @@ export async function previewWorkbenchRecipe(
     method: "POST",
     body: JSON.stringify(recipe),
   });
+}
+
+export async function getBenchmarkConfigs(): Promise<BenchmarkConfigList> {
+  return request<BenchmarkConfigList>("/api/v1/workbench/benchmark-configs");
 }
 
 export async function startWorkbenchSetup(

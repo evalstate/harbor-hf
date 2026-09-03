@@ -10,9 +10,12 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
+  type BenchmarkConfig,
   cancelLocalHarborRun,
   cancelWorkbenchSetup,
+  getBenchmarkConfigs,
   getLocalHarborLogs,
   getLocalHarborOptions,
   getLocalHarborRun,
@@ -27,13 +30,15 @@ import {
   previewWorkbenchRecipe,
   startLocalHarborRun,
   startWorkbenchSetup,
+  submitRun,
   type WorkbenchFile,
   type WorkbenchPreview,
   type WorkbenchRecipe,
   type WorkbenchSetup,
 } from "./api";
+import { useControlState } from "./control-state";
 import { PageHeader } from "./layout";
-import { cn, formatDate } from "./lib";
+import { cn, formatDate, formatMoney } from "./lib";
 import { Badge, Button, Card, ErrorNotice } from "./ui";
 
 const sources = [
@@ -44,6 +49,43 @@ const sources = [
   "agent_home",
   "model_name",
 ] as const;
+
+const hostedPendingStorageKey = "harbor-hf.workbench.pending-hosted-run.v1";
+
+interface PendingHostedRun {
+  confirmationKey: string;
+  idempotencyKey: string;
+}
+
+function storedPendingHostedRun(): PendingHostedRun | null {
+  try {
+    const value = JSON.parse(
+      window.localStorage.getItem(hostedPendingStorageKey) ?? "null",
+    ) as Partial<PendingHostedRun> | null;
+    if (
+      value &&
+      typeof value.confirmationKey === "string" &&
+      typeof value.idempotencyKey === "string"
+    )
+      return {
+        confirmationKey: value.confirmationKey,
+        idempotencyKey: value.idempotencyKey,
+      };
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function storePendingHostedRun(value: PendingHostedRun | null): void {
+  try {
+    if (value)
+      window.localStorage.setItem(hostedPendingStorageKey, JSON.stringify(value));
+    else window.localStorage.removeItem(hostedPendingStorageKey);
+  } catch {
+    // Private browsing policies may disable storage; the in-memory key still works.
+  }
+}
 
 function isManagedInferenceBinding(
   binding: WorkbenchRecipe["environment"][number],
@@ -240,7 +282,7 @@ function WorkbenchFlow() {
     ],
     [
       "Run",
-      "Select a Terminal-Bench 2.1 canary task, inspect the generated config, and start Harbor on this machine.",
+      "Choose a reviewed hosted configuration or run a canary directly with local Harbor.",
     ],
   ] as const;
   return (
@@ -266,6 +308,8 @@ function WorkbenchFlow() {
 }
 
 export function WorkbenchPage() {
+  const navigate = useNavigate();
+  const { writesAllowed, writeMode } = useControlState();
   const [recipe, setRecipe] = useState<WorkbenchRecipe>(copyStarter);
   const supportsDirectLocalRun = recipe.environment.some(
     (binding) => binding.source === "model_base_url",
@@ -295,7 +339,15 @@ export function WorkbenchPage() {
   const [localConfirmation, setLocalConfirmation] = useState<string | null>(null);
   const [startingLocal, setStartingLocal] = useState(false);
   const [cancellingLocal, setCancellingLocal] = useState(false);
+  const [benchmarkConfigs, setBenchmarkConfigs] = useState<BenchmarkConfig[]>([]);
+  const [benchmarkConfigsError, setBenchmarkConfigsError] = useState<unknown>(null);
+  const [selectedBenchmarkConfig, setSelectedBenchmarkConfig] = useState("");
+  const [hostedCeiling, setHostedCeiling] = useState(0);
+  const [hostedConfirmation, setHostedConfirmation] = useState<string | null>(null);
+  const [hostedRunError, setHostedRunError] = useState<unknown>(null);
+  const [startingHosted, setStartingHosted] = useState(false);
   const previewSequence = useRef(0);
+  const hostedRequestRef = useRef<PendingHostedRun | null>(null);
   const activeSetupRef = useRef<HTMLDivElement | null>(null);
   const liveOutputRef = useRef<HTMLElement | null>(null);
   const liveOutput = `${logs.stdout}${logs.stderr ? `\n[stderr]\n${logs.stderr}` : ""}`;
@@ -318,6 +370,18 @@ export function WorkbenchPage() {
         if (runs[0]) setLocalRun(runs[0]);
       })
       .catch(setLocalOptionsError);
+  }, []);
+
+  useEffect(() => {
+    void getBenchmarkConfigs()
+      .then(({ items }) => {
+        setBenchmarkConfigs(items);
+        const first = items[0];
+        if (!first) return;
+        setSelectedBenchmarkConfig((current) => current || first.name);
+        setHostedCeiling((current) => current || first.default_ceiling_microusd);
+      })
+      .catch(setBenchmarkConfigsError);
   }, []);
 
   useEffect(() => {
@@ -418,6 +482,18 @@ export function WorkbenchPage() {
   const localConfirmationKey = preview
     ? [preview.recipe_digest, ...selectedTasks].join(":")
     : null;
+  const selectedConfig = benchmarkConfigs.find(
+    (config) => config.name === selectedBenchmarkConfig,
+  );
+  const hostedConfirmationKey =
+    preview && setup && selectedConfig
+      ? [
+          preview.recipe_digest,
+          setup.setup_test_id,
+          selectedConfig.revision,
+          hostedCeiling,
+        ].join(":")
+      : null;
   const updateEnvironment = (
     index: number,
     change: Partial<WorkbenchRecipe["environment"][number]>,
@@ -501,6 +577,46 @@ export function WorkbenchPage() {
     }
   };
 
+  const launchHosted = async () => {
+    if (!setup || !selectedConfig || !verifiedCurrent || !hostedConfirmationKey) return;
+    setStartingHosted(true);
+    setHostedRunError(null);
+    try {
+      if (hostedRequestRef.current?.confirmationKey !== hostedConfirmationKey) {
+        const stored = storedPendingHostedRun();
+        hostedRequestRef.current =
+          stored?.confirmationKey === hostedConfirmationKey
+            ? stored
+            : {
+                confirmationKey: hostedConfirmationKey,
+                idempotencyKey: crypto.randomUUID(),
+              };
+        storePendingHostedRun(hostedRequestRef.current);
+      }
+      const value = await submitRun(
+        {
+          benchmark_config: selectedConfig.name,
+          benchmark_config_revision: selectedConfig.revision,
+          harness: {
+            type: "workbench",
+            recipe: { ...recipe },
+            setup_test_id: setup.setup_test_id,
+          },
+          ceiling_microusd: hostedCeiling,
+          confirmed: true,
+        },
+        hostedRequestRef.current.idempotencyKey,
+      );
+      storePendingHostedRun(null);
+      hostedRequestRef.current = null;
+      navigate(value.status_url.replace(/^\/api\/v1/, ""));
+    } catch (error) {
+      setHostedRunError(error);
+    } finally {
+      setStartingHosted(false);
+    }
+  };
+
   const cancelLocal = async () => {
     if (!localRun || !["queued", "running"].includes(localRun.status)) return;
     if (!window.confirm("Cancel this local Harbor process and its active trials?"))
@@ -520,7 +636,7 @@ export function WorkbenchPage() {
     <>
       <PageHeader
         title="Agent Workbench"
-        description="Configure a command-line harness, verify its setup, and run a Terminal-Bench 2.1 canary directly with Harbor on this machine."
+        description="Configure a command-line harness, verify its setup, then combine that exact recipe with a reviewed hosted Run configuration."
         action={
           <div className="flex flex-wrap gap-2">
             <Button
@@ -895,6 +1011,189 @@ export function WorkbenchPage() {
           </div>
         </Card>
 
+        <Card className="xl:col-span-2">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <PlayCircle className="text-cyan-300" size={20} />
+                <h2 className="font-semibold text-white">Run hosted</h2>
+                <Badge status={verifiedCurrent ? "complete" : "active"}>
+                  {verifiedCurrent ? "Setup passed" : "Awaiting setup"}
+                </Badge>
+              </div>
+              <p className="mt-2 max-w-3xl text-sm text-slate-400">
+                Select a reviewed benchmark configuration. Harbor-HF locks its
+                benchmark, model, deployment, worker, hardware, retry policy, and
+                evidence envelope together with this exact tested recipe.
+              </p>
+            </div>
+          </div>
+          {!writesAllowed ? (
+            <p className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+              Hosted launch is unavailable because write mode is {writeMode}.
+            </p>
+          ) : null}
+          {benchmarkConfigsError ? (
+            <div className="mt-4">
+              <ErrorNotice error={benchmarkConfigsError} />
+            </div>
+          ) : null}
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <label className="text-sm text-slate-300">
+              <span className="mb-1.5 block text-slate-400">
+                Benchmark configuration
+              </span>
+              <select
+                aria-label="Benchmark configuration"
+                className={fieldClass()}
+                disabled={!writesAllowed || benchmarkConfigs.length === 0}
+                value={selectedBenchmarkConfig}
+                onChange={(event) => {
+                  const next = benchmarkConfigs.find(
+                    (config) => config.name === event.target.value,
+                  );
+                  setSelectedBenchmarkConfig(event.target.value);
+                  if (next) setHostedCeiling(next.default_ceiling_microusd);
+                  setHostedConfirmation(null);
+                }}
+              >
+                {benchmarkConfigs.map((config) => (
+                  <option key={config.name} value={config.name}>
+                    {config.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-sm text-slate-300">
+              <span className="mb-1.5 block text-slate-400">Cost ceiling, USD</span>
+              <input
+                aria-label="Hosted cost ceiling, USD"
+                className={fieldClass()}
+                disabled={!writesAllowed || !selectedConfig}
+                type="number"
+                min="0"
+                max={
+                  selectedConfig
+                    ? selectedConfig.max_ceiling_microusd / 1_000_000
+                    : undefined
+                }
+                step="0.01"
+                value={hostedCeiling / 1_000_000}
+                onChange={(event) => {
+                  setHostedCeiling(
+                    Math.max(0, Math.round(Number(event.target.value) * 1_000_000)),
+                  );
+                  setHostedConfirmation(null);
+                }}
+              />
+            </label>
+          </div>
+          {selectedConfig ? (
+            <>
+              <p className="mt-4 text-sm text-slate-400">
+                {selectedConfig.description}
+              </p>
+              <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <dt className="text-slate-500">Benchmark</dt>
+                  <dd className="mt-1 font-mono text-slate-300">
+                    {selectedConfig.benchmark}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Model</dt>
+                  <dd className="mt-1 font-mono text-slate-300">
+                    {selectedConfig.model}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Tasks</dt>
+                  <dd className="mt-1 text-slate-300">{selectedConfig.task_count}</dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Maximum ceiling</dt>
+                  <dd className="mt-1 text-slate-300">
+                    {formatMoney(selectedConfig.max_ceiling_microusd)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Deployment</dt>
+                  <dd className="mt-1 font-mono text-slate-300">
+                    {selectedConfig.deployment}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Launch policy</dt>
+                  <dd className="mt-1 font-mono text-slate-300">
+                    {selectedConfig.launch_policy}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Result role</dt>
+                  <dd className="mt-1 text-slate-300">
+                    {selectedConfig.publication_role}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Recipe revision</dt>
+                  <dd className="mt-1 break-all font-mono text-slate-300">
+                    {preview?.revision_id ?? "Waiting for preview"}
+                  </dd>
+                </div>
+              </dl>
+            </>
+          ) : null}
+          <div className="mt-5 border-t border-slate-800 pt-5">
+            <label className="flex items-start gap-3 text-sm text-slate-300">
+              <input
+                className="mt-1 accent-cyan-400"
+                type="checkbox"
+                disabled={!writesAllowed || !verifiedCurrent || !selectedConfig}
+                checked={
+                  hostedConfirmationKey !== null &&
+                  hostedConfirmation === hostedConfirmationKey
+                }
+                onChange={(event) =>
+                  setHostedConfirmation(
+                    event.target.checked ? hostedConfirmationKey : null,
+                  )
+                }
+              />
+              <span>
+                I confirm this exact tested recipe, reviewed benchmark configuration,
+                and {formatMoney(hostedCeiling)} hard cost ceiling.
+              </span>
+            </label>
+            {hostedRunError ? (
+              <div className="mt-4">
+                <ErrorNotice error={hostedRunError} />
+              </div>
+            ) : null}
+            <Button
+              className="mt-4"
+              disabled={
+                !writesAllowed ||
+                !verifiedCurrent ||
+                !selectedConfig ||
+                hostedCeiling <= 0 ||
+                hostedCeiling > selectedConfig.max_ceiling_microusd ||
+                hostedConfirmationKey === null ||
+                hostedConfirmation !== hostedConfirmationKey ||
+                startingHosted
+              }
+              onClick={() => void launchHosted()}
+            >
+              <PlayCircle size={16} />
+              {startingHosted ? "Starting hosted run…" : "Start hosted run"}
+            </Button>
+            {!verifiedCurrent ? (
+              <p className="mt-2 text-xs text-slate-500">
+                Pass setup for the current recipe before starting a hosted Run.
+              </p>
+            ) : null}
+          </div>
+        </Card>
+
         {localOptions?.enabled !== false ? (
           <Card className="xl:col-span-2">
             <div className="flex flex-wrap items-start justify-between gap-4">
@@ -1146,8 +1445,8 @@ export function WorkbenchPage() {
                 </p>
                 {verifiedCurrent ? (
                   <p className="mt-2 max-w-xl text-sm text-slate-300">
-                    Setup passed for the current recipe. The local Harbor config is
-                    ready to run above.
+                    Setup passed for the current recipe. Hosted and local Harbor launch
+                    options are ready above.
                   </p>
                 ) : null}
               </div>

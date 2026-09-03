@@ -236,6 +236,7 @@ idempotency_key_digest: Digest
 profiles: [ProfileRef, ProfileRef, ProfileRef, ProfileRef]|[ProfileRef, ProfileRef, ProfileRef, ProfileRef, ProfileRef]
 ceiling_microusd: number
 start_paused?: boolean
+workbench?: WorkbenchRunRequest
 })
 export type RunLock = (CurrentRunLock | LegacyRunLock)
 export type CurrentRunLock = (Base & {
@@ -259,6 +260,7 @@ ceiling_microusd: number
 source_revision: Digest
 execution: ResolvedExecutionContract
 start_paused?: boolean
+workbench?: WorkbenchRunLock
 })
 export type ResolvedProfile = (ResolvedBenchmarkProfile | ResolvedModelProfile | ResolvedHarnessProfile | ResolvedDeploymentProfile | ResolvedLaunchPolicyProfile)
 export type LegacyRunLock = (Base & {
@@ -817,6 +819,13 @@ export interface ProfileRef {
 kind: ("benchmark" | "model" | "harness" | "deployment" | "launch_policy")
 alias: Id
 }
+export interface WorkbenchRunRequest {
+benchmark_config: Id
+run_config_revision: Digest
+recipe_digest: Digest
+revision_id: Id
+setup_test_id: Id
+}
 export interface ResolvedBenchmarkProfile {
 kind: "benchmark"
 profile_id: Digest
@@ -901,6 +910,28 @@ input_price_microusd_per_million_tokens: number
 output_price_microusd_per_million_tokens: number
 cache_read_price_microusd_per_million_tokens: number
 cache_write_price_microusd_per_million_tokens: number
+}
+export interface WorkbenchRunLock {
+benchmark_config: Id
+run_config_revision: Digest
+compiler_revision: Id
+template_harness: {
+name: Id
+profile_id: Digest
+}
+resolved_harness_profile_id: Digest
+recipe: {
+[k: string]: unknown
+}
+recipe_digest: Digest
+revision_id: Id
+setup_attestation: WorkbenchSetupAttestation
+}
+export interface WorkbenchSetupAttestation {
+setup_test_id: Id
+recipe_digest: Digest
+revision_id: Id
+completed_at: Timestamp
 }
 export interface LegacyResolvedModelProfile {
 kind: "model"

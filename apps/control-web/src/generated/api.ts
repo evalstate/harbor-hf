@@ -487,6 +487,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workbench/benchmark-configs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                name: string;
+                                revision: string;
+                                label: string;
+                                description: string;
+                                benchmark: string;
+                                model: string;
+                                deployment: string;
+                                launch_policy: string;
+                                default_ceiling_microusd: number;
+                                max_ceiling_microusd: number;
+                                task_count: number;
+                                /** @enum {unknown} */
+                                publication_role: "final" | "component" | "diagnostic";
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workbench/local-runs/options": {
         parameters: {
             query?: never;
@@ -1511,16 +1562,47 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        benchmark: string;
-                        model: string;
-                        harness: string;
+                        benchmark?: string;
+                        model?: string;
+                        harness: string | {
+                            /** @enum {unknown} */
+                            type: "workbench";
+                            recipe: {
+                                [key: string]: unknown;
+                            };
+                            setup_test_id: string;
+                        };
                         deployment?: string | null;
-                        launch_policy: string;
+                        launch_policy?: string;
+                        benchmark_config?: string;
+                        benchmark_config_revision?: string;
                         ceiling_microusd: number;
                         confirmed: boolean;
                         /** @default false */
                         start_paused?: boolean;
-                    };
+                    } & ({
+                        benchmark: string;
+                        model: string;
+                        harness?: string;
+                        launch_policy: string;
+                        benchmark_config?: never;
+                        benchmark_config_revision?: never;
+                    } | {
+                        benchmark_config: string;
+                        benchmark_config_revision: string;
+                        harness?: {
+                            /** @enum {unknown} */
+                            type: "workbench";
+                            recipe: {
+                                [key: string]: unknown;
+                            };
+                            setup_test_id: string;
+                        };
+                        benchmark?: never;
+                        model?: never;
+                        deployment?: never;
+                        launch_policy?: never;
+                    });
                 };
             };
             responses: {

@@ -41,6 +41,7 @@ import {
   acceptedSchema,
   attemptAcceptedSchema,
   auditSchema,
+  benchmarkConfigListSchema,
   capacitySchema,
   endpointSchema,
   evidenceAcceptedSchema,
@@ -210,6 +211,28 @@ function requireWorkerOperation(
 function redactDeploymentTopology<T>(value: T): T {
   const clone = structuredClone(value) as T;
   if (!clone || typeof clone !== "object") return clone;
+  const redactCommandAgent = (agent: unknown) => {
+    if (!agent || typeof agent !== "object") return;
+    const kwargs = (agent as { kwargs?: unknown }).kwargs;
+    if (!kwargs || typeof kwargs !== "object") return;
+    const config = (kwargs as { config?: unknown }).config;
+    if (!config || typeof config !== "object") return;
+    for (const phaseName of ["setup", "run"] as const) {
+      const phase = (config as Record<string, unknown>)[phaseName];
+      if (!phase || typeof phase !== "object") continue;
+      const record = phase as Record<string, unknown>;
+      if (typeof record.script === "string") record.script = "<redacted>";
+      if (Array.isArray(record.argv)) record.argv = ["<redacted>"];
+      if (
+        record.literals &&
+        typeof record.literals === "object" &&
+        !Array.isArray(record.literals)
+      )
+        record.literals = Object.fromEntries(
+          Object.keys(record.literals).map((name) => [name, "<redacted>"]),
+        );
+    }
+  };
   const profiles = (clone as { profiles?: unknown }).profiles;
   const candidates = Array.isArray(profiles) ? profiles : [clone];
   for (const profile of candidates) {
@@ -219,6 +242,38 @@ function redactDeploymentTopology<T>(value: T): T {
     const template = (spec as { trial_job_template?: unknown }).trial_job_template;
     if (template && typeof template === "object" && "inference_upstream" in template)
       (template as { inference_upstream?: string }).inference_upstream = "<redacted>";
+  }
+  const record = clone as {
+    workbench?: { recipe?: Record<string, unknown> };
+    execution?: {
+      harness?: { harbor_agent?: unknown };
+      harbor_agent?: unknown;
+    };
+  };
+  if (record.workbench) {
+    for (const profile of candidates) {
+      if (!profile || typeof profile !== "object") continue;
+      const spec = (profile as { spec?: unknown }).spec;
+      if (!spec || typeof spec !== "object") continue;
+      redactCommandAgent((spec as { harbor_agent?: unknown }).harbor_agent);
+    }
+    const recipe = record.workbench.recipe;
+    if (recipe) {
+      if (typeof recipe.setup_command === "string") recipe.setup_command = "<redacted>";
+      if (typeof recipe.run_command === "string") recipe.run_command = "<redacted>";
+      if (Array.isArray(recipe.environment))
+        recipe.environment = recipe.environment.map((binding) => {
+          if (
+            binding &&
+            typeof binding === "object" &&
+            (binding as { source?: unknown }).source === "literal"
+          )
+            return { ...binding, value: "<redacted>" };
+          return binding;
+        });
+    }
+    redactCommandAgent(record.execution?.harness?.harbor_agent);
+    redactCommandAgent(record.execution?.harbor_agent);
   }
   return clone;
 }
@@ -1287,6 +1342,17 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
   );
 
   app.get(
+    "/api/v1/workbench/benchmark-configs",
+    {
+      schema: {
+        tags: ["runs"],
+        response: { 200: benchmarkConfigListSchema },
+      },
+    },
+    async () => ({ items: runtime.service.benchmarkConfigs() }),
+  );
+
+  app.get(
     "/api/v1/workbench/local-runs/options",
     {
       schema: {
@@ -1739,7 +1805,7 @@ export async function buildApp(runtime: Runtime): Promise<FastifyInstance> {
     {
       schema: {
         tags: ["runs"],
-        body: cleanSchema(schemas.runSubmission),
+        body: inlineLocalSchema(schemas.runSubmission),
         response: { 202: acceptedSchema },
       },
     },
