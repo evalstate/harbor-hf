@@ -209,6 +209,17 @@ reference, the task filter, `n_attempts` and a concurrency limit.
 The harness list comes from Harbor. Its `harbor agent schema` command lists each
 agent and its accepted options, so the form reads that list instead of keeping
 its own catalog. An agent preset is the agent name plus a pinned version.
+Each agent names its reasoning option differently, for example `thinking` for
+pi and `reasoning_effort` for codex, so the agent preset also names the option
+that carries the form's reasoning effort value.
+
+Presets live in the repository under `presets/benchmarks/` and
+`presets/agents/`, one JSON file each, and the Space loads them at startup.
+Adding a benchmark or an agent means adding one file. No code changes.
+
+A submission carries an idempotency key, as today. The run id is derived from
+that key, so a repeated request returns the existing run instead of starting a
+second one.
 
 ```json
 {
@@ -280,6 +291,26 @@ requested. They will arrive with the submission and be stored encrypted in the
 Bucket with a key the Space holds, because a parent Job restart after 24 hours
 needs them again.
 
+### Cancel, pause, and capacity
+
+Cancel stops the parent Job through the Jobs API. Harbor receives SIGTERM and
+stops the child Jobs it started. The Space then lists Jobs that carry the run id
+label and cancels any child that is still alive, so that no orphan keeps
+running. The same orphan check runs whenever a parent Job ends for any reason.
+This needs the child Jobs to carry the run id label, which is one of the
+preconditions below.
+
+Pause is the same stop with the `paused` flag set in `state.json`. The control
+rule skips paused runs, so no new parent Job starts. Resume clears the flag and
+the control rule starts a parent Job on its next pass. Harbor resumes from the
+trials that already have a `result.json`.
+
+Capacity is bounded by two numbers. A configured cap on live parent Jobs, and
+the fixed `n_concurrent_trials` in each preset. Their product bounds the child
+Jobs in the namespace. A submission above the cap waits in the queued state
+until a parent Job slot frees up. This replaces the token bucket in
+`job-admission.ts`.
+
 ### Cost ceiling
 
 The cost ceiling is enforced inside the parent Job. A Harbor job plugin reads
@@ -288,6 +319,11 @@ ceiling. Whether the plugin hooks allow a stop mid-run is one of the
 preconditions below. If they do not, a small wrapper around the `harbor`
 process watches the trial results and sends SIGTERM, which Harbor handles
 cleanly. The ceiling is a candidate for an upstream `max_cost_usd` field later.
+
+The ceiling counts inference cost only, because that is what Harbor reports.
+The compute cost of the parent and child Jobs is shown in the panel as an
+estimate from the flavor price and the Job runtime reported by the Jobs API. It
+is not enforced in version one.
 
 ### Status and the control panel
 
@@ -399,6 +435,14 @@ pull request merges. Before the pull request, one implementation specification
 names the files, the record shapes and the API routes, so that the work does
 not make design decisions on its own.
 
+## Tests
+
+The pull request carries unit tests for submission, the control rule, the
+status computation and the orphan cleanup, all against a fake Jobs API and a
+local object store. Before merge, one end-to-end run with the one-task preset
+goes through the real Space and real HF Jobs, and its run folder in the Bucket
+is inspected by hand. That single run is the merge gate.
+
 ## Preconditions
 
 Three things must happen before code is written.
@@ -417,6 +461,12 @@ persistent storage, at the cost of restarts on every deploy.
 
 The Harbor plugin hooks must be checked for a mid-run stop, for the cost
 ceiling.
+
+Three smaller facts must be confirmed during the tests. That Harbor updates the
+job-level `result.json` while the run is in progress, because the panel depends
+on it. That `hf-sandbox` can put a label on the child Jobs it starts, because
+orphan cleanup depends on it. And how long agent installation takes inside a
+child Job, because it happens once per trial.
 
 Two facts are already known. `hf-sandbox` runs only tasks that ship a prebuilt
 image, and this is a general requirement for every benchmark. The current
